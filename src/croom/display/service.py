@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+from croom.core.config import Config
+from croom.core.service import Service
 from croom.display.cec import (
     CECController,
     CECDevice,
@@ -392,7 +394,7 @@ class DisplayInfo:
     model: str = ""
 
 
-class DisplayService:
+class DisplayService(Service):
     """
     High-level display service for Croom.
 
@@ -416,7 +418,9 @@ class DisplayService:
                 - power_off_timeout: Seconds of inactivity before power off
                 - wake_on_motion: Wake display on motion detection
         """
+        super().__init__("display")
         self.config = config or {}
+        self._initialized = False
 
         # CEC controller (for Raspberry Pi / TVs)
         self._cec: Optional[CECController] = None
@@ -446,6 +450,19 @@ class DisplayService:
         # Callbacks
         self._on_display_change: List[Callable[[DisplayState], None]] = []
 
+    @classmethod
+    def from_config(cls, config: Config) -> "DisplayService":
+        """Build the service from the agent's Config (spec section 4.2)."""
+        backend = config.display.backend
+        return cls(config={
+            "cec_enabled": backend in ("auto", "hdmi_cec"),
+            "ddc_enabled": backend in ("auto", "ddc"),
+            "auto_power_on": config.display.power_on_boot,
+            # display.power_off_shutdown describes shutdown behaviour this
+            # service does not implement; inactivity power-off stays off.
+            "auto_power_off": False,
+        })
+
     async def initialize(self) -> bool:
         """
         Initialize the display service.
@@ -456,6 +473,8 @@ class DisplayService:
         Returns:
             True if initialization successful
         """
+        if self._initialized:
+            return True
         try:
             # Initialize CEC if enabled (preferred for Raspberry Pi)
             if self._cec_enabled:
@@ -504,6 +523,7 @@ class DisplayService:
             else:
                 logger.warning("Display service initialized (no power control available)")
 
+            self._initialized = True
             return True
 
         except Exception as e:
@@ -721,6 +741,8 @@ class DisplayService:
         """Start the display service."""
         if self._running:
             return
+        if not self._initialized and not await self.initialize():
+            logger.warning("Display service running without display control")
 
         self._running = True
         self._last_activity = asyncio.get_event_loop().time()

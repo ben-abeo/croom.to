@@ -12,6 +12,8 @@ from croom.display.service import (
     DisplayService,
     DDCController,
 )
+from croom.core.config import Config
+from croom.core.service import Service
 
 
 class TestDisplayState:
@@ -223,3 +225,54 @@ class TestDisplayServicePower:
         result = await display_service.set_brightness(75)
         assert result is True
         mock_ddc.set_brightness.assert_called_once_with(75)
+
+
+class TestDisplayServiceAsService:
+    """DisplayService participates in the Service framework (spec 4.1 to 4.3)."""
+
+    def test_is_a_service_named_display(self):
+        service = DisplayService()
+        assert isinstance(service, Service)
+        assert service.name == "display"
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_without_display_control(self):
+        service = DisplayService(config={"cec_enabled": False, "ddc_enabled": False})
+        with patch.object(service, "_detect_displays", new=AsyncMock()):
+            await service.start()
+            assert service._running is True
+            assert service._control_method is None
+            await service.stop()
+            assert service._running is False
+
+    @pytest.mark.asyncio
+    async def test_start_runs_initialize_once(self):
+        service = DisplayService(config={"cec_enabled": False, "ddc_enabled": False})
+        with patch.object(service, "_detect_displays", new=AsyncMock()) as detect:
+            await service.start()
+            await service.stop()
+            await service.start()
+            await service.stop()
+        assert detect.await_count == 1
+
+    def test_from_config_auto_enables_both_controllers(self):
+        config = Config()
+        config.display.backend = "auto"
+        config.display.power_on_boot = False
+        service = DisplayService.from_config(config)
+        assert service.config == {
+            "cec_enabled": True,
+            "ddc_enabled": True,
+            "auto_power_on": False,
+            "auto_power_off": False,
+        }
+
+    @pytest.mark.parametrize(
+        "backend, cec, ddc",
+        [("hdmi_cec", True, False), ("ddc", False, True), ("none", False, False)],
+    )
+    def test_from_config_backend_selects_controllers(self, backend, cec, ddc):
+        config = Config()
+        config.display.backend = backend
+        service = DisplayService.from_config(config)
+        assert (service._cec_enabled, service._ddc_enabled) == (cec, ddc)

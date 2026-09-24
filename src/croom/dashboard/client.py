@@ -32,6 +32,8 @@ logger = logging.getLogger(__name__)
 # The backend (src/croom-dashboard/backend/src/websocket/server.ts) drops a
 # device after 60 seconds without a heartbeat.
 MAX_HEARTBEAT_INTERVAL = 55.0
+MIN_HEARTBEAT_INTERVAL = 5.0
+AUTH_TIMEOUT_SECONDS = 15.0
 INITIAL_BACKOFF_SECONDS = 5.0
 MAX_BACKOFF_SECONDS = 60.0
 UNKNOWN_DEVICE_MESSAGE = "Unknown device"
@@ -135,6 +137,7 @@ class DashboardClient(Service):
                 - heartbeat_interval: Seconds between heartbeats (default 30, clamped to 55)
                 - state_file: Path of the enrollment state file (default ./dashboard-state.json)
                 - initial_backoff / max_backoff: Reconnect delays in seconds (default 5 / 60)
+                - auth_timeout: Seconds to wait for the dashboard's reply to auth (default 15)
         """
         super().__init__("dashboard")
         self.config = config or {}
@@ -146,6 +149,7 @@ class DashboardClient(Service):
         self._state_file = Path(self.config.get("state_file", "dashboard-state.json"))
         self._initial_backoff = float(self.config.get("initial_backoff", INITIAL_BACKOFF_SECONDS))
         self._max_backoff = float(self.config.get("max_backoff", MAX_BACKOFF_SECONDS))
+        self._auth_timeout = float(self.config.get("auth_timeout", AUTH_TIMEOUT_SECONDS))
 
         self._device_id: Optional[str] = None
         self._connection_state = ConnectionState.DISCONNECTED
@@ -172,6 +176,12 @@ class DashboardClient(Service):
                 f"using {MAX_HEARTBEAT_INTERVAL:.0f}s"
             )
             return MAX_HEARTBEAT_INTERVAL
+        if interval < MIN_HEARTBEAT_INTERVAL:
+            logger.warning(
+                f"heartbeat_interval {interval:g}s is below the minimum; "
+                f"using {MIN_HEARTBEAT_INTERVAL:g}s (every heartbeat is a dashboard database write)"
+            )
+            return MIN_HEARTBEAT_INTERVAL
         return interval
 
     @classmethod
@@ -353,16 +363,19 @@ class DashboardClient(Service):
             self._ws = ws
             try:
                 await self._send(MessageType.AUTH, {"deviceId": self._device_id})
+                # The backend answers auth with auth_success or auth_error. A silent
+                # peer (broken proxy, backend catch-all) must not hold the session open.
+                try:
+                    first = await asyncio.wait_for(ws.receive(), timeout=self._auth_timeout)
+                except asyncio.TimeoutError:
+                    logger.warning(
+                        f"No authentication reply from the dashboard within {self._auth_timeout:g}s"
+                    )
+                    return
+                if not await self._handle_ws_message(first):
+                    return
                 async for message in ws:
-                    if message.type == aiohttp.WSMsgType.TEXT:
-                        if not await self._handle_text(message.data):
-                            break
-                    elif message.type in (
-                        aiohttp.WSMsgType.CLOSE,
-                        aiohttp.WSMsgType.CLOSING,
-                        aiohttp.WSMsgType.CLOSED,
-                        aiohttp.WSMsgType.ERROR,
-                    ):
+                    if not await self._handle_ws_message(message):
                         break
             finally:
                 was_connected = self._connection_state == ConnectionState.CONNECTED
@@ -377,6 +390,19 @@ class DashboardClient(Service):
     # ------------------------------------------------------------------
     # Incoming messages
     # ------------------------------------------------------------------
+
+    async def _handle_ws_message(self, message: aiohttp.WSMessage) -> bool:
+        """Dispatch one WebSocket frame. Returns False when the session should end."""
+        if message.type == aiohttp.WSMsgType.TEXT:
+            return await self._handle_text(message.data)
+        if message.type in (
+            aiohttp.WSMsgType.CLOSE,
+            aiohttp.WSMsgType.CLOSING,
+            aiohttp.WSMsgType.CLOSED,
+            aiohttp.WSMsgType.ERROR,
+        ):
+            return False
+        return True
 
     async def _handle_text(self, raw: str) -> bool:
         """Handle one text frame. Returns False when the session should end."""
@@ -399,6 +425,9 @@ class DashboardClient(Service):
             return False
         elif msg_type == MessageType.ERROR.value:
             logger.error(f"Dashboard error: {payload.get('message', '')}")
+            if self._connection_state != ConnectionState.CONNECTED:
+                logger.warning("Dashboard rejected the session before authentication; reconnecting")
+                return False
         elif msg_type == MessageType.COMMAND.value:
             await self._handle_command(payload)
         else:

@@ -21,6 +21,7 @@ from croom.core.config import Config
 from croom.core.service import Service
 from croom.dashboard.client import (
     MAX_HEARTBEAT_INTERVAL,
+    MIN_HEARTBEAT_INTERVAL,
     ConnectionState,
     DashboardClient,
     load_state,
@@ -32,9 +33,13 @@ from croom.dashboard.client import (
 class FakeDashboard:
     """Minimal stand-in for the dashboard backend."""
 
-    def __init__(self, known_device_ids=(), enroll_status=200):
+    def __init__(self, known_device_ids=(), enroll_status=200, auth_behaviour="normal"):
         self.known_devices = set(known_device_ids)
         self.enroll_status = enroll_status
+        # "normal": answer auth; "error_once": reply {type: error} to the first auth;
+        # "silent": never answer auth (the backend's catch-all or a broken proxy).
+        self.auth_behaviour = auth_behaviour
+        self.auth_count = 0
         self.enroll_requests = []
         self.messages = []
         self.sockets = []
@@ -77,6 +82,12 @@ class FakeDashboard:
             data = json.loads(msg.data)
             self.messages.append(data)
             if data["type"] == "auth":
+                self.auth_count += 1
+                if self.auth_behaviour == "silent":
+                    continue
+                if self.auth_behaviour == "error_once" and self.auth_count == 1:
+                    await ws.send_json({"type": "error", "payload": {"message": "Invalid message"}})
+                    continue
                 device_id = data["payload"].get("deviceId")
                 if device_id in self.known_devices:
                     await ws.send_json({
@@ -98,6 +109,12 @@ class FakeDashboard:
                 return
             await asyncio.sleep(0.02)
         raise AssertionError(f"timed out waiting for {count} x {msg_type!r}; received {self.messages}")
+
+
+@pytest.fixture(autouse=True)
+def fast_heartbeats(monkeypatch):
+    """Protocol tests heartbeat every 50 ms; production floors the interval at 5 s."""
+    monkeypatch.setattr("croom.dashboard.client.MIN_HEARTBEAT_INTERVAL", 0.0)
 
 
 def make_client(fake: FakeDashboard, tmp_path, **overrides) -> DashboardClient:
@@ -162,6 +179,15 @@ class TestDashboardClientService:
     def test_heartbeat_interval_is_clamped_to_backend_timeout(self):
         client = DashboardClient(config={"url": "http://localhost:3001", "heartbeat_interval": 120})
         assert client._heartbeat_interval == MAX_HEARTBEAT_INTERVAL
+
+    def test_heartbeat_interval_has_a_floor(self, monkeypatch, caplog):
+        monkeypatch.setattr("croom.dashboard.client.MIN_HEARTBEAT_INTERVAL", 5.0)
+        client = DashboardClient(config={"url": "http://localhost:3001", "heartbeat_interval": 0})
+        assert client._heartbeat_interval == 5.0
+        assert MIN_HEARTBEAT_INTERVAL == 5.0
+        assert "heartbeat_interval" in caplog.text
+        negative = DashboardClient(config={"url": "http://localhost:3001", "heartbeat_interval": -3})
+        assert negative._heartbeat_interval == 5.0
 
     def test_short_heartbeat_interval_is_kept(self):
         client = DashboardClient(config={"url": "http://localhost:3001", "heartbeat_interval": 10})
@@ -339,3 +365,32 @@ class TestDashboardClientProtocol:
                 await asyncio.sleep(0.02)
             assert seen == [{"delay": 5}]
             await client.stop()
+
+
+class TestAuthPhase:
+    async def test_error_reply_before_auth_ends_the_session_and_retries(self, tmp_path):
+        async with FakeDashboard(auth_behaviour="error_once") as fake:
+            client = make_client(fake, tmp_path)
+            await client.start()
+            try:
+                await fake.wait_for("status")
+                assert fake.auth_count == 2
+                assert len(fake.enroll_requests) == 1
+                assert client.is_connected
+            finally:
+                await client.stop()
+
+    async def test_silent_dashboard_times_out_the_auth_phase_and_retries(self, tmp_path):
+        async with FakeDashboard(auth_behaviour="silent") as fake:
+            client = make_client(fake, tmp_path, auth_timeout=0.1)
+            await client.start()
+            try:
+                loop = asyncio.get_running_loop()
+                deadline = loop.time() + 5
+                while fake.auth_count < 2 and loop.time() < deadline:
+                    await asyncio.sleep(0.02)
+                assert fake.auth_count >= 2
+                assert not client.is_connected
+                assert client.connection_state != ConnectionState.CONNECTED
+            finally:
+                await client.stop()

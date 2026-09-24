@@ -94,7 +94,7 @@ Each service gets a classmethod that builds the dict its constructor already und
 
 Optional services never raise out of `start()`.
 
-- Audio and video: with no device found, `initialize()` already returns True with a warning and `start()` skips capture. Exceptions inside `initialize()` are already caught and turn into a False return; `start()` then logs a warning that the service is running without devices and continues.
+- Audio and video: with no device found, `initialize()` already returns True with a warning and `start()` skips capture. Exceptions inside `initialize()` are already caught and turn into a False return; `start()` then logs a warning that the service is running without devices and continues. A device that is present but fails to start is dropped with an error log and the service continues without it.
 - Calendar: no provider, no credentials, or an authentication failure logs a warning and skips polling.
 - Display: no CEC or DDC control logs a warning and the service runs without power control, which is its existing behaviour.
 - AI: already tolerant. `_load_model()` catches load errors, logs them, and leaves the model unloaded. No code change; a regression test pins this behaviour.
@@ -111,8 +111,8 @@ Lifecycle, entered from `start()`:
 1. Load the state file. It is valid only if it contains `device_id` and its `dashboard_url` equals the configured `dashboard.url`; otherwise the device is treated as not enrolled.
 2. If not enrolled and a token is configured: `POST {url}/api/provisioning/enroll` with `{"token": ..., "deviceInfo": {...}}`. On HTTP 200, store `device_id` (response field `deviceId`), `dashboard_url`, and `enrolled_at` in the state file. On any other status or a network error, log and retry after the backoff delay. If not enrolled and no token is configured, log once that the dashboard is enabled without an enrollment token and stay idle without retrying.
 3. Open the WebSocket at `dashboard.url` with the scheme swapped (`http` to `ws`, `https` to `wss`) and the path `/ws`. The `websocketUrl` in the enroll response is logged when it differs but is not used, because the backend's default for it is `ws://localhost:3001`, which is wrong from a remote device.
-4. Send `auth`. On `auth_success` the client is connected: it invokes `on_connected` callbacks, passes `payload.config` to `on_config_update` callbacks, sends `status` online, and starts the heartbeat loop. On `auth_error` whose message is `Unknown device`, it deletes the state file and restarts from step 2. On any other `auth_error` it logs and retries after the backoff delay.
-5. Send `heartbeat` every `heartbeat_interval` seconds (default 30). The backend marks a device offline after 60 seconds without one, so intervals above 55 seconds are clamped to 55 with a warning.
+4. Send `auth`. On `auth_success` the client is connected: it invokes `on_connected` callbacks, passes `payload.config` to `on_config_update` callbacks, sends `status` online, and starts the heartbeat loop. On `auth_error` whose message is `Unknown device`, it deletes the state file and restarts from step 2. On any other `auth_error` it logs and retries after the backoff delay. If no reply arrives within 15 seconds, or the dashboard answers `error` before authentication, the session is closed and retried after the backoff delay.
+5. Send `heartbeat` every `heartbeat_interval` seconds (default 30). The backend marks a device offline after 60 seconds without one, so intervals above 55 seconds are clamped to 55 with a warning. Intervals below 5 seconds are raised to 5 with a warning, because every heartbeat is a database write on the backend.
 6. Any connection loss returns to step 3, or to step 2 if the device is not enrolled, after a backoff that starts at 5 seconds, doubles, and caps at 60 seconds, for as long as the service is running.
 7. `stop()` sends `status` offline if connected, cancels the loops, and closes the socket.
 

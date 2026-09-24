@@ -9,6 +9,8 @@
   const el = (id) => document.getElementById(id);
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false };
   let confirmTimer = null;
+  let lastActionsKey = null;
+  let lastEventsKey = null;
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
@@ -85,20 +87,33 @@
     return b;
   }
 
-  function leaveButton() {
+  function setActions(specs) {
+    // Replace the buttons only when their labels or availability change, so a
+    // click in progress is never lost to a re-render (the timer ticks every second).
+    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy]));
+    if (key === lastActionsKey) return;
+    lastActionsKey = key;
+    el("actions").replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
+  }
+
+  function leaveSpec() {
     if (model.confirmLeave) {
-      return button("Tap again to leave", "danger", () => {
+      return { label: "Tap again to leave", className: "danger", onClick: () => {
         clearTimeout(confirmTimer);
         model.confirmLeave = false;
         leave();
-      });
+      } };
     }
-    return button("Leave", "danger", () => {
+    return { label: "Leave", className: "danger", onClick: () => {
       model.confirmLeave = true;
       clearTimeout(confirmTimer);
       confirmTimer = setTimeout(() => { model.confirmLeave = false; render(); }, CONFIRM_MS);
       render();
-    });
+    } };
+  }
+
+  function meetingDetail(m) {
+    return (m.title ? m.title + ", " : "") + platformName(m.platform) + (m.joined_at ? ", " + elapsedSince(m.joined_at) : "");
   }
 
   function joinWindow(ev) {
@@ -110,14 +125,13 @@
 
   function render() {
     const body = document.body;
-    const actions = el("actions");
-    actions.replaceChildren();
     el("message").textContent = model.error;
 
     if (model.offline || !model.status) {
       body.dataset.state = "offline";
       el("headline").textContent = "Can't reach the room";
       el("detail").textContent = "Check that the Croom agent is running, then this page will reconnect on its own.";
+      setActions([]);
       return;
     }
 
@@ -130,28 +144,30 @@
     // A join is refused while a meeting is in progress, so do not offer the link form then.
     document.querySelector(".link").hidden = ["joining", "in_lobby", "connected", "leaving"].includes(m.state);
 
+    let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
       body.dataset.state = "joining";
       el("headline").textContent = m.state === "leaving" ? "Leaving" : "Joining " + label;
       el("detail").textContent = m.state === "in_lobby" ? "Waiting for the host to let the room in." : "The room's screen is connecting.";
-      if (m.state !== "leaving") actions.append(button("Cancel", "quiet", leave));
+      if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", onClick: leave }];
     } else if (m.state === "connected") {
       body.dataset.state = "meeting";
       el("headline").textContent = "In a meeting";
-      el("detail").textContent = (m.title ? m.title + ", " : "") + platformName(m.platform) + (m.joined_at ? ", " + elapsedSince(m.joined_at) : "");
-      actions.append(
-        button(m.muted ? "Unmute" : "Mute", "", () => toggle("mute")),
-        button(m.camera_on ? "Turn camera off" : "Turn camera on", "", () => toggle("camera")),
-        leaveButton()
-      );
+      el("detail").textContent = meetingDetail(m);
+      specs = [
+        { label: m.muted ? "Unmute" : "Mute", className: "", onClick: () => toggle("mute") },
+        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", onClick: () => toggle("camera") },
+        leaveSpec(),
+      ];
     } else if (m.state === "error") {
       body.dataset.state = "error";
       el("headline").textContent = "Couldn't join " + label;
       el("detail").textContent = m.error || "The room's screen could not join. Try again, or join from a different link.";
-      actions.append(button("Dismiss", "quiet", leave));
+      specs = [{ label: "Dismiss", className: "quiet", onClick: leave }];
     } else {
-      renderIdle(cal);
+      specs = renderIdle(cal);
     }
+    setActions(specs);
 
     renderEvents(cal);
   }
@@ -165,8 +181,7 @@
       body.dataset.state = "soon";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
-      if (current.joinable) el("actions").append(button("Join now", "primary", () => joinEvent(current.id)));
-      return;
+      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id) }] : [];
     }
 
     if (next) {
@@ -181,21 +196,24 @@
         el("headline").textContent = "Free until " + fmtTime(start);
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
-      if (next.joinable) {
-        const b = button(window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), "primary", () => joinEvent(next.id), !window.open);
-        el("actions").append(b);
-      }
-      return;
+      if (!next.joinable) return [];
+      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open }];
     }
 
     body.dataset.state = "free";
     el("headline").textContent = cal.connected ? "Free for the rest of the day" : "Free";
     el("detail").textContent = cal.connected ? "Nothing else is booked in here today." : "No calendar is connected. Join with a link below.";
+    return [];
   }
 
   function renderEvents(cal) {
     const list = el("events");
     const note = el("calendar-note");
+    const meetingState = model.status ? model.status.meeting.state : "idle";
+    const key = JSON.stringify([cal.connected, cal.current && cal.current.id, meetingState, model.busy,
+      model.events.map((ev) => [ev.id, ev.title, ev.start_time, ev.joinable, joinWindow(ev).open, joinWindow(ev).past])]);
+    if (key === lastEventsKey) return;
+    lastEventsKey = key;
     list.replaceChildren();
     if (!cal.connected) {
       note.textContent = "Calendar not connected.";
@@ -234,7 +252,9 @@
 
   function tick() {
     el("clock").textContent = fmtTime(new Date());
-    if (model.status && model.status.meeting.state === "connected") render();
+    if (model.status && model.status.meeting.state === "connected") {
+      el("detail").textContent = meetingDetail(model.status.meeting);
+    }
   }
 
   el("link-form").addEventListener("submit", (e) => {

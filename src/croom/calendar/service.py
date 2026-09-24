@@ -97,6 +97,11 @@ class CalendarService(Service):
         return self._provider
 
     @property
+    def connected(self) -> bool:
+        """True once a provider has authenticated and the service polls the calendar."""
+        return self._initialized
+
+    @property
     def next_meeting(self) -> Optional[CalendarEvent]:
         """Get the next upcoming meeting."""
         return self._next_meeting

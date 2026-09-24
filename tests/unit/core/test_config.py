@@ -300,3 +300,21 @@ class TestAutoToDefault:
     def test_explicit_device_passes_through(self):
         from croom.core.config import auto_to_default
         assert auto_to_default("hw:1,0") == "hw:1,0"
+
+
+class TestControlConfig:
+    """The control section configures the room control page (spec 4.1)."""
+
+    def test_defaults(self):
+        config = Config()
+        assert config.control.enabled is True
+        assert config.control.host == "0.0.0.0"
+        assert config.control.port == 8080
+
+    def test_round_trips_through_dict(self):
+        config = Config.from_dict({"control": {"enabled": False, "host": "127.0.0.1", "port": 9090}})
+        assert config.control.enabled is False
+        assert config.control.host == "127.0.0.1"
+        assert config.control.port == 9090
+        assert config.to_dict()["control"] == {"enabled": False, "host": "127.0.0.1", "port": 9090}
+        assert Config.from_dict(config.to_dict()).control.port == 9090

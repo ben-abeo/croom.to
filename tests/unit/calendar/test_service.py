@@ -370,3 +370,14 @@ class TestCalendarServiceAsService:
         config = Config()
         config.calendar.providers = []
         assert CalendarService.from_config(config).config["provider"] is None
+
+
+class TestCalendarServiceConnected:
+    def test_connected_is_false_until_initialized(self):
+        service = CalendarService(config={"provider": None})
+        assert service.connected is False
+
+    def test_connected_reflects_initialization(self):
+        service = CalendarService(config={"provider": "google"})
+        service._initialized = True
+        assert service.connected is True

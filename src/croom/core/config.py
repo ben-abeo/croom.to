@@ -121,6 +121,14 @@ class DashboardConfig:
 
 
 @dataclass
+class ControlConfig:
+    """Room control page served by the agent on the local network."""
+    enabled: bool = True
+    host: str = "0.0.0.0"
+    port: int = 8080
+
+
+@dataclass
 class UpdateConfig:
     """Update configuration."""
     auto_check: bool = True
@@ -149,6 +157,7 @@ class Config:
     video: VideoConfig = field(default_factory=VideoConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
+    control: ControlConfig = field(default_factory=ControlConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
     security: SecurityConfig = field(default_factory=SecurityConfig)
 
@@ -195,6 +204,8 @@ class Config:
 
         if "dashboard" in data:
             config.dashboard = DashboardConfig(**data["dashboard"])
+        if "control" in data:
+            config.control = ControlConfig(**data["control"])
 
         if "updates" in data:
             config.updates = UpdateConfig(**data["updates"])
@@ -263,6 +274,11 @@ class Config:
                 "url": self.dashboard.url,
                 "heartbeat_interval_seconds": self.dashboard.heartbeat_interval_seconds,
                 "metrics_interval_seconds": self.dashboard.metrics_interval_seconds,
+            },
+            "control": {
+                "enabled": self.control.enabled,
+                "host": self.control.host,
+                "port": self.control.port,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

@@ -112,3 +112,64 @@ class TestNoiseReductionBackend:
 
         assert NoiseReductionBackend.RNNOISE.value == "rnnoise"
         assert NoiseReductionBackend.SPEEX.value == "speex"
+
+
+class TestAudioServiceAsService:
+    """AudioService participates in the Service framework (spec 4.1 to 4.3)."""
+
+    def test_is_a_service_named_audio(self):
+        from croom.audio.service import AudioService
+        from croom.core.service import Service, ServiceState
+
+        service = AudioService()
+        assert isinstance(service, Service)
+        assert service.name == "audio"
+        assert service.state == ServiceState.STOPPED
+
+    @pytest.mark.asyncio
+    async def test_start_and_stop_without_devices(self):
+        with patch("croom.audio.service.get_audio_devices", return_value=[]):
+            from croom.audio.service import AudioService
+
+            service = AudioService()
+            await service.start()
+            assert service._running is True
+            assert service._input_device is None
+            assert service._output_device is None
+            await service.stop()
+            assert service._running is False
+
+    @pytest.mark.asyncio
+    async def test_initialize_runs_once(self):
+        with patch("croom.audio.service.get_audio_devices", return_value=[]) as probe:
+            from croom.audio.service import AudioService
+
+            service = AudioService()
+            assert await service.initialize() is True
+            assert await service.initialize() is True
+            assert probe.call_count == 1
+
+    def test_from_config_maps_dataclass_to_service_keys(self):
+        from croom.audio.service import AudioService
+        from croom.core.config import Config
+
+        config = Config()
+        config.audio.input_device = "auto"
+        config.audio.output_device = "alsa_output.usb-Jabra"
+        config.audio.noise_reduction_level = "off"
+        config.audio.echo_cancellation = False
+        service = AudioService.from_config(config)
+        assert service.config == {
+            "input_device": "default",
+            "output_device": "alsa_output.usb-Jabra",
+            "noise_reduction": False,
+            "echo_cancellation": False,
+        }
+
+    def test_from_config_noise_reduction_is_on_for_any_level_but_off(self):
+        from croom.audio.service import AudioService
+        from croom.core.config import Config
+
+        config = Config()
+        config.audio.noise_reduction_level = "aggressive"
+        assert AudioService.from_config(config).config["noise_reduction"] is True

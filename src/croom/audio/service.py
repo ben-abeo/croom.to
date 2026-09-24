@@ -9,6 +9,9 @@ import logging
 from typing import Optional, Dict, Any, List, Callable
 import numpy as np
 
+from croom.core.config import Config, auto_to_default
+from croom.core.service import Service
+
 from croom.audio.device import (
     AudioDevice,
     AudioDeviceInfo,
@@ -25,7 +28,7 @@ from croom.audio.processor import (
 logger = logging.getLogger(__name__)
 
 
-class AudioService:
+class AudioService(Service):
     """
     High-level audio service for Croom.
 
@@ -47,7 +50,9 @@ class AudioService:
                 - echo_cancellation: Enable AEC (default True)
                 - auto_gain: Enable AGC (default True)
         """
+        super().__init__("audio")
         self.config = config or {}
+        self._initialized = False
 
         # Devices
         self._input_device: Optional[AudioDevice] = None
@@ -72,6 +77,17 @@ class AudioService:
         self._audio_task: Optional[asyncio.Task] = None
         self._last_speech_state = False
 
+    @classmethod
+    def from_config(cls, config: Config) -> "AudioService":
+        """Build the service from the agent's Config (spec section 4.2)."""
+        audio = config.audio
+        return cls(config={
+            "input_device": auto_to_default(audio.input_device),
+            "output_device": auto_to_default(audio.output_device),
+            "noise_reduction": audio.noise_reduction_level != "off",
+            "echo_cancellation": audio.echo_cancellation,
+        })
+
     async def initialize(self) -> bool:
         """
         Initialize the audio service.
@@ -79,6 +95,8 @@ class AudioService:
         Returns:
             True if initialization successful
         """
+        if self._initialized:
+            return True
         try:
             # Discover devices
             self._available_devices = get_audio_devices()
@@ -120,6 +138,7 @@ class AudioService:
             if not await self._setup_output_device(output_id):
                 logger.warning("No output device configured")
 
+            self._initialized = True
             logger.info("Audio service initialized")
             return True
 
@@ -196,6 +215,8 @@ class AudioService:
         """Start audio capture and processing."""
         if self._running:
             return
+        if not self._initialized and not await self.initialize():
+            logger.warning("Audio service running without devices")
 
         self._running = True
 

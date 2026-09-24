@@ -16,11 +16,13 @@ from croom.calendar.providers.base import (
 )
 from croom.calendar.providers.google import GoogleCalendarProvider
 from croom.calendar.providers.microsoft import MicrosoftCalendarProvider
+from croom.core.config import Config
+from croom.core.service import Service
 
 logger = logging.getLogger(__name__)
 
 
-class CalendarService:
+class CalendarService(Service):
     """
     High-level calendar service for Croom.
 
@@ -46,7 +48,9 @@ class CalendarService:
                 - poll_interval: How often to check for events (seconds)
                 - auto_join_minutes: Minutes before meeting to trigger auto-join
         """
+        super().__init__("calendar")
         self.config = config or {}
+        self._initialized = False
         self._provider: Optional[CalendarProvider] = None
         self._calendar_ids: List[str] = []
         self._poll_interval = self.config.get('poll_interval', 60)
@@ -66,6 +70,26 @@ class CalendarService:
 
         # Track notified meetings to avoid duplicate notifications
         self._notified_meetings: Set[str] = set()
+
+    @classmethod
+    def from_config(cls, config: Config) -> "CalendarService":
+        """Build the service from the agent's Config (spec section 4.2)."""
+        calendar = config.calendar
+        provider = calendar.providers[0] if calendar.providers else None
+        credentials: Dict[str, Any] = {}
+        if provider == "google" and calendar.google_credentials_path:
+            credentials = {"service_account_file": calendar.google_credentials_path}
+        elif provider == "microsoft":
+            credentials = {
+                "client_id": calendar.microsoft_client_id,
+                "tenant_id": calendar.microsoft_tenant_id,
+            }
+        return cls(config={
+            "provider": provider,
+            "credentials": credentials,
+            "poll_interval": calendar.sync_interval_seconds,
+            "auto_join_minutes": config.meeting.join_early_minutes,
+        })
 
     @property
     def provider(self) -> Optional[CalendarProvider]:
@@ -94,7 +118,12 @@ class CalendarService:
         Returns:
             True if initialization successful
         """
+        if self._initialized:
+            return True
         provider_name = self.config.get('provider', 'google')
+        if not provider_name:
+            logger.info("No calendar provider configured; calendar service idle")
+            return False
         credentials = self.config.get('credentials', {})
         calendar_ids = self.config.get('calendar_ids', [])
 
@@ -129,6 +158,7 @@ class CalendarService:
                     logger.warning("No calendars found")
                     self._calendar_ids = []
 
+            self._initialized = True
             logger.info(f"Calendar service initialized with {provider_name}")
             return True
 
@@ -137,16 +167,15 @@ class CalendarService:
             return False
 
     async def start(self) -> None:
-        """Start the calendar polling loop."""
+        """Start polling the calendar. Runs idle when no provider could be initialized."""
         if self._running:
             return
-
+        if not self._initialized and not await self.initialize():
+            logger.warning("Calendar service running without a provider; polling disabled")
         self._running = True
-
-        # Initial fetch
+        if not self._initialized:
+            return
         await self._fetch_events()
-
-        # Start polling
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(f"Calendar polling started (interval: {self._poll_interval}s)")
 

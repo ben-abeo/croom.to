@@ -11,6 +11,8 @@ from croom.calendar.service import (
     CalendarEvent,
     CalendarService,
 )
+from croom.core.config import Config
+from croom.core.service import Service
 
 
 class TestCalendarEvent:
@@ -290,3 +292,81 @@ class TestCalendarServiceAutoJoin:
 
         should_join = calendar_service.should_auto_join(event, join_early_minutes=2)
         assert should_join is False
+
+
+class TestCalendarServiceAsService:
+    """CalendarService participates in the Service framework (spec 4.1 to 4.3)."""
+
+    def test_is_a_service_named_calendar(self):
+        service = CalendarService()
+        assert isinstance(service, Service)
+        assert service.name == "calendar"
+
+    @pytest.mark.asyncio
+    async def test_initialize_without_provider_returns_false(self):
+        service = CalendarService(config={"provider": None})
+        assert await service.initialize() is False
+        assert service._initialized is False
+        assert service._provider is None
+
+    @pytest.mark.asyncio
+    async def test_start_without_credentials_runs_idle(self):
+        service = CalendarService(config={"provider": "google", "credentials": {}})
+        with patch(
+            "croom.calendar.service.GoogleCalendarProvider.authenticate",
+            new=AsyncMock(return_value=False),
+        ), patch.object(service, "_fetch_events", new=AsyncMock()) as fetch:
+            await service.start()
+            assert service._running is True
+            assert service._initialized is False
+            assert service._poll_task is None
+            fetch.assert_not_awaited()
+            await service.stop()
+        assert service._running is False
+
+    @pytest.mark.asyncio
+    async def test_start_polls_when_initialized(self):
+        service = CalendarService(config={"provider": "google", "poll_interval": 60})
+        service._initialized = True
+        with patch.object(service, "_fetch_events", new=AsyncMock()) as fetch:
+            await service.start()
+            fetch.assert_awaited_once()
+            assert service._poll_task is not None
+            await service.stop()
+        assert service._poll_task is None
+
+    def test_from_config_google_with_service_account(self):
+        config = Config()
+        config.calendar.providers = ["google", "microsoft"]
+        config.calendar.google_credentials_path = "/etc/croom/google-sa.json"
+        config.calendar.sync_interval_seconds = 120
+        config.meeting.join_early_minutes = 3
+        service = CalendarService.from_config(config)
+        assert service.config == {
+            "provider": "google",
+            "credentials": {"service_account_file": "/etc/croom/google-sa.json"},
+            "poll_interval": 120,
+            "auto_join_minutes": 3,
+        }
+        assert service._poll_interval == 120
+        assert service._auto_join_minutes == 3
+
+    def test_from_config_google_without_path_has_no_credentials(self):
+        config = Config()
+        config.calendar.providers = ["google"]
+        assert CalendarService.from_config(config).config["credentials"] == {}
+
+    def test_from_config_microsoft(self):
+        config = Config()
+        config.calendar.providers = ["microsoft"]
+        config.calendar.microsoft_client_id = "client-123"
+        config.calendar.microsoft_tenant_id = "tenant-abc"
+        assert CalendarService.from_config(config).config["credentials"] == {
+            "client_id": "client-123",
+            "tenant_id": "tenant-abc",
+        }
+
+    def test_from_config_without_providers_is_idle(self):
+        config = Config()
+        config.calendar.providers = []
+        assert CalendarService.from_config(config).config["provider"] is None

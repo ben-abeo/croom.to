@@ -18,6 +18,21 @@ CONFIG_PATHS = [
     "config.yaml",
 ]
 
+# Preferred location for runtime state on an installed device (the installer
+# creates it and the croom service user owns it). See Config.resolve_data_dir().
+SYSTEM_DATA_DIR = Path("/var/lib/croom")
+
+
+def auto_to_default(value: str) -> str:
+    """Translate the config's 'auto' (or empty) device selector into the 'default' the services expect."""
+    return "default" if value in ("", "auto") else value
+
+
+def _writable_dir(path: Path) -> bool:
+    """True when path is an existing directory this process can write to."""
+    return path.is_dir() and os.access(path, os.W_OK)
+
+
 
 @dataclass
 class RoomConfig:
@@ -140,6 +155,10 @@ class Config:
     # Platform override (usually auto-detected)
     platform_type: str = "auto"  # 'rpi5', 'rpi4', 'pc', 'auto'
 
+    # Directory for runtime state such as the dashboard enrollment file.
+    # Empty means: /var/lib/croom when writable, otherwise $XDG_DATA_HOME/croom.
+    data_dir: str = ""
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "Config":
         """Create Config from dictionary."""
@@ -150,6 +169,8 @@ class Config:
 
         if "platform_type" in data:
             config.platform_type = data["platform_type"]
+        if "data_dir" in data:
+            config.data_dir = data["data_dir"]
 
         if "room" in data:
             config.room = RoomConfig(**data["room"])
@@ -188,6 +209,7 @@ class Config:
         return {
             "version": self.version,
             "platform_type": self.platform_type,
+            "data_dir": self.data_dir,
             "room": {
                 "name": self.room.name,
                 "location": self.room.location,
@@ -253,6 +275,26 @@ class Config:
                 "require_encryption": self.security.require_encryption,
             },
         }
+
+    def resolve_data_dir(self) -> Path:
+        """
+        Directory for runtime state files (spec section 4.5).
+
+        Order: data_dir when set (created if missing); otherwise /var/lib/croom
+        when it exists and is writable; otherwise $XDG_DATA_HOME/croom, which
+        defaults to ~/.local/share/croom (created if missing).
+        """
+        if self.data_dir:
+            path = Path(self.data_dir).expanduser()
+        elif _writable_dir(SYSTEM_DATA_DIR):
+            return SYSTEM_DATA_DIR
+        else:
+            xdg_home = os.environ.get("XDG_DATA_HOME") or os.path.join(
+                os.path.expanduser("~"), ".local", "share"
+            )
+            path = Path(xdg_home) / "croom"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
     def save(self, path: Optional[str] = None):
         """Save configuration to file."""

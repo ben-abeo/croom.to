@@ -242,3 +242,61 @@ class TestDashboardConfig:
         assert config.url == ""
         assert config.heartbeat_interval_seconds == 30
         assert config.metrics_interval_seconds == 60
+
+
+class TestDataDir:
+    """Tests for the data_dir key and Config.resolve_data_dir() (spec 4.5)."""
+
+    def test_defaults_to_empty(self):
+        assert Config().data_dir == ""
+
+    def test_round_trips_through_dict(self):
+        config = Config.from_dict({"data_dir": "/srv/croom-data"})
+        assert config.data_dir == "/srv/croom-data"
+        assert config.to_dict()["data_dir"] == "/srv/croom-data"
+        assert Config.from_dict(config.to_dict()).data_dir == "/srv/croom-data"
+
+    def test_explicit_dir_is_created_and_returned(self, tmp_path):
+        target = tmp_path / "explicit" / "nested"
+        config = Config(data_dir=str(target))
+        assert config.resolve_data_dir() == target
+        assert target.is_dir()
+
+    def test_system_dir_wins_when_writable(self, tmp_path, monkeypatch):
+        system_dir = tmp_path / "var-lib-croom"
+        system_dir.mkdir()
+        monkeypatch.setattr("croom.core.config.SYSTEM_DATA_DIR", system_dir)
+        assert Config().resolve_data_dir() == system_dir
+
+    def test_unwritable_system_dir_is_skipped(self, tmp_path, monkeypatch):
+        system_dir = tmp_path / "var-lib-croom"
+        system_dir.mkdir()
+        monkeypatch.setattr("croom.core.config.SYSTEM_DATA_DIR", system_dir)
+        monkeypatch.setattr("croom.core.config._writable_dir", lambda path: False)
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        assert Config().resolve_data_dir() == tmp_path / "xdg" / "croom"
+
+    def test_falls_back_to_xdg_data_home(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("croom.core.config.SYSTEM_DATA_DIR", tmp_path / "does-not-exist")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg"))
+        assert Config().resolve_data_dir() == tmp_path / "xdg" / "croom"
+        assert (tmp_path / "xdg" / "croom").is_dir()
+
+    def test_falls_back_to_home_local_share(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("croom.core.config.SYSTEM_DATA_DIR", tmp_path / "does-not-exist")
+        monkeypatch.delenv("XDG_DATA_HOME", raising=False)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        assert Config().resolve_data_dir() == tmp_path / ".local" / "share" / "croom"
+
+
+class TestAutoToDefault:
+    """auto_to_default() translates the config's device selector for the services."""
+
+    def test_auto_and_empty_become_default(self):
+        from croom.core.config import auto_to_default
+        assert auto_to_default("auto") == "default"
+        assert auto_to_default("") == "default"
+
+    def test_explicit_device_passes_through(self):
+        from croom.core.config import auto_to_default
+        assert auto_to_default("hw:1,0") == "hw:1,0"

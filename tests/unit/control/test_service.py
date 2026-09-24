@@ -33,6 +33,7 @@ class StubMeeting:
         self.camera_on = True
         self.callbacks = []
         self.fail_with = None
+        self.fail_before_joining = None
 
     def get_available_platforms(self):
         return list(self._platforms)
@@ -47,6 +48,8 @@ class StubMeeting:
 
     async def join_meeting(self, url, display_name=None, camera_on=None, mic_on=None):
         self.joins.append((url, display_name))
+        if self.fail_before_joining is not None:
+            raise self.fail_before_joining
         self.set_state(MeetingState.JOINING)
         await asyncio.sleep(0)
         if self.fail_with is not None:
@@ -375,7 +378,7 @@ class TestJoin:
 class TestLeaveMuteCamera:
     async def test_leave_when_idle_is_a_conflict(self, client_factory):
         client = await client_factory(make_service(meeting=StubMeeting()))
-        resp = await client.post("/api/meeting/leave")
+        resp = await client.post("/api/meeting/leave", json={})
         assert resp.status == 409
         assert (await resp.json())["error"] == "No meeting to leave"
 
@@ -385,7 +388,7 @@ class TestLeaveMuteCamera:
         client = await client_factory(make_service(meeting=meeting, calendar=calendar))
         await client.post("/api/meeting/join", json={"event_id": "e1"})
         await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
-        resp = await client.post("/api/meeting/leave")
+        resp = await client.post("/api/meeting/leave", json={})
         assert resp.status == 202
         assert await resp.json() == {"state": "leaving"}
         await wait_until(lambda: meeting.leaves == 1)
@@ -399,7 +402,7 @@ class TestLeaveMuteCamera:
         client = await client_factory(make_service(meeting=meeting))
         await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
         await wait_until(lambda: meeting.state == MeetingState.ERROR)
-        resp = await client.post("/api/meeting/leave")
+        resp = await client.post("/api/meeting/leave", json={})
         assert resp.status == 202
         await wait_until(lambda: meeting.state == MeetingState.IDLE)
         data = await (await client.get("/api/status")).json()
@@ -407,25 +410,25 @@ class TestLeaveMuteCamera:
 
     async def test_mute_and_camera_require_a_connected_meeting(self, client_factory):
         client = await client_factory(make_service(meeting=StubMeeting()))
-        assert (await client.post("/api/meeting/mute")).status == 409
-        assert (await client.post("/api/meeting/camera")).status == 409
+        assert (await client.post("/api/meeting/mute", json={})).status == 409
+        assert (await client.post("/api/meeting/camera", json={})).status == 409
 
     async def test_mute_and_camera_toggle_and_report(self, client_factory):
         meeting = StubMeeting()
         client = await client_factory(make_service(meeting=meeting))
         await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
         await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
-        assert await (await client.post("/api/meeting/mute")).json() == {"muted": True}
-        assert await (await client.post("/api/meeting/camera")).json() == {"camera_on": False}
+        assert await (await client.post("/api/meeting/mute", json={})).json() == {"muted": True}
+        assert await (await client.post("/api/meeting/camera", json={})).json() == {"camera_on": False}
         data = await (await client.get("/api/status")).json()
         assert data["meeting"]["muted"] is True
         assert data["meeting"]["camera_on"] is False
-        assert await (await client.post("/api/meeting/mute")).json() == {"muted": False}
+        assert await (await client.post("/api/meeting/mute", json={})).json() == {"muted": False}
 
     async def test_without_meeting_service_controls_are_unavailable(self, client_factory):
         client = await client_factory(make_service())
         for path in ("/api/meeting/leave", "/api/meeting/mute", "/api/meeting/camera"):
-            assert (await client.post(path)).status == 503, path
+            assert (await client.post(path, json={})).status == 503, path
 
 
 class TestPage:
@@ -454,3 +457,90 @@ class TestPage:
     def test_static_files_are_package_data(self):
         text = open("pyproject.toml", encoding="utf-8").read()
         assert 'control/static/*' in text
+
+
+EVENT_FIELDS = {"id", "title", "start_time", "end_time", "meeting_platform", "joinable"}
+
+
+class TestReviewFixes:
+    """Findings from the branch review, each pinned before it was fixed."""
+
+    async def test_events_and_next_are_limited_to_today(self, client_factory):
+        now = datetime.now().astimezone()
+        if (now + timedelta(hours=1)).date() != now.date():
+            pytest.skip("too close to midnight for a same-day event")
+        tomorrow = event("t1", "Tomorrow standup", starts_in_minutes=24 * 60 + 5)
+        today_later = event("e1", "Design review", starts_in_minutes=45)
+        client = await client_factory(make_service(meeting=StubMeeting(),
+                                                   calendar=StubCalendar(events=[today_later, tomorrow])))
+        events = (await (await client.get("/api/calendar/events")).json())["events"]
+        assert [e["id"] for e in events] == ["e1"]
+        client2 = await client_factory(make_service(meeting=StubMeeting(), calendar=StubCalendar(events=[tomorrow])))
+        data = await (await client2.get("/api/status")).json()
+        assert data["calendar"]["next"] is None
+        assert (await (await client2.get("/api/calendar/events")).json())["events"] == []
+
+    async def test_event_fields_are_limited_to_what_the_page_needs(self, client_factory):
+        ev = event("e1", "Design review", starts_in_minutes=20)
+        ev.description = "Agenda: next year's budget"
+        ev.organizer = "ceo@example.com"
+        ev.location = "HQ 3rd floor"
+        client = await client_factory(make_service(meeting=StubMeeting(), calendar=StubCalendar(events=[ev])))
+        events = (await (await client.get("/api/calendar/events")).json())["events"]
+        assert set(events[0]) == EVENT_FIELDS
+        data = await (await client.get("/api/status")).json()
+        assert set(data["calendar"]["next"]) == EVENT_FIELDS
+
+    async def test_posts_require_json_content_type(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        resp = await client.post("/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
+                                 headers={"Content-Type": "text/plain", "Origin": "https://evil.example"})
+        assert resp.status == 415
+        assert meeting.joins == []
+        for path in ("/api/meeting/leave", "/api/meeting/mute", "/api/meeting/camera"):
+            assert (await client.post(path)).status == 415, path
+
+    async def test_join_rejected_by_the_provider_before_joining_is_visible(self, client_factory):
+        meeting = StubMeeting()
+        meeting.fail_before_joining = ValueError("Invalid Zoom URL: https://zoom.us/my/ben")
+        client = await client_factory(make_service(meeting=meeting))
+        resp = await client.post("/api/meeting/join", json={"url": "https://zoom.us/my/ben"})
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        await asyncio.sleep(0.02)
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "error"
+        assert data["meeting"]["error"] == "Invalid Zoom URL: https://zoom.us/my/ben"
+        resp = await client.post("/api/meeting/leave", json={})
+        assert resp.status == 200
+        assert await resp.json() == {"state": "idle"}
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "idle"
+        assert data["meeting"]["error"] is None
+
+    @pytest.mark.parametrize("url", [
+        "https://evil.example/?teams.microsoft.com",
+        "https://zoom.us.evil.example/j/98765432100",
+        "https://example.com/zoom.us/j/98765432100",
+    ])
+    async def test_join_checks_the_link_hostname(self, client_factory, url):
+        meeting = StubMeeting(platforms=("zoom", "google_meet", "teams"))
+        client = await client_factory(make_service(meeting=meeting))
+        resp = await client.post("/api/meeting/join", json={"url": url})
+        assert resp.status == 400
+        assert meeting.joins == []
+
+    @pytest.mark.parametrize("url, expected", [
+        ("https://us02web.zoom.us/j/98765432100?pwd=abc", "https://us02web.zoom.us/j/98765432100?pwd=abc"),
+        ("zoom.us/j/98765432100", "https://zoom.us/j/98765432100"),
+        ("meet.google.com/abc-defg-hij", "https://meet.google.com/abc-defg-hij"),
+    ])
+    async def test_join_accepts_platform_hosts_and_adds_a_scheme(self, client_factory, url, expected):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        resp = await client.post("/api/meeting/join", json={"url": url})
+        assert resp.status == 202
+        assert (await resp.json())["url"] == expected
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins[0][0] == expected

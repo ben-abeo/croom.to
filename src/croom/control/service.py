@@ -10,13 +10,14 @@ import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
 from croom.core.config import Config
 from croom.core.service import Service
-from croom.meeting.providers.base import MeetingState, detect_platform
+from croom.meeting.providers.base import MeetingState
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,25 @@ STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY_BYTES = 4096
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
+# Hosts (and their subdomains) a join link may point the room's browser at.
+PLATFORM_HOSTS = {
+    "zoom": ("zoom.us", "zoomgov.com"),
+    "google_meet": ("meet.google.com", "g.co"),
+    "teams": ("teams.microsoft.com", "teams.live.com"),
+    "webex": ("webex.com",),
+}
+# The only calendar fields the page needs; the rest stays off the network.
+EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
+
+
+def normalize_link(value: str) -> str:
+    """Trim, turn a bare Zoom meeting id into a link, and add https:// when no scheme is given."""
+    url = value.strip()
+    if ZOOM_MEETING_ID.match(url):
+        return f"https://zoom.us/j/{url}"
+    if url and "://" not in url:
+        return "https://" + url
+    return url
 
 
 class ControlService(Service):
@@ -147,25 +167,43 @@ class ControlService(Service):
         return self._meeting.state.value
 
     def _platform_for(self, url: Optional[str]) -> Optional[str]:
-        """The configured platform a link belongs to, or None."""
+        """The configured platform a link's hostname belongs to, or None."""
         if not url or self._meeting is None:
             return None
-        platform = detect_platform(url)
-        if platform is None or platform not in self._meeting.get_available_platforms():
+        try:
+            host = urlsplit(normalize_link(url)).hostname
+        except ValueError:
             return None
-        return platform
+        if not host:
+            return None
+        for platform, domains in PLATFORM_HOSTS.items():
+            if any(host == domain or host.endswith("." + domain) for domain in domains):
+                return platform if platform in self._meeting.get_available_platforms() else None
+        return None
 
     def _event_dict(self, event) -> Dict[str, Any]:
-        data = event.to_dict()
+        full = event.to_dict()
+        data = {key: full.get(key) for key in EVENT_FIELDS}
         data["joinable"] = self._platform_for(event.meeting_url) is not None
         return data
+
+    def _today_events(self) -> List[Any]:
+        """Today's events in start order, by the device's local date."""
+        if self._calendar is None:
+            return []
+        today = datetime.now().astimezone().date()
+        return sorted(
+            (e for e in self._calendar.events if e.start_time.astimezone().date() == today),
+            key=lambda e: e.start_time,
+        )
 
     def _calendar_status(self) -> Dict[str, Any]:
         if self._calendar is None:
             return {"connected": False, "provider": None, "current": None, "next": None}
         provider = self._calendar.provider
         current = self._calendar.get_current_meeting()
-        upcoming = self._calendar.next_meeting
+        now = datetime.now(timezone.utc)
+        upcoming = next((e for e in self._today_events() if e.start_time > now), None)
         return {
             "connected": bool(self._calendar.connected),
             "provider": getattr(provider, "name", None) if provider is not None else None,
@@ -179,6 +217,9 @@ class ControlService(Service):
         error = self._last_error
         if error is None and state == "error" and current is not None and current.error_message:
             error = current.error_message
+        if error and state == "idle":
+            # The provider refused the link before it started joining.
+            state = "error"
         platforms = list(self._meeting.get_available_platforms()) if self._meeting is not None else []
         return {
             "room": {"name": self._room_name, "location": self._room_location},
@@ -214,7 +255,14 @@ class ControlService(Service):
     async def _handle_events(self, request: web.Request) -> web.Response:
         if self._calendar is None:
             return web.json_response({"events": []})
-        return web.json_response({"events": [self._event_dict(e) for e in self._calendar.events]})
+        return web.json_response({"events": [self._event_dict(e) for e in self._today_events()]})
+
+    @staticmethod
+    def _require_json(request: web.Request) -> Optional[web.Response]:
+        """Refuse POSTs that are not JSON: a cross-site form cannot drive the room."""
+        if request.content_type != "application/json":
+            return web.json_response({"error": "Send JSON with Content-Type: application/json"}, status=415)
+        return None
 
     @staticmethod
     async def _read_object(request: web.Request) -> Optional[Dict[str, Any]]:
@@ -232,6 +280,9 @@ class ControlService(Service):
         return web.json_response({"error": message}, status=status)
 
     async def _handle_join(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
         data = await self._read_object(request)
@@ -250,8 +301,7 @@ class ControlService(Service):
             title = event.title
         if not url:
             return self._error_response("Meeting link required", 400)
-        if ZOOM_MEETING_ID.match(url):
-            url = f"https://zoom.us/j/{url}"
+        url = normalize_link(url)
         if self._platform_for(url) is None:
             return self._error_response("Unsupported meeting link", 400)
         if self._meeting_state() in IN_PROGRESS_STATES:
@@ -271,9 +321,17 @@ class ControlService(Service):
             self._last_error = str(e)
 
     async def _handle_leave(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() == "idle":
+            if self._last_error is not None:
+                # Dismissing a join the provider refused before it started.
+                self._last_error = None
+                self._title = ""
+                return web.json_response({"state": "idle"})
             return self._error_response("No meeting to leave", 409)
         self._last_error = None
         self._task = asyncio.create_task(self._run_leave())
@@ -292,6 +350,9 @@ class ControlService(Service):
             self._joined_at = None
 
     async def _handle_mute(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
@@ -300,6 +361,9 @@ class ControlService(Service):
         return web.json_response({"muted": bool(muted)})
 
     async def _handle_camera(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":

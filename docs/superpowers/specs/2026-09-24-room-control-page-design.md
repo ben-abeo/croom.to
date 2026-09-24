@@ -50,28 +50,28 @@ All responses are JSON. No authentication. Paths:
   - `platforms`: the meeting service's available platforms, `[]` when there is no meeting service
   - `meeting`: `{state, platform, meeting_id, title, url, joined_at, muted, camera_on, error}` where `state` is one of `idle`, `joining`, `in_lobby`, `connected`, `leaving`, `error` (`idle` without a meeting service); `platform`, `meeting_id`, `url`, `joined_at` and `error` are `null` when absent; `title` is the calendar event title for an event join and `""` otherwise.
   - `calendar`: `{connected, provider, current, next}` where `current` and `next` are event objects or `null`.
-- `GET /api/calendar/events` returns `{"events": [...]}`: today's events in start order, each `CalendarEvent.to_dict()` plus `joinable` (true when the event has a `meeting_url` for an available platform). `[]` without a calendar service.
+- `GET /api/calendar/events` returns `{"events": [...]}`: today's events by the device's local date, in start order (the calendar service caches a week), each limited to `id`, `title`, `start_time`, `end_time`, `meeting_platform` and `joinable` (true when the event has a `meeting_url` for an available platform). Descriptions, organizers, locations and links stay off the network. `[]` without a calendar service. `calendar.next` in the status is the first of today's events that has not started.
 - `POST /api/meeting/join` with `{"url": "..."}` or `{"event_id": "..."}`:
   - `url` is trimmed; a value of 9 to 11 digits is treated as a Zoom meeting id and becomes `https://zoom.us/j/<id>`.
   - `event_id` is resolved through the calendar service; an unknown id or an event without a link is `400`.
-  - The link must map to an available platform through the same detection the meeting service uses; otherwise `400 {"error": "Unsupported meeting link"}`.
+  - A link without a scheme gets `https://`. Its hostname must be one of an available platform's domains (`zoom.us`, `zoomgov.com`, `meet.google.com`, `g.co`, `teams.microsoft.com`, `teams.live.com`, `webex.com`) or a subdomain of one; otherwise `400 {"error": "Unsupported meeting link"}`. Substring matches are not enough: `https://evil.example/?zoom.us` is refused.
   - When the meeting state is anything other than `idle` or `error`: `409 {"error": "A meeting is already in progress"}`.
   - No meeting service: `503`.
   - Otherwise the join starts in a background task and the response is `202 {"state": "joining", "url": "<normalized url>"}` immediately, because a join takes ten to thirty seconds and the page polls.
-- `POST /api/meeting/leave`: `409` when `idle`, else the leave runs in a background task and the response is `202 {"state": "leaving"}`. Leave also clears an `error` state.
+- `POST /api/meeting/leave`: `409` when `idle` with nothing to clear; `200 {"state": "idle"}` when it only dismisses a stored join error; otherwise the leave runs in a background task and the response is `202 {"state": "leaving"}`. Leave also clears an `error` state.
 - `POST /api/meeting/mute` and `POST /api/meeting/camera`: `409` unless `connected`; otherwise call the toggle and return `200 {"muted": bool}` or `200 {"camera_on": bool}`.
-- Request bodies that are not JSON objects: `400`. Bodies are limited to 4 KiB.
+- Every POST must carry `Content-Type: application/json`; anything else is `415`, which keeps a cross-site form on another web page from driving the room. Request bodies that are not JSON objects: `400`. Bodies are limited to 4 KiB.
 
 ### 4.4 Join flow and state
 
-- The service keeps one background task for the current join or leave. A join calls `meeting.join_meeting(url, display_name=room name)`; an exception is logged and stored as the last error. The error field in the status is the stored message, or `current_meeting.error_message` when the meeting state is `error`; a new join or a leave clears it.
+- The service keeps one background task for the current join or leave. A join calls `meeting.join_meeting(url, display_name=room name)`; an exception is logged and stored as the last error. The error field in the status is the stored message, or `current_meeting.error_message` when the meeting state is `error`; a new join or a leave clears it. When the provider refuses a link before it starts joining (the meeting state stays `idle`), the status reports `error` anyway so the page can show the message.
 - `joined_at` is recorded from the meeting service's state callback when the state becomes `connected` and cleared when it returns to `idle`.
 - `muted` and `camera_on` come from `current_meeting.is_muted` and `is_camera_on`; the providers update those on toggles.
 - `title` and the event reference are kept by the control service for the current join only.
 
 ### 4.5 Page
 
-One page, three states, polling `GET /api/status` every 2 seconds and `GET /api/calendar/events` every 30 seconds, with buttons disabled while a request is in flight and errors shown inline.
+One page, three states, polling `GET /api/status` every 2 seconds and `GET /api/calendar/events` every 30 seconds, with buttons disabled while a request is in flight and errors shown inline. Buttons and the schedule list are rebuilt only when their labels or availability change, so a click in progress is never lost while the timer ticks.
 
 - Idle: room name and location, a clock, a headline card for the current meeting if one is running on the calendar, otherwise the next one, with a countdown and a Join button that is enabled from ten minutes before the start until the end; today's list below with a Join button per joinable event; a "join with a link" field that accepts a link or a Zoom meeting id. Without a calendar, a single quiet line says the calendar is not connected.
 - Joining: the meeting title or platform, a progress message that follows `joining` and `in_lobby`, and a Cancel button that calls leave.

@@ -28,7 +28,7 @@ interface DeviceAttributes {
   lastSeen: Date;
   capabilities: object;
   config: object;
-  enrollmentToken?: string;
+  enrollmentToken?: string | null;
   createdAt?: Date;
   updatedAt?: Date;
 }
@@ -37,19 +37,19 @@ interface DeviceCreationAttributes extends Optional<DeviceAttributes, 'id' | 'st
 
 // Device model
 export class Device extends Model<DeviceAttributes, DeviceCreationAttributes> implements DeviceAttributes {
-  public id!: string;
-  public name!: string;
-  public roomName!: string;
-  public location!: string;
-  public status!: 'online' | 'offline' | 'error' | 'provisioning';
-  public platform!: string;
-  public softwareVersion!: string;
-  public lastSeen!: Date;
-  public capabilities!: object;
-  public config!: object;
-  public enrollmentToken?: string;
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
+  declare id: string;
+  declare name: string;
+  declare roomName: string;
+  declare location: string;
+  declare status: 'online' | 'offline' | 'error' | 'provisioning';
+  declare platform: string;
+  declare softwareVersion: string;
+  declare lastSeen: Date;
+  declare capabilities: object;
+  declare config: object;
+  declare enrollmentToken?: string | null;
+  declare readonly createdAt: Date;
+  declare readonly updatedAt: Date;
 }
 
 Device.init(
@@ -122,13 +122,13 @@ interface UserCreationAttributes extends Optional<UserAttributes, 'id' | 'role'>
 
 // User model
 export class User extends Model<UserAttributes, UserCreationAttributes> implements UserAttributes {
-  public id!: string;
-  public email!: string;
-  public passwordHash!: string;
-  public name!: string;
-  public role!: 'admin' | 'operator' | 'viewer';
-  public readonly createdAt!: Date;
-  public readonly updatedAt!: Date;
+  declare id: string;
+  declare email: string;
+  declare passwordHash: string;
+  declare name: string;
+  declare role: 'admin' | 'operator' | 'viewer';
+  declare readonly createdAt: Date;
+  declare readonly updatedAt: Date;
 }
 
 User.init(
@@ -175,11 +175,11 @@ interface MetricsAttributes {
 interface MetricsCreationAttributes extends Optional<MetricsAttributes, 'id'> {}
 
 export class Metrics extends Model<MetricsAttributes, MetricsCreationAttributes> implements MetricsAttributes {
-  public id!: string;
-  public deviceId!: string;
-  public timestamp!: Date;
-  public type!: string;
-  public data!: object;
+  declare id: string;
+  declare deviceId: string;
+  declare timestamp: Date;
+  declare type: string;
+  declare data: object;
 }
 
 Metrics.init(

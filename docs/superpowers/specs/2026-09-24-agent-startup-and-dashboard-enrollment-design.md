@@ -166,7 +166,7 @@ Acceptance test on the development machine: create a token on the Provisioning p
 - `src/croom/core/config.py`: `data_dir` and `resolve_data_dir()`
 - `src/croom/core/agent.py`: build services through `from_config`; pass platform info and capabilities to the dashboard client
 - `src/croom/audio/service.py`, `src/croom/video/service.py`, `src/croom/calendar/service.py`, `src/croom/display/service.py`: inherit `Service`, add `from_config`, start semantics from 4.1 and 4.3
-- `src/croom/dashboard/client.py`: rewrite per 4.4
+- `src/croom/dashboard/client.py`: rewrite per 4.4; `src/croom/dashboard/__init__.py` drops the removed export
 - the tests listed in section 5
 - this document
 

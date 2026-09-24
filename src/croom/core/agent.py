@@ -81,7 +81,7 @@ class CroomAgent:
         # Audio Service
         try:
             from croom.audio.service import AudioService
-            audio_service = AudioService(self.config)
+            audio_service = AudioService.from_config(self.config)
             self.service_manager.register(audio_service, dependencies=["ai"] if self.config.ai.enabled else None)
             logger.info("Audio service registered")
         except ImportError as e:
@@ -90,7 +90,7 @@ class CroomAgent:
         # Video Service
         try:
             from croom.video.service import VideoService
-            video_service = VideoService(self.config, self.capabilities)
+            video_service = VideoService.from_config(self.config)
             self.service_manager.register(video_service, dependencies=["ai"] if self.config.ai.enabled else None)
             logger.info("Video service registered")
         except ImportError as e:
@@ -99,7 +99,7 @@ class CroomAgent:
         # Display Service
         try:
             from croom.display.service import DisplayService
-            display_service = DisplayService(self.config, self.capabilities)
+            display_service = DisplayService.from_config(self.config)
             self.service_manager.register(display_service)
             logger.info("Display service registered")
         except ImportError as e:
@@ -117,7 +117,7 @@ class CroomAgent:
         # Calendar Service
         try:
             from croom.calendar.service import CalendarService
-            calendar_service = CalendarService(self.config)
+            calendar_service = CalendarService.from_config(self.config)
             self.service_manager.register(calendar_service)
             logger.info("Calendar service registered")
         except ImportError as e:
@@ -127,7 +127,9 @@ class CroomAgent:
         if self.config.dashboard.enabled and self.config.dashboard.url:
             try:
                 from croom.dashboard.client import DashboardClient
-                dashboard_client = DashboardClient(self.config, self.capabilities)
+                dashboard_client = DashboardClient.from_config(
+                    self.config, self.platform_info, self.capabilities
+                )
                 self.service_manager.register(dashboard_client)
                 logger.info("Dashboard client registered")
             except ImportError as e:

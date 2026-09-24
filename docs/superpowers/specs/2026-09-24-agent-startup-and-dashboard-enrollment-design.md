@@ -18,7 +18,7 @@ Success criteria:
 
 - Upstream issue #11. `CroomAgent._initialize_services()` registers `AudioService`, `VideoService`, `DisplayService`, `CalendarService`, and `DashboardClient` through `ServiceManager.register()`, which reads `service.name`. Only `AIService` and `MeetingService` subclass `croom.core.service.Service`; the other five are plain classes, so registration raises `AttributeError` and the agent exits. Reproduced on x86_64 WSL2 and reported upstream on Pi 4 with Bookworm and Trixie.
 - The agent passes a `Config` dataclass to constructors that read a plain dict with different key names (for example `VideoService` reads `camera` and `fps` while `VideoConfig` has `device` and `framerate`).
-- `ServiceManager.start_all()` aborts the agent if any `start()` raises. `AIService.start()` raises `FileNotFoundError` when `models/yolov8n.onnx` is missing, and the installer ships no models, so the default config (`ai.enabled: true`) cannot start even on a Pi.
+- `ServiceManager.start_all()` aborts the agent if any `start()` raises, so every optional service must contain its own failures. `AIService.start()` already does: with no model files (the installer ships none) it logs the missing models and keeps running, verified on this machine. The other optional services get the same treatment in this change.
 - `DashboardClient` speaks a protocol the backend does not implement. It sends `{"type": "register", "device_id": ...}` while `src/croom-dashboard/backend/src/websocket/server.ts` expects `{"type": "auth", "payload": {"deviceId": ...}}` for a device row that was created earlier by `POST /api/provisioning/enroll`. `croom/provisioning/enrollment.py` posts to `/api/devices/enroll`, which does not exist. The client also imports `websockets`, which is neither declared in `pyproject.toml` nor installed, and passes the `extra_headers` keyword that websockets 14 removed.
 
 ## 3. Scope
@@ -97,14 +97,14 @@ Optional services never raise out of `start()`.
 - Audio and video: with no device found, `initialize()` already returns True with a warning and `start()` skips capture. Exceptions inside `initialize()` are already caught and turn into a False return; `start()` then logs a warning that the service is running without devices and continues.
 - Calendar: no provider, no credentials, or an authentication failure logs a warning and skips polling.
 - Display: no CEC or DDC control logs a warning and the service runs without power control, which is its existing behaviour.
-- AI: `AIService.start()` wraps `_load_models()` in a try/except. Missing model files log a warning that detection features are disabled, and the service stays running with its backend initialised.
+- AI: already tolerant. `_load_model()` catches load errors, logs them, and leaves the model unloaded. No code change; a regression test pins this behaviour.
 - Dashboard: an unreachable backend or a failed enrollment keeps retrying in the background (4.4). `start()` returns as soon as the connection task is launched.
 
 `MeetingService` is unchanged: a failure there still aborts the agent through `ServiceManager.start_all()`.
 
 ### 4.4 Dashboard client
 
-Rewritten on `aiohttp`, already a dependency, for both REST and WebSocket. Public surface kept: `state`, `device_id`, `is_connected`, `connect()`, `disconnect()`, `send_status()`, `send_metrics()`, `on_connected()`, `on_disconnected()`, `on_config_update()`, `register_command()`. Added: `send_meeting_event()`, matching the backend.
+Rewritten on `aiohttp`, already a dependency, for both REST and WebSocket. Public surface kept: `device_id`, `is_connected`, `connect()`, `disconnect()`, `send_status()`, `send_metrics()`, `on_connected()`, `on_disconnected()`, `on_config_update()`, `register_command()`. Renamed: `state` becomes `connection_state`, because `Service.state` now carries the lifecycle state. Signatures follow the backend payloads: `send_status(status, message=None)` and `send_metrics(metrics_type, data)`. Added: `send_meeting_event(event, meeting_id, platform)`. Removed: `send_event()`, `send_log()`, and `create_dashboard_client()`; the backend has no handlers for the first two and nothing in the repo calls any of them.
 
 Lifecycle, entered from `start()`:
 
@@ -112,7 +112,7 @@ Lifecycle, entered from `start()`:
 2. If not enrolled and a token is configured: `POST {url}/api/provisioning/enroll` with `{"token": ..., "deviceInfo": {...}}`. On HTTP 200, store `device_id` (response field `deviceId`), `dashboard_url`, and `enrolled_at` in the state file. On any other status or a network error, log and retry after the backoff delay. If not enrolled and no token is configured, log once that the dashboard is enabled without an enrollment token and stay idle without retrying.
 3. Open the WebSocket at `dashboard.url` with the scheme swapped (`http` to `ws`, `https` to `wss`) and the path `/ws`. The `websocketUrl` in the enroll response is logged when it differs but is not used, because the backend's default for it is `ws://localhost:3001`, which is wrong from a remote device.
 4. Send `auth`. On `auth_success` the client is connected: it invokes `on_connected` callbacks, passes `payload.config` to `on_config_update` callbacks, sends `status` online, and starts the heartbeat loop. On `auth_error` whose message is `Unknown device`, it deletes the state file and restarts from step 2. On any other `auth_error` it logs and retries after the backoff delay.
-5. Send `heartbeat` every `heartbeat_interval` seconds (default 30; the backend marks a device offline after 60 seconds without one).
+5. Send `heartbeat` every `heartbeat_interval` seconds (default 30). The backend marks a device offline after 60 seconds without one, so intervals above 55 seconds are clamped to 55 with a warning.
 6. Any connection loss returns to step 3, or to step 2 if the device is not enrolled, after a backoff that starts at 5 seconds, doubles, and caps at 60 seconds, for as long as the service is running.
 7. `stop()` sends `status` offline if connected, cancels the loops, and closes the socket.
 
@@ -154,8 +154,8 @@ No new packages. `websockets` is no longer imported anywhere. `aiohttp` is alrea
 Unit tests, all offline and deterministic, with hardware probes patched to find nothing:
 
 - `tests/unit/core/test_agent.py` (new): with AI and dashboard disabled, `CroomAgent._initialize_services()` registers `audio`, `video`, `display`, `meeting`, and `calendar`; `start_all()` returns True with `get_audio_devices`, `get_cameras`, the CEC and DDC probes, and the meeting providers patched; `stop_all()` completes.
-- Per service, extending the existing test modules: the service is an instance of `Service` with the expected name; `start()` followed by `stop()` with no devices moves the state through RUNNING to STOPPED and raises nothing; `from_config` produces the mappings in 4.2, including `auto` to `default`, resolution translation, display backend flags, calendar provider selection, and credentials.
-- `tests/unit/ai/test_service.py`: `start()` with missing model files does not raise and logs a warning.
+- Per service, extending the existing test modules: the service is an instance of `Service` with the expected name; `start()` followed by `stop()` with no devices raises nothing and leaves the service's running flag cleared (the RUNNING and STOPPED transitions are asserted through `ServiceManager` in the agent test); `from_config` produces the mappings in 4.2, including `auto` to `default`, resolution translation, display backend flags, calendar provider selection, and credentials.
+- `tests/unit/ai/test_service.py` (new): `start()` with missing model files does not raise, loads no models, and logs the missing files (regression test for existing behaviour).
 - `tests/unit/dashboard/test_client.py` (new): an in-process fake dashboard, an aiohttp web app serving `/api/provisioning/enroll` and `/ws`, verifies the enroll request body and the state file contents; `auth` sent with the stored id; `status` online after `auth_success`; a heartbeat within a short configured interval; `auth_error` with `Unknown device` clearing the state and re-enrolling; `stop()` sending `status` offline; no enrollment attempt without a token; and WebSocket URL derivation for both `http` and `https`.
 - `tests/unit/core/test_config.py`: `data_dir` round-trips through `from_dict` and `to_dict`; `resolve_data_dir()` precedence with a temporary HOME and patched writability.
 
@@ -166,7 +166,6 @@ Acceptance test on the development machine: create a token on the Provisioning p
 - `src/croom/core/config.py`: `data_dir` and `resolve_data_dir()`
 - `src/croom/core/agent.py`: build services through `from_config`; pass platform info and capabilities to the dashboard client
 - `src/croom/audio/service.py`, `src/croom/video/service.py`, `src/croom/calendar/service.py`, `src/croom/display/service.py`: inherit `Service`, add `from_config`, start semantics from 4.1 and 4.3
-- `src/croom/ai/service.py`: tolerate missing models
 - `src/croom/dashboard/client.py`: rewrite per 4.4
 - the tests listed in section 5
 - this document

@@ -9,6 +9,9 @@ import logging
 from typing import Optional, Dict, Any, List, Callable, Tuple
 import numpy as np
 
+from croom.core.config import Config, auto_to_default
+from croom.core.service import Service
+
 from croom.video.camera import (
     Camera,
     CameraInfo,
@@ -31,8 +34,16 @@ from croom.video.processor import (
 
 logger = logging.getLogger(__name__)
 
+# Config uses short names; VideoService and Resolution.from_string() want "WxH".
+RESOLUTION_ALIASES = {
+    "4k": "3840x2160",
+    "1080p": "1920x1080",
+    "720p": "1280x720",
+    "480p": "640x480",
+}
 
-class VideoService:
+
+class VideoService(Service):
     """
     High-level video service for Croom.
 
@@ -52,7 +63,9 @@ class VideoService:
                 - rotation: Rotation angle (0, 90, 180, 270)
                 - background_blur: Enable background blur (default False)
         """
+        super().__init__("video")
         self.config = config or {}
+        self._initialized = False
 
         # Camera
         self._camera: Optional[Camera] = None
@@ -76,6 +89,17 @@ class VideoService:
         self._last_frame: Optional[np.ndarray] = None
         self._last_frame_info: Optional[FrameInfo] = None
 
+    @classmethod
+    def from_config(cls, config: Config) -> "VideoService":
+        """Build the service from the agent's Config (spec section 4.2)."""
+        video = config.video
+        resolution = video.resolution.strip().lower()
+        return cls(config={
+            "camera": auto_to_default(video.device),
+            "resolution": RESOLUTION_ALIASES.get(resolution, video.resolution),
+            "fps": video.framerate,
+        })
+
     async def initialize(self) -> bool:
         """
         Initialize the video service.
@@ -83,6 +107,8 @@ class VideoService:
         Returns:
             True if initialization successful
         """
+        if self._initialized:
+            return True
         try:
             # Discover cameras
             self._available_cameras = get_cameras()
@@ -121,6 +147,7 @@ class VideoService:
                 )
                 self._pipeline.add_processor(self._background_blur)
 
+            self._initialized = True
             logger.info("Video service initialized")
             return True
 
@@ -177,6 +204,8 @@ class VideoService:
         """Start video capture and processing."""
         if self._running:
             return
+        if not self._initialized and not await self.initialize():
+            logger.warning("Video service running without a camera")
 
         self._running = True
 

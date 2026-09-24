@@ -86,6 +86,11 @@ class ControlService(Service):
         app = web.Application(client_max_size=MAX_BODY_BYTES)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/status", self._handle_status)
+        app.router.add_get("/api/calendar/events", self._handle_events)
+        app.router.add_post("/api/meeting/join", self._handle_join)
+        app.router.add_post("/api/meeting/leave", self._handle_leave)
+        app.router.add_post("/api/meeting/mute", self._handle_mute)
+        app.router.add_post("/api/meeting/camera", self._handle_camera)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
         return app
@@ -205,3 +210,99 @@ class ControlService(Service):
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         return web.json_response(self._status())
+
+    async def _handle_events(self, request: web.Request) -> web.Response:
+        if self._calendar is None:
+            return web.json_response({"events": []})
+        return web.json_response({"events": [self._event_dict(e) for e in self._calendar.events]})
+
+    @staticmethod
+    async def _read_object(request: web.Request) -> Optional[Dict[str, Any]]:
+        """The request body as a JSON object, or None when it is not one."""
+        if not request.can_read_body:
+            return {}
+        try:
+            data = await request.json()
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
+
+    @staticmethod
+    def _error_response(message: str, status: int) -> web.Response:
+        return web.json_response({"error": message}, status=status)
+
+    async def _handle_join(self, request: web.Request) -> web.Response:
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object with url or event_id", 400)
+        title = ""
+        url = str(data.get("url") or "").strip()
+        event_id = str(data.get("event_id") or "").strip()
+        if event_id:
+            event = self._calendar.get_event_by_id(event_id) if self._calendar is not None else None
+            if event is None:
+                return self._error_response("Unknown calendar event", 400)
+            if not event.meeting_url:
+                return self._error_response("That meeting has no video link", 400)
+            url = event.meeting_url
+            title = event.title
+        if not url:
+            return self._error_response("Meeting link required", 400)
+        if ZOOM_MEETING_ID.match(url):
+            url = f"https://zoom.us/j/{url}"
+        if self._platform_for(url) is None:
+            return self._error_response("Unsupported meeting link", 400)
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response("A meeting is already in progress", 409)
+        self._last_error = None
+        self._title = title
+        self._task = asyncio.create_task(self._run_join(url))
+        return web.json_response({"state": "joining", "url": url}, status=202)
+
+    async def _run_join(self, url: str) -> None:
+        try:
+            await self._meeting.join_meeting(url, display_name=self._room_name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Join failed for {url}: {e}")
+            self._last_error = str(e)
+
+    async def _handle_leave(self, request: web.Request) -> web.Response:
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        if self._meeting_state() == "idle":
+            return self._error_response("No meeting to leave", 409)
+        self._last_error = None
+        self._task = asyncio.create_task(self._run_leave())
+        return web.json_response({"state": "leaving"}, status=202)
+
+    async def _run_leave(self) -> None:
+        try:
+            await self._meeting.leave_meeting()
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.error(f"Leave failed: {e}")
+            self._last_error = str(e)
+        finally:
+            self._title = ""
+            self._joined_at = None
+
+    async def _handle_mute(self, request: web.Request) -> web.Response:
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        if self._meeting_state() != "connected":
+            return self._error_response("Not in a meeting", 409)
+        muted = await self._meeting.toggle_mute()
+        return web.json_response({"muted": bool(muted)})
+
+    async def _handle_camera(self, request: web.Request) -> web.Response:
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        if self._meeting_state() != "connected":
+            return self._error_response("Not in a meeting", 409)
+        camera_on = await self._meeting.toggle_camera()
+        return web.json_response({"camera_on": bool(camera_on)})

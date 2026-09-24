@@ -11,12 +11,15 @@ from croom.core.config import Config
 from croom.core.service import ServiceState
 
 
-def make_config(tmp_path, dashboard_url: str = "") -> Config:
+def make_config(tmp_path, dashboard_url: str = "", control: bool = False) -> Config:
     config = Config()
     config.ai.enabled = False
     config.dashboard.enabled = bool(dashboard_url)
     config.dashboard.url = dashboard_url
     config.data_dir = str(tmp_path)
+    config.control.enabled = control
+    config.control.host = "127.0.0.1"
+    config.control.port = 0
     return config
 
 
@@ -71,3 +74,33 @@ class TestStartup:
             svc._state == ServiceState.STOPPED
             for svc in agent.service_manager.get_all_services().values()
         )
+
+
+class TestControlRegistration:
+    def test_control_is_registered_after_meeting_and_calendar(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        control = agent.service_manager.get_service("control")
+        assert control is not None
+        assert control._meeting is agent.service_manager.get_service("meeting")
+        assert control._calendar is agent.service_manager.get_service("calendar")
+        order = agent.service_manager._start_order
+        assert order.index("control") > order.index("meeting")
+        assert order.index("control") > order.index("calendar")
+
+    def test_control_is_absent_when_disabled(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=False))
+        agent._initialize_services()
+        assert agent.service_manager.get_service("control") is None
+
+    async def test_start_all_serves_the_page_on_an_ephemeral_port(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        try:
+            assert await agent.service_manager.start_all() is True
+            control = agent.service_manager.get_service("control")
+            assert control._state == ServiceState.RUNNING
+            assert control.bound_port is not None and control.bound_port > 0
+        finally:
+            await agent.service_manager.stop_all()
+        assert agent.service_manager.get_service("control").bound_port is None

@@ -135,6 +135,20 @@ class CroomAgent:
             except ImportError as e:
                 logger.warning(f"Dashboard client not available: {e}")
 
+        # Room control page (local web UI for the room)
+        if self.config.control.enabled:
+            try:
+                from croom.control.service import ControlService
+                control_service = ControlService.from_config(
+                    self.config,
+                    meeting=self.service_manager.get_service("meeting"),
+                    calendar=self.service_manager.get_service("calendar"),
+                )
+                self.service_manager.register(control_service, dependencies=["meeting", "calendar"])
+                logger.info("Room control page registered")
+            except ImportError as e:
+                logger.warning(f"Room control page not available: {e}")
+
     async def start(self) -> None:
         """Start the Croom agent and all services."""
         if self._running:

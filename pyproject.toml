@@ -74,7 +74,7 @@ where = ["src"]
 include = ["croom*"]
 
 [tool.setuptools.package-data]
-croom = ["py.typed"]
+croom = ["py.typed", "control/static/*"]
 
 [tool.black]
 line-length = 100

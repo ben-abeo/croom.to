@@ -426,3 +426,31 @@ class TestLeaveMuteCamera:
         client = await client_factory(make_service())
         for path in ("/api/meeting/leave", "/api/meeting/mute", "/api/meeting/camera"):
             assert (await client.post(path)).status == 503, path
+
+
+class TestPage:
+    async def test_index_is_served_uncached(self, client_factory):
+        client = await client_factory(make_service())
+        resp = await client.get("/")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert resp.headers["Cache-Control"] == "no-cache"
+        body = await resp.text()
+        assert "<title>Croom room</title>" in body
+        assert 'src="/static/app.js"' in body
+        assert 'href="/static/style.css"' in body
+
+    async def test_assets_are_served(self, client_factory):
+        client = await client_factory(make_service())
+        assert (await client.get("/static/app.js")).status == 200
+        assert (await client.get("/static/style.css")).status == 200
+
+    async def test_missing_assets_explain_themselves(self, client_factory, tmp_path):
+        client = await client_factory(make_service(static_dir=str(tmp_path)))
+        resp = await client.get("/")
+        assert resp.status == 500
+        assert "assets are missing" in await resp.text()
+
+    def test_static_files_are_package_data(self):
+        text = open("pyproject.toml", encoding="utf-8").read()
+        assert 'control/static/*' in text

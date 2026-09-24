@@ -173,3 +173,27 @@ class TestAudioServiceAsService:
         config = Config()
         config.audio.noise_reduction_level = "aggressive"
         assert AudioService.from_config(config).config["noise_reduction"] is True
+
+
+class TestAudioServiceDeviceFailure:
+    """A device that is present but fails to start must not take the service down (spec 4.3)."""
+
+    @pytest.mark.asyncio
+    async def test_start_survives_input_device_failure(self):
+        from croom.audio.device import AudioDeviceInfo, AudioDeviceType
+        from croom.audio.service import AudioService
+
+        mic = AudioDeviceInfo(id="fake-mic", name="Fake mic", device_type=AudioDeviceType.INPUT, is_default=True)
+        device = MagicMock()
+        device.open = AsyncMock(return_value=True)
+        device.start = AsyncMock(side_effect=RuntimeError("device busy"))
+        device.stop = AsyncMock()
+        with patch("croom.audio.service.get_audio_devices", return_value=[mic]), \
+             patch("croom.audio.service.create_audio_device", return_value=device):
+            service = AudioService()
+            await service.start()
+            assert service._running is True
+            assert service._input_device is None
+            assert service._audio_task is None
+            await service.stop()
+            assert service._running is False

@@ -70,3 +70,28 @@ class TestVideoServiceAsService:
         config = Config()
         config.video.device = "/dev/video2"
         assert VideoService.from_config(config).config["camera"] == "/dev/video2"
+
+
+class TestVideoServiceDeviceFailure:
+    """A camera that is present but fails to start must not take the service down (spec 4.3)."""
+
+    async def test_start_survives_camera_failure(self):
+        from unittest.mock import AsyncMock, MagicMock
+        from croom.video.camera import CameraInfo
+
+        info = CameraInfo(id="fake-cam", name="Fake camera", backend=None)
+        camera = MagicMock()
+        camera.open = AsyncMock(return_value=True)
+        camera.set_resolution = AsyncMock(return_value=True)
+        camera.set_fps = AsyncMock(return_value=True)
+        camera.start = AsyncMock(side_effect=RuntimeError("device busy"))
+        camera.stop = AsyncMock()
+        with patch("croom.video.service.get_cameras", return_value=[info]), \
+             patch("croom.video.service.create_camera", return_value=camera):
+            service = VideoService()
+            await service.start()
+            assert service._running is True
+            assert service._camera is None
+            assert service._capture_task is None
+            await service.stop()
+            assert service._running is False

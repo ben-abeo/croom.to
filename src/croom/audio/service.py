@@ -222,12 +222,20 @@ class AudioService(Service):
 
         # Start input device
         if self._input_device:
-            await self._input_device.start()
-            self._audio_task = asyncio.create_task(self._audio_loop())
+            try:
+                await self._input_device.start()
+                self._audio_task = asyncio.create_task(self._audio_loop())
+            except Exception as e:
+                logger.error(f"Audio input device failed to start, continuing without it: {e}")
+                self._input_device = None
 
         # Start output device
         if self._output_device:
-            await self._output_device.start()
+            try:
+                await self._output_device.start()
+            except Exception as e:
+                logger.error(f"Audio output device failed to start, continuing without it: {e}")
+                self._output_device = None
 
         logger.info("Audio service started")
 

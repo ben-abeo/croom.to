@@ -211,8 +211,12 @@ class VideoService(Service):
 
         # Start camera
         if self._camera:
-            await self._camera.start()
-            self._capture_task = asyncio.create_task(self._capture_loop())
+            try:
+                await self._camera.start()
+                self._capture_task = asyncio.create_task(self._capture_loop())
+            except Exception as e:
+                logger.error(f"Camera failed to start, continuing without video: {e}")
+                self._camera = None
 
         logger.info("Video service started")
 

@@ -22,6 +22,7 @@ S2S_KEYS = ("account_id", "s2s_client_id", "s2s_client_secret", "room_user")
 ZOOM_OAUTH_URL = "https://zoom.us/oauth/token"
 ZOOM_API_URL = "https://api.zoom.us/v2"
 REQUEST_TIMEOUT = aiohttp.ClientTimeout(total=15)
+CLOCK_SKEW_S = 30  # iat is backdated so a room clock slightly ahead of Zoom's still passes
 
 
 class ZoomAuthError(Exception):
@@ -93,7 +94,7 @@ def _b64url(raw: bytes) -> str:
 def meeting_sdk_signature(client_id: str, client_secret: str, meeting_number, role: int = 0,
                           now: Optional[float] = None, ttl_seconds: int = 7200) -> str:
     """A Meeting SDK JWT for one meeting: HS256 with the app's client secret (spec 4.3)."""
-    issued = int(now if now is not None else time.time())
+    issued = int(now if now is not None else time.time()) - CLOCK_SKEW_S
     header = {"alg": "HS256", "typ": "JWT"}
     payload = {
         "appKey": client_id,

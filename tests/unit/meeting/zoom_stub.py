@@ -8,7 +8,9 @@ STUB_JS = r"""
 window.__zoomCalls = [];
 window.ZoomMtg = {
   _listeners: {},
-  _behaviour: { waiting: false, errorFor: "999", neverConnect: false, delayMs: 50 },
+  _behaviour: { waiting: false, errorFor: "999", neverConnect: false, delayMs: 50, endAfterMs: 0,
+                mutedOnEntry: false, videoOffOnEntry: false, silentConnect: false, statusField: "meetingStatus" },
+  _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
   setZoomJSLib(path, av) { window.__zoomCalls.push(["setZoomJSLib", path, av]); },
   preLoadWasm() { window.__zoomCalls.push(["preLoadWasm"]); },
   prepareWebSDK() { window.__zoomCalls.push(["prepareWebSDK"]); },
@@ -28,20 +30,21 @@ window.ZoomMtg = {
       return;
     }
     if (b.neverConnect) return;
-    setTimeout(() => this._fire("onMeetingStatus", { meetingStatus: 1 }), 10);
+    setTimeout(() => this._status(1), 10);
     if (b.waiting) setTimeout(() => this._fire("onUserIsInWaitingRoom", {}), 20);
     setTimeout(() => {
       const button = document.createElement("button");
       button.id = "stub-video";
-      button.setAttribute("aria-label", "Stop Video");
+      button.setAttribute("aria-label", b.videoOffOnEntry ? "Start Video" : "Stop Video");
       button.addEventListener("click", () => button.setAttribute("aria-label",
         button.getAttribute("aria-label") === "Stop Video" ? "Start Video" : "Stop Video"));
       document.body.appendChild(button);
-      this._fire("onMeetingStatus", { meetingStatus: 2 });
+      if (!b.silentConnect) this._status(2);
       opts.success && opts.success();
+      if (b.endAfterMs > 0) setTimeout(() => this._status(3), b.endAfterMs);
     }, b.waiting ? 300 : b.delayMs);
   },
-  getCurrentUser(opts) { opts.success && opts.success({ result: { currentUser: { userId: 16777216, userName: "Room 1", muted: false } } }); },
+  getCurrentUser(opts) { opts.success && opts.success({ result: { currentUser: { userId: 16777216, userName: "Room 1", muted: this._behaviour.mutedOnEntry } } }); },
   mute(opts) { window.__zoomCalls.push(["mute", { userId: opts.userId, mute: opts.mute }]); opts.success && opts.success(); },
   leaveMeeting(opts) { window.__zoomCalls.push(["leaveMeeting", { confirm: opts.confirm }]); opts.success && opts.success(); },
 };

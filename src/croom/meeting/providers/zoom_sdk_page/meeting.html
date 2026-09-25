@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="sdk-version" content="__SDK_VERSION__">
 <title>Crystal Meet</title>
 <style>
 html, body { margin: 0; height: 100%; background: #111827; color: #fff; font-family: Lexend, "Segoe UI", Arial, sans-serif; }
@@ -11,13 +12,14 @@ html, body { margin: 0; height: 100%; background: #111827; color: #fff; font-fam
 </head>
 <body>
 <p id="crystal-meet-status">Connecting to Zoom</p>
-<script src="https://source.zoom.us/6.5.0/lib/vendor/react.min.js"></script>
-<script src="https://source.zoom.us/6.5.0/lib/vendor/react-dom.min.js"></script>
-<script src="https://source.zoom.us/6.5.0/lib/vendor/react-redux.min.js"></script>
-<script src="https://source.zoom.us/6.5.0/lib/vendor/redux.min.js"></script>
-<script src="https://source.zoom.us/6.5.0/lib/vendor/redux-thunk.min.js"></script>
-<script src="https://source.zoom.us/6.5.0/lib/vendor/lodash.min.js"></script>
-<script src="https://source.zoom.us/6.5.0/zoom-meeting-6.5.0.min.js"></script>
+<script>window.__zoomLoadErrors = [];</script>
+<script src="https://source.zoom.us/__SDK_VERSION__/lib/vendor/react.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
+<script src="https://source.zoom.us/__SDK_VERSION__/lib/vendor/react-dom.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
+<script src="https://source.zoom.us/__SDK_VERSION__/lib/vendor/react-redux.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
+<script src="https://source.zoom.us/__SDK_VERSION__/lib/vendor/redux.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
+<script src="https://source.zoom.us/__SDK_VERSION__/lib/vendor/redux-thunk.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
+<script src="https://source.zoom.us/__SDK_VERSION__/lib/vendor/lodash.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
+<script src="https://source.zoom.us/__SDK_VERSION__/zoom-meeting-__SDK_VERSION__.min.js" onerror="window.__zoomLoadErrors.push(this.src)"></script>
 <script src="/static/meeting.js"></script>
 </body>
 </html>

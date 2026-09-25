@@ -29,7 +29,7 @@ async def check_zoom(config: Config, out: TextIO = sys.stdout,
         return 1
     credentials = load_zoom_credentials(path)
     meeting_sdk_signature(credentials.sdk_client_id, credentials.sdk_client_secret, TEST_MEETING_NUMBER)
-    print(f"Zoom Meeting SDK: app {credentials.sdk_client_id}, signature minted", file=out)
+    print(f"Zoom Meeting SDK: app {credentials.sdk_client_id}, signature minted (Zoom checks it only when a meeting is joined)", file=out)
     if not credentials.has_room_user:
         print("Zoom room user: not configured; this room can join only meetings hosted on your own Zoom account.", file=out)
         return 0
@@ -42,5 +42,5 @@ async def check_zoom(config: Config, out: TextIO = sys.stdout,
     except ZoomAuthError as e:
         print(f"Zoom: {e}", file=out)
         return 1
-    print("Ready: this room can join meetings hosted by any Zoom account.", file=out)
+    print("Ready: this room should join meetings hosted by any Zoom account; the first outside-hosted meeting proves it.", file=out)
     return 0

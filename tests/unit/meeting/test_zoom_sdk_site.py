@@ -8,7 +8,7 @@ from unittest import mock
 
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
-from croom.meeting.providers.zoom_sdk_site import CROSS_ORIGIN_HEADERS, ZoomSdkSite
+from croom.meeting.providers.zoom_sdk_site import CROSS_ORIGIN_HEADERS, PAGE_DIR, SDK_VERSION, ZoomSdkSite
 
 
 async def client_for(site):
@@ -78,3 +78,17 @@ async def test_start_binds_an_ephemeral_loopback_port():
     finally:
         await site.stop()
     assert site.port is None
+
+
+async def test_the_sdk_version_is_pinned_once_and_injected_into_the_page():
+    raw = (PAGE_DIR / "meeting.html").read_text(encoding="utf-8")
+    assert SDK_VERSION not in raw and "__SDK_VERSION__" in raw
+    assert "onerror" in raw
+    client = await client_for(ZoomSdkSite())
+    try:
+        body = await (await client.get("/meeting")).text()
+        assert "__SDK_VERSION__" not in body
+        assert f"source.zoom.us/{SDK_VERSION}/zoom-meeting-{SDK_VERSION}.min.js" in body
+        assert f'<meta name="sdk-version" content="{SDK_VERSION}">' in body
+    finally:
+        await client.close()

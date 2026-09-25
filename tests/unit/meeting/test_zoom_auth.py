@@ -107,15 +107,15 @@ class TestSignature:
         assert b64url_decode(signature) == expected
         assert json.loads(b64url_decode(header)) == {"alg": "HS256", "typ": "JWT"}
         claims = json.loads(b64url_decode(payload))
-        assert claims == {
+        assert claims == {  # iat is backdated 30 s so a room clock slightly ahead of Zoom's still passes
             "appKey": "sdkClient123", "sdkKey": "sdkClient123", "mn": "99612060433", "role": 0,
-            "iat": 1_800_000_000, "exp": 1_800_007_200, "tokenExp": 1_800_007_200,
+            "iat": 1_799_999_970, "exp": 1_800_007_170, "tokenExp": 1_800_007_170,
         }
         assert "=" not in token
 
     def test_custom_role_and_ttl(self):
         claims = json.loads(b64url_decode(meeting_sdk_signature("a", "b", "123", role=1, now=100, ttl_seconds=1800).split(".")[1]))
-        assert claims["role"] == 1 and claims["exp"] == 1900 and claims["tokenExp"] == 1900
+        assert claims["role"] == 1 and claims["iat"] == 70 and claims["exp"] == 1870 and claims["tokenExp"] == 1870
 
 
 class FakeZoom:

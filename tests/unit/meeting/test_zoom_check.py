@@ -63,10 +63,10 @@ class TestSuccess:
     async def test_full_credentials(self, tmp_path):
         code, text, made = await run(config_for(tmp_path, FULL))
         assert code == 0, text
-        assert "Zoom Meeting SDK: app sdkClient123, signature minted" in text
+        assert "Zoom Meeting SDK: app sdkClient123, signature minted (Zoom checks it only when a meeting is joined)" in text
         assert "Zoom account: server-to-server token obtained for account acct789" in text
         assert "Zoom room user: room1@crystalpm.com, ZAK obtained (valid 2 hours)" in text
-        assert text.rstrip().endswith("Ready: this room can join meetings hosted by any Zoom account.")
+        assert text.rstrip().endswith("Ready: this room should join meetings hosted by any Zoom account; the first outside-hosted meeting proves it.")
         [api] = made
         assert api.args == ("acct789", "s2sClient", "s2sSecret") and api.zak_calls == [("room1@crystalpm.com", 7200)]
 

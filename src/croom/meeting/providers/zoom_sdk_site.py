@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from aiohttp import web
 
 PAGE_DIR = Path(__file__).parent / "zoom_sdk_page"
+SDK_VERSION = "6.5.0"  # the one place to bump when Zoom retires this web SDK from its CDN
 CROSS_ORIGIN_HEADERS = {
     "Cross-Origin-Opener-Policy": "same-origin",
     "Cross-Origin-Embedder-Policy": "credentialless",
@@ -64,7 +65,8 @@ class ZoomSdkSite:
         return response
 
     async def _page(self, request: web.Request) -> web.StreamResponse:
-        return web.FileResponse(PAGE_DIR / "meeting.html", headers={"Cache-Control": "no-cache"})
+        html = (PAGE_DIR / "meeting.html").read_text(encoding="utf-8").replace("__SDK_VERSION__", SDK_VERSION)
+        return web.Response(text=html, content_type="text/html", headers={"Cache-Control": "no-cache"})
 
     async def _script(self, request: web.Request) -> web.StreamResponse:
         return web.FileResponse(PAGE_DIR / "meeting.js", headers={"Cache-Control": "no-cache"})

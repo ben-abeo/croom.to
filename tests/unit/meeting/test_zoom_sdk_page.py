@@ -112,11 +112,35 @@ async def test_mic_off_at_join_mutes_after_connecting():
         assert [c[1] for c in await run.calls("mute")] == [{"userId": 16777216, "mute": True}]
 
 
-async def test_missing_sdk_is_reported():
+async def test_missing_sdk_is_reported_with_the_failing_urls():
     async with PageRun(stub="") as run:
         await run.wait_for("error")
         detail = [d for s, d in run.events if s == "error"][0]
         assert "did not load from source.zoom.us" in detail
+        assert "zoom-meeting-6.5.0.min.js" in detail and "still published" in detail
+
+
+async def test_connected_is_reported_once_the_current_user_is_known():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        assert await run.page.evaluate("window.crystalMeet.userId") == 16777216
+        assert [s for s, _ in run.events].count("connected") == 1
+
+
+async def test_join_success_without_status_events_connects_after_the_grace_period():
+    async with PageRun({"connectGraceMs": 300}, stub=STUB_JS + "window.ZoomMtg._behaviour.silentConnect = true;") as run:
+        await run.wait_for("connected")
+
+
+async def test_status_events_may_use_the_status_field_name():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.statusField = 'status';") as run:
+        await run.wait_for("connected")
+
+
+async def test_host_ending_the_meeting_is_reported_as_left():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.endAfterMs = 200;") as run:
+        await run.wait_for("connected")
+        await run.wait_for("left")
 
 
 async def test_used_join_token_is_reported():

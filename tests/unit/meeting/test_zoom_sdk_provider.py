@@ -4,6 +4,7 @@ stub SDK (spec 2026-09-25 Zoom, section 4.4): joining, the waiting room, Zoom's
 errors, the ZAK path, mute, camera, leave, and joining again.
 """
 
+import asyncio
 import json
 
 import pytest
@@ -201,3 +202,85 @@ class TestUrlsAndConfig:
         config = Config()
         config.meeting.zoom_credentials_path = str(path)
         assert ZoomSdkProvider.from_config(config)._api is not None
+
+
+class TestReviewFixes:
+    async def test_host_ending_the_meeting_returns_the_room_to_idle(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.endAfterMs = 300;")
+        try:
+            await provider.join_meeting(LINK)
+            assert provider.state == MeetingState.CONNECTED
+            for _ in range(60):
+                if provider.state == MeetingState.IDLE:
+                    break
+                await asyncio.sleep(0.05)
+            assert provider.state == MeetingState.IDLE and provider.current_meeting is None
+            assert provider._page.url == "about:blank"
+        finally:
+            await provider.shutdown()
+
+    async def test_leave_during_a_join_cancels_it_quietly(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;")
+        try:
+            states = []
+            provider.add_state_callback(states.append)
+            task = asyncio.create_task(provider.join_meeting(LINK))
+            for _ in range(100):
+                if provider.state == MeetingState.JOINING and provider._page.url != "about:blank":
+                    break
+                await asyncio.sleep(0.05)
+            await provider.leave_meeting()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+            assert provider.state == MeetingState.IDLE and provider.current_meeting is None
+            assert MeetingState.ERROR not in states
+        finally:
+            await provider.shutdown()
+
+    async def test_entry_state_is_read_from_zoom_not_assumed(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true; window.ZoomMtg._behaviour.videoOffOnEntry = true;")
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
+            assert info.is_muted is True and info.is_camera_on is False
+            assert await provider.toggle_camera() is True
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "Stop Video"
+            assert await provider.toggle_mute() is False
+        finally:
+            await provider.shutdown()
+
+    async def test_camera_off_join_does_not_press_when_video_is_already_off(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.videoOffOnEntry = true;")
+        try:
+            info = await provider.join_meeting(LINK, camera_on=False)
+            assert info.is_camera_on is False
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "Start Video"
+        finally:
+            await provider.shutdown()
+
+    async def test_join_success_without_status_events_still_connects(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.silentConnect = true;")
+        provider.CONNECT_GRACE_MS = 300
+        try:
+            await provider.join_meeting(LINK)
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await provider.shutdown()
+
+    async def test_meeting_controls_on_screen_count_as_connected_at_the_deadline(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.silentConnect = true;")
+        provider.CONNECT_GRACE_MS = 60000
+        provider.CONNECT_TIMEOUT_S = 1
+        try:
+            await provider.join_meeting(LINK)
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await provider.shutdown()
+
+    async def test_status_events_with_the_other_field_name_connect_too(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.statusField = 'status';")
+        provider.CONNECT_GRACE_MS = 60000
+        try:
+            await provider.join_meeting(LINK)
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await provider.shutdown()

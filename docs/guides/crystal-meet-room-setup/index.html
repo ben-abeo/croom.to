@@ -86,7 +86,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
 <div class="step"><span class="badge">1</span><h2>Prepare the device</h2></div>
 <ul>
   <li><strong>Flash the card.</strong> On your computer, open <span class="ui">Raspberry Pi Imager</span>, choose your Pi model, then <span class="ui">Raspberry Pi OS (64-bit)</span> with desktop, and your microSD card.</li>
-  <li><strong>Pre-fill the settings.</strong> When Imager offers customisation, set the hostname to something like <span class="chip">crystal-meet-room-1</span>, the username to <span class="chip">pi</span> with a password you keep, your Wi-Fi network, and turn on SSH. Write the card.</li>
+  <li><strong>Pre-fill the settings.</strong> When Imager offers customisation, set the hostname to something like <span class="chip">crystal-meet-room-1</span>, the username to <span class="chip">pi</span> with a password you keep, your Wi-Fi network and your time zone, and turn on SSH. Write the card.</li>
   <li><strong>Connect and boot.</strong> Put the card in the Pi, plug in the TV over HDMI, the camera and speakerphone over USB, then power. Wait for the desktop to appear on the TV.</li>
   <li><strong>Turn on automatic sign-in.</strong> Open <span class="ui">Preferences › Raspberry Pi Configuration › System</span> and set <span class="ui">Auto Login</span> to on, so the room comes back by itself after a power cut.</li>
 </ul>
@@ -146,6 +146,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <div class="card"><h3>The device shows offline</h3><p>From the Pi, type <span class="chip">curl http://&lt;dashboard address&gt;:3001/health</span>. If nothing comes back, the dashboard is not reachable from the room's network: check the address in <span class="chip">~/room.yaml</span> and the dashboard PC's networking. If the token was already used, create a new one and run the installer again with the updated config.</p></div>
   <div class="card"><h3>The browser opens but never joins</h3><p>Zoom needs the passcode inside the link; paste the full invitation link. Google Meet waits until someone in the meeting admits "the room". If the page says it could not join, press <span class="ui">Dismiss</span> and try the link again.</p></div>
   <div class="card"><h3>The screens cannot open the page</h3><p>Use the device's IP address rather than its <span class="chip">.local</span> name; many tablets do not resolve those. Check that the screen and the device are on the same network, then open <span class="chip">http://&lt;device address&gt;:8080/api/status</span> from a laptop to confirm the device answers.</p></div>
+  <div class="card"><h3>No browser window opens on the TV</h3><p>The service waits for the desktop before it starts, so give a freshly booted Pi a minute. If the window still does not appear, type <span class="chip">sudo journalctl -u croom -n 50</span> and look for "Failed to initialize". The browser is installed under <span class="chip">/opt/croom/browsers</span>; if that folder is missing, run the installer again.</p></div>
   <div class="card"><h3>No sound or picture in the call</h3><p>Check the USB camera and speakerphone are connected before the device starts, then reboot the Pi. The service runs as the signed-in desktop user so it can use the room's screen and audio.</p></div>
 </div>
 </section>

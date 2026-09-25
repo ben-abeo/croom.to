@@ -32,5 +32,11 @@ def test_guide_source_is_self_contained():
     assert not re.search(r"""(src|href)=["']https?://""", html)
     assert "url(http" not in html and "@import" not in html and "http://fonts" not in html
     assert "Crystal Meet" in html and "Croom " not in html
-    for asset in ("crystalpm-logo-white.svg", "fonts/lexend-400.woff2", "fonts/lexend-600.woff2"):
+    for asset in ("crystalpm-logo-white.svg", "fonts/lexend-400.woff2", "fonts/lexend-600.woff2", "fonts/OFL.txt"):
         assert (GUIDE / asset).is_file(), asset
+
+
+def test_guide_covers_the_time_zone_and_the_browser_check():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "time zone" in html
+    assert "No browser window" in html and "journalctl -u croom" in html

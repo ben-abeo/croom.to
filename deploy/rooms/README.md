@@ -17,5 +17,6 @@ Install on the device with:
 
     sudo bash installer/install.sh --config /path/to/room-N.yaml
 
-The room page is then at `http://<device>:8080/` for anyone on the network.
+The room page is then at `http://<device>:8080/` for anyone on the network,
+and the door sign at `http://<device>:8080/sign`.
 Never commit a real token to this folder.

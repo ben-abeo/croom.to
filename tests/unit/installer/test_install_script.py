@@ -68,3 +68,46 @@ def test_installs_from_the_fork_by_default():
     text = SCRIPT.read_text()
     assert 'CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"' in text
     assert "pip\" install croom" not in text
+
+
+def test_config_option_without_a_value_is_refused():
+    result = run_bash(f"bash {SCRIPT} --config")
+    assert result.returncode == 1
+    assert "not found" in (result.stdout + result.stderr).lower()
+
+
+def test_desktop_user_must_exist():
+    result = run_bash(f"source {SCRIPT}; CROOM_USER=no_such_user_for_croom check_desktop_user")
+    assert result.returncode == 1
+    assert "does not exist" in (result.stdout + result.stderr).lower()
+
+
+def test_units_run_as_the_desktop_user_with_the_bundled_browser(tmp_path):
+    result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={tmp_path}; CROOM_USER=$(id -un); write_units")
+    assert result.returncode == 0, result.stderr
+    me = subprocess.check_output(["id", "-un"], text=True).strip()
+    unit = (tmp_path / "croom.service").read_text()
+    assert f"User={me}" in unit
+    assert "Description=Crystal Meet room agent (croom)" in unit
+    assert "Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers" in unit
+    assert f"Environment=XDG_RUNTIME_DIR=/run/user/{os.getuid()}" in unit
+    # The agent opens a headed browser: start after the display manager and wait for the display.
+    assert "After=display-manager.service" in unit
+    assert "ExecStartPre=" in unit and "/tmp/.X11-unix/X0" in unit
+    ui = (tmp_path / "croom-ui.service").read_text()
+    assert f"User={me}" in ui and "Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers" in ui
+
+
+def test_browser_is_installed_for_the_service_user():
+    install = SCRIPT.read_text().split("install_croom() {")[1].split("\n}\n")[0]
+    assert 'export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"' in install
+    assert install.index("PLAYWRIGHT_BROWSERS_PATH") < install.index('playwright" install chromium')
+    assert 'chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/browsers"' in install
+
+
+def test_completion_message_skips_editing_when_a_room_config_was_installed():
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; print_completion")
+    assert result.returncode == 0, result.stderr
+    assert "Edit configuration" not in result.stdout and "Room page:" in result.stdout
+    result = run_bash(f"source {SCRIPT}; print_completion")
+    assert "Edit configuration" in result.stdout

@@ -21,6 +21,7 @@ INSTALL_DIR="/opt/croom"
 CONFIG_DIR="/etc/croom"
 DATA_DIR="/var/lib/croom"
 LOG_DIR="/var/log/croom"
+SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 # The agent runs as the desktop user that invoked sudo, so Chromium can use the
 # screen and audio of the signed-in session. Override the source with CROOM_REPO.
 CROOM_USER="${SUDO_USER:-}"
@@ -178,9 +179,12 @@ install_croom() {
     log "Installing from $CROOM_REPO"
     "$INSTALL_DIR/venv/bin/pip" install "$CROOM_REPO"
 
-    # Install browser automation
+    # Install the browser where the service user can find it: under sudo the
+    # default would be root's ~/.cache, invisible to the desktop user at runtime.
+    export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"
     "$INSTALL_DIR/venv/bin/pip" install playwright
     "$INSTALL_DIR/venv/bin/playwright" install chromium
+    chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/browsers"
 
     log "Croom installed"
 }
@@ -289,14 +293,19 @@ EOF
     log "Configuration created at $CONFIG_DIR/config.yaml"
 }
 
-# Create systemd service
-create_service() {
-    log "Creating systemd service..."
+# Write the systemd units (separate from create_service so tests can call it)
+write_units() {
+    mkdir -p "$SYSTEMD_DIR"
+    local uid
+    uid=$(id -u "$CROOM_USER")
 
-    cat > /etc/systemd/system/croom.service << EOF
+    # The agent opens a headed browser, so it must start after the desktop
+    # session exists: order after the display manager and wait for the X
+    # display (up to two minutes, then systemd restarts the unit and it waits again).
+    cat > "$SYSTEMD_DIR/croom.service" << EOF
 [Unit]
 Description=Crystal Meet room agent (croom)
-After=network-online.target pulseaudio.service
+After=display-manager.service network-online.target pulseaudio.service
 Wants=network-online.target
 
 [Service]
@@ -304,18 +313,20 @@ Type=simple
 User=$CROOM_USER
 Group=$CROOM_USER
 WorkingDirectory=$INSTALL_DIR
+ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until [ -S /tmp/.X11-unix/X0 ]; do sleep 2; done'
 ExecStart=$INSTALL_DIR/venv/bin/python -m croom.core.agent -c $CONFIG_DIR/config.yaml
 Restart=always
 RestartSec=10
 Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$CROOM_USER")
+Environment=XDG_RUNTIME_DIR=/run/user/$uid
+Environment=PLAYWRIGHT_BROWSERS_PATH=$INSTALL_DIR/browsers
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
     # Touch UI service (optional)
-    cat > /etc/systemd/system/croom-ui.service << EOF
+    cat > "$SYSTEMD_DIR/croom-ui.service" << EOF
 [Unit]
 Description=Crystal Meet touch UI (croom-ui)
 After=croom.service
@@ -330,13 +341,19 @@ ExecStart=$INSTALL_DIR/venv/bin/python -m croom_ui.main -c $CONFIG_DIR/config.ya
 Restart=always
 RestartSec=10
 Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$CROOM_USER")
+Environment=XDG_RUNTIME_DIR=/run/user/$uid
+Environment=PLAYWRIGHT_BROWSERS_PATH=$INSTALL_DIR/browsers
 Environment=QT_QPA_PLATFORM=eglfs
 
 [Install]
 WantedBy=graphical.target
 EOF
+}
 
+# Create systemd service
+create_service() {
+    log "Creating systemd service..."
+    write_units
     systemctl daemon-reload
     log "Systemd services created"
 }
@@ -366,16 +383,23 @@ print_completion() {
     echo "Configuration: $CONFIG_DIR/config.yaml"
     echo "Room page: http://$(hostname).local:8080/  (or use this device's IP address)"
     echo ""
-    echo "Next steps:"
-    echo "1. Edit configuration: sudo nano $CONFIG_DIR/config.yaml"
-    echo "2. Start service: sudo systemctl start croom"
-    echo "3. Check status: sudo systemctl status croom"
-    echo "4. View logs: sudo journalctl -u croom -f"
-    echo ""
-    echo "To connect to management dashboard:"
-    echo "1. Get enrollment token from dashboard"
-    echo "2. Add to config: dashboard.enrollment_token"
-    echo "3. Restart: sudo systemctl restart croom"
+    if [[ -n "$ROOM_CONFIG" ]]; then
+        echo "Next steps:"
+        echo "1. Start service: sudo systemctl start croom"
+        echo "2. Check status: sudo systemctl status croom"
+        echo "3. View logs: sudo journalctl -u croom -f"
+    else
+        echo "Next steps:"
+        echo "1. Edit configuration: sudo nano $CONFIG_DIR/config.yaml"
+        echo "2. Start service: sudo systemctl start croom"
+        echo "3. Check status: sudo systemctl status croom"
+        echo "4. View logs: sudo journalctl -u croom -f"
+        echo ""
+        echo "To connect to the dashboard:"
+        echo "1. Create an enrollment token on the dashboard's Provisioning page"
+        echo "2. Add to config: dashboard.enrollment_token"
+        echo "3. Restart: sudo systemctl restart croom"
+    fi
     echo ""
 }
 

@@ -25,6 +25,9 @@ def test_readme_names_the_setup_pieces():
         "croom --check-calendar",
         "docs/guides/crystal-meet-room-setup.pdf",
         "docs/guides/crystal-meet-google-calendar.pdf",
+        "docs/guides/crystal-meet-zoom.pdf",
+        "--zoom-credentials",
+        "croom --check-zoom",
         "npm run dev",
         ".venv/bin/pytest",
     ):

@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Connect Crystal Meet rooms to Zoom</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --blue-700: #003EBC;
+  --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --tint-50: #F7F9FF; --slate-500: #647087; --ink-900: #1C2024;
+  --radius: 12px; --radius-sm: 8px;
+}
+@page { size: Letter; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Lexend", "Segoe UI", Arial, sans-serif; color: var(--ink-900); font-size: 10.5pt; line-height: 1.5; }
+h1, h2, h3 { font-weight: 600; line-height: 1.15; margin: 0.2em 0; }
+h2 { font-size: 16pt; color: var(--navy-800); }
+p { margin: 0.4em 0; }
+.kicker { font-size: 9pt; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--blue-600); margin: 0 0 6px; }
+.banner { background: var(--navy-800); color: #fff; border-radius: var(--radius); padding: 28px 32px; margin-bottom: 20px; }
+.banner .kicker { color: var(--periwinkle-300); }
+.banner .kicker.top { color: #fff; margin-bottom: 2px; }
+.banner h1 { font-size: 26pt; margin: 6px 0 8px; }
+.banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
+.banner img { height: 26px; display: block; margin-bottom: 18px; }
+.intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
+.glance { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); padding: 12px 12px; }
+.glance .card:nth-child(2) { border-top-color: #3B6DF0; }
+.glance .card:nth-child(3) { border-top-color: #6C92F5; }
+.glance .card:nth-child(4) { border-top-color: #8EABF8; }
+.glance .card:nth-child(5) { border-top-color: var(--periwinkle-300); }
+.card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
+.card .kicker { font-size: 8pt; }
+.card h3 { font-size: 11pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9.5pt; }
+.block { break-inside: avoid; }
+.step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
+ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+li { position: relative; padding-left: 18px; margin: 5px 0; }
+li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
+.ui { font-weight: 600; color: var(--blue-600); }
+.chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.chip.wrap { white-space: normal; overflow-wrap: anywhere; }
+.see { color: var(--slate-500); font-size: 9.5pt; margin: 4px 0 0 18px; }
+.callout { border-radius: var(--radius-sm); padding: 12px 18px; margin: 12px 0; border-left: 4px solid var(--blue-600); background: var(--tint-100); break-inside: avoid; }
+.callout.warn { background: #FFF8E1; border-left-color: #E8A013; }
+.callout.tip { background: #EDFBF3; border-left-color: #1FA971; }
+.callout .kicker { margin-bottom: 4px; }
+.callout p { margin: 2px 0; }
+.trouble { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.trouble .card { break-inside: avoid; }
+.trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.trouble .card h3 { font-size: 10.5pt; }
+.page-break { break-before: page; }
+pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--blue-600); background: var(--tint-100); border-radius: var(--radius-sm); padding: 10px 14px; margin: 6px 0 0 18px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<section class="banner">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker top">Crystal PM</p>
+  <p class="kicker">How-to guide</p>
+  <h1>Connect Crystal Meet rooms to Zoom</h1>
+  <p>Let each room join Zoom meetings through Zoom's Meeting SDK, including meetings hosted by customers and vendors, with no one signing in on the device.</p>
+</section>
+
+<p class="intro">This guide has two halves. The Zoom half is done once for all rooms by the person who administers your Zoom account: two apps in the App Marketplace and one Zoom user per room, about 20 minutes. The device half takes about five minutes per room. Rooms still join only when someone presses Join on the room page.</p>
+
+<div class="glance">
+  <div class="card"><p class="kicker">Step 1</p><h3>The SDK app</h3><p>A Meeting SDK app and its client id and secret.</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>The token app</h3><p>A Server-to-Server OAuth app with one scope.</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>A user per room</h3><p>Rooms join outside meetings as their own Zoom user.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>Put it on the device</h3><p>The credentials file, the installer, the check.</p></div>
+  <div class="card"><p class="kicker">Step 5</p><h3>Join a test meeting</h3><p>One inside your account, one outside.</p></div>
+</div>
+
+<div class="callout warn">
+  <p class="kicker">Before you begin</p>
+  <p><strong>Access.</strong> The Zoom account owner, or an admin with the Develop permission (visible as <span class="ui">Develop</span> at the top of the App Marketplace) and rights to add users.</p>
+  <p><strong>Why three parts.</strong> Since March 2026 Zoom lets an SDK app join meetings hosted by other Zoom accounts only as a signed-in Zoom user. The SDK app (step 1) joins your own meetings; the token app (step 2) and a Zoom user per room (step 3) let the room join everyone else's.</p>
+  <p><strong>Secrets.</strong> You will collect a client id and secret (step 1) and an account id, client id and secret (step 2). Keep them out of email and chat; they go straight into a file on each device.</p>
+</div>
+
+<section class="block">
+<div class="step"><span class="badge">1</span><h2>Create the Meeting SDK app</h2></div>
+<ul>
+  <li><strong>Open the App Marketplace</strong> at <span class="chip">marketplace.zoom.us</span> signed in as the admin, then <span class="ui">Develop › Build App</span>, choose <span class="ui">General App</span> and create it. Name it <span class="chip">Crystal Meet rooms</span>.</li>
+  <li><strong>Turn on the Meeting SDK.</strong> In the app's <span class="ui">Features</span> (or <span class="ui">Embed</span>) section, enable <span class="ui">Meeting SDK</span>.</li>
+  <li><strong>Copy the credentials.</strong> On <span class="ui">Basic Information › App Credentials</span>, copy the <span class="ui">Client ID</span> and <span class="ui">Client Secret</span>. The development credentials are fine: the app is used only inside your account and is never published.</li>
+</ul>
+<p class="see">You should now see the app under Manage › Built Apps with Meeting SDK enabled, and have its client id and secret.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">2</span><h2>Create the Server-to-Server app for tokens</h2></div>
+<ul>
+  <li><strong>Build it.</strong> <span class="ui">Develop › Build App</span>, choose <span class="ui">Server-to-Server OAuth</span>, name it <span class="chip">Crystal Meet room tokens</span>.</li>
+  <li><strong>Copy the credentials</strong> from <span class="ui">App Credentials</span>: <span class="ui">Account ID</span>, <span class="ui">Client ID</span> and <span class="ui">Client Secret</span>.</li>
+  <li><strong>Add the one scope.</strong> Under <span class="ui">Scopes › Add Scopes</span>, search for <span class="chip">token</span> and add <span class="chip">user:read:token:admin</span> (View users' tokens). Nothing else is needed.</li>
+  <li><strong>Activate the app</strong> on the <span class="ui">Activation</span> page. Tokens only work while it is active.</li>
+</ul>
+<p class="see">You should now see the app listed as active, with the account id, client id and secret saved with the step 1 values.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">3</span><h2>Create a Zoom user for each room</h2></div>
+<ul>
+  <li><strong>Add the user.</strong> In <span class="chip">admin.zoom.us</span> go to <span class="ui">User Management › Users › Add Users</span>. Use a mailbox you can read, for example <span class="chip">room1@crystalpm.com</span>, and the <span class="ui">Basic</span> user type, which is free on a paid account.</li>
+  <li><strong>Activate it.</strong> Open the invitation email in that mailbox and finish the sign-up.</li>
+  <li><strong>Name it after the room.</strong> In the user's profile set the display name to the room's name, for example <span class="chip">Room 1</span>. That is the name hosts see when the room joins.</li>
+  <li><strong>Repeat</strong> for Room 2 and Room 3.</li>
+</ul>
+<p class="see">You should now see one active Basic user per room, each named after its room.</p>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The room user never hosts anything and needs no licence. If you skip steps 2 and 3, rooms can still join meetings hosted on your own Zoom account; they just cannot join meetings hosted by other companies.</p>
+</div>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">4</span><h2>Put the credentials on each device</h2></div>
+<ul>
+  <li><strong>Make the file.</strong> Copy <span class="chip">deploy/rooms/zoom-credentials.example.json</span> to <span class="chip">zoom-credentials.json</span> and fill in the six values: the step 1 client id and secret, the step 2 account id, client id and secret, and that room's user as <span class="ui">room_user</span>. Each room gets its own file because <span class="ui">room_user</span> differs.</li>
+  <li><strong>Copy it to the device</strong>, for example <span class="chip wrap">scp zoom-credentials.json pi@crystal-meet-room-1.local:~/</span>.</li>
+  <li><strong>A device you are installing now.</strong> Add <span class="chip">--zoom-credentials ~/zoom-credentials.json</span> to the installer command from the setup guide.</li>
+  <li><strong>A device that is already installed.</strong> Type <span class="chip wrap">sudo install -o pi -g pi -m 600 ~/zoom-credentials.json /etc/croom/zoom-credentials.json</span> (your username instead of pi), then <span class="chip">sudo systemctl restart croom</span>.</li>
+  <li><strong>Check it.</strong> Type <span class="chip wrap">/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml</span>. It reads:</li>
+</ul>
+<pre>Zoom Meeting SDK: app AbC123xYz, signature minted
+Zoom account: server-to-server token obtained for account 9XyZ12ab
+Zoom room user: room1@crystalpm.com, ZAK obtained (valid 2 hours)
+Ready: this room can join meetings hosted by any Zoom account.</pre>
+<ul>
+  <li><strong>Delete the copy in your home folder.</strong> Type <span class="chip">rm ~/zoom-credentials.json</span>.</li>
+</ul>
+<p class="see">You should now see the check end with "Ready", and the room's log say the Zoom Meeting SDK provider is ready.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">5</span><h2>Join a test meeting</h2></div>
+<ul>
+  <li><strong>Inside your account.</strong> Have a colleague start a Zoom meeting and paste its invitation link, passcode included, into the room page's <span class="ui">Join with a link</span>, or book it on the room's calendar and press <span class="ui">Join now</span>. Zoom's meeting appears on the TV within about fifteen seconds.</li>
+  <li><strong>Outside your account.</strong> Join a meeting hosted by someone outside the company, or by a personal Zoom account. The room appears in the participant list under its own name, for example Room 1. If the host uses a waiting room, the room page says it is waiting until the host admits it.</li>
+  <li><strong>Controls.</strong> From the table page press <span class="ui">Mute</span>, <span class="ui">Turn camera off</span>, then <span class="ui">Leave</span> and <span class="ui">Tap again to leave</span>.</li>
+</ul>
+<p class="see">You should now see both meetings join, the room named after itself in the outside one, and the TV return to the room's idle screen after leaving.</p>
+</section>
+
+<div class="page-break"></div>
+<section class="block">
+<p class="kicker">If something is off</p>
+<h2>Troubleshooting</h2>
+<div class="trouble">
+  <div class="card"><h3>The check says "not configured"</h3><p>It names the value that is missing or still a placeholder in <span class="chip">/etc/croom/zoom-credentials.json</span>. The four server-to-server values and <span class="ui">room_user</span> go together: fill in all of them or none.</p></div>
+  <div class="card"><h3>The check says Zoom refused the credentials</h3><p>The account id, client id or secret of the step 2 app is wrong, or the app is not activated. Copy them again from App Credentials and check the Activation page.</p></div>
+  <div class="card"><h3>The check says no such user, or a scope is missing</h3><p>The <span class="ui">room_user</span> must be an active user on this Zoom account. "Lacks the user token scope" means step 2's scope <span class="chip">user:read:token:admin</span> is missing: add it and activate the app again.</p></div>
+  <div class="card"><h3>The room page says the meeting is not authorized</h3><p>The meeting is hosted by another account and the room joined without its Zoom user. Fill in the server-to-server values and <span class="ui">room_user</span>, restart the service and run the check.</p></div>
+  <div class="card"><h3>Wrong passcode or meeting not found</h3><p>Paste the full invitation link with its passcode part. A bare meeting id cannot open a passcode-protected meeting. Zoom's exact reason shows on the room page.</p></div>
+  <div class="card"><h3>The TV stays dark and the page says the SDK did not load</h3><p>The device could not reach <span class="chip">source.zoom.us</span>. Check the device's internet access and any web filter, then try again.</p></div>
+</div>
+</section>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The room joins meetings as its own Zoom user through Zoom's supported Meeting SDK, so it is never mistaken for a bot. To take that away, deactivate the two apps or the room users in Zoom.</p>
+</div>
+
+</body>
+</html>

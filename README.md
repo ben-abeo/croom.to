@@ -30,21 +30,27 @@ Follow the two guides in this order:
 2. [Connect Crystal Meet rooms to Google Calendar](docs/guides/crystal-meet-google-calendar.pdf):
    room resources in Google Workspace, one service account and key, share each
    room calendar with it, put the key and the calendar address on the device.
+3. [Connect Crystal Meet rooms to Zoom](docs/guides/crystal-meet-zoom.pdf): a
+   Meeting SDK app, a Server-to-Server app for tokens, one Zoom user per room,
+   and the credentials file on the device, so rooms join any Zoom meeting.
 
 The commands the guides walk through, for reference:
 
 ```bash
 git clone https://github.com/ben-abeo/croom.to.git && cd croom.to
 cp deploy/rooms/room-1.yaml ~/room.yaml            # then edit the four REPLACE values
-sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-service-account.json
+sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-service-account.json --zoom-credentials ~/zoom-credentials.json
 sudo systemctl start croom
 /opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
+/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml
 ```
 
 Installer options: `--config FILE` installs a prepared room config as
 `/etc/croom/config.yaml`; `--credentials FILE` installs a Google service
-account key as `/etc/croom/google-service-account.json`, readable only by the
-service user; `--enable-ui` and `--no-service` are upstream options; the
+account key as `/etc/croom/google-service-account.json` and
+`--zoom-credentials FILE` the Zoom credentials as
+`/etc/croom/zoom-credentials.json`, both readable only by the service user;
+`--enable-ui` and `--no-service` are upstream options; the
 `CROOM_REPO` environment variable overrides the pip source, which defaults to
 this fork's `main` branch. Run the installer with `sudo` from the desktop user
 account: the service runs as that user so Chromium can use the TV and the
@@ -60,7 +66,7 @@ lists the values to replace. The sections that matter:
 | Section | Keys | Notes |
 |---|---|---|
 | `room` | `name`, `location`, `timezone` | The name is shown on the page, the sign and the dashboard. |
-| `meeting` | `platforms: [zoom, google_meet]` | Which links the room can join; joins are limited to those platforms' hostnames. |
+| `meeting` | `platforms: [zoom, google_meet]`, `zoom_credentials_path` | Which links the room can join; joins are limited to those platforms' hostnames. Zoom joins go through Zoom's Meeting SDK with the credentials file (`deploy/rooms/zoom-credentials.example.json`); without it the public web client is used, and Zoom blocks automated guests there. |
 | `calendar` | `providers: [google]`, `google_credentials_path`, `google_calendar_id`, `sync_interval_seconds` | The room's calendar address looks like `c_1885...@resource.calendar.google.com`. A placeholder or a missing key logs one line and the room works with pasted links only. |
 | `control` | `enabled`, `host`, `port` | The room page and sign on port 8080, open on the LAN by design. |
 | `dashboard` | `url`, `enrollment_token`, `heartbeat_interval_seconds` | The token comes from the dashboard's Provisioning page and works once. |
@@ -121,6 +127,7 @@ Decisions worth knowing before changing things:
 - Brand assets (logo, Lexend, its OFL licence) are bundled under `src/croom/control/static` and in each guide folder, so nothing loads from the internet.
 - Nothing joins or leaves by itself; Join now opens ten minutes before a booking.
 - With a calendar address configured, only that calendar is read; the room resource's declined (double-booked) and cancelled bookings are dropped; a link typed into an event wins over an automatically added Meet.
+- Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
 
 Known limitations, mostly inherited from upstream:
 

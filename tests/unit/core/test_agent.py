@@ -30,7 +30,7 @@ def no_hardware():
          patch("croom.video.service.get_cameras", return_value=[]), \
          patch("croom.display.service.DisplayService.initialize", new=AsyncMock(return_value=False)), \
          patch("croom.calendar.service.CalendarService.initialize", new=AsyncMock(return_value=False)), \
-         patch("croom.meeting.service.get_provider", return_value=None):
+         patch("croom.meeting.service.build_provider", return_value=None):
         yield
 
 

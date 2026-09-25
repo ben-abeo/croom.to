@@ -17,7 +17,7 @@ from croom.meeting.providers.base import (
     MeetingState,
     detect_platform,
 )
-from croom.meeting.providers import get_provider, get_all_providers
+from croom.meeting.providers import build_provider, get_all_providers
 
 logger = logging.getLogger(__name__)
 
@@ -42,10 +42,13 @@ class MeetingService(Service):
         """Start meeting service."""
         # Initialize configured providers
         for platform in self.config.meeting.platforms:
-            provider_cls = get_provider(platform)
-            if provider_cls:
+            try:
+                provider = build_provider(platform, self.config)
+            except Exception as e:  # noqa: BLE001 - a bad credentials file must not stop the other platforms
+                logger.error(f"Failed to build {platform} provider: {e}")
+                continue
+            if provider is not None:
                 try:
-                    provider = provider_cls()
                     await provider.initialize()
                     self._providers[platform] = provider
                     logger.info(f"Initialized meeting provider: {platform}")

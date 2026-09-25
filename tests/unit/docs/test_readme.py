@@ -28,6 +28,9 @@ def test_readme_names_the_setup_pieces():
         "docs/guides/crystal-meet-zoom.pdf",
         "--zoom-credentials",
         "croom --check-zoom",
+        "SDK_VERSION",
+        "Follow the three guides",
+        "not yet verified against a live outside-hosted meeting",
         "npm run dev",
         ".venv/bin/pytest",
     ):

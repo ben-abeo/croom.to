@@ -22,7 +22,7 @@ network. The device joins nothing by itself; someone presses Join now.
 
 ## Set up a room
 
-Follow the two guides in this order:
+Follow the three guides in this order:
 
 1. [Set up a Crystal Meet room](docs/guides/crystal-meet-room-setup.pdf): prepare
    the Pi, create the room on the dashboard, install with the room's config,
@@ -103,7 +103,9 @@ code that never ran, and the deselected test stalls; leave them. Everything
 this fork added lives under `tests/unit/control`, `tests/unit/calendar`,
 `tests/unit/deploy`, `tests/unit/installer` and `tests/unit/docs` and must
 pass. The browser tests drive the room page and the sign in the venv's
-Chromium; the docs tests render the PDFs.
+Chromium; the docs tests render the PDFs. The Zoom web SDK version is pinned once, as
+`SDK_VERSION` in `src/croom/meeting/providers/zoom_sdk_site.py`; bump it there when Zoom
+retires that version from its CDN.
 
 ## Implementation notes
 
@@ -136,6 +138,7 @@ Known limitations, mostly inherited from upstream:
 - One headed browser window opens per configured platform when the agent starts.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.
+- Joining Zoom meetings hosted by other accounts relies on a ZAK fetched through the Server-to-Server app; this is not yet verified against a live outside-hosted meeting. If Zoom refuses, the fallback is the SDK app's own OAuth authorization.
 
 ---
 

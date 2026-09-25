@@ -130,21 +130,21 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
   <li><strong>A device that is already installed.</strong> Type <span class="chip wrap">sudo install -o pi -g pi -m 600 ~/zoom-credentials.json /etc/croom/zoom-credentials.json</span> (your username instead of pi), then <span class="chip">sudo systemctl restart croom</span>.</li>
   <li><strong>Check it.</strong> Type <span class="chip wrap">/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml</span>. It reads:</li>
 </ul>
-<pre>Zoom Meeting SDK: app AbC123xYz, signature minted
+<pre>Zoom Meeting SDK: app AbC123xYz, signature minted (Zoom checks it only when a meeting is joined)
 Zoom account: server-to-server token obtained for account 9XyZ12ab
 Zoom room user: room1@crystalpm.com, ZAK obtained (valid 2 hours)
-Ready: this room can join meetings hosted by any Zoom account.</pre>
+Ready: this room should join meetings hosted by any Zoom account; the first outside-hosted meeting proves it.</pre>
 <ul>
   <li><strong>Delete the copy in your home folder.</strong> Type <span class="chip">rm ~/zoom-credentials.json</span>.</li>
 </ul>
-<p class="see">You should now see the check end with "Ready", and the room's log say the Zoom Meeting SDK provider is ready.</p>
+<p class="see">You should now see the check end with "Ready".</p>
 </section>
 
 <section class="block">
 <div class="step"><span class="badge">5</span><h2>Join a test meeting</h2></div>
 <ul>
   <li><strong>Inside your account.</strong> Have a colleague start a Zoom meeting and paste its invitation link, passcode included, into the room page's <span class="ui">Join with a link</span>, or book it on the room's calendar and press <span class="ui">Join now</span>. Zoom's meeting appears on the TV within about fifteen seconds.</li>
-  <li><strong>Outside your account.</strong> Join a meeting hosted by someone outside the company, or by a personal Zoom account. The room appears in the participant list under its own name, for example Room 1. If the host uses a waiting room, the room page says it is waiting until the host admits it.</li>
+  <li><strong>Outside your account.</strong> Join a meeting hosted by someone outside the company, or by a personal Zoom account. The room appears in the participant list under its own name, for example Room 1. If the host uses a waiting room, the room page says it is waiting until the host admits it. This step is the proof for the outside-host route, which has not yet been verified against a live meeting: if Zoom refuses with an authorization message even though the check passed, tell whoever set this up; the fallback is fetching the ZAK through the SDK app's own OAuth.</li>
   <li><strong>Controls.</strong> From the table page press <span class="ui">Mute</span>, <span class="ui">Turn camera off</span>, then <span class="ui">Leave</span> and <span class="ui">Tap again to leave</span>.</li>
 </ul>
 <p class="see">You should now see both meetings join, the room named after itself in the outside one, and the TV return to the room's idle screen after leaving.</p>
@@ -158,7 +158,7 @@ Ready: this room can join meetings hosted by any Zoom account.</pre>
   <div class="card"><h3>The check says "not configured"</h3><p>It names the value that is missing or still a placeholder in <span class="chip">/etc/croom/zoom-credentials.json</span>. The four server-to-server values and <span class="ui">room_user</span> go together: fill in all of them or none.</p></div>
   <div class="card"><h3>The check says Zoom refused the credentials</h3><p>The account id, client id or secret of the step 2 app is wrong, or the app is not activated. Copy them again from App Credentials and check the Activation page.</p></div>
   <div class="card"><h3>The check says no such user, or a scope is missing</h3><p>The <span class="ui">room_user</span> must be an active user on this Zoom account. "Lacks the user token scope" means step 2's scope <span class="chip">user:read:token:admin</span> is missing: add it and activate the app again.</p></div>
-  <div class="card"><h3>The room page says the meeting is not authorized</h3><p>The meeting is hosted by another account and the room joined without its Zoom user. Fill in the server-to-server values and <span class="ui">room_user</span>, restart the service and run the check.</p></div>
+  <div class="card"><h3>The room page says the meeting is not authorized</h3><p>The meeting is hosted by another account and the room joined without its Zoom user. Fill in the server-to-server values and <span class="ui">room_user</span>, restart the service and run the check. If the check passes and Zoom still refuses, the outside-host route needs the fallback described in step 5.</p></div>
   <div class="card"><h3>Wrong passcode or meeting not found</h3><p>Paste the full invitation link with its passcode part. A bare meeting id cannot open a passcode-protected meeting. Zoom's exact reason shows on the room page.</p></div>
   <div class="card"><h3>The TV stays dark and the page says the SDK did not load</h3><p>The device could not reach <span class="chip">source.zoom.us</span>. Check the device's internet access and any web filter, then try again.</p></div>
 </div>

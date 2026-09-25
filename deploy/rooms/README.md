@@ -23,7 +23,8 @@ Zoom needs one more file per room, `zoom-credentials.json`, made from
 (the same for every room), and, to join meetings hosted by other Zoom accounts,
 the Server-to-Server app's account id, client id and secret plus that room's own
 Zoom user (`room_user`, for example `room1@crystalpm.com`). The guide "Connect
-Crystal Meet rooms to Zoom" covers creating all of it.
+Crystal Meet rooms to Zoom" covers creating all of it. Joining meetings hosted by
+other Zoom accounts is not yet verified against a live meeting; see the guide's step 5.
 
 Install on the device with the room config and both credential files:
 

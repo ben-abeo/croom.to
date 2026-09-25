@@ -40,7 +40,8 @@ def test_zoom_guide_quotes_the_real_commands_and_names():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     for needle in ("--zoom-credentials", "zoom-credentials.json", "zoom-credentials.example.json",
                    "croom --check-zoom -c /etc/croom/config.yaml", "user:read:token:admin",
-                   "Meeting SDK", "Server-to-Server OAuth", "room_user"):
+                   "Meeting SDK", "Server-to-Server OAuth", "room_user",
+                   "not yet been verified", "the first outside-hosted meeting proves it"):
         assert needle in html, needle
 
 

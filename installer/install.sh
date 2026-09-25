@@ -300,10 +300,16 @@ install_credentials() {
         return
     fi
     mkdir -p "$CONFIG_DIR"
-    cp "$CREDENTIALS_FILE" "$CONFIG_DIR/google-service-account.json"
-    chown "$CROOM_USER:$CROOM_USER" "$CONFIG_DIR/google-service-account.json"
-    chmod 600 "$CONFIG_DIR/google-service-account.json"
-    log "Installed Google Calendar credentials at $CONFIG_DIR/google-service-account.json"
+    local target="$CONFIG_DIR/google-service-account.json"
+    if [[ "$CREDENTIALS_FILE" -ef "$target" ]]; then
+        # A reinstall that names the already installed key: keep it, fix owner and mode
+        chown "$CROOM_USER:$CROOM_USER" "$target"
+        chmod 600 "$target"
+    else
+        # install(1) creates the file with its final owner and mode, never world-readable
+        install -o "$CROOM_USER" -g "$CROOM_USER" -m 600 "$CREDENTIALS_FILE" "$target"
+    fi
+    log "Installed Google Calendar credentials at $target"
 }
 
 # Write the systemd units (separate from create_service so tests can call it)

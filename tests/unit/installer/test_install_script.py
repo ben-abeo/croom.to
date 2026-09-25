@@ -148,3 +148,22 @@ def test_completion_message_names_the_calendar_check_when_credentials_were_insta
     assert "croom --check-calendar -c /etc/croom/config.yaml" in result.stdout
     result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; print_completion")
     assert "--check-calendar" not in result.stdout
+
+
+def test_reinstalling_with_the_installed_key_path_keeps_it(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    installed = etc / "google-service-account.json"
+    installed.write_text('{"type": "service_account"}')
+    result = run_bash(
+        f"source {SCRIPT}; CONFIG_DIR={etc}; CROOM_USER=$(id -un); CREDENTIALS_FILE={installed}; install_credentials",
+    )
+    assert result.returncode == 0, result.stderr
+    assert installed.read_text() == '{"type": "service_account"}'
+    assert oct(installed.stat().st_mode & 0o777) == "0o600"
+
+
+def test_credentials_are_never_world_readable_even_briefly():
+    body = SCRIPT.read_text().split("install_credentials() {")[1].split("\n}\n")[0]
+    assert 'install -o "$CROOM_USER" -g "$CROOM_USER" -m 600' in body
+    assert "cp " not in body

@@ -72,3 +72,6 @@ Thumbs.db
 
 # Node
 node_modules/
+
+# Google service account keys are installed on devices, never committed
+google-service-account.json

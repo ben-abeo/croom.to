@@ -23,8 +23,9 @@ export default function Dashboard() {
   return (
     <div className="space-y-8">
       <div>
+        <p className="kicker">Fleet overview</p>
         <h1 className="text-3xl font-bold">Dashboard</h1>
-        <p className="text-gray-400 mt-1">Overview of your Croom fleet</p>
+        <p className="text-gray-400 mt-1">Every Crystal Meet room at a glance</p>
       </div>
 
       {/* Stats cards */}

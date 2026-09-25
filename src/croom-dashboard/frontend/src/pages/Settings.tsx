@@ -6,6 +6,7 @@ export default function Settings() {
   return (
     <div className="space-y-6">
       <div>
+        <p className="kicker">Dashboard settings</p>
         <h1 className="text-3xl font-bold">Settings</h1>
         <p className="text-gray-400 mt-1">Dashboard configuration</p>
       </div>

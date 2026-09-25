@@ -33,8 +33,9 @@ export default function Login() {
       <div className="max-w-md w-full mx-4">
         <div className="bg-gray-800 rounded-lg p-8 shadow-xl">
           <div className="text-center mb-8">
-            <h1 className="text-3xl font-bold text-white">Croom</h1>
-            <p className="text-gray-400 mt-2">Enterprise Management Dashboard</p>
+            <img src="/crystalpm-logo-white.svg" alt="Crystal PM" className="h-10 w-auto mx-auto mb-4" />
+            <h1 className="text-3xl font-bold text-white">Crystal Meet</h1>
+            <p className="text-gray-400 mt-2">Sign in to manage your rooms</p>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-6">

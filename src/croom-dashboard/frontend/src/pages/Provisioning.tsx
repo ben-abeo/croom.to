@@ -34,8 +34,9 @@ export default function Provisioning() {
   return (
     <div className="space-y-6">
       <div>
-        <h1 className="text-3xl font-bold">Device Provisioning</h1>
-        <p className="text-gray-400 mt-1">Add new devices to your fleet</p>
+        <p className="kicker">Add a room</p>
+        <h1 className="text-3xl font-bold">Device provisioning</h1>
+        <p className="text-gray-400 mt-1">Create an enrollment token for a new room device</p>
       </div>
 
       {/* Create enrollment token */}

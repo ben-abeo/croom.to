@@ -30,8 +30,9 @@ export default function Layout({ children }: LayoutProps) {
         <div className="flex flex-col h-full">
           {/* Logo */}
           <div className="p-6 border-b border-gray-700">
-            <h1 className="text-2xl font-bold text-white">Croom</h1>
-            <p className="text-sm text-gray-400">Enterprise Dashboard</p>
+            <img src="/crystalpm-logo-white.svg" alt="Crystal PM" className="h-8 w-auto mb-3" />
+            <h1 className="text-2xl font-bold text-white">Crystal Meet</h1>
+            <p className="text-sm text-gray-400">Rooms dashboard</p>
           </div>
 
           {/* Navigation */}

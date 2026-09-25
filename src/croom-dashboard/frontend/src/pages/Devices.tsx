@@ -17,6 +17,7 @@ export default function Devices() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
+          <p className="kicker">Room devices</p>
           <h1 className="text-3xl font-bold">Devices</h1>
           <p className="text-gray-400 mt-1">{data?.total || 0} devices registered</p>
         </div>

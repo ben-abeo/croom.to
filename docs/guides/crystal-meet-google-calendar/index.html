@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Connect Crystal Meet rooms to Google Calendar</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --blue-700: #003EBC;
+  --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --tint-50: #F7F9FF; --slate-500: #647087; --ink-900: #1C2024;
+  --radius: 12px; --radius-sm: 8px;
+}
+@page { size: Letter; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Lexend", "Segoe UI", Arial, sans-serif; color: var(--ink-900); font-size: 10.5pt; line-height: 1.5; }
+h1, h2, h3 { font-weight: 600; line-height: 1.15; margin: 0.2em 0; }
+h2 { font-size: 16pt; color: var(--navy-800); }
+p { margin: 0.4em 0; }
+.kicker { font-size: 9pt; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--blue-600); margin: 0 0 6px; }
+.banner { background: var(--navy-800); color: #fff; border-radius: var(--radius); padding: 28px 32px; margin-bottom: 20px; }
+.banner .kicker { color: var(--periwinkle-300); }
+.banner .kicker.top { color: #fff; margin-bottom: 2px; }
+.banner h1 { font-size: 26pt; margin: 6px 0 8px; }
+.banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
+.banner img { height: 26px; display: block; margin-bottom: 18px; }
+.intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
+.glance { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); padding: 12px 12px; }
+.glance .card:nth-child(2) { border-top-color: #3B6DF0; }
+.glance .card:nth-child(3) { border-top-color: #6C92F5; }
+.glance .card:nth-child(4) { border-top-color: #8EABF8; }
+.glance .card:nth-child(5) { border-top-color: var(--periwinkle-300); }
+.card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
+.card .kicker { font-size: 8pt; }
+.card h3 { font-size: 11pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9.5pt; }
+.block { break-inside: avoid; }
+.step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
+ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+li { position: relative; padding-left: 18px; margin: 5px 0; }
+li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
+.ui { font-weight: 600; color: var(--blue-600); }
+.chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.chip.wrap { white-space: normal; overflow-wrap: anywhere; }
+.see { color: var(--slate-500); font-size: 9.5pt; margin: 4px 0 0 18px; }
+.callout { border-radius: var(--radius-sm); padding: 12px 18px; margin: 12px 0; border-left: 4px solid var(--blue-600); background: var(--tint-100); break-inside: avoid; }
+.callout.warn { background: #FFF8E1; border-left-color: #E8A013; }
+.callout.tip { background: #EDFBF3; border-left-color: #1FA971; }
+.callout .kicker { margin-bottom: 4px; }
+.callout p { margin: 2px 0; }
+.trouble { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.trouble .card { break-inside: avoid; }
+.trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.trouble .card h3 { font-size: 10.5pt; }
+.page-break { break-before: page; }
+pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--blue-600); background: var(--tint-100); border-radius: var(--radius-sm); padding: 10px 14px; margin: 6px 0 0 18px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<section class="banner">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker top">Crystal PM</p>
+  <p class="kicker">How-to guide</p>
+  <h1>Connect Crystal Meet rooms to Google Calendar</h1>
+  <p>Give each room device read access to its own Google Workspace room calendar, so bookings show on the room page and the door sign and Join now joins them.</p>
+</section>
+
+<p class="intro">This guide has two halves. The Google half is done once for all rooms by someone with Google Workspace admin access and takes about 30 minutes. The device half takes about five minutes per room. Nothing here makes a room join a meeting by itself: someone in the room still presses Join now.</p>
+
+<div class="glance">
+  <div class="card"><p class="kicker">Step 1</p><h3>Create the rooms</h3><p>Room resources in the Admin console.</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>Create the key</h3><p>A service account and its JSON key.</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>Share the calendars</h3><p>Each room calendar with the account.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>Put it on the device</h3><p>The key, the address, the check.</p></div>
+  <div class="card"><p class="kicker">Step 5</p><h3>Book a test meeting</h3><p>See it on the room page and sign.</p></div>
+</div>
+
+<div class="callout warn">
+  <p class="kicker">Before you begin</p>
+  <p><strong>Access.</strong> A Google Workspace super admin, or someone who can manage Buildings and resources and create a Google Cloud project.</p>
+  <p><strong>Devices.</strong> The room devices installed as in <span class="ui">Set up a Crystal Meet room</span>, and their room names.</p>
+  <p><strong>A way to copy one file to each device</strong>, such as <span class="chip">scp</span> from your computer or a USB stick.</p>
+  <p><strong>The key is a password for the room calendars.</strong> Keep it out of email and chat, copy it straight to the devices, and delete the downloaded copy afterwards.</p>
+</div>
+
+<section class="block">
+<div class="step"><span class="badge">1</span><h2>Create the rooms in Google Workspace</h2></div>
+<ul>
+  <li><strong>Open the Admin console</strong> at <span class="chip">admin.google.com</span>, then <span class="ui">Directory › Buildings and resources › Manage resources</span>.</li>
+  <li><strong>Add the building once.</strong> Open <span class="ui">Buildings</span>, press <span class="ui">Add building</span>, fill in the name, address and floors, and save.</li>
+  <li><strong>Add each room.</strong> Open <span class="ui">Resources</span>, press <span class="ui">Add new resource</span>, choose category <span class="ui">Meeting space (room)</span> and type <span class="ui">Conference room</span>, pick the building and floor, and set the resource name to the same name the device uses, for example <span class="chip">Room 1</span>. Save, then repeat for Room 2 and Room 3.</li>
+  <li><strong>Copy each room's calendar address.</strong> Open the room and copy its <span class="ui">Resource email</span>. It looks like <span class="chip wrap">c_1885a3b9c2d4e6f7g8h9i0j1k2l3m4n5@resource.calendar.google.com</span>. Keep the three addresses; step 4 needs them.</li>
+</ul>
+<p class="see">You should now see the three rooms under Resources, each with a resource email.</p>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>Staff book a room by adding it to an event under <span class="ui">Rooms</span>. New rooms can take up to 24 hours to appear in that list, but the room's calendar exists straight away, so you can continue.</p>
+</div>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">2</span><h2>Create the service account and its key</h2></div>
+<ul>
+  <li><strong>Open the Cloud console</strong> at <span class="chip">console.cloud.google.com</span>, open the project picker at the top, press <span class="ui">New project</span>, name it <span class="chip">Crystal Meet</span> and create it. Make sure it is selected.</li>
+  <li><strong>Turn on the Calendar API.</strong> Go to <span class="ui">APIs &amp; Services › Library</span>, search for <span class="ui">Google Calendar API</span>, open it and press <span class="ui">Enable</span>.</li>
+  <li><strong>Create the account.</strong> Go to <span class="ui">IAM &amp; Admin › Service accounts</span>, press <span class="ui">Create service account</span>, name it <span class="chip">crystal-meet-rooms</span>, press <span class="ui">Create and continue</span>, skip the roles, and press <span class="ui">Done</span>.</li>
+  <li><strong>Create the key.</strong> Open the account, go to <span class="ui">Keys</span>, press <span class="ui">Add key › Create new key</span>, choose <span class="ui">JSON</span> and create it. A file downloads; rename it <span class="chip">google-service-account.json</span>.</li>
+  <li><strong>Copy the account's email.</strong> It ends in <span class="chip">.iam.gserviceaccount.com</span>. Step 3 needs it.</li>
+</ul>
+<p class="see">You should now see the service account listed, and the key file on your computer.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">3</span><h2>Share each room calendar with the service account</h2></div>
+<ul>
+  <li><strong>Allow full sharing to outside addresses, once.</strong> In the Admin console go to <span class="ui">Apps › Google Workspace › Calendar › Sharing settings</span>. Under <span class="ui">External sharing options for secondary calendars</span> choose <span class="ui">Share all information, but outsiders cannot change calendars</span> and save. Room calendars count as secondary calendars, and the service account is an outside address.</li>
+  <li><strong>Subscribe to the rooms.</strong> Open <span class="chip">calendar.google.com</span>. Next to <span class="ui">Other calendars</span> press <span class="ui">+</span>, choose <span class="ui">Browse resources</span> and tick the three rooms. They appear under Other calendars.</li>
+  <li><strong>Share each room.</strong> Hover the room's name, open its menu, choose <span class="ui">Settings and sharing</span>, then under <span class="ui">Share with specific people or groups</span> press <span class="ui">Add people and groups</span>, paste the service account email, set the permission to <span class="ui">See all event details</span>, and send. Repeat for each room.</li>
+</ul>
+<p class="see">You should now see the service account listed under each room's sharing settings with See all event details.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">4</span><h2>Put the key and the calendar address on each device</h2></div>
+<ul>
+  <li><strong>Copy the key to the device.</strong> From your computer, type <span class="chip wrap">scp google-service-account.json pi@crystal-meet-room-1.local:~/</span> (use the device's name or IP address and your username), or carry it over on a USB stick.</li>
+  <li><strong>A device you are installing now.</strong> Before running the installer, open <span class="chip">~/room.yaml</span> and put the room's calendar address in <span class="ui">google_calendar_id</span>, keeping the quotes. Then run <span class="chip wrap">sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-service-account.json</span> and start the service as the setup guide says.</li>
+  <li><strong>A device that is already installed.</strong> Type <span class="chip wrap">sudo install -o pi -g pi -m 600 ~/google-service-account.json /etc/croom/google-service-account.json</span> (your username instead of pi), then <span class="chip">sudo nano /etc/croom/config.yaml</span>, set <span class="ui">google_calendar_id</span> to the room's address, save, and type <span class="chip">sudo systemctl restart croom</span>.</li>
+  <li><strong>Check it.</strong> Type <span class="chip wrap">/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml</span>. It prints who it connected as, the room's calendar, and the next bookings:</li>
+</ul>
+<pre>Google Calendar: connected as crystal-meet-rooms@crystal-meet.iam.gserviceaccount.com
+Calendar: Room 1 (c_1885a3b9c2d4e6f7g8h9i0j1k2l3m4n5@resource.calendar.google.com)
+Bookings in the next 7 days:
+  Thu Sep 25  9:00 AM to 9:30 AM   Design review                Zoom link
+  Thu Sep 25  1:00 PM to 2:00 PM   Board lunch                  no video link</pre>
+<ul>
+  <li><strong>Delete the copy in your home folder.</strong> Type <span class="chip">rm ~/google-service-account.json</span>. The installed copy under <span class="chip">/etc/croom</span> is the one the room uses.</li>
+</ul>
+<p class="see">You should now see the check end with the room's name and its bookings, or "No bookings in the next 7 days", and the room page's schedule fills within a minute.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">5</span><h2>Book a test meeting</h2></div>
+<ul>
+  <li><strong>Create the booking.</strong> In Google Calendar, make an event a few minutes from now, add the room under <span class="ui">Rooms</span>, and add a video link: a Google Meet, the Zoom add-on, or a pasted Zoom invitation link with its passcode. Save it.</li>
+  <li><strong>Watch the room.</strong> Within a minute the room page lists it under <span class="ui">Today</span> and the door sign shows it as next. Ten minutes before the start the sign turns amber and the room page shows <span class="ui">Join now</span>.</li>
+  <li><strong>Join and leave.</strong> Press <span class="ui">Join now</span>; the TV joins the link. Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>.</li>
+</ul>
+<p class="see">You should now see the booking on the room page and the sign, and the TV join when Join now is pressed.</p>
+<div class="callout tip">
+  <p class="kicker">Tip</p>
+  <p>If the room declines a booking (the event shows the room as declined), the slot was already taken by another booking. The device ignores declined bookings, so the sign stays right.</p>
+</div>
+</section>
+
+<div class="page-break"></div>
+<section class="block">
+<p class="kicker">If something is off</p>
+<h2>Troubleshooting</h2>
+<div class="trouble">
+  <div class="card"><h3>The check says "not configured"</h3><p>It names the cause: no key path, a missing key file, or an empty or placeholder address. Check that <span class="chip">/etc/croom/google-service-account.json</span> exists, fix <span class="chip">/etc/croom/config.yaml</span>, then restart the service and run the check again.</p></div>
+  <div class="card"><h3>The check says "not found or not shared"</h3><p>The address is wrong or step 3 was missed for this room. Copy the resource email again and share the room calendar with the exact service account email. If Google refuses "See all event details", do the sharing setting at the start of step 3 first.</p></div>
+  <div class="card"><h3>The check says it could not sign in</h3><p>The file is not a service account JSON key (download a new one from the account's Keys page), the Calendar API is not enabled in that project, or the key was deleted in the Cloud console.</p></div>
+  <div class="card"><h3>A booking is missing on the room page</h3><p>The room was not added to the event, the room declined it, or it is more than 7 days away. Cancelled bookings never show. Check the device's clock and time zone if today's bookings look shifted.</p></div>
+  <div class="card"><h3>The booking shows but Join now is missing</h3><p>The event has no video link the device can join. Add a Google Meet, use the Zoom add-on, or paste the full Zoom invitation link including its passcode part.</p></div>
+  <div class="card"><h3>Bookings show at the wrong time</h3><p>Set the device's time zone in <span class="ui">Preferences › Raspberry Pi Configuration › Localisation</span>, then type <span class="chip">sudo systemctl restart croom</span>.</p></div>
+</div>
+</section>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The key can only read the calendars you shared with it. To take that away, delete the key on the account's Keys page. To replace it, create a new key and repeat step 4 on each device.</p>
+</div>
+
+</body>
+</html>

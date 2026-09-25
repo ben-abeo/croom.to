@@ -15,7 +15,8 @@
   const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
 
   async function getJson(path) {
-    const response = await fetch(path);
+    const options = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(4000) } : {};
+    const response = await fetch(path, options);
     if (!response.ok) throw new Error("Request failed (" + response.status + ")");
     return response.json();
   }
@@ -43,12 +44,19 @@
     document.body.dataset.state = state;
     el("kicker").textContent = kicker;
     el("headline").textContent = headline;
-    el("headline").classList.toggle("long", headline.length > 26);
+    el("headline").classList.toggle("long", headline.length > 34);
     el("detail").textContent = detail || "";
   }
 
+  const startMs = (ev) => new Date(ev.start_time).getTime();
+  const endMs = (ev) => new Date(ev.end_time).getTime();
+  const ongoingEvent = (now) => model.events.filter((ev) => startMs(ev) <= now && endMs(ev) > now).sort((a, b) => endMs(a) - endMs(b))[0] || null;
+  const upcomingEvent = (now) => model.events.filter((ev) => startMs(ev) > now).sort((a, b) => startMs(a) - startMs(b))[0] || null;
+  const earliest = (a, b) => (!a ? b : !b ? a : startMs(a) <= startMs(b) ? a : b);
+
   function render() {
-    if (model.offline || !model.status) {
+    if (!model.status && !model.offline) return; // still loading: wait for the first status result
+    if (model.offline) {
       setStatus("offline", "Not connected", "Sign not connected", "Check that Crystal Meet is running on the room's device.");
       return;
     }
@@ -57,9 +65,12 @@
     el("room-location").textContent = s.room.location;
     const m = s.meeting;
     const cal = s.calendar;
-    const current = cal.current;
-    const next = cal.next;
     const now = Date.now();
+    el("upcoming").hidden = !cal.connected;
+    // The API's "current" only covers bookings with a video link; an in-person
+    // booking still occupies the room, so fall back to today's event list.
+    const current = cal.current || ongoingEvent(now);
+    const next = earliest(cal.next, upcomingEvent(now));
 
     if (IN_PROGRESS.includes(m.state)) {
       const until = current ? " until " + fmtTime(new Date(current.end_time)) : "";

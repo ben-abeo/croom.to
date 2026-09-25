@@ -7,6 +7,7 @@ when Playwright or its browser is not installed.
 """
 
 import asyncio
+import socket
 import threading
 
 import pytest
@@ -20,9 +21,11 @@ playwright = pytest.importorskip("playwright.sync_api")
 class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
-    def __init__(self, calendar_events=(), room_name="Lab"):
+    def __init__(self, calendar_events=(), room_name="Lab", calendar_connected=True, port=0):
         self.events = list(calendar_events)
         self.room_name = room_name
+        self.calendar_connected = calendar_connected
+        self.port_arg = port
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -37,8 +40,8 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting()
         service = ControlService(
-            config={"host": "127.0.0.1", "port": 0, "room_name": self.room_name, "room_location": "2nd floor"},
-            meeting=self.meeting, calendar=StubCalendar(events=self.events),
+            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": "2nd floor"},
+            meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
         )
         await service.start()
         self.port = service.bound_port
@@ -133,7 +136,7 @@ def test_door_sign_follows_the_room_state(browser):
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert page.locator("#headline").inner_text().startswith("Free until")
         assert page.locator("#kicker").inner_text().upper() == "AVAILABLE"
-        assert page.locator("#actions").count() == 0
+        assert page.locator("button").count() == 0  # a sign has nothing to press
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
                           data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
@@ -144,3 +147,55 @@ def test_door_sign_follows_the_room_state(browser):
                           data="{}", headers={"Content-Type": "application/json"})
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
         page.close()
+
+
+def test_door_sign_shows_bookings_without_a_video_link(browser):
+    # An in-person booking has no link, so the API's "current" is null; the room is still taken.
+    with PageServer(calendar_events=[event("b1", "Board lunch", -5, duration=20, url=None),
+                                     event("e2", "Design review", 40)], room_name="Room 1") as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=5000)
+        assert page.locator("#headline").inner_text().startswith("Booked until")
+        assert page.locator("#kicker").inner_text().upper() == "BOOKED"
+        assert page.locator("#detail").inner_text() == "Board lunch"
+        page.close()
+
+
+def test_door_sign_warns_before_the_next_meeting(browser):
+    with PageServer(calendar_events=[event("e1", "Standup", 6)], room_name="Room 1") as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        assert page.locator("#headline").inner_text().startswith("Standup starts in")
+        assert page.locator("#kicker").inner_text().upper() == "STARTING SOON"
+        page.close()
+
+
+def test_door_sign_hides_the_schedule_without_a_calendar(browser):
+    with PageServer(calendar_connected=False) as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#headline").inner_text() == "Free"
+        assert page.locator("#upcoming").count() == 1 and not page.locator("#upcoming").is_visible()
+        page.close()
+
+
+def free_port():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_door_sign_goes_offline_and_recovers(browser):
+    port = free_port()
+    page = browser.new_page(viewport={"width": 1024, "height": 600})
+    with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1", port=port):
+        page.goto(f"http://127.0.0.1:{port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    page.wait_for_function("document.body.dataset.state === 'offline'", timeout=10000)
+    assert page.locator("#headline").inner_text() == "Sign not connected"
+    with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1", port=port):
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=10000)
+    page.close()

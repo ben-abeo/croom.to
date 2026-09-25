@@ -480,11 +480,10 @@ class TestPage:
 
     def test_page_has_no_external_references(self):
         from croom.control.service import STATIC_DIR
-        for name in ("index.html", "style.css", "app.js"):
+        for name in ("index.html", "style.css", "app.js", "sign.html", "sign.css", "sign.js"):
             text = (STATIC_DIR / name).read_text(encoding="utf-8")
             assert "http://" not in text and "https://" not in text and "//fonts." not in text, name
-        assert "Croom" not in (STATIC_DIR / "index.html").read_text(encoding="utf-8")
-        assert "Croom" not in (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+            assert "Croom" not in text, name
 
     async def test_sign_is_served_uncached(self, client_factory):
         client = await client_factory(make_service())

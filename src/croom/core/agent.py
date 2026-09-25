@@ -263,6 +263,11 @@ def main() -> None:
         help="Enable debug logging",
         action="store_true"
     )
+    parser.add_argument(
+        "--check-calendar",
+        help="Check the room's Google Calendar setup, print the next bookings and exit",
+        action="store_true"
+    )
 
     args = parser.parse_args()
 
@@ -272,6 +277,10 @@ def main() -> None:
         level=log_level,
         format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
+
+    if args.check_calendar:
+        from croom.calendar.check import check_calendar
+        raise SystemExit(asyncio.run(check_calendar(load_config(args.config))))
 
     # Run agent
     try:

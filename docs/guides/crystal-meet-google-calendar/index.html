@@ -108,6 +108,7 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
   <li><strong>Turn on the Calendar API.</strong> Go to <span class="ui">APIs &amp; Services › Library</span>, search for <span class="ui">Google Calendar API</span>, open it and press <span class="ui">Enable</span>.</li>
   <li><strong>Create the account.</strong> Go to <span class="ui">IAM &amp; Admin › Service accounts</span>, press <span class="ui">Create service account</span>, name it <span class="chip">crystal-meet-rooms</span>, press <span class="ui">Create and continue</span>, skip the roles, and press <span class="ui">Done</span>.</li>
   <li><strong>Create the key.</strong> Open the account, go to <span class="ui">Keys</span>, press <span class="ui">Add key › Create new key</span>, choose <span class="ui">JSON</span> and create it. A file downloads; rename it <span class="chip">google-service-account.json</span>.</li>
+  <li><strong>If Google says key creation is not allowed.</strong> Newer Google Cloud organizations block service account keys by default. Go to <span class="ui">IAM &amp; Admin › Organization policies</span> (you need the Organization Policy Administrator role, which a super admin can grant to their own account under IAM), open <span class="ui">Disable service account key creation</span>, press <span class="ui">Manage policy</span>, choose <span class="ui">Override parent's policy</span>, add a rule with enforcement <span class="ui">Off</span>, set the policy, then create the key again.</li>
   <li><strong>Copy the account's email.</strong> It ends in <span class="chip">.iam.gserviceaccount.com</span>. Step 3 needs it.</li>
 </ul>
 <p class="see">You should now see the service account listed, and the key file on your computer.</p>
@@ -166,6 +167,7 @@ Bookings in the next 7 days:
   <div class="card"><h3>The check says it could not sign in</h3><p>The file is not a service account JSON key (download a new one from the account's Keys page), the Calendar API is not enabled in that project, or the key was deleted in the Cloud console.</p></div>
   <div class="card"><h3>A booking is missing on the room page</h3><p>The room was not added to the event, the room declined it, or it is more than 7 days away. Cancelled bookings never show. Check the device's clock and time zone if today's bookings look shifted.</p></div>
   <div class="card"><h3>The booking shows but Join now is missing</h3><p>The event has no video link the device can join. Add a Google Meet, use the Zoom add-on, or paste the full Zoom invitation link including its passcode part.</p></div>
+  <div class="card"><h3>Google says key creation is not allowed</h3><p>The organization policy "Disable service account key creation" is on, which is the default for newer Google Cloud organizations. Turn it off for the Crystal Meet project as described in step 2, then create the key again.</p></div>
   <div class="card"><h3>Bookings show at the wrong time</h3><p>Set the device's time zone in <span class="ui">Preferences › Raspberry Pi Configuration › Localisation</span>, then type <span class="chip">sudo systemctl restart croom</span>.</p></div>
 </div>
 </section>

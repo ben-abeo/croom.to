@@ -51,3 +51,8 @@ def test_setup_guide_points_to_the_calendar_guide():
 def test_both_guides_share_one_renderer():
     for guide in ("crystal-meet-room-setup", "crystal-meet-google-calendar"):
         assert "from render_guide import render" in (GUIDES / guide / "build.py").read_text(encoding="utf-8")
+
+
+def test_calendar_guide_covers_blocked_key_creation():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "Disable service account key creation" in html and "Organization policies" in html

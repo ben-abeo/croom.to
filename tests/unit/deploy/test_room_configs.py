@@ -24,8 +24,19 @@ def test_room_configs_load(path):
     assert "REPLACE_WITH_DASHBOARD_ADDRESS" in config.dashboard.url
     assert config.meeting.platforms == ["zoom", "google_meet"]
     assert config.ai.enabled is False
-    assert config.calendar.providers == []
+    assert config.calendar.providers == ["google"]
+    assert config.calendar.google_credentials_path == "/etc/croom/google-service-account.json"
+    assert config.calendar.google_calendar_id == "REPLACE_WITH_ROOM_CALENDAR_ID"
 
 
 def test_there_are_three_rooms():
     assert [p.name for p in ROOMS] == ["room-1.yaml", "room-2.yaml", "room-3.yaml"]
+
+
+@pytest.mark.parametrize("path", ROOMS, ids=lambda p: p.name)
+def test_unfilled_room_configs_never_poll_google(path):
+    # A device installed with the placeholders left in must log one line and serve the room page,
+    # never poll Google (spec 2026-09-25 section 4.2).
+    from croom.calendar.service import google_not_configured_reason
+    config = Config.from_dict(yaml.safe_load(path.read_text(encoding="utf-8")))
+    assert google_not_configured_reason(config.calendar) is not None

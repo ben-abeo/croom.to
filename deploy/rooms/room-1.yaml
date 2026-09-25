@@ -1,6 +1,6 @@
 # Crystal Meet room device: Room 1
-# Replace the three REPLACE values, then install with:
-#   sudo bash installer/install.sh --config room-1.yaml
+# Replace the four REPLACE values, then install with:
+#   sudo bash installer/install.sh --config room-1.yaml --credentials google-service-account.json
 version: 2
 
 room:
@@ -17,7 +17,10 @@ meeting:
   mic_default_on: true
 
 calendar:
-  providers: []
+  providers: [google]
+  google_credentials_path: /etc/croom/google-service-account.json
+  google_calendar_id: "REPLACE_WITH_ROOM_CALENDAR_ID"
+  sync_interval_seconds: 60
 
 ai:
   enabled: false

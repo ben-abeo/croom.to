@@ -111,3 +111,40 @@ def test_completion_message_skips_editing_when_a_room_config_was_installed():
     assert "Edit configuration" not in result.stdout and "Room page:" in result.stdout
     result = run_bash(f"source {SCRIPT}; print_completion")
     assert "Edit configuration" in result.stdout
+
+
+def test_missing_credentials_file_is_refused_before_install(tmp_path):
+    result = run_bash(f"bash {SCRIPT} --credentials {tmp_path / 'nope.json'}")
+    assert result.returncode == 1
+    assert "not found" in (result.stdout + result.stderr).lower()
+
+
+def test_help_mentions_credentials():
+    result = run_bash(f"bash {SCRIPT} --help")
+    assert "--credentials FILE" in result.stdout
+
+
+def test_credentials_are_installed_for_the_service_user_only(tmp_path):
+    key = tmp_path / "key.json"
+    key.write_text('{"type": "service_account"}')
+    result = run_bash(
+        f"source {SCRIPT}; CONFIG_DIR={tmp_path / 'etc'}; CROOM_USER=$(id -un); CREDENTIALS_FILE={key}; install_credentials",
+    )
+    assert result.returncode == 0, result.stderr
+    installed = tmp_path / "etc" / "google-service-account.json"
+    assert installed.read_text() == key.read_text()
+    assert oct(installed.stat().st_mode & 0o777) == "0o600"
+
+
+def test_install_credentials_does_nothing_without_a_file(tmp_path):
+    result = run_bash(f"source {SCRIPT}; CONFIG_DIR={tmp_path / 'etc'}; CROOM_USER=$(id -un); install_credentials")
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / "etc" / "google-service-account.json").exists()
+
+
+def test_completion_message_names_the_calendar_check_when_credentials_were_installed():
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; CREDENTIALS_FILE=/tmp/key.json; print_completion")
+    assert result.returncode == 0, result.stderr
+    assert "croom --check-calendar -c /etc/croom/config.yaml" in result.stdout
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; print_completion")
+    assert "--check-calendar" not in result.stdout

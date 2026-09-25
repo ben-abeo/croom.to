@@ -27,6 +27,7 @@ SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 CROOM_USER="${SUDO_USER:-}"
 CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"
 ROOM_CONFIG=""
+CREDENTIALS_FILE=""
 
 # Log function
 log() {
@@ -293,6 +294,18 @@ EOF
     log "Configuration created at $CONFIG_DIR/config.yaml"
 }
 
+# Install the Google service account key where the agent reads it (calendar spec 4.5)
+install_credentials() {
+    if [[ -z "$CREDENTIALS_FILE" ]]; then
+        return
+    fi
+    mkdir -p "$CONFIG_DIR"
+    cp "$CREDENTIALS_FILE" "$CONFIG_DIR/google-service-account.json"
+    chown "$CROOM_USER:$CROOM_USER" "$CONFIG_DIR/google-service-account.json"
+    chmod 600 "$CONFIG_DIR/google-service-account.json"
+    log "Installed Google Calendar credentials at $CONFIG_DIR/google-service-account.json"
+}
+
 # Write the systemd units (separate from create_service so tests can call it)
 write_units() {
     mkdir -p "$SYSTEMD_DIR"
@@ -400,6 +413,10 @@ print_completion() {
         echo "2. Add to config: dashboard.enrollment_token"
         echo "3. Restart: sudo systemctl restart croom"
     fi
+    if [[ -n "$CREDENTIALS_FILE" ]]; then
+        echo ""
+        echo "Check the calendar: $INSTALL_DIR/venv/bin/croom --check-calendar -c $CONFIG_DIR/config.yaml"
+    fi
     echo ""
 }
 
@@ -419,6 +436,7 @@ main() {
     install_dependencies
     install_croom
     create_config
+    install_credentials
     create_service
     enable_services
     print_completion
@@ -435,6 +453,13 @@ run_installer() {
                 fi
                 shift 2
                 ;;
+            --credentials)
+                CREDENTIALS_FILE="$2"
+                if [[ -z "$CREDENTIALS_FILE" || ! -f "$CREDENTIALS_FILE" ]]; then
+                    error "Credentials file not found: ${CREDENTIALS_FILE:-<missing>}"
+                fi
+                shift 2
+                ;;
             --enable-ui)
                 ENABLE_UI="yes"
                 shift
@@ -448,6 +473,7 @@ run_installer() {
                 echo ""
                 echo "Options:"
                 echo "  --config FILE   Install a prepared room config as /etc/croom/config.yaml"
+                echo "  --credentials FILE  Install a Google service account key as /etc/croom/google-service-account.json"
                 echo "  --enable-ui     Enable Touch UI service"
                 echo "  --no-service    Don't create systemd services"
                 echo "  --help          Show this help"

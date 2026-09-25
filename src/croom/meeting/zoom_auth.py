@@ -123,6 +123,10 @@ class ZoomApi:
         self._token: Optional[str] = None
         self._token_expires = 0.0
 
+    def _basic_auth_header(self) -> str:
+        pair = f"{self._client_id}:{self._client_secret}".encode()
+        return "Basic " + base64.b64encode(pair).decode("ascii")
+
     async def access_token(self) -> str:
         if self._token and time.time() < self._token_expires - 60:
             return self._token
@@ -131,7 +135,7 @@ class ZoomApi:
                 async with session.post(
                     self._oauth_url,
                     params={"grant_type": "account_credentials", "account_id": self._account_id},
-                    auth=aiohttp.BasicAuth(self._client_id, self._client_secret),
+                    headers={"Authorization": self._basic_auth_header()},
                 ) as response:
                     status, body = response.status, await response.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:

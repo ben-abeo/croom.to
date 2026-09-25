@@ -115,6 +115,13 @@ def event(event_id, title, starts_in_minutes, duration=30, url="https://zoom.us/
                          meeting_url=url, meeting_platform=platform)
 
 
+def skip_if_day_ends_within(hours: float) -> None:
+    """Events are filtered to today; tests that schedule ahead skip near midnight."""
+    now = datetime.now().astimezone()
+    if (now + timedelta(hours=hours)).date() != now.date():
+        pytest.skip(f"less than {hours} hours left in the local day")
+
+
 def make_service(meeting=None, calendar=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
@@ -250,6 +257,7 @@ class TestCalendarEvents:
         assert await (await client.get("/api/calendar/events")).json() == {"events": []}
 
     async def test_events_carry_the_joinable_flag(self, client_factory):
+        skip_if_day_ends_within(3)
         events = [
             event("e1", "Design review", starts_in_minutes=20),
             event("e2", "Vendor call", starts_in_minutes=90, url="https://teams.microsoft.com/l/meetup-join/abc",
@@ -439,7 +447,7 @@ class TestPage:
         assert resp.headers["Content-Type"].startswith("text/html")
         assert resp.headers["Cache-Control"] == "no-cache"
         body = await resp.text()
-        assert "<title>Croom room</title>" in body
+        assert "<title>Crystal Meet</title>" in body
         assert 'src="/static/app.js"' in body
         assert 'href="/static/style.css"' in body
 
@@ -458,6 +466,26 @@ class TestPage:
         text = open("pyproject.toml", encoding="utf-8").read()
         assert 'control/static/*' in text
 
+    async def test_brand_assets_are_served(self, client_factory):
+        client = await client_factory(make_service())
+        for path, content_type in (
+            ("/static/crystalpm-logo-white.svg", "image/svg+xml"),
+            ("/static/fonts/lexend-400.woff2", "font/woff2"),
+            ("/static/fonts/lexend-600.woff2", "font/woff2"),
+            ("/static/fonts/OFL.txt", "text/plain"),
+        ):
+            resp = await client.get(path)
+            assert resp.status == 200, path
+            assert resp.headers["Content-Type"].startswith(content_type), (path, resp.headers["Content-Type"])
+
+    def test_page_has_no_external_references(self):
+        from croom.control.service import STATIC_DIR
+        for name in ("index.html", "style.css", "app.js"):
+            text = (STATIC_DIR / name).read_text(encoding="utf-8")
+            assert "http://" not in text and "https://" not in text and "//fonts." not in text, name
+        assert "Croom" not in (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+        assert "Croom" not in (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+
 
 EVENT_FIELDS = {"id", "title", "start_time", "end_time", "meeting_platform", "joinable"}
 
@@ -466,9 +494,7 @@ class TestReviewFixes:
     """Findings from the branch review, each pinned before it was fixed."""
 
     async def test_events_and_next_are_limited_to_today(self, client_factory):
-        now = datetime.now().astimezone()
-        if (now + timedelta(hours=1)).date() != now.date():
-            pytest.skip("too close to midnight for a same-day event")
+        skip_if_day_ends_within(1)
         tomorrow = event("t1", "Tomorrow standup", starts_in_minutes=24 * 60 + 5)
         today_later = event("e1", "Design review", starts_in_minutes=45)
         client = await client_factory(make_service(meeting=StubMeeting(),

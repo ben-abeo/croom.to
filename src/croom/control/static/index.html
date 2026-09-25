@@ -3,20 +3,25 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Croom room</title>
+<title>Crystal Meet</title>
+<link rel="icon" href="/static/crystalpm-logo-white.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body data-state="loading">
 <main class="screen">
   <header class="top">
-    <div class="room">
-      <h1 id="room-name">Room</h1>
-      <p id="room-location" class="location"></p>
+    <div class="brand">
+      <img class="logo" src="/static/crystalpm-logo-white.svg" alt="Crystal PM">
+      <div>
+        <h1 id="room-name">Room</h1>
+        <p id="room-location" class="location"></p>
+      </div>
     </div>
     <p id="clock" class="clock"></p>
   </header>
 
-  <section class="now" aria-live="polite">
+  <section class="now status-card" aria-live="polite">
+    <p id="kicker" class="kicker">Connecting</p>
     <p id="headline" class="headline">Connecting to the room</p>
     <p id="detail" class="detail"></p>
     <p id="message" class="message" role="status"></p>
@@ -24,13 +29,13 @@
   </section>
 
   <section class="schedule">
-    <h2>Today</h2>
+    <p class="kicker">Today</p>
     <ul id="events" class="events"></ul>
     <p id="calendar-note" class="note"></p>
   </section>
 
   <section class="link">
-    <h2>Join with a link</h2>
+    <p class="kicker">Join with a link</p>
     <form id="link-form" class="link-form">
       <label class="visually-hidden" for="link-input">Meeting link or Zoom meeting ID</label>
       <input id="link-input" type="text" inputmode="url" autocomplete="off" spellcheck="false"

@@ -20,8 +20,9 @@ playwright = pytest.importorskip("playwright.sync_api")
 class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
-    def __init__(self, calendar_events=()):
+    def __init__(self, calendar_events=(), room_name="Lab"):
         self.events = list(calendar_events)
+        self.room_name = room_name
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -36,7 +37,7 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting()
         service = ControlService(
-            config={"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"},
+            config={"host": "127.0.0.1", "port": 0, "room_name": self.room_name, "room_location": "2nd floor"},
             meeting=self.meeting, calendar=StubCalendar(events=self.events),
         )
         await service.start()
@@ -109,4 +110,17 @@ def test_in_meeting_controls_are_not_rebuilt_while_the_timer_ticks(browser):
         assert page.evaluate("document.querySelector('#actions button') === window.__firstButton"), \
             "the action buttons were replaced while nothing about them changed"
         assert page.locator("#detail").inner_text() != before, "the elapsed time should keep ticking"
+        page.close()
+
+
+def test_long_names_do_not_overflow_on_phone(browser):
+    long_name = "The Extraordinarily Long Conference Room Name Nobody Abbreviates"
+    with PageServer(calendar_events=[event("e1", "Quarterly planning session with the entire leadership team", 25)],
+                    room_name=long_name) as server:
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        assert page.locator("#room-name").inner_text() == long_name
+        assert page.locator("#kicker").inner_text().upper() == "ROOM FREE"
         page.close()

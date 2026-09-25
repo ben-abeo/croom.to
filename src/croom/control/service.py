@@ -7,6 +7,7 @@ meeting and calendar services on behalf of whoever is in the room.
 
 import asyncio
 import logging
+import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -34,6 +35,16 @@ PLATFORM_HOSTS = {
 }
 # The only calendar fields the page needs; the rest stays off the network.
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
+
+
+def _register_font_types() -> None:
+    """Serve the bundled fonts with their real media type (aiohttp's table lacks woff2)."""
+    mimetypes.add_type("font/woff2", ".woff2")
+    try:
+        from aiohttp.web_fileresponse import CONTENT_TYPES
+        CONTENT_TYPES.add_type("font/woff2", ".woff2")
+    except (ImportError, AttributeError):  # pragma: no cover - older or newer aiohttp layouts
+        pass
 
 
 def normalize_link(value: str) -> str:
@@ -103,6 +114,7 @@ class ControlService(Service):
 
     def create_app(self) -> web.Application:
         """The aiohttp application; tests drive it without a listener."""
+        _register_font_types()
         app = web.Application(client_max_size=MAX_BODY_BYTES)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/api/status", self._handle_status)

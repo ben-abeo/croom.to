@@ -129,8 +129,9 @@
 
     if (model.offline || !model.status) {
       body.dataset.state = "offline";
+      el("kicker").textContent = "Not connected";
       el("headline").textContent = "Can't reach the room";
-      el("detail").textContent = "Check that the Croom agent is running, then this page will reconnect on its own.";
+      el("detail").textContent = "Check that Crystal Meet is running on the room's device, then this page will reconnect on its own.";
       setActions([]);
       return;
     }
@@ -147,11 +148,13 @@
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
       body.dataset.state = "joining";
+      el("kicker").textContent = m.state === "leaving" ? "Leaving" : "Joining";
       el("headline").textContent = m.state === "leaving" ? "Leaving" : "Joining " + label;
       el("detail").textContent = m.state === "in_lobby" ? "Waiting for the host to let the room in." : "The room's screen is connecting.";
       if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", onClick: leave }];
     } else if (m.state === "connected") {
       body.dataset.state = "meeting";
+      el("kicker").textContent = "In a meeting";
       el("headline").textContent = "In a meeting";
       el("detail").textContent = meetingDetail(m);
       specs = [
@@ -161,6 +164,7 @@
       ];
     } else if (m.state === "error") {
       body.dataset.state = "error";
+      el("kicker").textContent = "Couldn't join";
       el("headline").textContent = "Couldn't join " + label;
       el("detail").textContent = m.error || "The room's screen could not join. Try again, or join from a different link.";
       specs = [{ label: "Dismiss", className: "quiet", onClick: leave }];
@@ -179,6 +183,7 @@
 
     if (current) {
       body.dataset.state = "soon";
+      el("kicker").textContent = "Happening now";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
       return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id) }] : [];
@@ -190,9 +195,11 @@
       const minutes = minutesUntil(start);
       if (window.open) {
         body.dataset.state = "soon";
+        el("kicker").textContent = "Starting soon";
         el("headline").textContent = minutes === 0 ? next.title + " is starting" : next.title + " starts in " + plural(minutes, "minute");
       } else {
         body.dataset.state = "free";
+        el("kicker").textContent = "Room free";
         el("headline").textContent = "Free until " + fmtTime(start);
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
@@ -201,6 +208,7 @@
     }
 
     body.dataset.state = "free";
+    el("kicker").textContent = "Room free";
     el("headline").textContent = cal.connected ? "Free for the rest of the day" : "Free";
     el("detail").textContent = cal.connected ? "Nothing else is booked in here today." : "No calendar is connected. Join with a link below.";
     return [];

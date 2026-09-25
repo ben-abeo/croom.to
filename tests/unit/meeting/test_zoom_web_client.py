@@ -72,3 +72,28 @@ async def test_types_the_room_name_and_presses_join_once_it_enables():
 
 async def test_still_handles_the_older_form():
     assert await drive(LEGACY_FORM) == "Room 1"
+
+
+BLOCKED_PAGE = """
+<!DOCTYPE html><html><body>
+<h1>Enter Meeting Info</h1>
+<p>Automated bots aren't allowed to join this meeting. If this was a mistake and you are a human, sign in to join the meeting.</p>
+<button>Sign in to join</button>
+</body></html>
+"""
+
+
+async def test_failure_message_quotes_what_zoom_showed():
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(BLOCKED_PAGE)
+        provider = ZoomProvider()
+        provider._page = page
+        provider.CONNECT_TIMEOUT_MS = 500
+        try:
+            with pytest.raises(RuntimeError) as failure:
+                await provider._wait_for_connection()
+            assert "Automated bots aren't allowed to join this meeting" in str(failure.value)
+        finally:
+            await browser.close()

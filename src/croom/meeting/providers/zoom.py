@@ -34,6 +34,7 @@ class ZoomProvider(MeetingProvider):
     NAME_SELECTORS = ['#input-for-name', '#inputname', 'input[placeholder*="name" i]']
     JOIN_SELECTORS = ['button.preview-join-button', '#joinBtn', 'button.join-btn', 'button:has-text("Join")', '[aria-label*="join" i]']
     DISABLED_CLASSES = {'disabled', 'zm-btn--disabled'}
+    CONNECT_TIMEOUT_MS = 60000  # how long to wait for the meeting controls after pressing Join
 
     # URL patterns for Zoom
     ZOOM_URL_PATTERNS = [
@@ -295,12 +296,12 @@ class ZoomProvider(MeetingProvider):
         raise RuntimeError("Zoom join button stayed disabled; the name may not have been accepted")
 
     async def _wait_for_connection(self) -> None:
-        """Wait for Zoom meeting connection."""
+        """Wait for Zoom meeting connection; on failure say what the page showed."""
         try:
             # Wait for meeting controls to appear
             await self._page.wait_for_selector(
                 '[aria-label*="leave" i], .leave-btn, button:has-text("Leave")',
-                timeout=60000
+                timeout=self.CONNECT_TIMEOUT_MS
             )
         except Exception:
             # Check for waiting room
@@ -313,7 +314,14 @@ class ZoomProvider(MeetingProvider):
                     timeout=300000
                 )
             else:
-                raise RuntimeError("Failed to connect to Zoom meeting")
+                raise RuntimeError(f"Failed to connect to Zoom meeting; the page says: {await self._page_words()}")
+
+    async def _page_words(self) -> str:
+        """The page's visible text, trimmed, for error messages; never raises."""
+        try:
+            return await self._page.evaluate("() => document.body.innerText.replace(/\\s+/g, ' ').trim().slice(0, 240)")
+        except Exception:
+            return "(page text unavailable)"
 
     async def leave_meeting(self) -> None:
         """Leave Zoom meeting."""

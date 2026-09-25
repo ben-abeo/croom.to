@@ -268,6 +268,11 @@ def main() -> None:
         help="Check the room's Google Calendar setup, print the next bookings and exit",
         action="store_true"
     )
+    parser.add_argument(
+        "--check-zoom",
+        help="Check the room's Zoom Meeting SDK credentials and exit",
+        action="store_true"
+    )
 
     args = parser.parse_args()
 
@@ -281,6 +286,10 @@ def main() -> None:
     if args.check_calendar:
         from croom.calendar.check import check_calendar
         raise SystemExit(asyncio.run(check_calendar(load_config(args.config))))
+
+    if args.check_zoom:
+        from croom.meeting.zoom_check import check_zoom
+        raise SystemExit(asyncio.run(check_zoom(load_config(args.config))))
 
     # Run agent
     try:

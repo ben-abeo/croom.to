@@ -1,6 +1,6 @@
 /** @type {import('tailwindcss').Config} */
-// Crystal PM blue theme. The gray and blue scales are remapped to brand shades so
-// every page inherits the palette without editing each class.
+// Crystal PM accent on Tailwind's stock charcoal grays. Only the blue scale is
+// remapped to brand shades; gray stays default (#111827 page, #1F2937 cards).
 export default {
   content: [
     "./index.html",
@@ -12,18 +12,6 @@ export default {
         sans: ['Lexend', 'Segoe UI', 'Arial', 'sans-serif'],
       },
       colors: {
-        gray: {
-          50: '#F7F9FF',
-          100: '#EDF2FE',
-          200: '#DCE5FF',
-          300: '#BDCEFF',
-          400: '#8E9AB1',
-          500: '#647087',
-          600: '#33477F',
-          700: '#22346B',
-          800: '#16244F',
-          900: '#001636',
-        },
         blue: {
           50: '#F7F9FF',
           100: '#EDF2FE',

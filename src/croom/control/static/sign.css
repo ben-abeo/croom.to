@@ -5,6 +5,7 @@
 :root {
   --navy-900: #001636;
   --navy-800: #16244F;
+  --surface-900: #111827;
   --periwinkle-300: #BDCEFF;
   --free: #1FA971;
   --soon: #E8A013;
@@ -17,7 +18,7 @@
 html, body { height: 100%; }
 body {
   margin: 0;
-  background: var(--navy-900);
+  background: var(--surface-900);
   color: #fff;
   font-family: var(--font);
   font-size: clamp(16px, 1.6vw, 24px);
@@ -29,7 +30,7 @@ body {
 body[data-state="free"] { background: var(--free); }
 body[data-state="soon"] { background: var(--soon); color: var(--navy-800); }
 body[data-state="occupied"] { background: var(--busy); }
-body[data-state="offline"], body[data-state="loading"] { background: var(--navy-900); }
+body[data-state="offline"], body[data-state="loading"] { background: var(--surface-900); }
 
 .sign {
   min-height: 100%;

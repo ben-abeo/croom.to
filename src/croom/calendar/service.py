@@ -6,6 +6,7 @@ Manages calendar providers and coordinates event polling.
 
 import asyncio
 import logging
+import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Callable, Set
 
@@ -20,6 +21,26 @@ from croom.core.config import Config
 from croom.core.service import Service
 
 logger = logging.getLogger(__name__)
+
+PLACEHOLDER_PREFIX = "REPLACE_"
+
+
+def google_not_configured_reason(calendar) -> Optional[str]:
+    """
+    Why Google Calendar cannot be read yet, in words for the person setting up
+    the room (spec 2026-09-25 section 4.2); None when it can.
+    """
+    path = calendar.google_credentials_path
+    if not path:
+        return "no google_credentials_path in the config"
+    if not (os.path.isfile(path) and os.access(path, os.R_OK)):
+        return f"credentials file not found or unreadable: {path}"
+    calendar_id = (calendar.google_calendar_id or "").strip()
+    if not calendar_id:
+        return "google_calendar_id is empty; put the room's calendar address in the config"
+    if calendar_id.startswith(PLACEHOLDER_PREFIX):
+        return f"google_calendar_id is still the placeholder {calendar_id}; put the room's calendar address in the config"
+    return None
 
 
 class CalendarService(Service):
@@ -73,12 +94,18 @@ class CalendarService(Service):
 
     @classmethod
     def from_config(cls, config: Config) -> "CalendarService":
-        """Build the service from the agent's Config (spec section 4.2)."""
+        """Build the service from the agent's Config (specs 2026-09-24 agent startup 4.2, 2026-09-25 calendar 4.2 and 4.3)."""
         calendar = config.calendar
         provider = calendar.providers[0] if calendar.providers else None
         credentials: Dict[str, Any] = {}
-        if provider == "google" and calendar.google_credentials_path:
-            credentials = {"service_account_file": calendar.google_credentials_path}
+        calendar_ids: List[str] = []
+        not_configured: Optional[str] = None
+        if provider == "google":
+            not_configured = google_not_configured_reason(calendar)
+            if calendar.google_credentials_path:
+                credentials = {"service_account_file": calendar.google_credentials_path}
+            if calendar.google_calendar_id:
+                calendar_ids = [calendar.google_calendar_id]
         elif provider == "microsoft":
             credentials = {
                 "client_id": calendar.microsoft_client_id,
@@ -87,8 +114,10 @@ class CalendarService(Service):
         return cls(config={
             "provider": provider,
             "credentials": credentials,
+            "calendar_ids": calendar_ids,
             "poll_interval": calendar.sync_interval_seconds,
             "auto_join_minutes": config.meeting.join_early_minutes,
+            "not_configured": not_configured,
         })
 
     @property
@@ -125,6 +154,10 @@ class CalendarService(Service):
         """
         if self._initialized:
             return True
+        reason = self.config.get('not_configured')
+        if reason:
+            logger.warning(f"Google Calendar not configured: {reason}")
+            return False
         provider_name = self.config.get('provider', 'google')
         if not provider_name:
             logger.info("No calendar provider configured; calendar service idle")
@@ -176,7 +209,7 @@ class CalendarService(Service):
         if self._running:
             return
         if not self._initialized and not await self.initialize():
-            logger.warning("Calendar service running without a provider; polling disabled")
+            logger.info("Calendar service running without a provider; polling disabled")
         self._running = True
         if not self._initialized:
             return
@@ -230,8 +263,8 @@ class CalendarService(Service):
                 )
 
                 for event in events:
-                    # Skip cancelled events
-                    if event.status == 'cancelled':
+                    # Skip cancelled bookings and ones this room declined (double bookings)
+                    if event.status == 'cancelled' or event.response_status == 'declined':
                         continue
                     all_events[event.id] = event
 

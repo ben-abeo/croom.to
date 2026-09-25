@@ -59,6 +59,7 @@ class CalendarConfig:
     providers: List[str] = field(default_factory=lambda: ["google", "microsoft"])
     sync_interval_seconds: int = 60
     google_credentials_path: str = ""
+    google_calendar_id: str = ""  # the room's calendar address, e.g. c_18...@resource.calendar.google.com
     microsoft_tenant_id: str = ""
     microsoft_client_id: str = ""
 
@@ -237,6 +238,8 @@ class Config:
             "calendar": {
                 "providers": self.calendar.providers,
                 "sync_interval_seconds": self.calendar.sync_interval_seconds,
+                "google_credentials_path": self.calendar.google_credentials_path,
+                "google_calendar_id": self.calendar.google_calendar_id,
             },
             "ai": {
                 "enabled": self.ai.enabled,

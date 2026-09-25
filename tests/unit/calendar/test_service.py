@@ -345,8 +345,10 @@ class TestCalendarServiceAsService:
         assert service.config == {
             "provider": "google",
             "credentials": {"service_account_file": "/etc/croom/google-sa.json"},
+            "calendar_ids": [],
             "poll_interval": 120,
             "auto_join_minutes": 3,
+            "not_configured": "credentials file not found or unreadable: /etc/croom/google-sa.json",
         }
         assert service._poll_interval == 120
         assert service._auto_join_minutes == 3

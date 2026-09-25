@@ -2014,3 +2014,7 @@ Expected: no output from either grep.
 ```bash
 git push -u origin google-calendar
 ```
+
+- [ ] **Step 4: Acceptance with real credentials (when Ben has them; spec section 5)**
+
+With the service account key and one shared room calendar: run `.venv/bin/croom --check-calendar -c <a config with the real key path and calendar id>` on this PC and read the bookings back; then run the agent with that config, open `http://localhost:8080/` and `/sign`, and see the booking; then press Join now. Record the outcome in the ledger. Until the key exists this step stays open and does not block the branch review.

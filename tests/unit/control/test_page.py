@@ -124,3 +124,23 @@ def test_long_names_do_not_overflow_on_phone(browser):
         assert page.locator("#room-name").inner_text() == long_name
         assert page.locator("#kicker").inner_text().upper() == "ROOM FREE"
         page.close()
+
+
+def test_door_sign_follows_the_room_state(browser):
+    with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1") as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#headline").inner_text().startswith("Free until")
+        assert page.locator("#kicker").inner_text().upper() == "AVAILABLE"
+        assert page.locator("#actions").count() == 0
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
+                          data='{"url": "https://zoom.us/j/98765432100"}',
+                          headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=8000)
+        assert page.locator("#headline").inner_text() == "In use"
+        assert page.locator("#kicker").inner_text().upper() == "IN USE"
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave",
+                          data="{}", headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        page.close()

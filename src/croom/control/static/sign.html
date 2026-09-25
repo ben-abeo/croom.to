@@ -1,0 +1,37 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crystal Meet</title>
+<link rel="icon" href="/static/crystalpm-logo-white.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/sign.css">
+</head>
+<body data-state="loading">
+<main class="sign">
+  <header class="top">
+    <div class="brand">
+      <img class="logo" src="/static/crystalpm-logo-white.svg" alt="Crystal PM">
+      <div>
+        <h1 id="room-name">Room</h1>
+        <p id="room-location" class="location"></p>
+      </div>
+    </div>
+    <p id="clock" class="clock"></p>
+  </header>
+
+  <section class="status" aria-live="polite">
+    <p id="kicker" class="kicker">Connecting</p>
+    <p id="headline" class="headline">Connecting</p>
+    <p id="detail" class="detail"></p>
+  </section>
+
+  <section class="upcoming">
+    <p class="kicker">Today</p>
+    <ul id="events" class="events"></ul>
+    <p id="calendar-note" class="note"></p>
+  </section>
+</main>
+<script src="/static/sign.js"></script>
+</body>
+</html>

@@ -117,6 +117,7 @@ class ControlService(Service):
         _register_font_types()
         app = web.Application(client_max_size=MAX_BODY_BYTES)
         app.router.add_get("/", self._handle_index)
+        app.router.add_get("/sign", self._handle_sign)
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/calendar/events", self._handle_events)
         app.router.add_post("/api/meeting/join", self._handle_join)
@@ -260,6 +261,12 @@ class ControlService(Service):
         if not index.is_file():
             return web.Response(text="Room control page assets are missing.", status=500)
         return web.FileResponse(index, headers={"Cache-Control": "no-cache"})
+
+    async def _handle_sign(self, request: web.Request) -> web.StreamResponse:
+        sign = self._static_dir / "sign.html"
+        if not sign.is_file():
+            return web.Response(text="Door sign assets are missing.", status=500)
+        return web.FileResponse(sign, headers={"Cache-Control": "no-cache"})
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         return web.json_response(self._status())

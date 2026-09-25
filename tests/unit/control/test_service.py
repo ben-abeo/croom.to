@@ -486,6 +486,19 @@ class TestPage:
         assert "Croom" not in (STATIC_DIR / "index.html").read_text(encoding="utf-8")
         assert "Croom" not in (STATIC_DIR / "app.js").read_text(encoding="utf-8")
 
+    async def test_sign_is_served_uncached(self, client_factory):
+        client = await client_factory(make_service())
+        resp = await client.get("/sign")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert resp.headers["Cache-Control"] == "no-cache"
+        body = await resp.text()
+        assert "<title>Crystal Meet</title>" in body
+        assert 'src="/static/sign.js"' in body and 'href="/static/sign.css"' in body
+        assert (await client.get("/static/sign.js")).status == 200
+        assert (await client.get("/static/sign.css")).status == 200
+
+
 
 EVENT_FIELDS = {"id", "title", "start_time", "end_time", "meeting_platform", "joinable"}
 

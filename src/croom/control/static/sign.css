@@ -1,0 +1,84 @@
+/* Crystal Meet door sign: the background is the room's status. */
+@font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+
+:root {
+  --navy-900: #001636;
+  --navy-800: #16244F;
+  --periwinkle-300: #BDCEFF;
+  --free: #1FA971;
+  --soon: #E8A013;
+  --busy: #B42318;
+  --gutter: clamp(20px, 4vw, 56px);
+  --font: "Lexend", "Segoe UI", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--navy-900);
+  color: #fff;
+  font-family: var(--font);
+  font-size: clamp(16px, 1.6vw, 24px);
+  line-height: 1.4;
+  transition: background-color 500ms ease, color 500ms ease;
+}
+@media (prefers-reduced-motion: reduce) { body { transition: none; } }
+
+body[data-state="free"] { background: var(--free); }
+body[data-state="soon"] { background: var(--soon); color: var(--navy-800); }
+body[data-state="occupied"] { background: var(--busy); }
+body[data-state="offline"], body[data-state="loading"] { background: var(--navy-900); }
+
+.sign {
+  min-height: 100%;
+  padding: var(--gutter);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: clamp(20px, 3vh, 40px);
+}
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.brand { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.logo { width: clamp(110px, 12vw, 170px); height: auto; display: block; }
+body[data-state="soon"] .logo { filter: brightness(0) saturate(100%) invert(11%) sepia(38%) saturate(2400%) hue-rotate(205deg) brightness(90%); }
+h1 { margin: 0; font-size: clamp(1.3rem, 2.6vw, 2.4rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
+.location { margin: 2px 0 0; opacity: 0.85; }
+.clock {
+  margin: 0;
+  font-size: clamp(2.2rem, 7vw, 6rem);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kicker {
+  margin: 0 0 10px;
+  font-size: clamp(0.75rem, 1.4vw, 1.1rem);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+.status { align-self: center; }
+.headline {
+  margin: 0;
+  font-size: clamp(2.4rem, 9vw, 8rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  max-width: 14ch;
+  overflow-wrap: anywhere;
+}
+.headline.long { font-size: clamp(1.8rem, 5.4vw, 4.6rem); max-width: 24ch; }
+.detail { margin: 14px 0 0; font-size: clamp(1.1rem, 2.4vw, 2rem); max-width: 40ch; overflow-wrap: anywhere; opacity: 0.92; }
+.detail:empty { display: none; }
+
+.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.event { display: grid; grid-template-columns: 7ch 1fr; gap: 14px; align-items: baseline; }
+.event time { font-variant-numeric: tabular-nums; opacity: 0.85; }
+.event .title { margin: 0; overflow-wrap: anywhere; }
+.note { margin: 6px 0 0; opacity: 0.85; }
+.note:empty { display: none; }

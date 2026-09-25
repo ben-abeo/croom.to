@@ -4,6 +4,7 @@ Google Calendar provider.
 Uses Google Calendar API to fetch events and meeting information.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
@@ -28,6 +29,21 @@ try:
     GOOGLE_API_AVAILABLE = True
 except ImportError:
     GOOGLE_API_AVAILABLE = False
+
+
+def choose_meeting_url(conference_url: Optional[str], typed_url: Optional[str]) -> Optional[str]:
+    """
+    The link a booking should join.
+
+    The conference attached to the event wins, except when it is a Google Meet
+    (Workspace adds one to every event by default) and someone typed a link for
+    another platform into the location or description: that typed link wins.
+    """
+    if conference_url and typed_url:
+        conference_is_meet = detect_meeting_platform(conference_url) == MeetingPlatform.GOOGLE_MEET
+        typed_is_other = detect_meeting_platform(typed_url) not in (MeetingPlatform.GOOGLE_MEET, MeetingPlatform.UNKNOWN)
+        return typed_url if conference_is_meet and typed_is_other else conference_url
+    return conference_url or typed_url
 
 
 class GoogleCalendarProvider(CalendarProvider):
@@ -57,17 +73,15 @@ class GoogleCalendarProvider(CalendarProvider):
 
     async def authenticate(self, credentials: Dict[str, Any]) -> bool:
         """
-        Authenticate with Google Calendar API.
-
-        Supports two authentication methods:
-        1. Service account (preferred for room devices)
-        2. OAuth2 user credentials
+        Authenticate with the Google Calendar API. The blocking work runs in a
+        worker thread so the agent's event loop keeps serving.
 
         Args:
             credentials: Dict with either:
                 - 'service_account_file': Path to service account JSON
                 - 'service_account_info': Service account JSON dict
                 - 'oauth_token': OAuth2 token info dict
+              plus optional 'delegate_email' for domain-wide delegation.
 
         Returns:
             True if authentication successful
@@ -75,56 +89,41 @@ class GoogleCalendarProvider(CalendarProvider):
         if not GOOGLE_API_AVAILABLE:
             logger.error("Google API libraries not installed")
             return False
-
         try:
-            # Service account authentication (preferred)
-            if 'service_account_file' in credentials:
-                self._creds = ServiceAccountCredentials.from_service_account_file(
-                    credentials['service_account_file'],
-                    scopes=self.SCOPES
-                )
-                # Delegate to room account if specified
-                if 'delegate_email' in credentials:
-                    self._creds = self._creds.with_subject(credentials['delegate_email'])
-
-            elif 'service_account_info' in credentials:
-                self._creds = ServiceAccountCredentials.from_service_account_info(
-                    credentials['service_account_info'],
-                    scopes=self.SCOPES
-                )
-                if 'delegate_email' in credentials:
-                    self._creds = self._creds.with_subject(credentials['delegate_email'])
-
-            # OAuth2 token authentication
-            elif 'oauth_token' in credentials:
-                token_info = credentials['oauth_token']
-                self._creds = Credentials(
-                    token=token_info.get('access_token'),
-                    refresh_token=token_info.get('refresh_token'),
-                    token_uri='https://oauth2.googleapis.com/token',
-                    client_id=token_info.get('client_id'),
-                    client_secret=token_info.get('client_secret'),
-                    scopes=self.SCOPES
-                )
-            else:
-                logger.error("No valid credentials provided")
-                return False
-
-            # Build service
-            self._service = build('calendar', 'v3', credentials=self._creds)
-
-            # Test authentication
-            self._service.calendarList().list(maxResults=1).execute()
-
-            self._authenticated = True
-            self._credentials = credentials
-            logger.info("Google Calendar authentication successful")
-            return True
-
+            await asyncio.to_thread(self._connect, credentials)
         except Exception as e:
             logger.error(f"Google Calendar authentication failed: {e}")
             self._authenticated = False
             return False
+        self._authenticated = True
+        self._credentials = credentials
+        logger.info("Google Calendar authentication successful")
+        return True
+
+    def _connect(self, credentials: Dict[str, Any]) -> None:
+        """Blocking: build the credentials and the API client, then make one call to prove they work."""
+        if 'service_account_file' in credentials:
+            self._creds = ServiceAccountCredentials.from_service_account_file(
+                credentials['service_account_file'], scopes=self.SCOPES)
+        elif 'service_account_info' in credentials:
+            self._creds = ServiceAccountCredentials.from_service_account_info(
+                credentials['service_account_info'], scopes=self.SCOPES)
+        elif 'oauth_token' in credentials:
+            token_info = credentials['oauth_token']
+            self._creds = Credentials(
+                token=token_info.get('access_token'),
+                refresh_token=token_info.get('refresh_token'),
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=token_info.get('client_id'),
+                client_secret=token_info.get('client_secret'),
+                scopes=self.SCOPES,
+            )
+        else:
+            raise ValueError("No valid credentials provided")
+        if 'delegate_email' in credentials and hasattr(self._creds, 'with_subject'):
+            self._creds = self._creds.with_subject(credentials['delegate_email'])
+        self._service = build('calendar', 'v3', credentials=self._creds, cache_discovery=False)
+        self._service.calendarList().list(maxResults=1).execute()
 
     async def refresh_auth(self) -> bool:
         """Refresh authentication tokens."""
@@ -145,23 +144,34 @@ class GoogleCalendarProvider(CalendarProvider):
         """Get list of available calendars."""
         if not self._authenticated or not self._service:
             return []
-
         try:
-            result = self._service.calendarList().list().execute()
-            calendars = result.get('items', [])
-
-            return [
-                {
-                    'id': cal['id'],
-                    'name': cal.get('summary', cal['id']),
-                    'primary': cal.get('primary', False),
-                }
-                for cal in calendars
-            ]
-
+            result = await asyncio.to_thread(lambda: self._service.calendarList().list().execute())
         except HttpError as e:
             logger.error(f"Failed to list calendars: {e}")
             return []
+        return [
+            {'id': cal['id'], 'name': cal.get('summary', cal['id']), 'primary': cal.get('primary', False)}
+            for cal in result.get('items', [])
+        ]
+
+    async def get_calendar(self, calendar_id: str) -> Dict[str, str]:
+        """
+        One calendar's id and name.
+
+        Raises LookupError when Google answers 403 or 404: the calendar does not
+        exist or is not shared with this account. Other API errors propagate.
+        """
+        if not self._service:
+            raise RuntimeError("Not authenticated")
+        try:
+            result = await asyncio.to_thread(
+                lambda: self._service.calendars().get(calendarId=calendar_id).execute())
+        except HttpError as e:
+            status = getattr(e, 'status_code', None) or getattr(getattr(e, 'resp', None), 'status', None)
+            if status in (403, 404):
+                raise LookupError(calendar_id) from e
+            raise
+        return {'id': result.get('id', calendar_id), 'name': result.get('summary', calendar_id)}
 
     async def get_events(
         self,
@@ -170,38 +180,34 @@ class GoogleCalendarProvider(CalendarProvider):
         time_max: datetime,
         max_results: int = 100
     ) -> List[CalendarEvent]:
-        """Get events from Google Calendar."""
+        """Get events from Google Calendar; the API call runs in a worker thread."""
         if not self._authenticated or not self._service:
             return []
-
+        if time_min.tzinfo is None:
+            time_min = time_min.replace(tzinfo=timezone.utc)
+        if time_max.tzinfo is None:
+            time_max = time_max.replace(tzinfo=timezone.utc)
         try:
-            # Ensure timezone-aware
-            if time_min.tzinfo is None:
-                time_min = time_min.replace(tzinfo=timezone.utc)
-            if time_max.tzinfo is None:
-                time_max = time_max.replace(tzinfo=timezone.utc)
-
-            result = self._service.events().list(
-                calendarId=calendar_id,
-                timeMin=time_min.isoformat(),
-                timeMax=time_max.isoformat(),
-                maxResults=max_results,
-                singleEvents=True,
-                orderBy='startTime'
-            ).execute()
-
-            events = []
-            for item in result.get('items', []):
-                event = self._parse_event(item, calendar_id)
-                if event:
-                    events.append(event)
-
-            logger.debug(f"Fetched {len(events)} events from {calendar_id}")
-            return events
-
+            result = await asyncio.to_thread(
+                lambda: self._service.events().list(
+                    calendarId=calendar_id,
+                    timeMin=time_min.isoformat(),
+                    timeMax=time_max.isoformat(),
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy='startTime',
+                ).execute()
+            )
         except HttpError as e:
             logger.error(f"Failed to fetch events: {e}")
             return []
+        events = []
+        for item in result.get('items', []):
+            event = self._parse_event(item, calendar_id)
+            if event:
+                events.append(event)
+        logger.debug(f"Fetched {len(events)} events from {calendar_id}")
+        return events
 
     def _parse_event(self, item: Dict, calendar_id: str) -> Optional[CalendarEvent]:
         """Parse Google Calendar API event to CalendarEvent."""
@@ -223,28 +229,16 @@ class GoogleCalendarProvider(CalendarProvider):
                     end.get('dateTime', '').replace('Z', '+00:00')
                 )
 
-            # Get meeting URL
-            meeting_url = None
-            meeting_platform = MeetingPlatform.UNKNOWN
-
-            # Check conferenceData first (Google Meet)
-            conf_data = item.get('conferenceData', {})
-            entry_points = conf_data.get('entryPoints', [])
-            for ep in entry_points:
-                if ep.get('entryPointType') == 'video':
-                    meeting_url = ep.get('uri')
-                    meeting_platform = MeetingPlatform.GOOGLE_MEET
+            # The booking's link: the attached conference (Meet or the Zoom add-on),
+            # unless a link for another platform was typed into the event.
+            conference_url = None
+            for ep in item.get('conferenceData', {}).get('entryPoints', []):
+                if ep.get('entryPointType') == 'video' and ep.get('uri'):
+                    conference_url = ep['uri']
                     break
-
-            # If no conference data, check description/location
-            if not meeting_url:
-                description = item.get('description', '')
-                location = item.get('location', '')
-
-                url = extract_meeting_url(location) or extract_meeting_url(description)
-                if url:
-                    meeting_url = url
-                    meeting_platform = detect_meeting_platform(url)
+            typed_url = extract_meeting_url(item.get('location', '')) or extract_meeting_url(item.get('description', ''))
+            meeting_url = choose_meeting_url(conference_url, typed_url)
+            meeting_platform = detect_meeting_platform(meeting_url) if meeting_url else MeetingPlatform.UNKNOWN
 
             # Get organizer
             organizer = item.get('organizer', {}).get('email', '')

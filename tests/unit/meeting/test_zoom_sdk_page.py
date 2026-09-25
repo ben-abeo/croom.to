@@ -123,9 +123,11 @@ async def test_used_join_token_is_reported():
     async with PageRun() as run:
         await run.wait_for("connected")
         token = run.site.register_join(JOIN)
+        await run.page.goto("about:blank")  # a fragment-only change would not reload the page
         await run.page.goto(run.site.url() + "#" + token, wait_until="load")
         await run.wait_for("connected")
         run.events.clear()
+        await run.page.goto("about:blank")
         await run.page.goto(run.site.url() + "#" + token, wait_until="load")  # the same token again
         await run.wait_for("error")
         assert "join parameters expired" in [d for s, d in run.events if s == "error"][0]

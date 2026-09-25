@@ -29,6 +29,12 @@ class ZoomProvider(MeetingProvider):
     Note: Zoom web client has limited functionality compared to native app.
     """
 
+    # The web client's pre-join form (7.x): the name field is labelled "Your Name" with id
+    # input-for-name and no placeholder, and Join is disabled by CSS class until a name is typed.
+    NAME_SELECTORS = ['#input-for-name', '#inputname', 'input[placeholder*="name" i]']
+    JOIN_SELECTORS = ['button.preview-join-button', '#joinBtn', 'button.join-btn', 'button:has-text("Join")', '[aria-label*="join" i]']
+    DISABLED_CLASSES = {'disabled', 'zm-btn--disabled'}
+
     # URL patterns for Zoom
     ZOOM_URL_PATTERNS = [
         # Standard Zoom meeting link
@@ -230,23 +236,36 @@ class ZoomProvider(MeetingProvider):
         except Exception:
             pass
 
+    async def _find_first(self, selectors, timeout=3000):
+        """The first element any of the selectors finds, or None."""
+        for selector in selectors:
+            try:
+                element = await self._page.wait_for_selector(selector, timeout=timeout)
+            except Exception:
+                continue
+            if element:
+                return element
+        return None
+
     async def _handle_prejoin(
         self,
         display_name: str,
         camera_on: bool,
         mic_on: bool
     ) -> None:
-        """Handle Zoom pre-join screen."""
-        # Set display name
-        try:
-            name_input = await self._page.wait_for_selector(
-                '#inputname, input[placeholder*="name" i]',
-                timeout=5000
-            )
-            if name_input:
-                await name_input.fill(display_name)
-        except Exception:
-            pass
+        """Handle the Zoom pre-join screen: type the room's name; Join stays disabled without one."""
+        name_input = await self._find_first(self.NAME_SELECTORS)
+        if name_input is None:
+            try:
+                labelled = self._page.get_by_label(re.compile(r"your name", re.IGNORECASE))
+                if await labelled.count():
+                    name_input = await labelled.first.element_handle()
+            except Exception:
+                name_input = None
+        if name_input is not None:
+            await name_input.fill(display_name)
+        else:
+            logger.warning("Zoom pre-join name field not found; trying to join without a name")
 
         # Enter password if prompted
         try:
@@ -263,24 +282,17 @@ class ZoomProvider(MeetingProvider):
         # Store preferences to apply after connection
 
     async def _click_join_button(self) -> None:
-        """Click Zoom join button."""
-        join_selectors = [
-            'button:has-text("Join")',
-            '#joinBtn',
-            'button.join-btn',
-            '[aria-label*="join" i]',
-        ]
-
-        for selector in join_selectors:
-            try:
-                btn = await self._page.wait_for_selector(selector, timeout=3000)
-                if btn:
-                    await btn.click()
-                    return
-            except Exception:
-                continue
-
-        raise RuntimeError("Could not find Zoom join button")
+        """Click Zoom's Join button once it is enabled (the web client disables it by class, not attribute)."""
+        button = await self._find_first(self.JOIN_SELECTORS)
+        if button is None:
+            raise RuntimeError("Could not find Zoom join button")
+        for _ in range(40):  # up to 10 s for the button to enable after the name is typed
+            classes = set((await button.get_attribute("class") or "").split())
+            if not (classes & self.DISABLED_CLASSES) and await button.is_enabled():
+                await button.click()
+                return
+            await asyncio.sleep(0.25)
+        raise RuntimeError("Zoom join button stayed disabled; the name may not have been accepted")
 
     async def _wait_for_connection(self) -> None:
         """Wait for Zoom meeting connection."""

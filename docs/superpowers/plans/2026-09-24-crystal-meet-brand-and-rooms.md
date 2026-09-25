@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Present the product as Crystal Meet in the Crystal PM brand on the room page and the dashboard, and package the installation for three conference-room devices with a branded setup guide.
+**Goal:** Present the product as Crystal Meet in the Crystal PM brand on the room page and the dashboard, add a door sign page, and package the installation for three conference-room devices with a branded setup guide that covers the table screen and the door sign as network devices.
 
 **Architecture:** The room page keeps its markup, API and behaviour; its stylesheet is rewritten on the brand tokens with Lexend and the logo bundled as package data, and the script only gains kicker labels and new copy. The dashboard is rebranded by remapping Tailwind's gray and blue scales to brand shades so every page inherits the palette, plus the name, logo, font and kicker labels in the shell and page headers. The installer gains a fork repository default, a `--config` option, and runs the agent as the signed-in desktop user. Three room configs live in `deploy/rooms/`, and the guide is a static HTML page rendered to PDF with the venv's Chromium.
 
@@ -44,6 +44,7 @@
 | `src/croom-dashboard/frontend/src/components/Layout.tsx`, `src/pages/Login.tsx`, `Dashboard.tsx`, `Devices.tsx`, `Analytics.tsx`, `Provisioning.tsx`, `Settings.tsx` | Name, logo, kickers, copy. |
 | `deploy/rooms/README.md`, `room-1.yaml`, `room-2.yaml`, `room-3.yaml` | Per-room configs. |
 | `installer/install.sh` | Fork repository default, `--config`, desktop-user service, updated template, source guard. |
+| `src/croom/control/static/sign.html`, `sign.css`, `sign.js`; `src/croom/control/service.py` | The door sign page and its route. |
 | `docs/guides/crystal-meet-room-setup/index.html`, `build.py`, assets; `docs/guides/crystal-meet-room-setup.pdf` | The guide and its renderer. |
 | `tests/unit/control/test_service.py`, `tests/unit/control/test_page.py`, `tests/unit/installer/test_install_script.py`, `tests/unit/deploy/test_room_configs.py`, `tests/unit/docs/test_room_setup_guide.py` | Tests. |
 
@@ -1363,12 +1364,13 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <div class="card"><p class="kicker">Step 1</p><h3>Prepare the device</h3><p>Install Raspberry Pi OS, sign in, connect the TV and camera.</p></div>
   <div class="card"><p class="kicker">Step 2</p><h3>Create the room</h3><p>Add the room in the dashboard and copy its token. <span class="ui">Provisioning</span></p></div>
   <div class="card"><p class="kicker">Step 3</p><h3>Install Crystal Meet</h3><p>One command with the room's config file.</p></div>
-  <div class="card"><p class="kicker">Step 4</p><h3>First run</h3><p>Open the room page and join a test call.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>First run and screens</h3><p>Join a test call, then point the table screen and the door sign at the device.</p></div>
 </div>
 
 <div class="callout warn">
   <p class="kicker">Before you begin</p>
   <p><strong>Hardware per room.</strong> Raspberry Pi 4 (4 GB) or Pi 5, the official power supply, a 32 GB microSD card, an HDMI cable to the room's TV, and a USB camera or speakerphone (a Logitech C920 or a Jabra Speak works well).</p>
+  <p><strong>Two screens on the network.</strong> A touch tablet or PoE touch panel on the table to join and control meetings, and a small screen by the door to show whether the room is free. Neither connects to the Pi: each only needs a browser, power, and the office network. Give the room device a fixed address on your router (a DHCP reservation) so the screens can always find it.</p>
   <p><strong>The dashboard address.</strong> The Crystal Meet dashboard must be reachable from the room's network, for example <span class="chip">http://192.168.1.20:3000</span> for the dashboard and port <span class="chip">3001</span> for devices. If the dashboard runs on a Windows PC under WSL2, turn on mirrored networking or forward ports 3000 and 3001 first, or the devices will show Offline.</p>
   <p><strong>Accounts.</strong> A dashboard sign-in with the admin role, and the Zoom or Google Meet links you want to test with.</p>
 </div>
@@ -1405,14 +1407,16 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
 </ul>
 <p class="see">You should now see a browser window open on the TV. That window is the room's meeting screen; leave it open.</p>
 
-<div class="step"><span class="badge">4</span><h2>First run</h2></div>
+<div class="step"><span class="badge">4</span><h2>First run and the screens</h2></div>
 <ul>
   <li><strong>Open the room page.</strong> On your laptop or phone on the office network, go to <span class="chip">http://crystal-meet-room-1.local:8080</span>, or use the device's IP address with <span class="chip">:8080</span>.</li>
   <li><strong>Check the dashboard.</strong> On <span class="ui">Devices</span>, the room should show <span class="ui">Online</span> within a minute.</li>
   <li><strong>Join a test call.</strong> Paste a Zoom link, or a Zoom meeting ID, into <span class="ui">Join with a link</span> and press <span class="ui">Join</span>. The TV shows the meeting joining; the page turns blue and offers <span class="ui">Mute</span>, <span class="ui">Turn camera off</span> and <span class="ui">Leave</span>.</li>
   <li><strong>Leave.</strong> Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>.</li>
+  <li><strong>Set up the table screen.</strong> On the tablet or panel, open its kiosk browser (Fully Kiosk Browser on Android, Guided Access with Safari on an iPad) and set the start page to <span class="chip">http://&lt;device address&gt;:8080/</span>. Turn on full screen and keep the screen awake.</li>
+  <li><strong>Set up the door sign.</strong> On the door screen, set the start page to <span class="chip">http://&lt;device address&gt;:8080/sign</span>. It shows green when the room is free, amber when a meeting is about to start, and red while the room is in use or booked.</li>
 </ul>
-<p class="see">You should now see the room page say the room is free again, and the dashboard still showing the device Online.</p>
+<p class="see">You should now see the room page say the room is free again, the door sign green, and the dashboard still showing the device Online.</p>
 <div class="callout tip">
   <p class="kicker">Tip</p>
   <p>Zoom links that include their passcode (the part after <span class="chip">?pwd=</span>) join straight through. Google Meet joins as a guest, so someone in the meeting admits the room when it asks.</p>
@@ -1425,6 +1429,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <div class="card"><h3>The room page does not load</h3><p>On the Pi, type <span class="chip">sudo systemctl status croom</span>. If it is not running, type <span class="chip">sudo journalctl -u croom -n 50</span> and look for the first line marked ERROR. Make sure port 8080 is not used by something else on the device.</p></div>
   <div class="card"><h3>The device shows Offline</h3><p>From the Pi, type <span class="chip">curl http://&lt;dashboard address&gt;:3001/health</span>. If nothing comes back, the dashboard is not reachable from the room's network: check the address in <span class="chip">~/room.yaml</span> and the dashboard PC's networking. If the token was already used, create a new one and run the installer again with the updated config.</p></div>
   <div class="card"><h3>The browser opens but never joins</h3><p>Zoom needs the passcode inside the link; paste the full invitation link. Google Meet waits until someone in the meeting admits "the room". If the page says it could not join, press <span class="ui">Dismiss</span> and try the link again.</p></div>
+  <div class="card"><h3>The screens cannot open the page</h3><p>Use the device's IP address rather than its <span class="chip">.local</span> name; many tablets do not resolve those. Check that the screen and the device are on the same network, then open <span class="chip">http://&lt;device address&gt;:8080/api/status</span> from a laptop to confirm the device answers.</p></div>
   <div class="card"><h3>No sound or picture in the call</h3><p>Check the USB camera or speakerphone is connected before the device starts, then reboot the Pi. The service runs as the signed-in desktop user so it can use the room's screen and audio.</p></div>
 </div>
 <div class="callout">
@@ -1456,13 +1461,360 @@ git commit -m "docs: Crystal Meet room setup guide"
 
 ---
 
-### Task 5: Push and final check
+### Task 5: The door sign page
+
+**Files:**
+- Create: `src/croom/control/static/sign.html`, `src/croom/control/static/sign.css`, `src/croom/control/static/sign.js`
+- Modify: `src/croom/control/service.py` (route)
+- Test: `tests/unit/control/test_service.py`, `tests/unit/control/test_page.py`
+
+**Interfaces:**
+- Consumes: `GET /api/status` and `GET /api/calendar/events` (unchanged); the assets from Task 1.
+- Produces: `GET /sign`. The guide (Task 4) points the door screen at it.
+
+- [ ] **Step 1: Write the failing tests**
+
+Append to `class TestPage` in `tests/unit/control/test_service.py`:
+
+```python
+    async def test_sign_is_served_uncached(self, client_factory):
+        client = await client_factory(make_service())
+        resp = await client.get("/sign")
+        assert resp.status == 200
+        assert resp.headers["Content-Type"].startswith("text/html")
+        assert resp.headers["Cache-Control"] == "no-cache"
+        body = await resp.text()
+        assert "<title>Crystal Meet</title>" in body
+        assert 'src="/static/sign.js"' in body and 'href="/static/sign.css"' in body
+        assert (await client.get("/static/sign.js")).status == 200
+        assert (await client.get("/static/sign.css")).status == 200
+```
+
+Append to `tests/unit/control/test_page.py`:
+
+```python
+def test_door_sign_follows_the_room_state(browser):
+    with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1") as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#headline").inner_text().startswith("Free until")
+        assert page.locator("#kicker").inner_text().upper() == "AVAILABLE"
+        assert page.locator("#actions").count() == 0
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
+                          data='{"url": "https://zoom.us/j/98765432100"}',
+                          headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=8000)
+        assert page.locator("#headline").inner_text() == "In use"
+        assert page.locator("#kicker").inner_text().upper() == "IN USE"
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave",
+                          data="{}", headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        page.close()
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv/bin/pytest tests/unit/control/test_service.py -q -p no:cacheprovider -k test_sign` and `.venv/bin/pytest tests/unit/control/test_page.py -q -p no:cacheprovider -k door_sign`
+Expected: FAIL with `404` for `/sign` and the browser test timing out on the missing page.
+
+- [ ] **Step 3: Add the route**
+
+In `src/croom/control/service.py`, in `create_app`, directly after `app.router.add_get("/", self._handle_index)` add:
+
+```python
+        app.router.add_get("/sign", self._handle_sign)
+```
+
+and after `_handle_index` add:
+
+```python
+    async def _handle_sign(self, request: web.Request) -> web.StreamResponse:
+        sign = self._static_dir / "sign.html"
+        if not sign.is_file():
+            return web.Response(text="Door sign assets are missing.", status=500)
+        return web.FileResponse(sign, headers={"Cache-Control": "no-cache"})
+```
+
+- [ ] **Step 4: Create the sign page**
+
+Create `src/croom/control/static/sign.html`:
+
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crystal Meet</title>
+<link rel="icon" href="/static/crystalpm-logo-white.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/sign.css">
+</head>
+<body data-state="loading">
+<main class="sign">
+  <header class="top">
+    <div class="brand">
+      <img class="logo" src="/static/crystalpm-logo-white.svg" alt="Crystal PM">
+      <div>
+        <h1 id="room-name">Room</h1>
+        <p id="room-location" class="location"></p>
+      </div>
+    </div>
+    <p id="clock" class="clock"></p>
+  </header>
+
+  <section class="status" aria-live="polite">
+    <p id="kicker" class="kicker">Connecting</p>
+    <p id="headline" class="headline">Connecting</p>
+    <p id="detail" class="detail"></p>
+  </section>
+
+  <section class="upcoming">
+    <p class="kicker">Today</p>
+    <ul id="events" class="events"></ul>
+    <p id="calendar-note" class="note"></p>
+  </section>
+</main>
+<script src="/static/sign.js"></script>
+</body>
+</html>
+```
+
+Create `src/croom/control/static/sign.css`:
+
+```css
+/* Crystal Meet door sign: the background is the room's status. */
+@font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+
+:root {
+  --navy-900: #001636;
+  --navy-800: #16244F;
+  --periwinkle-300: #BDCEFF;
+  --free: #1FA971;
+  --soon: #E8A013;
+  --busy: #B42318;
+  --gutter: clamp(20px, 4vw, 56px);
+  --font: "Lexend", "Segoe UI", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  background: var(--navy-900);
+  color: #fff;
+  font-family: var(--font);
+  font-size: clamp(16px, 1.6vw, 24px);
+  line-height: 1.4;
+  transition: background-color 500ms ease, color 500ms ease;
+}
+@media (prefers-reduced-motion: reduce) { body { transition: none; } }
+
+body[data-state="free"] { background: var(--free); }
+body[data-state="soon"] { background: var(--soon); color: var(--navy-800); }
+body[data-state="occupied"] { background: var(--busy); }
+body[data-state="offline"], body[data-state="loading"] { background: var(--navy-900); }
+
+.sign {
+  min-height: 100%;
+  padding: var(--gutter);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: clamp(20px, 3vh, 40px);
+}
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.brand { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+.logo { width: clamp(110px, 12vw, 170px); height: auto; display: block; }
+body[data-state="soon"] .logo { filter: brightness(0) saturate(100%) invert(11%) sepia(38%) saturate(2400%) hue-rotate(205deg) brightness(90%); }
+h1 { margin: 0; font-size: clamp(1.3rem, 2.6vw, 2.4rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
+.location { margin: 2px 0 0; opacity: 0.85; }
+.clock {
+  margin: 0;
+  font-size: clamp(2.2rem, 7vw, 6rem);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.kicker {
+  margin: 0 0 10px;
+  font-size: clamp(0.75rem, 1.4vw, 1.1rem);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  opacity: 0.9;
+}
+.status { align-self: center; }
+.headline {
+  margin: 0;
+  font-size: clamp(2.4rem, 9vw, 8rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  max-width: 14ch;
+  overflow-wrap: anywhere;
+}
+.detail { margin: 14px 0 0; font-size: clamp(1.1rem, 2.4vw, 2rem); max-width: 40ch; overflow-wrap: anywhere; opacity: 0.92; }
+.detail:empty { display: none; }
+
+.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.event { display: grid; grid-template-columns: 7ch 1fr; gap: 14px; align-items: baseline; }
+.event time { font-variant-numeric: tabular-nums; opacity: 0.85; }
+.event .title { margin: 0; overflow-wrap: anywhere; }
+.note { margin: 6px 0 0; opacity: 0.85; }
+.note:empty { display: none; }
+```
+
+Create `src/croom/control/static/sign.js`:
+
+```javascript
+(function () {
+  "use strict";
+
+  const SOON_MS = 10 * 60 * 1000;
+  const STATUS_EVERY_MS = 5000;
+  const EVENTS_EVERY_MS = 60000;
+  const IN_PROGRESS = ["joining", "in_lobby", "connected", "leaving"];
+
+  const el = (id) => document.getElementById(id);
+  const model = { status: null, events: [], offline: false };
+
+  const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
+  const platformName = (key) => platformNames[key] || key || "";
+  const fmtTime = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
+
+  async function getJson(path) {
+    const response = await fetch(path);
+    if (!response.ok) throw new Error("Request failed (" + response.status + ")");
+    return response.json();
+  }
+
+  async function refreshStatus() {
+    try {
+      model.status = await getJson("/api/status");
+      model.offline = false;
+    } catch (e) {
+      model.offline = true;
+    }
+    render();
+  }
+
+  async function refreshEvents() {
+    try {
+      model.events = (await getJson("/api/calendar/events")).events || [];
+    } catch (e) {
+      // keep the last list
+    }
+    render();
+  }
+
+  function setStatus(state, kicker, headline, detail) {
+    document.body.dataset.state = state;
+    el("kicker").textContent = kicker;
+    el("headline").textContent = headline;
+    el("detail").textContent = detail || "";
+  }
+
+  function render() {
+    if (model.offline || !model.status) {
+      setStatus("offline", "Not connected", "Sign not connected", "Check that Crystal Meet is running on the room's device.");
+      return;
+    }
+    const s = model.status;
+    el("room-name").textContent = s.room.name;
+    el("room-location").textContent = s.room.location;
+    const m = s.meeting;
+    const cal = s.calendar;
+    const current = cal.current;
+    const next = cal.next;
+    const now = Date.now();
+
+    if (IN_PROGRESS.includes(m.state)) {
+      const until = current ? " until " + fmtTime(new Date(current.end_time)) : "";
+      setStatus("occupied", "In use", "In use" + until, m.title || (current ? current.title : platformName(m.platform)));
+    } else if (current) {
+      setStatus("occupied", "Booked", "Booked until " + fmtTime(new Date(current.end_time)), current.title);
+    } else if (next && new Date(next.start_time).getTime() - now <= SOON_MS) {
+      const minutes = Math.max(0, Math.round((new Date(next.start_time).getTime() - now) / 60000));
+      setStatus("soon", "Starting soon", minutes === 0 ? next.title + " is starting" : next.title + " starts in " + plural(minutes, "minute"), fmtTime(new Date(next.start_time)) + " to " + fmtTime(new Date(next.end_time)));
+    } else if (next) {
+      setStatus("free", "Available", "Free until " + fmtTime(new Date(next.start_time)), "Next: " + next.title);
+    } else {
+      setStatus("free", "Available", cal.connected ? "Free for the rest of the day" : "Free", cal.connected ? "Nothing else is booked in here today." : "");
+    }
+
+    renderUpcoming(cal, now);
+  }
+
+  function renderUpcoming(cal, now) {
+    const list = el("events");
+    const note = el("calendar-note");
+    list.replaceChildren();
+    if (!cal.connected) {
+      note.textContent = "";
+      return;
+    }
+    const upcoming = model.events.filter((ev) => new Date(ev.end_time).getTime() > now).slice(0, 3);
+    note.textContent = upcoming.length ? "" : "Nothing else scheduled today.";
+    for (const ev of upcoming) {
+      const li = document.createElement("li");
+      li.className = "event";
+      const time = document.createElement("time");
+      time.dateTime = ev.start_time;
+      time.textContent = fmtTime(new Date(ev.start_time));
+      const title = document.createElement("p");
+      title.className = "title";
+      title.textContent = ev.title;
+      li.append(time, title);
+      list.append(li);
+    }
+  }
+
+  function tick() {
+    el("clock").textContent = fmtTime(new Date());
+  }
+
+  tick();
+  setInterval(tick, 1000);
+  refreshStatus();
+  refreshEvents();
+  setInterval(refreshStatus, STATUS_EVERY_MS);
+  setInterval(refreshEvents, EVENTS_EVERY_MS);
+})();
+```
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `.venv/bin/pytest tests/unit/control/test_service.py tests/unit/control/test_page.py -q -p no:cacheprovider`
+Expected: all pass.
+
+- [ ] **Step 6: Look at the sign**
+
+Serve the page with stub services and capture `/sign` at 1024×600 (landscape) and 600×1024 (portrait) in the free state, then after an API join in the in-use state. Check: green and red backgrounds, the logo, the headline readable at arm's length when the capture is viewed small, no overflow in portrait. Fix before committing.
+
+- [ ] **Step 7: Run the whole suite** (Global Constraints). Expected: at most 87 failed.
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/croom/control/static/sign.html src/croom/control/static/sign.css src/croom/control/static/sign.js src/croom/control/service.py tests/unit/control/test_service.py tests/unit/control/test_page.py
+git commit -m "feat(control): door sign page"
+```
+
+---
+
+### Task 6: Push and final check
 
 **Files:** none new.
 
 - [ ] **Step 1: Confirm nothing user-facing says Croom**
 
 Run: `grep -rn "Croom" src/croom/control/static src/croom-dashboard/frontend/src src/croom-dashboard/frontend/index.html deploy docs/guides/crystal-meet-room-setup/index.html`
+(the sign and room pages included)
 Expected: no output.
 
 - [ ] **Step 2: Run the whole suite** (Global Constraints). Expected: at most 87 failed.

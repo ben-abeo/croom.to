@@ -21,13 +21,13 @@ ROOM = "c_1885abc@resource.calendar.google.com"
 
 
 def item(event_id, summary, conference=None, description="", location="", all_day=False,
-         response="accepted", status="confirmed"):
+         response="accepted", status="confirmed", start=None, end=None):
     """One item as Google's events.list returns it for a room resource calendar."""
     if all_day:
-        start, end = {"date": "2026-09-25"}, {"date": "2026-09-26"}
+        start, end = start or {"date": "2026-09-25"}, end or {"date": "2026-09-26"}
     else:
-        start = {"dateTime": "2026-09-25T09:00:00-05:00", "timeZone": "America/Chicago"}
-        end = {"dateTime": "2026-09-25T09:30:00-05:00", "timeZone": "America/Chicago"}
+        start = start or {"dateTime": "2026-09-25T09:00:00-05:00", "timeZone": "America/Chicago"}
+        end = end or {"dateTime": "2026-09-25T09:30:00-05:00", "timeZone": "America/Chicago"}
     data = {
         "kind": "calendar#event", "id": event_id, "status": status, "summary": summary,
         "start": start, "end": end, "description": description, "location": location,
@@ -167,10 +167,11 @@ class TestApiCalls:
         task.cancel()
         assert ticks >= 10
 
-    async def test_api_errors_give_no_events(self):
+    async def test_api_errors_propagate_so_the_caller_keeps_its_last_list(self):
         provider = provider_with(FakeGoogleService([], list_error=http_error(500)))
         now = datetime.now(timezone.utc)
-        assert await provider.get_events(ROOM, now, now + timedelta(days=1)) == []
+        with pytest.raises(HttpError):
+            await provider.get_events(ROOM, now, now + timedelta(days=1))
 
     async def test_get_calendar_returns_name_and_id(self):
         provider = provider_with(FakeGoogleService(calendar={"id": ROOM, "summary": "Room 1"}))
@@ -186,3 +187,15 @@ class TestApiCalls:
         provider = provider_with(FakeGoogleService(get_error=http_error(500)))
         with pytest.raises(HttpError):
             await provider.get_calendar(ROOM)
+
+
+class TestReviewFixes:
+    async def test_all_day_bookings_are_timezone_aware_and_sortable(self):
+        events = await fetch([item("e5", "Office closed", all_day=True), item("e1", "Design review", conference=MEET)])
+        assert all(e.start_time.tzinfo is not None and e.end_time.tzinfo is not None for e in events)
+        assert [e.id for e in sorted(events, key=lambda e: e.start_time)] == ["e5", "e1"]
+
+    async def test_typed_link_loses_trailing_punctuation_and_html_entities(self):
+        [event] = await fetch([item("e8", "Board call",
+                                    description="Join here: https://zoom.us/j/12345678901?pwd=abc&amp;uname=Room.")])
+        assert event.meeting_url == "https://zoom.us/j/12345678901?pwd=abc&uname=Room"

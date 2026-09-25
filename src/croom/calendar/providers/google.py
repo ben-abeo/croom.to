@@ -180,27 +180,24 @@ class GoogleCalendarProvider(CalendarProvider):
         time_max: datetime,
         max_results: int = 100
     ) -> List[CalendarEvent]:
-        """Get events from Google Calendar; the API call runs in a worker thread."""
+        """Get events from Google Calendar; the API call runs in a worker thread. API errors propagate."""
         if not self._authenticated or not self._service:
             return []
         if time_min.tzinfo is None:
             time_min = time_min.replace(tzinfo=timezone.utc)
         if time_max.tzinfo is None:
             time_max = time_max.replace(tzinfo=timezone.utc)
-        try:
-            result = await asyncio.to_thread(
-                lambda: self._service.events().list(
-                    calendarId=calendar_id,
-                    timeMin=time_min.isoformat(),
-                    timeMax=time_max.isoformat(),
-                    maxResults=max_results,
-                    singleEvents=True,
-                    orderBy='startTime',
-                ).execute()
-            )
-        except HttpError as e:
-            logger.error(f"Failed to fetch events: {e}")
-            return []
+        # Errors propagate: the calendar service keeps its last good list and reports the problem.
+        result = await asyncio.to_thread(
+            lambda: self._service.events().list(
+                calendarId=calendar_id,
+                timeMin=time_min.isoformat(),
+                timeMax=time_max.isoformat(),
+                maxResults=max_results,
+                singleEvents=True,
+                orderBy='startTime',
+            ).execute()
+        )
         events = []
         for item in result.get('items', []):
             event = self._parse_event(item, calendar_id)
@@ -219,8 +216,10 @@ class GoogleCalendarProvider(CalendarProvider):
             # Handle all-day events
             is_all_day = 'date' in start
             if is_all_day:
-                start_time = datetime.fromisoformat(start['date'])
-                end_time = datetime.fromisoformat(end['date'])
+                # Google gives dates only; make them aware in the device's zone so they sort with timed events
+                local_tz = datetime.now().astimezone().tzinfo
+                start_time = datetime.fromisoformat(start['date']).replace(tzinfo=local_tz)
+                end_time = datetime.fromisoformat(end['date']).replace(tzinfo=local_tz)
             else:
                 start_time = datetime.fromisoformat(
                     start.get('dateTime', '').replace('Z', '+00:00')

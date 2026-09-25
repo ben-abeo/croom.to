@@ -4,6 +4,7 @@ the config field, the calendar id wiring, the not-configured rule and the
 declined-booking filter.
 """
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
@@ -103,6 +104,8 @@ class TestStartWhenNotConfigured:
     async def test_initialize_uses_only_the_configured_calendar(self, tmp_path):
         service = CalendarService.from_config(google_config(tmp_path))
         with patch("croom.calendar.service.GoogleCalendarProvider.authenticate", new=AsyncMock(return_value=True)), \
+             patch("croom.calendar.service.GoogleCalendarProvider.get_calendar",
+                   new=AsyncMock(return_value={"id": ROOM, "name": "Room 1"})), \
              patch("croom.calendar.service.GoogleCalendarProvider.get_calendars",
                    new=AsyncMock(return_value=[{"id": "primary", "name": "rooms@p", "primary": True}])) as listing:
             assert await service.initialize() is True
@@ -130,3 +133,57 @@ class TestDeclinedBookings:
         ])
         await service._fetch_events()
         assert [e.id for e in service.events] == ["kept"]
+
+
+class TestPollHealth:
+    async def test_start_retries_until_google_is_reachable(self, tmp_path):
+        service = CalendarService.from_config(google_config(tmp_path))
+        service._poll_interval = 0.01
+        with patch("croom.calendar.service.GoogleCalendarProvider.authenticate",
+                   new=AsyncMock(side_effect=[False, False, True])), \
+             patch("croom.calendar.service.GoogleCalendarProvider.get_calendar",
+                   new=AsyncMock(return_value={"id": ROOM, "name": "Room 1"})), \
+             patch.object(service, "_fetch_events", new=AsyncMock()) as fetch:
+            await service.start()
+            assert service.connected is False and service._poll_task is not None
+            for _ in range(300):
+                if service.connected:
+                    break
+                await asyncio.sleep(0.01)
+            assert service.connected is True
+            await service.stop()
+        assert fetch.await_count >= 1
+
+    async def test_unshared_calendar_is_not_connected_and_says_who_to_share_with(self, tmp_path, caplog):
+        service = CalendarService.from_config(google_config(tmp_path))
+        with patch("croom.calendar.service.GoogleCalendarProvider.authenticate", new=AsyncMock(return_value=True)), \
+             patch("croom.calendar.service.GoogleCalendarProvider.get_calendar",
+                   new=AsyncMock(side_effect=LookupError(ROOM))), \
+             caplog.at_level(logging.INFO):
+            assert await service.initialize() is False
+        assert service.connected is False
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "share the room's calendar with rooms@p.iam.gserviceaccount.com" in warnings[0] and ROOM in warnings[0]
+
+    async def test_failed_poll_keeps_the_last_bookings_and_drops_connected(self):
+        service = CalendarService(config={"provider": "google", "calendar_ids": [ROOM]})
+        service._initialized = True
+        service._calendar_ids = [ROOM]
+        service._provider = AsyncMock()
+        service._provider.get_events = AsyncMock(side_effect=[
+            [booking("kept", 10)], RuntimeError("backendError"), [booking("kept", 10), booking("later", 90)],
+        ])
+        await service._fetch_events()
+        assert service.connected is True and [e.id for e in service.events] == ["kept"]
+        await service._fetch_events()
+        assert service.connected is False and [e.id for e in service.events] == ["kept"]
+        await service._fetch_events()
+        assert service.connected is True and [e.id for e in service.events] == ["kept", "later"]
+
+
+class TestWhitespace:
+    def test_calendar_id_is_stripped(self, tmp_path):
+        config = google_config(tmp_path, calendar_id=f"  {ROOM} ")
+        assert google_not_configured_reason(config.calendar) is None
+        assert CalendarService.from_config(config).config["calendar_ids"] == [ROOM]

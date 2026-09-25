@@ -3,14 +3,13 @@
 words (spec 2026-09-25 section 4.4). Exit 0 when the calendar was read, 1 otherwise.
 """
 
-import json
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional, TextIO
 
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.calendar.providers.google import GoogleCalendarProvider
-from croom.calendar.service import google_not_configured_reason
+from croom.calendar.service import google_not_configured_reason, service_account_email
 from croom.core.config import Config
 
 DAYS_AHEAD = 7
@@ -20,15 +19,6 @@ LINK_WORDS = {
     MeetingPlatform.MICROSOFT_TEAMS: "Teams link",
     MeetingPlatform.WEBEX: "Webex link",
 }
-
-
-def service_account_email(path: str) -> str:
-    """The client_email inside a service account key file, or '' when it cannot be read."""
-    try:
-        with open(path, encoding="utf-8") as f:
-            return str(json.load(f).get("client_email", ""))
-    except (OSError, ValueError, AttributeError):
-        return ""
 
 
 def link_words(event: CalendarEvent) -> str:
@@ -65,10 +55,11 @@ async def check_calendar(
               "service account key, or the project's Calendar API is not enabled.", file=out)
         return 1
     print(f"Google Calendar: connected as {account}", file=out)
+    calendar_id = calendar.google_calendar_id.strip()
     try:
-        info = await provider.get_calendar(calendar.google_calendar_id)
+        info = await provider.get_calendar(calendar_id)
     except LookupError:
-        print(f"Calendar {calendar.google_calendar_id} not found or not shared: in Google Calendar, "
+        print(f"Calendar {calendar_id} not found or not shared: in Google Calendar, "
               f"share the room's calendar with {account} (See all event details), and check the "
               "address in the config.", file=out)
         return 1

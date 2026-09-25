@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any, List
 from enum import Enum
+import html
 import re
 
 
@@ -137,6 +138,7 @@ def extract_meeting_url(text: str) -> Optional[str]:
     """
     if not text:
         return None
+    text = html.unescape(text)  # descriptions arrive HTML-escaped (&amp; inside links)
 
     # Patterns for various meeting platforms
     patterns = [
@@ -155,7 +157,7 @@ def extract_meeting_url(text: str) -> Optional[str]:
     for pattern in patterns:
         match = re.search(pattern, text, re.IGNORECASE)
         if match:
-            return match.group(0)
+            return match.group(0).rstrip('.,;:)>\'"')  # a link at the end of a sentence
 
     return None
 

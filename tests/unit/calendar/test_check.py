@@ -89,6 +89,12 @@ class TestSuccess:
         code, text = await run(config_for(tmp_path), FakeProvider())
         assert code == 0 and "No bookings in the next 7 days." in text
 
+    async def test_calendar_id_is_stripped_before_lookup(self, tmp_path):
+        provider = FakeProvider()
+        code, text = await run(config_for(tmp_path, calendar_id=f" {ROOM} "), provider)
+        assert code == 0, text
+        assert provider.requested == ROOM
+
 
 class TestFailures:
     async def test_no_google_provider(self, tmp_path):

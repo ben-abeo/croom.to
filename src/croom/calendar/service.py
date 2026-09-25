@@ -5,6 +5,7 @@ Manages calendar providers and coordinates event polling.
 """
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timezone, timedelta
@@ -41,6 +42,15 @@ def google_not_configured_reason(calendar) -> Optional[str]:
     if calendar_id.startswith(PLACEHOLDER_PREFIX):
         return f"google_calendar_id is still the placeholder {calendar_id}; put the room's calendar address in the config"
     return None
+
+
+def service_account_email(path: str) -> str:
+    """The client_email inside a service account key file, or '' when it cannot be read."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            return str(json.load(f).get("client_email", ""))
+    except (OSError, ValueError, AttributeError):
+        return ""
 
 
 class CalendarService(Service):
@@ -89,6 +99,11 @@ class CalendarService(Service):
         self._poll_task: Optional[asyncio.Task] = None
         self._running = False
 
+        # Health: connected means authenticated and the last poll succeeded;
+        # a problem is logged once at WARNING and repeated at DEBUG.
+        self._last_poll_ok = True
+        self._last_problem: Optional[str] = None
+
         # Track notified meetings to avoid duplicate notifications
         self._notified_meetings: Set[str] = set()
 
@@ -104,8 +119,9 @@ class CalendarService(Service):
             not_configured = google_not_configured_reason(calendar)
             if calendar.google_credentials_path:
                 credentials = {"service_account_file": calendar.google_credentials_path}
-            if calendar.google_calendar_id:
-                calendar_ids = [calendar.google_calendar_id]
+            calendar_id = calendar.google_calendar_id.strip()
+            if calendar_id:
+                calendar_ids = [calendar_id]
         elif provider == "microsoft":
             credentials = {
                 "client_id": calendar.microsoft_client_id,
@@ -127,8 +143,8 @@ class CalendarService(Service):
 
     @property
     def connected(self) -> bool:
-        """True once a provider has authenticated and the service polls the calendar."""
-        return self._initialized
+        """True while a provider is authenticated and the last poll succeeded."""
+        return self._initialized and self._last_poll_ok
 
     @property
     def next_meeting(self) -> Optional[CalendarEvent]:
@@ -176,11 +192,13 @@ class CalendarService(Service):
 
             # Authenticate
             if not await self._provider.authenticate(credentials):
-                logger.error(f"Failed to authenticate with {provider_name}")
+                self._report(f"Could not sign in to {provider_name}: check the key file and that this device can reach the internet")
                 return False
 
             # Set calendar IDs or discover primary
             if calendar_ids:
+                if not await self._calendar_is_readable(calendar_ids[0], credentials):
+                    return False
                 self._calendar_ids = calendar_ids
             else:
                 # Try to get primary calendar
@@ -197,23 +215,59 @@ class CalendarService(Service):
                     self._calendar_ids = []
 
             self._initialized = True
+            self._last_poll_ok = True
+            self._clear_problem()
             logger.info(f"Calendar service initialized with {provider_name}")
             return True
 
         except Exception as e:
-            logger.error(f"Failed to initialize calendar service: {e}")
+            self._report(f"Failed to initialize calendar service: {e}")
             return False
 
+    async def _calendar_is_readable(self, calendar_id: str, credentials: Dict[str, Any]) -> bool:
+        """Confirm the configured calendar exists and is shared with this account, in words the admin can act on."""
+        lookup = getattr(self._provider, 'get_calendar', None)
+        if lookup is None:
+            return True
+        try:
+            await lookup(calendar_id)
+        except LookupError:
+            account = service_account_email(credentials.get('service_account_file', '')) or "the service account"
+            self._report(f"Calendar {calendar_id} not found or not shared: share the room's calendar with {account} "
+                         "(See all event details), and check the address in the config")
+            return False
+        return True
+
+    def _report(self, message: str) -> None:
+        """Log a problem once at WARNING; the same problem again goes to DEBUG so the journal stays readable."""
+        if message != self._last_problem:
+            logger.warning(message)
+            self._last_problem = message
+        else:
+            logger.debug(message)
+
+    def _clear_problem(self) -> None:
+        if self._last_problem is not None:
+            logger.info("Calendar connected again")
+            self._last_problem = None
+
+    def _can_retry(self) -> bool:
+        """Retry initialising when a provider and credentials are configured: the usual cause is Google being unreachable."""
+        return bool(self.config.get('provider')) and not self.config.get('not_configured') and bool(self.config.get('credentials'))
+
     async def start(self) -> None:
-        """Start polling the calendar. Runs idle when no provider could be initialized."""
+        """Start polling. Idle when nothing is configured; keeps retrying when Google cannot be reached yet."""
         if self._running:
             return
         if not self._initialized and not await self.initialize():
-            logger.info("Calendar service running without a provider; polling disabled")
+            if not self._can_retry():
+                logger.info("Calendar service running without a provider; polling disabled")
+                self._running = True
+                return
+            logger.warning(f"Calendar not connected yet; retrying every {self._poll_interval}s")
         self._running = True
-        if not self._initialized:
-            return
-        await self._fetch_events()
+        if self._initialized:
+            await self._fetch_events()
         self._poll_task = asyncio.create_task(self._poll_loop())
         logger.info(f"Calendar polling started (interval: {self._poll_interval}s)")
 
@@ -236,6 +290,8 @@ class CalendarService(Service):
         while self._running:
             try:
                 await asyncio.sleep(self._poll_interval)
+                if not self._initialized and not await self.initialize():
+                    continue
                 await self._fetch_events()
                 self._check_upcoming_meetings()
             except asyncio.CancelledError:
@@ -269,6 +325,8 @@ class CalendarService(Service):
                     all_events[event.id] = event
 
             self._events = all_events
+            self._last_poll_ok = True
+            self._clear_problem()
 
             # Update next meeting
             self._update_next_meeting()
@@ -283,7 +341,9 @@ class CalendarService(Service):
             logger.debug(f"Fetched {len(all_events)} calendar events")
 
         except Exception as e:
-            logger.error(f"Failed to fetch calendar events: {e}")
+            # Keep the last good bookings; the page and sign show "not connected" until a poll succeeds
+            self._last_poll_ok = False
+            self._report(f"Calendar poll failed, keeping the last bookings: {e}")
 
     def _update_next_meeting(self) -> None:
         """Update the next meeting reference."""

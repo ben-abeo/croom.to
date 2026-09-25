@@ -1,0 +1,35 @@
+# Crystal Meet room device: Room 1
+# Replace the three REPLACE values, then install with:
+#   sudo bash installer/install.sh --config room-1.yaml
+version: 2
+
+room:
+  name: "Room 1"
+  location: "REPLACE_WITH_LOCATION"
+  timezone: "America/Chicago"
+
+meeting:
+  platforms: [zoom, google_meet]
+  default_platform: auto
+  join_early_minutes: 1
+  auto_leave: true
+  camera_default_on: true
+  mic_default_on: true
+
+calendar:
+  providers: []
+
+ai:
+  enabled: false
+
+control:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+
+dashboard:
+  enabled: true
+  url: "http://REPLACE_WITH_DASHBOARD_ADDRESS:3001"
+  enrollment_token: "REPLACE_WITH_TOKEN_FROM_DASHBOARD"
+  heartbeat_interval_seconds: 30
+  metrics_interval_seconds: 60

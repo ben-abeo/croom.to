@@ -21,11 +21,15 @@ INSTALL_DIR="/opt/croom"
 CONFIG_DIR="/etc/croom"
 DATA_DIR="/var/lib/croom"
 LOG_DIR="/var/log/croom"
-CROOM_USER="croom"
+# The agent runs as the desktop user that invoked sudo, so Chromium can use the
+# screen and audio of the signed-in session. Override the source with CROOM_REPO.
+CROOM_USER="${SUDO_USER:-}"
+CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"
+ROOM_CONFIG=""
 
 # Log function
 log() {
-    echo -e "${GREEN}[Croom]${NC} $1"
+    echo -e "${GREEN}[Crystal Meet]${NC} $1"
 }
 
 warn() {
@@ -42,6 +46,17 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         error "This script must be run as root (use sudo)"
     fi
+}
+
+# The service needs a desktop session: refuse a bare root shell.
+check_desktop_user() {
+    if [[ -z "$CROOM_USER" || "$CROOM_USER" == "root" ]]; then
+        error "Run this installer with sudo from the desktop user account, for example: sudo bash installer/install.sh"
+    fi
+    if ! id "$CROOM_USER" &>/dev/null; then
+        error "User '$CROOM_USER' does not exist"
+    fi
+    log "Crystal Meet will run as user $CROOM_USER"
 }
 
 # Check platform compatibility
@@ -130,18 +145,9 @@ install_dependencies() {
     log "Dependencies installed"
 }
 
-# Create croom user
+# Give the desktop user access to cameras, audio and input devices
 create_user() {
-    log "Creating croom user..."
-
-    if id "$CROOM_USER" &>/dev/null; then
-        log "User $CROOM_USER already exists"
-    else
-        useradd -r -s /bin/false -d "$INSTALL_DIR" "$CROOM_USER"
-        log "User $CROOM_USER created"
-    fi
-
-    # Add to required groups
+    log "Preparing user $CROOM_USER..."
     usermod -a -G video,audio,input,dialout,gpio "$CROOM_USER" 2>/dev/null || true
 }
 
@@ -167,14 +173,10 @@ install_croom() {
     # Create virtual environment
     python3 -m venv "$INSTALL_DIR/venv"
 
-    # Install package
+    # Install package from the configured repository
     "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-    "$INSTALL_DIR/venv/bin/pip" install croom || {
-        # If package not on PyPI, install from source
-        log "Installing from source..."
-        "$INSTALL_DIR/venv/bin/pip" install /usr/local/src/croom 2>/dev/null || \
-        "$INSTALL_DIR/venv/bin/pip" install git+https://github.com/amirhmoradi/croom.to.git
-    }
+    log "Installing from $CROOM_REPO"
+    "$INSTALL_DIR/venv/bin/pip" install "$CROOM_REPO"
 
     # Install browser automation
     "$INSTALL_DIR/venv/bin/pip" install playwright
@@ -186,6 +188,15 @@ install_croom() {
 # Create default configuration
 create_config() {
     log "Creating configuration..."
+    mkdir -p "$CONFIG_DIR"
+
+    if [[ -n "$ROOM_CONFIG" ]]; then
+        cp "$ROOM_CONFIG" "$CONFIG_DIR/config.yaml"
+        chown "$CROOM_USER:$CROOM_USER" "$CONFIG_DIR/config.yaml"
+        chmod 640 "$CONFIG_DIR/config.yaml"
+        log "Installed room configuration from $ROOM_CONFIG"
+        return
+    fi
 
     if [[ -f "$CONFIG_DIR/config.yaml" ]]; then
         log "Configuration already exists, skipping"
@@ -193,7 +204,7 @@ create_config() {
     fi
 
     cat > "$CONFIG_DIR/config.yaml" << 'EOF'
-# Croom Configuration
+# Crystal Meet room configuration (croom)
 version: 2
 
 room:
@@ -203,9 +214,8 @@ room:
 
 meeting:
   platforms:
-    - google_meet
-    - teams
     - zoom
+    - google_meet
   default_platform: auto
   join_early_minutes: 1
   auto_leave: true
@@ -219,7 +229,7 @@ calendar:
   sync_interval_seconds: 60
 
 ai:
-  enabled: true
+  enabled: false
   backend: auto
   person_detection: true
   noise_reduction: true
@@ -248,6 +258,11 @@ display:
   power_on_boot: true
   power_off_shutdown: true
   touch_enabled: true
+
+control:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
 
 dashboard:
   enabled: true
@@ -280,7 +295,7 @@ create_service() {
 
     cat > /etc/systemd/system/croom.service << EOF
 [Unit]
-Description=Croom Conference Room Agent
+Description=Crystal Meet room agent (croom)
 After=network-online.target pulseaudio.service
 Wants=network-online.target
 
@@ -293,7 +308,7 @@ ExecStart=$INSTALL_DIR/venv/bin/python -m croom.core.agent -c $CONFIG_DIR/config
 Restart=always
 RestartSec=10
 Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$CROOM_USER")
 
 [Install]
 WantedBy=multi-user.target
@@ -302,7 +317,7 @@ EOF
     # Touch UI service (optional)
     cat > /etc/systemd/system/croom-ui.service << EOF
 [Unit]
-Description=Croom Touch UI
+Description=Crystal Meet touch UI (croom-ui)
 After=croom.service
 Wants=croom.service
 
@@ -315,7 +330,7 @@ ExecStart=$INSTALL_DIR/venv/bin/python -m croom_ui.main -c $CONFIG_DIR/config.ya
 Restart=always
 RestartSec=10
 Environment=DISPLAY=:0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=XDG_RUNTIME_DIR=/run/user/$(id -u "$CROOM_USER")
 Environment=QT_QPA_PLATFORM=eglfs
 
 [Install]
@@ -343,12 +358,13 @@ enable_services() {
 print_completion() {
     echo ""
     echo -e "${GREEN}========================================${NC}"
-    echo -e "${GREEN}  Croom Installation Complete!${NC}"
+    echo -e "${GREEN}  Crystal Meet installation complete${NC}"
     echo -e "${GREEN}========================================${NC}"
     echo ""
     echo "Version: $CROOM_VERSION"
     echo "Install directory: $INSTALL_DIR"
     echo "Configuration: $CONFIG_DIR/config.yaml"
+    echo "Room page: http://$(hostname).local:8080/  (or use this device's IP address)"
     echo ""
     echo "Next steps:"
     echo "1. Edit configuration: sudo nano $CONFIG_DIR/config.yaml"
@@ -367,11 +383,12 @@ print_completion() {
 main() {
     echo ""
     echo -e "${BLUE}========================================${NC}"
-    echo -e "${BLUE}  Croom Installer v$CROOM_VERSION${NC}"
+    echo -e "${BLUE}  Crystal Meet installer v$CROOM_VERSION${NC}"
     echo -e "${BLUE}========================================${NC}"
     echo ""
 
     check_root
+    check_desktop_user
     check_platform
     create_user
     create_directories
@@ -383,30 +400,46 @@ main() {
     print_completion
 }
 
-# Parse arguments
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --enable-ui)
-            ENABLE_UI="yes"
-            shift
-            ;;
-        --no-service)
-            NO_SERVICE="yes"
-            shift
-            ;;
-        --help)
-            echo "Usage: $0 [options]"
-            echo ""
-            echo "Options:"
-            echo "  --enable-ui     Enable Touch UI service"
-            echo "  --no-service    Don't create systemd services"
-            echo "  --help          Show this help"
-            exit 0
-            ;;
-        *)
-            error "Unknown option: $1"
-            ;;
-    esac
-done
+# Parse arguments and run only when executed, not when sourced by tests
+run_installer() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --config)
+                ROOM_CONFIG="$2"
+                if [[ -z "$ROOM_CONFIG" || ! -f "$ROOM_CONFIG" ]]; then
+                    error "Config file not found: ${ROOM_CONFIG:-<missing>}"
+                fi
+                shift 2
+                ;;
+            --enable-ui)
+                ENABLE_UI="yes"
+                shift
+                ;;
+            --no-service)
+                NO_SERVICE="yes"
+                shift
+                ;;
+            --help)
+                echo "Usage: $0 [options]"
+                echo ""
+                echo "Options:"
+                echo "  --config FILE   Install a prepared room config as /etc/croom/config.yaml"
+                echo "  --enable-ui     Enable Touch UI service"
+                echo "  --no-service    Don't create systemd services"
+                echo "  --help          Show this help"
+                echo ""
+                echo "Environment:"
+                echo "  CROOM_REPO      pip source to install (default: this fork on GitHub)"
+                exit 0
+                ;;
+            *)
+                error "Unknown option: $1"
+                ;;
+        esac
+    done
+    main
+}
 
-main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    run_installer "$@"
+fi

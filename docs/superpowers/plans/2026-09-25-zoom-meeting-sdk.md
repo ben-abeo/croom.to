@@ -733,7 +733,7 @@ async def test_joins_with_the_one_time_parameters_and_reports_connected():
         [join] = await run.calls("join")
         assert join[1] == {"signature": "sig.nature.x", "meetingNumber": "99612060433", "passWord": "abc123",
                            "userName": "Room 1", "userEmail": "", "zak": "ZAK-1"}
-        assert [s for s, _ in run.events][:2] == ["joining", "joining"] or run.events[0][0] == "joining"
+        assert run.events[0][0] == "joining" and run.events[-1][0] == "connected"
         assert await run.page.evaluate("window.crystalMeet.state") == "connected"
         assert await run.page.evaluate("window.crystalMeet.userId") == 16777216
         [lib] = await run.calls("setZoomJSLib")

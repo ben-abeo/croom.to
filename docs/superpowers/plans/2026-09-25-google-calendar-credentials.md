@@ -23,6 +23,7 @@
 - Run tests with `.venv/bin/pytest` from the repo root. After every task run `bash /tmp/claude-1000/-home-cpm-ssh/f78b4b20-e6f0-4204-894b-193a8d8a2549/scratchpad/suite-gate.sh <label>` (runs the whole suite minus the stalling upstream v4l2 test and compares with the 87-entry baseline) and confirm `GATE: PASSED` and every test this plan adds passing. Note: the upstream tests in `tests/unit/calendar/test_service.py` classes `TestCalendarEvent`, `TestCalendarService` and `TestCalendarServiceAutoJoin` are among the 87 baseline failures; leave them alone.
 - Google client libraries become declared dependencies (`google-api-python-client`, `google-auth`, `google-auth-httplib2`) and are installed into `.venv` in Task 1; tests that need them use `pytest.importorskip("googleapiclient")`.
 - The check command is `croom --check-calendar [-c CONFIG]`, exit 0 when the calendar was read, 1 otherwise, output on stdout.
+- `README.md` starts with the Crystal Meet section (Task 6) and links every file under `docs/superpowers/specs` and `docs/superpowers/plans`; the upstream README text stays below it unchanged.
 
 ## Review Focus
 
@@ -54,6 +55,7 @@
 | `tests/unit/calendar/test_check.py` | Check command words, exit codes, CLI flag. |
 | `tests/unit/calendar/test_service.py` | One existing assertion updated to the new `from_config` dict. |
 | `tests/unit/installer/test_install_script.py`, `tests/unit/deploy/test_room_configs.py`, `tests/unit/docs/test_google_calendar_guide.py` | Installer option, room configs, guides. |
+| `README.md`, `tests/unit/docs/test_readme.py` | Crystal Meet section first: pieces, room setup, configs, dashboard, development, implementation notes linking every spec and plan; the upstream README kept below. |
 
 ---
 
@@ -1762,7 +1764,241 @@ git commit -m "docs: Google Calendar guide for Crystal Meet rooms, with one shar
 
 ---
 
-### Task 6: Push and final check
+### Task 6: README with setup and implementation notes
+
+**Files:**
+- Modify: `README.md` (prepend a section; the upstream text stays below)
+- Test: `tests/unit/docs/test_readme.py`
+
+**Interfaces:**
+- Consumes: the installer options (Task 4), the check command (Task 3), both guides (Task 5), the config keys (Task 1), the spec and plan file names under `docs/superpowers`.
+- Produces: the README section that later work extends; `test_readme_links_every_spec_and_plan` fails whenever a new spec or plan is added without a README link, which is the intended reminder.
+
+- [ ] **Step 1: Write the failing tests**
+
+Create `tests/unit/docs/test_readme.py`:
+
+```python
+"""
+The README explains how to set up and develop Crystal Meet, points at both
+guides, and links every design spec and implementation plan.
+"""
+
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[3]
+README = REPO / "README.md"
+
+
+def test_readme_starts_with_crystal_meet_and_keeps_upstream():
+    text = README.read_text(encoding="utf-8")
+    assert text.lstrip().startswith("# Crystal Meet")
+    assert "# 🎥 Croom" in text  # the upstream project's README stays below
+
+
+def test_readme_names_the_setup_pieces():
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "installer/install.sh --config",
+        "--credentials",
+        "deploy/rooms/",
+        ":8080/sign",
+        "croom --check-calendar",
+        "docs/guides/crystal-meet-room-setup.pdf",
+        "docs/guides/crystal-meet-google-calendar.pdf",
+        "npm run dev",
+        ".venv/bin/pytest",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_links_every_spec_and_plan():
+    text = README.read_text(encoding="utf-8")
+    for folder in ("specs", "plans"):
+        files = sorted((REPO / "docs" / "superpowers" / folder).glob("*.md"))
+        assert files, folder
+        for path in files:
+            assert path.relative_to(REPO).as_posix() in text, path.name
+```
+
+- [ ] **Step 2: Run the tests to verify they fail**
+
+Run: `.venv/bin/pytest tests/unit/docs/test_readme.py -q -p no:cacheprovider`
+Expected: FAIL: the README starts with the upstream banner, not `# Crystal Meet`.
+
+- [ ] **Step 3: Prepend the Crystal Meet section**
+
+Create the section text in a scratch file, then prepend it. Save the following as `/tmp/claude-1000/-home-cpm-ssh/f78b4b20-e6f0-4204-894b-193a8d8a2549/scratchpad/readme-crystal-meet.md`:
+
+```markdown
+# Crystal Meet
+
+Crystal PM's conference rooms: a Raspberry Pi behind each TV joins Zoom and
+Google Meet calls, a touchscreen on the table opens the room page to join and
+control the call, a small screen by the door shows whether the room is free,
+and one dashboard watches every room. It is a fork of
+[croom.to](https://github.com/amirhmoradi/croom.to); the upstream README
+follows this section. The code keeps upstream's `croom` names for the package,
+the command, the service units and the folders under `/etc` and `/opt`.
+
+## How the pieces fit
+
+| Piece | Where it runs | What it does |
+|---|---|---|
+| Room device, the `croom` agent | A Raspberry Pi behind the TV, one per room | Joins meetings in a headed Chromium, reads the room's Google Calendar, serves the room page and the door sign, reports to the dashboard. |
+| Room page `http://<device>:8080/` | Any browser on the office network, usually a tablet on the table | Today's bookings, Join now, Mute, Turn camera off, Leave, and a box to paste a Zoom or Meet link. |
+| Door sign `http://<device>:8080/sign` | A small screen by the door, PoE or Wi-Fi | Green when free, amber ten minutes before a booking, red while in use or booked. |
+| Dashboard, `src/croom-dashboard` | One server; this fork runs it on a Windows PC under WSL2 | Fleet overview, device status, enrollment tokens on the Provisioning page. |
+
+Neither screen is cabled to the Pi: each only needs a browser, power and the
+network. The device joins nothing by itself; someone presses Join now.
+
+## Set up a room
+
+Follow the two guides in this order:
+
+1. [Set up a Crystal Meet room](docs/guides/crystal-meet-room-setup.pdf): prepare
+   the Pi, create the room on the dashboard, install with the room's config,
+   first run, point the table screen and the door sign at the device.
+2. [Connect Crystal Meet rooms to Google Calendar](docs/guides/crystal-meet-google-calendar.pdf):
+   room resources in Google Workspace, one service account and key, share each
+   room calendar with it, put the key and the calendar address on the device.
+
+The commands the guides walk through, for reference:
+
+```bash
+git clone https://github.com/ben-abeo/croom.to.git && cd croom.to
+cp deploy/rooms/room-1.yaml ~/room.yaml            # then edit the four REPLACE values
+sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-service-account.json
+sudo systemctl start croom
+/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
+```
+
+Installer options: `--config FILE` installs a prepared room config as
+`/etc/croom/config.yaml`; `--credentials FILE` installs a Google service
+account key as `/etc/croom/google-service-account.json`, readable only by the
+service user; `--enable-ui` and `--no-service` are upstream options; the
+`CROOM_REPO` environment variable overrides the pip source, which defaults to
+this fork's `main` branch. Run the installer with `sudo` from the desktop user
+account: the service runs as that user so Chromium can use the TV and the
+room's audio. It installs the agent into `/opt/croom/venv`, Playwright's
+Chromium into `/opt/croom/browsers`, and a `croom.service` unit that waits for
+the desktop before starting.
+
+## Configure a room
+
+`deploy/rooms/` holds one config per room with placeholders, and its README
+lists the values to replace. The sections that matter:
+
+| Section | Keys | Notes |
+|---|---|---|
+| `room` | `name`, `location`, `timezone` | The name is shown on the page, the sign and the dashboard. |
+| `meeting` | `platforms: [zoom, google_meet]` | Which links the room can join; joins are limited to those platforms' hostnames. |
+| `calendar` | `providers: [google]`, `google_credentials_path`, `google_calendar_id`, `sync_interval_seconds` | The room's calendar address looks like `c_1885...@resource.calendar.google.com`. A placeholder or a missing key logs one line and the room works with pasted links only. |
+| `control` | `enabled`, `host`, `port` | The room page and sign on port 8080, open on the LAN by design. |
+| `dashboard` | `url`, `enrollment_token`, `heartbeat_interval_seconds` | The token comes from the dashboard's Provisioning page and works once. |
+
+Never commit a real token or key.
+
+## Run the dashboard
+
+```bash
+docker run -d --name croom_postgres -e POSTGRES_USER=croom -e POSTGRES_PASSWORD=croom -e POSTGRES_DB=croom \
+  -p 127.0.0.1:5432:5432 -v croom_pgdata:/var/lib/postgresql/data --restart unless-stopped postgres:16-alpine
+cd src/croom-dashboard/backend && npm install && npm run dev     # API and WebSocket on :3001; settings in backend/.env (not committed)
+cd src/croom-dashboard/frontend && npm install && npm run dev    # web app on :3000, proxies /api and /ws to :3001
+```
+
+Open `http://localhost:3000`, sign in with the admin account the backend
+creates on first start, and use Provisioning to create one token per room.
+Devices enrol with `POST /api/provisioning/enroll` and then keep a WebSocket
+open for heartbeats, status and meeting events. Under WSL2, turn on mirrored
+networking or forward ports 3000 and 3001 so the Pis can reach the dashboard.
+Restart the Vite dev server after changing `tailwind.config.js`.
+
+## Develop and test
+
+```bash
+python3 -m venv .venv && .venv/bin/pip install -e ".[dev]" && .venv/bin/playwright install chromium
+.venv/bin/pytest -q -p no:cacheprovider --deselect tests/unit/video/test_v4l2_camera.py::TestV4L2Camera::test_start
+.venv/bin/croom -v -c ~/.config/croom/config.yaml                 # run the agent on this machine (WSL2 with WSLg works)
+.venv/bin/python docs/guides/crystal-meet-room-setup/build.py     # rebuild a guide's PDF after editing its index.html
+```
+
+The upstream suite carries 87 tests that fail because they were written for
+code that never ran, and the deselected test stalls; leave them. Everything
+this fork added lives under `tests/unit/control`, `tests/unit/calendar`,
+`tests/unit/deploy`, `tests/unit/installer` and `tests/unit/docs` and must
+pass. The browser tests drive the room page and the sign in the venv's
+Chromium; the docs tests render the PDFs.
+
+## Implementation notes
+
+Each piece was designed in a spec, built from a plan test-first, and reviewed
+by a fresh reviewer before merging. The spec holds the why and the contracts,
+the plan holds the how, step by step with the code.
+
+| Work | Spec | Plan |
+|---|---|---|
+| Agent startup fix and dashboard enrollment: the services join the `Service` framework; REST enroll plus a WebSocket for heartbeats | [spec](docs/superpowers/specs/2026-09-24-agent-startup-and-dashboard-enrollment-design.md) | [plan](docs/superpowers/plans/2026-09-24-agent-startup-and-dashboard-enrollment.md) |
+| Room control page and API: `croom.control` with `/api/status`, `/api/calendar/events` and `/api/meeting/{join,leave,mute,camera}` | [spec](docs/superpowers/specs/2026-09-24-room-control-page-design.md) | [plan](docs/superpowers/plans/2026-09-24-room-control-page.md) |
+| Crystal Meet brand, three room configs and the installer, the door sign, the setup guide | [spec](docs/superpowers/specs/2026-09-24-crystal-meet-brand-and-rooms-design.md) | [plan](docs/superpowers/plans/2026-09-24-crystal-meet-brand-and-rooms.md) |
+| Google Calendar credentials, the check command, the calendar guide | [spec](docs/superpowers/specs/2026-09-25-google-calendar-credentials-design.md) | [plan](docs/superpowers/plans/2026-09-25-google-calendar-credentials.md) |
+
+Decisions worth knowing before changing things:
+
+- Internal names stay `croom`; only what a person sees says Crystal Meet.
+- The room page and sign are open on the LAN by design; joins are restricted to the configured platforms' hostnames and every POST must be JSON.
+- The dark theme is Tailwind's stock charcoal (`#111827` page, `#1F2937` cards) with the Crystal PM blue accent and Lexend; navy was rejected for dark mode.
+- Brand assets (logo, Lexend, its OFL licence) are bundled under `src/croom/control/static` and in each guide folder, so nothing loads from the internet.
+- Nothing joins or leaves by itself; Join now opens ten minutes before a booking.
+- With a calendar address configured, only that calendar is read; the room resource's declined (double-booked) and cancelled bookings are dropped; a link typed into an event wins over an automatically added Meet.
+
+Known limitations, mostly inherited from upstream:
+
+- Stopping the meeting service can hang while closing the headed Chromium; the service unit's restart covers it.
+- Google Meet joins as a guest, so someone in the meeting must admit the room; Zoom links need their passcode in the link.
+- One headed browser window opens per configured platform when the agent starts.
+- `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
+- The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.
+
+---
+
+*The upstream croom.to README follows.*
+
+```
+
+Then prepend it:
+
+```bash
+SCRATCH=/tmp/claude-1000/-home-cpm-ssh/f78b4b20-e6f0-4204-894b-193a8d8a2549/scratchpad
+{ cat "$SCRATCH/readme-crystal-meet.md"; echo; cat README.md; } > "$SCRATCH/README.new" && mv "$SCRATCH/README.new" README.md
+head -3 README.md
+```
+
+Expected: the first line printed is `# Crystal Meet`.
+
+- [ ] **Step 4: Run the tests to verify they pass**
+
+Run: `.venv/bin/pytest tests/unit/docs/test_readme.py -q -p no:cacheprovider`
+Expected: 3 passed.
+
+- [ ] **Step 5: Read the section once as a newcomer**
+
+Open `README.md` and check that every command in it exists in this branch (`--credentials`, `--check-calendar`, both PDF paths, `deploy/rooms/README.md`) and that the four spec and plan links resolve to files. Fix any drift before committing.
+
+- [ ] **Step 6: Run the whole suite** (Global Constraints). Expected: `GATE: PASSED`.
+
+- [ ] **Step 7: Commit**
+
+```bash
+git add README.md tests/unit/docs/test_readme.py
+git commit -m "docs: README explains Crystal Meet's pieces, setup, configs, development and design record"
+```
+
+---
+
+### Task 7: Push and final check
 
 **Files:** none new.
 

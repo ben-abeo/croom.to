@@ -164,6 +164,51 @@ def test_reinstalling_with_the_installed_key_path_keeps_it(tmp_path):
 
 
 def test_credentials_are_never_world_readable_even_briefly():
-    body = SCRIPT.read_text().split("install_credentials() {")[1].split("\n}\n")[0]
+    body = SCRIPT.read_text().split("install_private_file() {")[1].split("\n}\n")[0]
     assert 'install -o "$CROOM_USER" -g "$CROOM_USER" -m 600' in body
     assert "cp " not in body
+    for function in ("install_credentials() {", "install_zoom_credentials() {"):
+        caller = SCRIPT.read_text().split(function)[1].split("\n}\n")[0]
+        assert "install_private_file" in caller
+
+
+def test_missing_zoom_credentials_file_is_refused_before_install(tmp_path):
+    result = run_bash(f"bash {SCRIPT} --zoom-credentials {tmp_path / 'nope.json'}")
+    assert result.returncode == 1
+    assert "not found" in (result.stdout + result.stderr).lower()
+
+
+def test_help_mentions_zoom_credentials():
+    assert "--zoom-credentials FILE" in run_bash(f"bash {SCRIPT} --help").stdout
+
+
+def test_zoom_credentials_are_installed_for_the_service_user_only(tmp_path):
+    key = tmp_path / "zoom.json"
+    key.write_text('{"sdk_client_id": "a", "sdk_client_secret": "b"}')
+    result = run_bash(
+        f"source {SCRIPT}; CONFIG_DIR={tmp_path / 'etc'}; CROOM_USER=$(id -un); ZOOM_CREDENTIALS_FILE={key}; install_zoom_credentials",
+    )
+    assert result.returncode == 0, result.stderr
+    installed = tmp_path / "etc" / "zoom-credentials.json"
+    assert installed.read_text() == key.read_text()
+    assert oct(installed.stat().st_mode & 0o777) == "0o600"
+
+
+def test_reinstalling_with_the_installed_zoom_credentials_keeps_them(tmp_path):
+    etc = tmp_path / "etc"
+    etc.mkdir()
+    installed = etc / "zoom-credentials.json"
+    installed.write_text('{"sdk_client_id": "a", "sdk_client_secret": "b"}')
+    result = run_bash(
+        f"source {SCRIPT}; CONFIG_DIR={etc}; CROOM_USER=$(id -un); ZOOM_CREDENTIALS_FILE={installed}; install_zoom_credentials",
+    )
+    assert result.returncode == 0, result.stderr
+    assert installed.read_text() == '{"sdk_client_id": "a", "sdk_client_secret": "b"}'
+
+
+def test_completion_message_names_the_zoom_check_when_zoom_credentials_were_installed():
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; ZOOM_CREDENTIALS_FILE=/tmp/zoom.json; print_completion")
+    assert result.returncode == 0, result.stderr
+    assert "croom --check-zoom -c /etc/croom/config.yaml" in result.stdout
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; print_completion")
+    assert "--check-zoom" not in result.stdout

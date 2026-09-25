@@ -1,6 +1,6 @@
 # Crystal Meet room device: Room 1
 # Replace the four REPLACE values, then install with:
-#   sudo bash installer/install.sh --config room-1.yaml --credentials google-service-account.json
+#   sudo bash installer/install.sh --config room-1.yaml --credentials google-service-account.json --zoom-credentials zoom-credentials.json
 version: 2
 
 room:
@@ -15,6 +15,7 @@ meeting:
   auto_leave: true
   camera_default_on: true
   mic_default_on: true
+  zoom_credentials_path: /etc/croom/zoom-credentials.json
 
 calendar:
   providers: [google]

@@ -18,15 +18,25 @@ before installing it on that room's device:
   Admin console). The guide "Connect Crystal Meet rooms to Google Calendar"
   covers creating the rooms, the service account key and sharing.
 
-Install on the device with the room config and the service account key:
+Zoom needs one more file per room, `zoom-credentials.json`, made from
+`zoom-credentials.example.json`: the Meeting SDK app's client id and secret
+(the same for every room), and, to join meetings hosted by other Zoom accounts,
+the Server-to-Server app's account id, client id and secret plus that room's own
+Zoom user (`room_user`, for example `room1@crystalpm.com`). The guide "Connect
+Crystal Meet rooms to Zoom" covers creating all of it.
 
-    sudo bash installer/install.sh --config /path/to/room-N.yaml --credentials /path/to/google-service-account.json
+Install on the device with the room config and both credential files:
 
-The key is copied to `/etc/croom/google-service-account.json`, readable only by
-the service user. Without `--credentials` the room works with pasted links only
-and logs one line saying the calendar is not configured.
+    sudo bash installer/install.sh --config /path/to/room-N.yaml --credentials /path/to/google-service-account.json --zoom-credentials /path/to/zoom-credentials.json
+
+The files are copied to `/etc/croom/google-service-account.json` and
+`/etc/croom/zoom-credentials.json`, readable only by the service user. Without
+`--credentials` the room works with pasted links only and logs one line saying
+the calendar is not configured; without `--zoom-credentials` Zoom joins fall
+back to the public web client, which Zoom blocks for automated guests.
 
 The room page is then at `http://<device>:8080/` for anyone on the network,
 and the door sign at `http://<device>:8080/sign`. Check the calendar with
-`/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml`.
-Never commit a real token or key to this folder.
+`/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml` and Zoom
+with `/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml`.
+Never commit a real token, key or secret to this folder.

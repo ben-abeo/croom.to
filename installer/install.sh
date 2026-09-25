@@ -28,6 +28,7 @@ CROOM_USER="${SUDO_USER:-}"
 CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"
 ROOM_CONFIG=""
 CREDENTIALS_FILE=""
+ZOOM_CREDENTIALS_FILE=""
 
 # Log function
 log() {
@@ -294,22 +295,35 @@ EOF
     log "Configuration created at $CONFIG_DIR/config.yaml"
 }
 
-# Install the Google service account key where the agent reads it (calendar spec 4.5)
-install_credentials() {
-    if [[ -z "$CREDENTIALS_FILE" ]]; then
-        return
-    fi
+# Copy a secret file into place for the service user only (mode 600). A reinstall
+# may name the already installed file itself; keep it and fix owner and mode.
+install_private_file() {
+    local source="$1" target="$2" label="$3"
     mkdir -p "$CONFIG_DIR"
-    local target="$CONFIG_DIR/google-service-account.json"
-    if [[ "$CREDENTIALS_FILE" -ef "$target" ]]; then
-        # A reinstall that names the already installed key: keep it, fix owner and mode
+    if [[ "$source" -ef "$target" ]]; then
         chown "$CROOM_USER:$CROOM_USER" "$target"
         chmod 600 "$target"
     else
         # install(1) creates the file with its final owner and mode, never world-readable
-        install -o "$CROOM_USER" -g "$CROOM_USER" -m 600 "$CREDENTIALS_FILE" "$target"
+        install -o "$CROOM_USER" -g "$CROOM_USER" -m 600 "$source" "$target"
     fi
-    log "Installed Google Calendar credentials at $target"
+    log "Installed $label at $target"
+}
+
+# The Google service account key (calendar spec 4.5)
+install_credentials() {
+    if [[ -z "$CREDENTIALS_FILE" ]]; then
+        return
+    fi
+    install_private_file "$CREDENTIALS_FILE" "$CONFIG_DIR/google-service-account.json" "Google Calendar credentials"
+}
+
+# The Zoom Meeting SDK credentials (Zoom spec 4.7)
+install_zoom_credentials() {
+    if [[ -z "$ZOOM_CREDENTIALS_FILE" ]]; then
+        return
+    fi
+    install_private_file "$ZOOM_CREDENTIALS_FILE" "$CONFIG_DIR/zoom-credentials.json" "Zoom credentials"
 }
 
 # Write the systemd units (separate from create_service so tests can call it)
@@ -423,6 +437,10 @@ print_completion() {
         echo ""
         echo "Check the calendar: $INSTALL_DIR/venv/bin/croom --check-calendar -c $CONFIG_DIR/config.yaml"
     fi
+    if [[ -n "$ZOOM_CREDENTIALS_FILE" ]]; then
+        echo ""
+        echo "Check Zoom: $INSTALL_DIR/venv/bin/croom --check-zoom -c $CONFIG_DIR/config.yaml"
+    fi
     echo ""
 }
 
@@ -443,6 +461,7 @@ main() {
     install_croom
     create_config
     install_credentials
+    install_zoom_credentials
     create_service
     enable_services
     print_completion
@@ -466,6 +485,13 @@ run_installer() {
                 fi
                 shift 2
                 ;;
+            --zoom-credentials)
+                ZOOM_CREDENTIALS_FILE="$2"
+                if [[ -z "$ZOOM_CREDENTIALS_FILE" || ! -f "$ZOOM_CREDENTIALS_FILE" ]]; then
+                    error "Zoom credentials file not found: ${ZOOM_CREDENTIALS_FILE:-<missing>}"
+                fi
+                shift 2
+                ;;
             --enable-ui)
                 ENABLE_UI="yes"
                 shift
@@ -480,6 +506,7 @@ run_installer() {
                 echo "Options:"
                 echo "  --config FILE   Install a prepared room config as /etc/croom/config.yaml"
                 echo "  --credentials FILE  Install a Google service account key as /etc/croom/google-service-account.json"
+                echo "  --zoom-credentials FILE  Install Zoom Meeting SDK credentials as /etc/croom/zoom-credentials.json"
                 echo "  --enable-ui     Enable Touch UI service"
                 echo "  --no-service    Don't create systemd services"
                 echo "  --help          Show this help"

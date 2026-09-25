@@ -51,6 +51,7 @@ class MeetingConfig:
     auto_leave: bool = True
     camera_default_on: bool = True
     mic_default_on: bool = True
+    zoom_credentials_path: str = ""  # /etc/croom/zoom-credentials.json on a room device
 
 
 @dataclass
@@ -234,6 +235,7 @@ class Config:
                 "auto_leave": self.meeting.auto_leave,
                 "camera_default_on": self.meeting.camera_default_on,
                 "mic_default_on": self.meeting.mic_default_on,
+                "zoom_credentials_path": self.meeting.zoom_credentials_path,
             },
             "calendar": {
                 "providers": self.calendar.providers,

@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Set up a Crystal Meet room</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --blue-700: #003EBC;
+  --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --tint-50: #F7F9FF; --slate-500: #647087; --ink-900: #1C2024;
+  --radius: 12px; --radius-sm: 8px;
+}
+@page { size: Letter; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Lexend", "Segoe UI", Arial, sans-serif; color: var(--ink-900); font-size: 10.5pt; line-height: 1.5; }
+h1, h2, h3 { font-weight: 600; line-height: 1.15; margin: 0.2em 0; }
+h2 { font-size: 16pt; color: var(--navy-800); }
+p { margin: 0.4em 0; }
+.kicker { font-size: 9pt; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--blue-600); margin: 0 0 6px; }
+.banner { background: var(--navy-800); color: #fff; border-radius: var(--radius); padding: 28px 32px; margin-bottom: 20px; }
+.banner .kicker { color: var(--periwinkle-300); }
+.banner .kicker.top { color: #fff; margin-bottom: 2px; }
+.banner h1 { font-size: 26pt; margin: 6px 0 8px; }
+.banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
+.banner img { height: 26px; display: block; margin-bottom: 18px; }
+.intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
+.glance { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 12px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); }
+.glance .card:nth-child(2) { border-top-color: #3B6DF0; }
+.glance .card:nth-child(3) { border-top-color: #6C92F5; }
+.glance .card:nth-child(4) { border-top-color: var(--periwinkle-300); }
+.card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
+.card .kicker { font-size: 8pt; }
+.card h3 { font-size: 11.5pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9.5pt; }
+.block { break-inside: avoid; }
+.step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
+ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+li { position: relative; padding-left: 18px; margin: 5px 0; }
+li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
+.ui { font-weight: 600; color: var(--blue-600); }
+.chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.see { color: var(--slate-500); font-size: 9.5pt; margin: 4px 0 0 18px; }
+.callout { border-radius: var(--radius-sm); padding: 12px 18px; margin: 12px 0; border-left: 4px solid var(--blue-600); background: var(--tint-100); break-inside: avoid; }
+.callout.warn { background: #FFF8E1; border-left-color: #E8A013; }
+.callout.tip { background: #EDFBF3; border-left-color: #1FA971; }
+.callout .kicker { margin-bottom: 4px; }
+.callout p { margin: 2px 0; }
+.trouble { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.trouble .card { break-inside: avoid; }
+.trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.trouble .card h3 { font-size: 10.5pt; }
+.page-break { break-before: page; }
+</style>
+</head>
+<body>
+
+<section class="banner">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker top">Crystal PM</p>
+  <p class="kicker">How-to guide</p>
+  <h1>Set up a Crystal Meet room</h1>
+  <p>Put a Crystal Meet device in a conference room and join Zoom and Google Meet calls from the room's screen, step by step.</p>
+</section>
+
+<p class="intro">This guide takes one conference room from an empty Raspberry Pi to a room that shows up in the Crystal Meet dashboard and joins calls from its own web page. Plan about 45 minutes per room, most of it waiting for downloads. No programming experience is needed: if you can follow a recipe and type the commands printed here, you can do this. Repeat it for each room.</p>
+
+<div class="glance">
+  <div class="card"><p class="kicker">Step 1</p><h3>Prepare the device</h3><p>Install Raspberry Pi OS, sign in, connect the TV and camera.</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>Create the room</h3><p>Add the room on the dashboard's <span class="ui">Provisioning</span> page and copy its token.</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>Install Crystal Meet</h3><p>One command with the room's config file.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>First run and screens</h3><p>Join a test call, then point the table screen and the door sign at the device.</p></div>
+</div>
+
+<div class="callout warn">
+  <p class="kicker">Before you begin</p>
+  <p><strong>Hardware per room.</strong> Raspberry Pi 4 (4 GB) or Pi 5, the official power supply, a 32 GB microSD card, an HDMI cable to the room's TV, and a USB camera and speakerphone (for example a Logitech Brio 505 and a Jabra Speak2 55).</p>
+  <p><strong>Two screens on the network.</strong> A touch tablet or PoE touch panel on the table to join and control meetings, and a small screen by the door to show whether the room is free. Neither connects to the Pi: each only needs a browser, power, and the office network. Give the room device a fixed address on your router (a DHCP reservation) so the screens can always find it.</p>
+  <p><strong>The dashboard address.</strong> The Crystal Meet dashboard must be reachable from the room's network, for example <span class="chip">http://192.168.1.20:3000</span> for the dashboard and port <span class="chip">3001</span> for devices. If the dashboard runs on a Windows PC under WSL2, turn on mirrored networking or forward ports 3000 and 3001 first, or the devices will show Offline.</p>
+  <p><strong>Accounts.</strong> A dashboard sign-in with the admin role, and the Zoom or Google Meet links you want to test with.</p>
+</div>
+
+<section class="block">
+<div class="step"><span class="badge">1</span><h2>Prepare the device</h2></div>
+<ul>
+  <li><strong>Flash the card.</strong> On your computer, open <span class="ui">Raspberry Pi Imager</span>, choose your Pi model, then <span class="ui">Raspberry Pi OS (64-bit)</span> with desktop, and your microSD card.</li>
+  <li><strong>Pre-fill the settings.</strong> When Imager offers customisation, set the hostname to something like <span class="chip">crystal-meet-room-1</span>, the username to <span class="chip">pi</span> with a password you keep, your Wi-Fi network, and turn on SSH. Write the card.</li>
+  <li><strong>Connect and boot.</strong> Put the card in the Pi, plug in the TV over HDMI, the camera and speakerphone over USB, then power. Wait for the desktop to appear on the TV.</li>
+  <li><strong>Turn on automatic sign-in.</strong> Open <span class="ui">Preferences › Raspberry Pi Configuration › System</span> and set <span class="ui">Auto Login</span> to on, so the room comes back by itself after a power cut.</li>
+</ul>
+<p class="see">You should now see the Raspberry Pi desktop on the room's TV, and the Pi should be on the office network.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">2</span><h2>Create the room in the dashboard</h2></div>
+<ul>
+  <li><strong>Open the dashboard</strong> at its address on port 3000 and sign in.</li>
+  <li><strong>Go to</strong> <span class="ui">Provisioning</span> and fill in the <span class="ui">Room Name</span> exactly as people call the room (for example <span class="chip">Room 1</span>) and, if you like, its <span class="ui">Location</span>. Press <span class="ui">Generate Token</span>.</li>
+  <li><strong>Copy the token</strong> shown under <span class="ui">Enrollment Token</span>. It is a long string of letters and numbers; you will paste it into the device's config in the next step.</li>
+</ul>
+<p class="see">You should now see the token on the page and, on <span class="ui">Devices</span>, the room listed as provisioning until its device connects.</p>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The token links one device to this room and works once. If a device is ever reinstalled, create a new token for it. Nothing else about the room needs to change.</p>
+</div>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">3</span><h2>Install Crystal Meet on the device</h2></div>
+<ul>
+  <li><strong>Open a terminal</strong> on the Pi (the black icon in the top bar), or connect over SSH from your computer.</li>
+  <li><strong>Get the software.</strong> Type <span class="chip">sudo apt update &amp;&amp; sudo apt install -y git</span>, then <span class="chip">git clone https://github.com/ben-abeo/croom.to.git</span>, then <span class="chip">cd croom.to</span>.</li>
+  <li><strong>Make the room's config.</strong> Type <span class="chip">cp deploy/rooms/room-1.yaml ~/room.yaml</span> (use <span class="chip">room-2.yaml</span> or <span class="chip">room-3.yaml</span> for the other rooms), then <span class="chip">nano ~/room.yaml</span>.</li>
+  <li><strong>Fill in three values.</strong> The room's <span class="ui">name</span> and <span class="ui">location</span>; the dashboard <span class="ui">url</span> as <span class="chip">http://&lt;dashboard address&gt;:3001</span>; and the <span class="ui">enrollment_token</span> you copied. Save with <span class="ui">Ctrl+O</span>, Enter, then <span class="ui">Ctrl+X</span>.</li>
+  <li><strong>Run the installer.</strong> Type <span class="chip">sudo bash installer/install.sh --config ~/room.yaml</span>. It installs the browser and the room software; expect 10 to 20 minutes.</li>
+  <li><strong>Start it.</strong> When the installer prints <span class="ui">Crystal Meet installation complete</span>, type <span class="chip">sudo systemctl start croom</span>. The service also starts on every boot from now on.</li>
+</ul>
+<p class="see">You should now see a browser window open on the TV. That window is the room's meeting screen; leave it open.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">4</span><h2>First run and the screens</h2></div>
+<ul>
+  <li><strong>Open the room page.</strong> On your laptop or phone on the office network, go to <span class="chip">http://crystal-meet-room-1.local:8080</span>, or use the device's IP address with <span class="chip">:8080</span>.</li>
+  <li><strong>Check the dashboard.</strong> On <span class="ui">Devices</span>, the room should show <span class="ui">online</span> within a minute.</li>
+  <li><strong>Join a test call.</strong> Paste a Zoom link, or a Zoom meeting ID, into <span class="ui">Join with a link</span> and press <span class="ui">Join</span>. The TV shows the meeting joining; the page turns blue and offers <span class="ui">Mute</span>, <span class="ui">Turn camera off</span> and <span class="ui">Leave</span>.</li>
+  <li><strong>Leave.</strong> Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>.</li>
+  <li><strong>Set up the table screen.</strong> On the tablet or panel, open its kiosk browser (Fully Kiosk Browser on Android, Guided Access with Safari on an iPad) and set the start page to <span class="chip">http://&lt;device address&gt;:8080/</span>. Turn on full screen and keep the screen awake.</li>
+  <li><strong>Set up the door sign.</strong> On the door screen, set the start page to <span class="chip">http://&lt;device address&gt;:8080/sign</span>. It shows green when the room is free, amber when a meeting is about to start, and red while the room is in use or booked.</li>
+</ul>
+<p class="see">You should now see the room page say the room is free again, the door sign green, and the dashboard still showing the device online.</p>
+<div class="callout tip">
+  <p class="kicker">Tip</p>
+  <p>Zoom links that include their passcode (the part after <span class="chip">?pwd=</span>) join straight through. Google Meet joins as a guest, so someone in the meeting admits the room when it asks.</p>
+</div>
+</section>
+
+<div class="page-break"></div>
+<section class="block">
+<p class="kicker">If something is off</p>
+<h2>Troubleshooting</h2>
+<div class="trouble">
+  <div class="card"><h3>The room page does not load</h3><p>On the Pi, type <span class="chip">sudo systemctl status croom</span>. If it is not running, type <span class="chip">sudo journalctl -u croom -n 50</span> and look for the first line marked ERROR. Make sure port 8080 is not used by something else on the device.</p></div>
+  <div class="card"><h3>The device shows offline</h3><p>From the Pi, type <span class="chip">curl http://&lt;dashboard address&gt;:3001/health</span>. If nothing comes back, the dashboard is not reachable from the room's network: check the address in <span class="chip">~/room.yaml</span> and the dashboard PC's networking. If the token was already used, create a new one and run the installer again with the updated config.</p></div>
+  <div class="card"><h3>The browser opens but never joins</h3><p>Zoom needs the passcode inside the link; paste the full invitation link. Google Meet waits until someone in the meeting admits "the room". If the page says it could not join, press <span class="ui">Dismiss</span> and try the link again.</p></div>
+  <div class="card"><h3>The screens cannot open the page</h3><p>Use the device's IP address rather than its <span class="chip">.local</span> name; many tablets do not resolve those. Check that the screen and the device are on the same network, then open <span class="chip">http://&lt;device address&gt;:8080/api/status</span> from a laptop to confirm the device answers.</p></div>
+  <div class="card"><h3>No sound or picture in the call</h3><p>Check the USB camera and speakerphone are connected before the device starts, then reboot the Pi. The service runs as the signed-in desktop user so it can use the room's screen and audio.</p></div>
+</div>
+</section>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>Under the hood the device software is still called <span class="chip">croom</span>: that is the name you will see in service and log commands. Everything people see says Crystal Meet.</p>
+</div>
+
+</body>
+</html>

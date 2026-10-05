@@ -13,7 +13,8 @@ import { createServer } from 'http';
 import { config } from 'dotenv';
 
 import { logger } from './services/logger';
-import { initDatabase } from './models';
+import { initDatabase, User } from './models';
+import { ensureAdmin } from './bootstrap';
 import { WebSocketServer } from './websocket/server';
 import { deviceRouter } from './routes/devices';
 import { authRouter } from './routes/auth';
@@ -34,6 +35,7 @@ async function main() {
   // Initialize database
   await initDatabase();
   logger.info('Database initialized');
+  await ensureAdmin(User, process.env);
 
   // Create Express app
   const app = express();

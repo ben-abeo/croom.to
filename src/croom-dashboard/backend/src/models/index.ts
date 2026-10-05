@@ -4,6 +4,7 @@
 
 import { Sequelize, DataTypes, Model, Optional } from 'sequelize';
 import { logger } from '../services/logger';
+import { syncOptions } from '../bootstrap';
 
 // Database connection
 const sequelize = new Sequelize({
@@ -231,11 +232,10 @@ export async function initDatabase(): Promise<void> {
     await sequelize.authenticate();
     logger.info('Database connection established');
 
-    // Sync models (use migrations in production)
-    if (process.env.NODE_ENV !== 'production') {
-      await sequelize.sync({ alter: true });
-      logger.info('Database synchronized');
-    }
+    // No migrations exist: production creates missing tables and never alters them.
+    const options = syncOptions(process.env.NODE_ENV);
+    await sequelize.sync(options);
+    logger.info(options.alter ? 'Database synchronized (tables altered to match the models)' : 'Database tables created where missing');
   } catch (error) {
     logger.error('Database initialization failed:', error);
     throw error;

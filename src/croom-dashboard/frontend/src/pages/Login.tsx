@@ -82,9 +82,6 @@ export default function Login() {
             </button>
           </form>
 
-          <p className="mt-6 text-center text-sm text-gray-500">
-            Default: admin@croom.local / admin
-          </p>
         </div>
       </div>
     </div>

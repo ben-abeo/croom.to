@@ -15,22 +15,25 @@ the command, the service units and the folders under `/etc` and `/opt`.
 | Room device, the `croom` agent | A Raspberry Pi behind the TV, one per room | Joins meetings in a headed Chromium, reads the room's Google Calendar, serves the room page and the door sign, reports to the dashboard. |
 | Room page `http://<device>:8080/` | Any browser on the office network, usually a tablet on the table | Today's bookings, Join now, Mute, Turn camera off, Leave, and a box to paste a Zoom or Meet link. |
 | Door sign `http://<device>:8080/sign` | A small screen by the door, PoE or Wi-Fi | Green when free, amber ten minutes before a booking, red while in use or booked. |
-| Dashboard, `src/croom-dashboard` | One server; this fork runs it on a Windows PC under WSL2 | Fleet overview, device status, enrollment tokens on the Provisioning page. |
+| Dashboard, `src/croom-dashboard` | A fourth Raspberry Pi (or any 64-bit Docker host) on the office network, from `deploy/dashboard/` | Fleet overview, device status, enrollment tokens on the Provisioning page. |
 
 Neither screen is cabled to the Pi: each only needs a browser, power and the
 network. The device joins nothing by itself; someone presses Join now.
 
 ## Set up a room
 
-Follow the three guides in this order:
+Follow the four guides in this order:
 
-1. [Set up a Crystal Meet room](docs/guides/crystal-meet-room-setup.pdf): prepare
+1. [Set up the Crystal Meet dashboard](docs/guides/crystal-meet-dashboard.pdf): a
+   fourth Raspberry Pi on the office network runs the dashboard under Docker;
+   one install command, a fixed address, nightly backups.
+2. [Set up a Crystal Meet room](docs/guides/crystal-meet-room-setup.pdf): prepare
    the Pi, create the room on the dashboard, install with the room's config,
    first run, point the table screen and the door sign at the device.
-2. [Connect Crystal Meet rooms to Google Calendar](docs/guides/crystal-meet-google-calendar.pdf):
+3. [Connect Crystal Meet rooms to Google Calendar](docs/guides/crystal-meet-google-calendar.pdf):
    room resources in Google Workspace, one service account and key, share each
    room calendar with it, put the key and the calendar address on the device.
-3. [Connect Crystal Meet rooms to Zoom](docs/guides/crystal-meet-zoom.pdf): a
+4. [Connect Crystal Meet rooms to Zoom](docs/guides/crystal-meet-zoom.pdf): a
    Meeting SDK app, its submission to Zoom's review (unlisted, needed only for
    meetings hosted by other accounts), a Server-to-Server app for tokens, one
    Zoom user per room, and the credentials file on the device.
@@ -76,6 +79,25 @@ Never commit a real token or key.
 
 ## Run the dashboard
 
+In production the dashboard runs on its own Raspberry Pi, or any 64-bit Docker
+host, from `deploy/dashboard/`: Postgres and the dashboard image built from
+this repo, under Docker Compose. One command installs it and later updates it:
+
+```bash
+sudo bash installer/install-dashboard.sh --admin-email you@crystalpm.com
+```
+
+It installs Docker, clones this fork into `/opt/croom-dashboard`, writes the
+secrets once to `deploy/dashboard/.env` there (mode 600, never committed),
+builds and starts the stack on ports 3001 and 80, and adds a nightly `pg_dump`
+to `/var/backups/croom-dashboard`. The first admin comes from `ADMIN_EMAIL` and
+`ADMIN_PASSWORD` in that file and is created only when missing. There are no
+database migrations: production creates missing tables at start-up and never
+alters existing ones. The dashboard guide covers the Pi; `deploy/dashboard/README.md`
+has the operator's commands.
+
+For development on this machine:
+
 ```bash
 docker run -d --name croom_postgres -e POSTGRES_USER=croom -e POSTGRES_PASSWORD=croom -e POSTGRES_DB=croom \
   -p 127.0.0.1:5432:5432 -v croom_pgdata:/var/lib/postgresql/data --restart unless-stopped postgres:16-alpine
@@ -83,8 +105,9 @@ cd src/croom-dashboard/backend && npm install && npm run dev     # API and WebSo
 cd src/croom-dashboard/frontend && npm install && npm run dev    # web app on :3000, proxies /api and /ws to :3001
 ```
 
-Open `http://localhost:3000`, sign in with the admin account the backend
-creates on first start, and use Provisioning to create one token per room.
+Open `http://localhost:3000` and sign in; on an empty database the backend
+creates the admin from `ADMIN_EMAIL` and `ADMIN_PASSWORD` in `backend/.env`.
+Use Provisioning to create one token per room.
 Devices enrol with `POST /api/provisioning/enroll` and then keep a WebSocket
 open for heartbeats, status and meeting events. Under WSL2, turn on mirrored
 networking or forward ports 3000 and 3001 so the Pis can reach the dashboard.
@@ -121,6 +144,7 @@ the plan holds the how, step by step with the code.
 | Crystal Meet brand, three room configs and the installer, the door sign, the setup guide | [spec](docs/superpowers/specs/2026-09-24-crystal-meet-brand-and-rooms-design.md) | [plan](docs/superpowers/plans/2026-09-24-crystal-meet-brand-and-rooms.md) |
 | Google Calendar credentials, the check command, the calendar guide | [spec](docs/superpowers/specs/2026-09-25-google-calendar-credentials-design.md) | [plan](docs/superpowers/plans/2026-09-25-google-calendar-credentials.md) |
 | Zoom joins through the Meeting SDK: signature, per-room Zoom user's ZAK for outside hosts, loopback page, `croom --check-zoom`, the Zoom guide | [spec](docs/superpowers/specs/2026-09-25-zoom-meeting-sdk-design.md) | [plan](docs/superpowers/plans/2026-09-25-zoom-meeting-sdk.md) |
+| The dashboard on a Raspberry Pi: Docker Compose packaging, production mode in the backend, the dashboard installer and guide | [spec](docs/superpowers/specs/2026-10-05-dashboard-on-a-pi-design.md) | [plan](docs/superpowers/plans/2026-10-05-dashboard-on-a-pi.md) |
 
 Decisions worth knowing before changing things:
 
@@ -139,6 +163,7 @@ Known limitations, mostly inherited from upstream:
 - One headed browser window opens per configured platform when the agent starts.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.
+- The dashboard speaks plain HTTP on the office network, with no TLS, and has no database migrations; a model change that needs an altered table is a manual `psql` step in production.
 - Joining Zoom meetings hosted by other accounts needs the SDK app approved by Zoom's review, which takes weeks, and relies on a ZAK fetched through the Server-to-Server app; this is not yet verified against a live outside-hosted meeting. If Zoom refuses after the approval, the fallback is the SDK app's own OAuth authorization.
 
 ---

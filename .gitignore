@@ -76,3 +76,6 @@ node_modules/
 # Credential files are installed on devices, never committed
 google-service-account.json
 zoom-credentials.json
+
+# The dashboard's generated settings live only on the dashboard host
+deploy/dashboard/.env

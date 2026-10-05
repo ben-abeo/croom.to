@@ -205,7 +205,9 @@ class TestZoomApiErrors:
                 await api.user_zak("room1@crystalpm.com")
         finally:
             await server.close()
-        assert "lacks the user token scope (user:read:token:admin)" in str(failure.value)
+        assert "lacks a scope" in str(failure.value)
+        assert "does not contain scopes:[user:read:token:admin]" in str(failure.value)
+        assert "activate the app again" in str(failure.value)
 
     async def test_other_refusal_quotes_zoom(self):
         server, api = await api_for(FakeZoom(zak_status=429, zak_body={"message": "Too many requests"}))

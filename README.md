@@ -31,8 +31,9 @@ Follow the three guides in this order:
    room resources in Google Workspace, one service account and key, share each
    room calendar with it, put the key and the calendar address on the device.
 3. [Connect Crystal Meet rooms to Zoom](docs/guides/crystal-meet-zoom.pdf): a
-   Meeting SDK app, a Server-to-Server app for tokens, one Zoom user per room,
-   and the credentials file on the device, so rooms join any Zoom meeting.
+   Meeting SDK app, its submission to Zoom's review (unlisted, needed only for
+   meetings hosted by other accounts), a Server-to-Server app for tokens, one
+   Zoom user per room, and the credentials file on the device.
 
 The commands the guides walk through, for reference:
 
@@ -129,7 +130,7 @@ Decisions worth knowing before changing things:
 - Brand assets (logo, Lexend, its OFL licence) are bundled under `src/croom/control/static` and in each guide folder, so nothing loads from the internet.
 - Nothing joins or leaves by itself; Join now opens ten minutes before a booking.
 - With a calendar address configured, only that calendar is read; the room resource's declined (double-booked) and cancelled bookings are dropped; a link typed into an event wins over an automatically added Meet.
-- Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
+- Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need Zoom's review of the SDK app (it may stay unlisted; its production credentials are the approved ones) plus the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
 
 Known limitations, mostly inherited from upstream:
 
@@ -138,7 +139,7 @@ Known limitations, mostly inherited from upstream:
 - One headed browser window opens per configured platform when the agent starts.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.
-- Joining Zoom meetings hosted by other accounts relies on a ZAK fetched through the Server-to-Server app; this is not yet verified against a live outside-hosted meeting. If Zoom refuses, the fallback is the SDK app's own OAuth authorization.
+- Joining Zoom meetings hosted by other accounts needs the SDK app approved by Zoom's review, which takes weeks, and relies on a ZAK fetched through the Server-to-Server app; this is not yet verified against a live outside-hosted meeting. If Zoom refuses after the approval, the fallback is the SDK app's own OAuth authorization.
 
 ---
 

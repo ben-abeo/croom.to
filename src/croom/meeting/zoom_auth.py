@@ -166,6 +166,6 @@ class ZoomApi:
         if status == 404:
             raise ZoomAuthError(f"Zoom has no user {user} on this account")
         if status in (400, 401, 403) and "scope" in message.lower():
-            raise ZoomAuthError("the server-to-server app lacks the user token scope (user:read:token:admin); "
-                                "add it and re-activate the app")
+            raise ZoomAuthError(f"the server-to-server app lacks a scope; Zoom says \"{message}\". "
+                                "Add the named scope under Scopes and activate the app again")
         raise ZoomAuthError(f"Zoom refused the ZAK for {user} ({status}): {message or 'no details'}")

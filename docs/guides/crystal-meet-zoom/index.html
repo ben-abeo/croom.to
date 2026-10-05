@@ -25,21 +25,23 @@ p { margin: 0.4em 0; }
 .banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
 .banner img { height: 26px; display: block; margin-bottom: 18px; }
 .intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
-.glance { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; margin: 0 0 22px; }
-.glance .card { border-top: 4px solid var(--blue-600); padding: 12px 12px; }
-.glance .card:nth-child(2) { border-top-color: #3B6DF0; }
-.glance .card:nth-child(3) { border-top-color: #6C92F5; }
-.glance .card:nth-child(4) { border-top-color: #8EABF8; }
-.glance .card:nth-child(5) { border-top-color: var(--periwinkle-300); }
+.glance { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); padding: 10px 10px; }
+.glance .card:nth-child(2) { border-top-color: #2F62EA; }
+.glance .card:nth-child(3) { border-top-color: #4A78F1; }
+.glance .card:nth-child(4) { border-top-color: #6C92F5; }
+.glance .card:nth-child(5) { border-top-color: #8EABF8; }
+.glance .card:nth-child(6) { border-top-color: var(--periwinkle-300); }
 .card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
 .card .kicker { font-size: 8pt; }
-.card h3 { font-size: 11pt; margin: 2px 0 4px; }
-.card p { margin: 0; color: var(--slate-500); font-size: 9.5pt; }
+.card h3 { font-size: 10.5pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9pt; }
 .block { break-inside: avoid; }
+.block.long { break-inside: auto; }
 .step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
 .badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
 ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
-li { position: relative; padding-left: 18px; margin: 5px 0; }
+li { position: relative; padding-left: 18px; margin: 5px 0; break-inside: avoid; }
 li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
 .ui { font-weight: 600; color: var(--blue-600); }
 .chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
@@ -68,46 +70,67 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
   <p>Let each room join Zoom meetings through Zoom's Meeting SDK, including meetings hosted by customers and vendors, with no one signing in on the device.</p>
 </section>
 
-<p class="intro">This guide has two halves. The Zoom half is done once for all rooms by the person who administers your Zoom account: two apps in the App Marketplace and one Zoom user per room, about 20 minutes. The device half takes about five minutes per room. Rooms still join only when someone presses Join on the room page.</p>
+<p class="intro">This guide has two halves. The Zoom half is done once for all rooms by the person who administers your Zoom account: two apps in the App Marketplace, one review request, and one Zoom user per room, about 30 minutes at the keyboard. Zoom's review of the app then runs for a few weeks in the background; rooms join meetings on your own account in the meantime. The device half takes about five minutes per room. Rooms still join only when someone presses Join on the room page.</p>
 
 <div class="glance">
   <div class="card"><p class="kicker">Step 1</p><h3>The SDK app</h3><p>A Meeting SDK app and its client id and secret.</p></div>
-  <div class="card"><p class="kicker">Step 2</p><h3>The token app</h3><p>A Server-to-Server OAuth app with one scope.</p></div>
-  <div class="card"><p class="kicker">Step 3</p><h3>A user per room</h3><p>Rooms join outside meetings as their own Zoom user.</p></div>
-  <div class="card"><p class="kicker">Step 4</p><h3>Put it on the device</h3><p>The credentials file, the installer, the check.</p></div>
-  <div class="card"><p class="kicker">Step 5</p><h3>Join a test meeting</h3><p>One inside your account, one outside.</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>Zoom's review</h3><p>Submit the app, unlisted, so rooms may join outside meetings.</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>The token app</h3><p>A Server-to-Server OAuth app with two read-only scopes.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>A user per room</h3><p>Rooms join outside meetings as their own Zoom user.</p></div>
+  <div class="card"><p class="kicker">Step 5</p><h3>On the device</h3><p>The credentials file, the installer, the check.</p></div>
+  <div class="card"><p class="kicker">Step 6</p><h3>A test meeting</h3><p>One inside your account, one outside.</p></div>
 </div>
 
 <div class="callout warn">
   <p class="kicker">Before you begin</p>
-  <p><strong>Access.</strong> The Zoom account owner, or an admin with the Develop permission (visible as <span class="ui">Develop</span> at the top of the App Marketplace) and rights to add users.</p>
-  <p><strong>Why three parts.</strong> Since March 2026 Zoom lets an SDK app join meetings hosted by other Zoom accounts only as a signed-in Zoom user. The SDK app (step 1) joins your own meetings; the token app (step 2) and a Zoom user per room (step 3) let the room join everyone else's.</p>
-  <p><strong>Secrets.</strong> You will collect a client id and secret (step 1) and an account id, client id and secret (step 2). Keep them out of email and chat; they go straight into a file on each device.</p>
+  <p><strong>Access.</strong> The Zoom account owner, or an admin whose role has the <span class="ui">Zoom for developers</span> permission (then <span class="ui">Develop</span> shows at the top of the App Marketplace) and who may add users. The owner grants that permission at <span class="chip">admin.zoom.us</span> under <span class="ui">User Management › Roles</span>: edit the admin's role, then <span class="ui">Role Settings › Advanced features › Zoom for developers</span>, tick <span class="ui">View</span> and <span class="ui">Edit</span>.</p>
+  <p><strong>Why four parts.</strong> Zoom lets an SDK app join meetings hosted by other Zoom accounts only once Zoom has reviewed the app, and, since March 2026, only as a signed-in Zoom user. The SDK app (step 1) joins your own meetings on its own; the review (step 2), the token app (step 3) and a Zoom user per room (step 4) let the room join everyone else's.</p>
+  <p><strong>Secrets.</strong> You will collect a client id and secret (step 1) and an account id, client id and secret (step 3). Keep them out of email and chat; they go straight into a file on each device.</p>
 </div>
 
-<section class="block">
+<section class="block long">
 <div class="step"><span class="badge">1</span><h2>Create the Meeting SDK app</h2></div>
 <ul>
-  <li><strong>Open the App Marketplace</strong> at <span class="chip">marketplace.zoom.us</span> signed in as the admin, then <span class="ui">Develop › Build App</span>, choose <span class="ui">General App</span> and create it. Name it <span class="chip">Crystal Meet rooms</span>.</li>
-  <li><strong>Turn on the Meeting SDK.</strong> In the app's <span class="ui">Features</span> (or <span class="ui">Embed</span>) section, enable <span class="ui">Meeting SDK</span>.</li>
-  <li><strong>Copy the credentials.</strong> On <span class="ui">Basic Information › App Credentials</span>, copy the <span class="ui">Client ID</span> and <span class="ui">Client Secret</span>. The development credentials are fine: the app is used only inside your account and is never published.</li>
+  <li><strong>Sign in to the App Marketplace</strong> at <span class="chip">marketplace.zoom.us</span> with the account owner's login, or as an admin with the permission above. Open <span class="ui">Develop</span> at the top right and choose <span class="ui">Build App</span>. If there is no Develop menu, the permission is missing; see Before you begin.</li>
+  <li><strong>Pick the type.</strong> In the dialog choose <span class="ui">General App</span> and press <span class="ui">Create</span>. Zoom folded its old "Meeting SDK app" type into the General App; there is no separate SDK type to look for.</li>
+  <li><strong>Name it and make it account-owned.</strong> On <span class="ui">Basic Information</span> set the name to <span class="chip">Crystal Meet rooms</span> and choose <span class="ui">Admin-managed</span> where the page asks how the app is managed. It belongs to the account; nobody signs in to it.</li>
+  <li><strong>Copy the development credentials.</strong> Still on Basic Information, <span class="ui">App Credentials</span> shows two pairs, <span class="ui">Development</span> and <span class="ui">Production</span>. Copy the Development <span class="ui">Client ID</span> and <span class="ui">Client Secret</span>; they go into the credentials file as <span class="ui">sdk_client_id</span> and <span class="ui">sdk_client_secret</span>. The development pair joins meetings on your own account straight away. The Production pair is for after step 2.</li>
+  <li><strong>If the page insists on an OAuth Redirect URL</strong> before it lets you continue, enter <span class="chip">https://crystalpm.com/</span>. The rooms never use it; it only has to be a page on a domain you own.</li>
+  <li><strong>Turn on the Meeting SDK.</strong> Open <span class="ui">Features</span> and its <span class="ui">Embed</span> tab (some layouts show Embed under <span class="ui">Surface</span>), switch <span class="ui">Meeting SDK</span> on and save.</li>
+  <li><strong>Add the scope Zoom insists on.</strong> The build flow will not continue with an empty <span class="ui">Scopes</span> page. Press <span class="ui">Add Scopes</span>, search for <span class="chip">zak</span> and add <span class="chip">user:read:zak:admin</span> (View a user's ZAK). If it is not offered, search for <span class="chip">token</span> and add <span class="chip">user:read:token:admin</span> instead; if the list only has older names, pick <span class="ui">User › View all user information</span>, the one Zoom's own SDK guide names for admin-managed apps. In <span class="ui">Scope Description</span> write: "Fetches a conference-room user's ZAK so the room device can join meetings hosted by other Zoom accounts as that user." Add nothing else; every extra scope lengthens step 2.</li>
+  <li><strong>Skip Local Test.</strong> The rooms do not sign in through the app, so it needs no event subscriptions and no "Add App Now" to work.</li>
 </ul>
-<p class="see">You should now see the app under Manage › Built Apps with Meeting SDK enabled, and have its client id and secret.</p>
+<p class="see">You should now see the app under Manage › Built Apps (Zoom also calls this list Created apps) with Meeting SDK on, and have its development client id and secret.</p>
+</section>
+
+<section class="block long">
+<div class="step"><span class="badge">2</span><h2>Submit the app to Zoom's review, unlisted</h2></div>
+<p>Needed only for meetings hosted by other Zoom accounts, which is most customer and vendor meetings. Zoom's rule: an SDK app may join meetings outside the account that created it only after Zoom has reviewed the app. Reviewed does not mean public; the app stays unlisted. Zoom asks developers to submit at least a month ahead, so do this the same day as step 1.</p>
+<ul>
+  <li><strong>Fill in the listing.</strong> In the app's left menu open <span class="ui">App Listing</span> (older layouts: <span class="ui">Information</span>). Give a short and a long description, for example "Crystal PM's conference-room devices join Zoom meetings from the room's TV. Used only inside Crystal PM.", the company name, a category, the developer contact, and a support address and privacy policy page on <span class="chip">crystalpm.com</span>.</li>
+  <li><strong>Verify the domain when asked.</strong> Every web address in the listing must be on a domain Zoom has verified for your account. Zoom shows the proof it wants, a DNS record or a small file on the site; whoever manages crystalpm.com's DNS can add it in minutes.</li>
+  <li><strong>Tell the reviewers what it is.</strong> In the submission's test instructions say the app runs on a Raspberry Pi behind a conference-room TV, joins a meeting as an ordinary participant when a person presses Join, has no sign-in flow and no outside users, and is device-specific. Zoom accepts a short screen recording of a join, or a live session with the review team, for device-specific apps. Write "none" where it asks for test logins. Add a line of release notes. If the reviewers ask to see the app authorized, open <span class="ui">Local Test</span> and press <span class="ui">Add App Now</span> once as the admin; that is all the authorization it ever gets.</li>
+  <li><strong>Keep it unlisted.</strong> Where the submission asks how the app is distributed choose <span class="ui">Set my app as 'Unlisted'</span>, not <span class="ui">Publish my app to the Zoom App Marketplace</span>.</li>
+  <li><strong>Accept the Marketplace Development Agreement</strong> and press <span class="ui">Submit</span>. Zoom's reviewers reply by email with questions or the approval; answer them quickly to keep the clock moving.</li>
+  <li><strong>After the approval,</strong> copy the <span class="ui">Production</span> Client ID and Client Secret from App Credentials into each room's credentials file in place of the development pair (step 5) and restart the service. Zoom's reviewers approve the production pair; the development pair stays limited to your own account's meetings.</li>
+</ul>
+<p class="see">You should now see the app's status as In review, and later Approved. Until then rooms join meetings hosted on your own account only.</p>
 </section>
 
 <section class="block">
-<div class="step"><span class="badge">2</span><h2>Create the Server-to-Server app for tokens</h2></div>
+<div class="step"><span class="badge">3</span><h2>Create the Server-to-Server app for tokens</h2></div>
 <ul>
-  <li><strong>Build it.</strong> <span class="ui">Develop › Build App</span>, choose <span class="ui">Server-to-Server OAuth</span>, name it <span class="chip">Crystal Meet room tokens</span>.</li>
+  <li><strong>Build it.</strong> <span class="ui">Develop › Build App</span>, choose <span class="ui">Server-to-Server OAuth</span> and press <span class="ui">Create</span>; name it <span class="chip">Crystal Meet room tokens</span>.</li>
   <li><strong>Copy the credentials</strong> from <span class="ui">App Credentials</span>: <span class="ui">Account ID</span>, <span class="ui">Client ID</span> and <span class="ui">Client Secret</span>.</li>
-  <li><strong>Add the one scope.</strong> Under <span class="ui">Scopes › Add Scopes</span>, search for <span class="chip">token</span> and add <span class="chip">user:read:token:admin</span> (View users' tokens). Nothing else is needed.</li>
+  <li><strong>Fill in Information.</strong> Zoom will not activate the app without a short description, the company name and a developer contact name and email. Leave event subscriptions off on the <span class="ui">Feature</span> page.</li>
+  <li><strong>Add two read-only scopes.</strong> Under <span class="ui">Scopes › Add Scopes</span>, search for <span class="chip">zak</span> and add <span class="chip">user:read:zak:admin</span> (View a user's ZAK), then search for <span class="chip">token</span> and add <span class="chip">user:read:token:admin</span> (View a user's token). Zoom's docs name the first for ZAKs and the second for the token request the room makes, so add both; nothing else is needed. The list only offers scopes the signed-in person's own role allows, so if either is missing, do this as the account owner.</li>
   <li><strong>Activate the app</strong> on the <span class="ui">Activation</span> page. Tokens only work while it is active.</li>
 </ul>
 <p class="see">You should now see the app listed as active, with the account id, client id and secret saved with the step 1 values.</p>
 </section>
 
 <section class="block">
-<div class="step"><span class="badge">3</span><h2>Create a Zoom user for each room</h2></div>
+<div class="step"><span class="badge">4</span><h2>Create a Zoom user for each room</h2></div>
 <ul>
   <li><strong>Add the user.</strong> In <span class="chip">admin.zoom.us</span> go to <span class="ui">User Management › Users › Add Users</span>. Use a mailbox you can read, for example <span class="chip">room1@crystalpm.com</span>, and the <span class="ui">Basic</span> user type, which is free on a paid account.</li>
   <li><strong>Activate it.</strong> Open the invitation email in that mailbox and finish the sign-up.</li>
@@ -117,14 +140,14 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 <p class="see">You should now see one active Basic user per room, each named after its room.</p>
 <div class="callout">
   <p class="kicker">Good to know</p>
-  <p>The room user never hosts anything and needs no licence. If you skip steps 2 and 3, rooms can still join meetings hosted on your own Zoom account; they just cannot join meetings hosted by other companies.</p>
+  <p>The room user never hosts anything and needs no licence. If you skip steps 2 to 4, rooms can still join meetings hosted on your own Zoom account; they just cannot join meetings hosted by other companies.</p>
 </div>
 </section>
 
 <section class="block">
-<div class="step"><span class="badge">4</span><h2>Put the credentials on each device</h2></div>
+<div class="step"><span class="badge">5</span><h2>Put the credentials on each device</h2></div>
 <ul>
-  <li><strong>Make the file.</strong> Copy <span class="chip">deploy/rooms/zoom-credentials.example.json</span> to <span class="chip">zoom-credentials.json</span> and fill in the six values: the step 1 client id and secret, the step 2 account id, client id and secret, and that room's user as <span class="ui">room_user</span>. Each room gets its own file because <span class="ui">room_user</span> differs.</li>
+  <li><strong>Make the file.</strong> Copy <span class="chip">deploy/rooms/zoom-credentials.example.json</span> to <span class="chip">zoom-credentials.json</span> and fill in the six values: the step 1 client id and secret (the development pair until step 2 is approved, the production pair after), the step 3 account id, client id and secret, and that room's user as <span class="ui">room_user</span>. Each room gets its own file because <span class="ui">room_user</span> differs.</li>
   <li><strong>Copy it to the device</strong>, for example <span class="chip wrap">scp zoom-credentials.json pi@crystal-meet-room-1.local:~/</span>.</li>
   <li><strong>A device you are installing now.</strong> Add <span class="chip">--zoom-credentials ~/zoom-credentials.json</span> to the installer command from the setup guide.</li>
   <li><strong>A device that is already installed.</strong> Type <span class="chip wrap">sudo install -o pi -g pi -m 600 ~/zoom-credentials.json /etc/croom/zoom-credentials.json</span> (your username instead of pi), then <span class="chip">sudo systemctl restart croom</span>.</li>
@@ -133,7 +156,7 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 <pre>Zoom Meeting SDK: app AbC123xYz, signature minted (Zoom checks it only when a meeting is joined)
 Zoom account: server-to-server token obtained for account 9XyZ12ab
 Zoom room user: room1@crystalpm.com, ZAK obtained (valid 2 hours)
-Ready: this room should join meetings hosted by any Zoom account; the first outside-hosted meeting proves it.</pre>
+Ready: this room can join meetings on your own Zoom account now; meetings hosted by other accounts also need Zoom's approval of the SDK app, and the first outside-hosted meeting proves it.</pre>
 <ul>
   <li><strong>Delete the copy in your home folder.</strong> Type <span class="chip">rm ~/zoom-credentials.json</span>.</li>
 </ul>
@@ -141,10 +164,10 @@ Ready: this room should join meetings hosted by any Zoom account; the first outs
 </section>
 
 <section class="block">
-<div class="step"><span class="badge">5</span><h2>Join a test meeting</h2></div>
+<div class="step"><span class="badge">6</span><h2>Join a test meeting</h2></div>
 <ul>
-  <li><strong>Inside your account.</strong> Have a colleague start a Zoom meeting and paste its invitation link, passcode included, into the room page's <span class="ui">Join with a link</span>, or book it on the room's calendar and press <span class="ui">Join now</span>. Zoom's meeting appears on the TV within about fifteen seconds.</li>
-  <li><strong>Outside your account.</strong> Join a meeting hosted by someone outside the company, or by a personal Zoom account. The room appears in the participant list under its own name, for example Room 1. If the host uses a waiting room, the room page says it is waiting until the host admits it. This step is the proof for the outside-host route, which has not yet been verified against a live meeting: if Zoom refuses with an authorization message even though the check passed, tell whoever set this up; the fallback is fetching the ZAK through the SDK app's own OAuth.</li>
+  <li><strong>Inside your account.</strong> Have a colleague start a Zoom meeting and paste its invitation link, passcode included, into the room page's <span class="ui">Join with a link</span>, or book it on the room's calendar and press <span class="ui">Join now</span>. Zoom's meeting appears on the TV within about fifteen seconds. This works from day one, with the development pair.</li>
+  <li><strong>Outside your account,</strong> once step 2 is approved and the production pair is on the device. Join a meeting hosted by someone outside the company, or by a personal Zoom account. The room appears in the participant list under its own name, for example Room 1. If the host uses a waiting room, the room page says it is waiting until the host admits it. This step is the proof for the outside-host route, which has not yet been verified against a live meeting: if Zoom refuses with an authorization message even though the app is approved and the check passed, tell whoever set this up; the fallback is fetching the ZAK through the SDK app's own OAuth.</li>
   <li><strong>Controls.</strong> From the table page press <span class="ui">Mute</span>, <span class="ui">Turn camera off</span>, then <span class="ui">Leave</span> and <span class="ui">Tap again to leave</span>.</li>
 </ul>
 <p class="see">You should now see both meetings join, the room named after itself in the outside one, and the TV return to the room's idle screen after leaving.</p>
@@ -155,10 +178,11 @@ Ready: this room should join meetings hosted by any Zoom account; the first outs
 <p class="kicker">If something is off</p>
 <h2>Troubleshooting</h2>
 <div class="trouble">
+  <div class="card"><h3>There is no Develop menu in the Marketplace</h3><p>The signed-in admin's role lacks the <span class="ui">Zoom for developers</span> permission. The account owner adds it under <span class="ui">User Management › Roles</span> (Role Settings › Advanced features), or does steps 1 to 3 personally.</p></div>
   <div class="card"><h3>The check says "not configured"</h3><p>It names the value that is missing or still a placeholder in <span class="chip">/etc/croom/zoom-credentials.json</span>. The four server-to-server values and <span class="ui">room_user</span> go together: fill in all of them or none.</p></div>
-  <div class="card"><h3>The check says Zoom refused the credentials</h3><p>The account id, client id or secret of the step 2 app is wrong, or the app is not activated. Copy them again from App Credentials and check the Activation page.</p></div>
-  <div class="card"><h3>The check says no such user, or a scope is missing</h3><p>The <span class="ui">room_user</span> must be an active user on this Zoom account. "Lacks the user token scope" means step 2's scope <span class="chip">user:read:token:admin</span> is missing: add it and activate the app again.</p></div>
-  <div class="card"><h3>The room page says the meeting is not authorized</h3><p>The meeting is hosted by another account and the room joined without its Zoom user. Fill in the server-to-server values and <span class="ui">room_user</span>, restart the service and run the check. If the check passes and Zoom still refuses, the outside-host route needs the fallback described in step 5.</p></div>
+  <div class="card"><h3>The check says Zoom refused the credentials</h3><p>The account id, client id or secret of the step 3 app is wrong, or the app is not activated. Copy them again from App Credentials and check the Activation page.</p></div>
+  <div class="card"><h3>The check says no such user, or a scope is missing</h3><p>The <span class="ui">room_user</span> must be an active user on this Zoom account. "Lacks a scope" quotes the scope Zoom wants; add that scope to the step 3 app under <span class="ui">Scopes</span> and activate it again.</p></div>
+  <div class="card"><h3>The room page says the meeting is not authorized</h3><p>The meeting is hosted by another account. Three things must all be true: the SDK app is approved (step 2), the device holds its production pair, and the file has the server-to-server values and <span class="ui">room_user</span>. Fix what is missing, restart the service and run the check. If all three are true and Zoom still refuses, the outside-host route needs the fallback described in step 6.</p></div>
   <div class="card"><h3>Wrong passcode or meeting not found</h3><p>Paste the full invitation link with its passcode part. A bare meeting id cannot open a passcode-protected meeting. Zoom's exact reason shows on the room page.</p></div>
   <div class="card"><h3>The TV stays dark and the page says the SDK did not load</h3><p>The device could not reach <span class="chip">source.zoom.us</span>. Check the device's internet access and any web filter, then try again.</p></div>
 </div>

@@ -42,5 +42,5 @@ async def check_zoom(config: Config, out: TextIO = sys.stdout,
     except ZoomAuthError as e:
         print(f"Zoom: {e}", file=out)
         return 1
-    print("Ready: this room should join meetings hosted by any Zoom account; the first outside-hosted meeting proves it.", file=out)
+    print("Ready: this room can join meetings on your own Zoom account now; meetings hosted by other accounts also need Zoom's approval of the SDK app, and the first outside-hosted meeting proves it.", file=out)
     return 0

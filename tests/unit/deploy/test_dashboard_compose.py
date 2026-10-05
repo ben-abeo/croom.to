@@ -3,6 +3,7 @@ The dashboard's compose file, image and env example are what the installer and
 the fourth Pi run; check their shape here so a typo surfaces before a build.
 """
 
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -94,3 +95,14 @@ def test_compose_config_resolves(tmp_path):
                             capture_output=True, text=True, cwd=tmp_path)
     assert result.returncode == 0, result.stderr
     assert "croom-dashboard:local" in result.stdout
+
+
+def test_operator_notes_use_sudo_and_show_backup_copy_and_restore():
+    text = (DEPLOY / "README.md").read_text(encoding="utf-8")
+    # .env is root-only, so compose cannot be run by the pi user without sudo.
+    for match in re.finditer(r"docker compose", text):
+        assert text[max(0, match.start() - 5):match.start()] == "sudo ", text[match.start() - 40:match.end() + 20]
+    assert "sudo cp /var/backups/croom-dashboard/" in text and "sudo chown" in text
+    assert "sudo gunzip -c /var/backups/croom-dashboard/" in text
+    assert "-v ON_ERROR_STOP=1" in text
+    assert "sudo systemctl start croom-dashboard-backup.service" in text

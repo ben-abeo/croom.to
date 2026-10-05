@@ -50,10 +50,11 @@ check_platform() {
     if ! command -v apt-get >/dev/null 2>&1; then
         error "This installer needs a Debian-based system with apt (Raspberry Pi OS, Debian, Ubuntu)."
     fi
-    if (( MEMORY_KB < 2000000 )); then
+    # A 2 GB Pi reports about 1.85 GB and a 4 GB Pi about 3.9 GB: thresholds sit below the nominal sizes.
+    if (( MEMORY_KB < 1800000 )); then
         error "At least 2 GB of memory is needed to build the dashboard image (found $((MEMORY_KB / 1024)) MB)."
     fi
-    if (( MEMORY_KB < 3800000 )); then
+    if (( MEMORY_KB < 3600000 )); then
         warn "Less than 4 GB of memory: building the image takes longer."
     fi
 }
@@ -150,6 +151,8 @@ start_stack() {
     for i in $(seq 1 90); do
         if curl -fs http://127.0.0.1:3001/health >/dev/null 2>&1; then
             log "The dashboard is answering"
+            # Each rebuild leaves the previous image behind; drop it so updates do not fill the card.
+            docker image prune -f >/dev/null 2>&1 || true
             return
         fi
         sleep 2
@@ -196,7 +199,7 @@ print_completion() {
     echo "sign in, change the password, then create one token per room on Provisioning."
     echo ""
     echo "Backups:  $BACKUP_DIR (nightly at 02:30, 14 days kept)"
-    echo "Logs:     cd $(deploy_dir) && docker compose logs -f"
+    echo "Logs:     cd $(deploy_dir) && sudo docker compose logs -f   (compose always needs sudo: the settings file is root's)"
     echo "Update:   sudo bash $INSTALL_DIR/installer/install-dashboard.sh"
     echo ""
 }

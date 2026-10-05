@@ -85,10 +85,19 @@ def test_platform_refuses_32_bit():
 def test_platform_refuses_less_than_2gb_and_warns_below_4gb():
     result = run_bash(f"source {SCRIPT}; check_platform", env={"MEMORY_KB": "1000000"})
     assert result.returncode == 1 and "2 GB" in result.stdout + result.stderr
-    result = run_bash(f"source {SCRIPT}; check_platform", env={"MEMORY_KB": "2000000"})
-    assert result.returncode == 0 and "4 GB" in result.stdout
-    result = run_bash(f"source {SCRIPT}; check_platform", env={"MEMORY_KB": "8000000"})
+    # A 2 GB Pi 4 reports about 1.85 GB in /proc/meminfo: it passes with the warning.
+    result = run_bash(f"source {SCRIPT}; check_platform", env={"MEMORY_KB": "1850000"})
+    assert result.returncode == 0, result.stderr
+    assert "4 GB" in result.stdout
+    # A 4 GB Pi 4 reports about 3.9 GB: no warning.
+    result = run_bash(f"source {SCRIPT}; check_platform", env={"MEMORY_KB": "3900000"})
     assert result.returncode == 0 and "4 GB" not in result.stdout
+
+
+def test_update_prunes_the_previous_image_after_the_dashboard_answers():
+    start = SCRIPT.read_text().split("start_stack() {")[1].split("\n}\n")[0]
+    assert "docker image prune -f" in start
+    assert start.index("is answering") < start.index("docker image prune -f")
 
 
 def test_backup_units_are_written_with_the_real_paths(tmp_path):
@@ -117,6 +126,7 @@ def test_completion_shows_the_password_only_on_the_first_run(tmp_path):
     assert "ben@crystalpm.com" in first.stdout and "abc123" in first.stdout
     assert "install-dashboard.sh" in first.stdout and "/var/backups/croom-dashboard" in first.stdout
     assert "Fixed IP" in first.stdout and "Provisioning" in first.stdout
+    assert "sudo docker compose logs -f" in first.stdout  # the settings file is root's, so compose needs sudo
     later = run_bash(f"source {SCRIPT}; INSTALL_DIR={tmp_path}; print_completion")
     assert "abc123" not in later.stdout and "ben@crystalpm.com" in later.stdout
 

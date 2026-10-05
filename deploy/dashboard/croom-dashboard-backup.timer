@@ -1,0 +1,9 @@
+[Unit]
+Description=Nightly backup of the Crystal Meet dashboard database
+
+[Timer]
+OnCalendar=*-*-* 02:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,8 @@
+[Unit]
+Description=Nightly backup of the Crystal Meet dashboard database
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+ExecStart=__BIN_DIR__/croom-dashboard-backup __INSTALL_DIR__/deploy/dashboard __BACKUP_DIR__

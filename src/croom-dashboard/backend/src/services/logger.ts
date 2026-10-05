@@ -2,6 +2,7 @@
  * Logger service using Winston.
  */
 
+import path from 'path';
 import winston from 'winston';
 
 const logLevel = process.env.LOG_LEVEL || 'info';
@@ -24,8 +25,9 @@ export const logger = winston.createLogger({
   ],
 });
 
-// Add file transport in production
-if (process.env.NODE_ENV === 'production') {
-  logger.add(new winston.transports.File({ filename: 'error.log', level: 'error' }));
-  logger.add(new winston.transports.File({ filename: 'combined.log' }));
+// Log files only when asked for; under Docker everything stays on stdout.
+const logDir = process.env.LOG_DIR;
+if (logDir) {
+  logger.add(new winston.transports.File({ filename: path.join(logDir, 'error.log'), level: 'error' }));
+  logger.add(new winston.transports.File({ filename: path.join(logDir, 'combined.log') }));
 }

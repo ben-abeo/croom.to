@@ -15,6 +15,8 @@ import { config } from 'dotenv';
 import { logger } from './services/logger';
 import { initDatabase, User } from './models';
 import { ensureAdmin } from './bootstrap';
+import { serveWebApp, webAppDir } from './webapp';
+import { helmetOptions } from './security';
 import { WebSocketServer } from './websocket/server';
 import { deviceRouter } from './routes/devices';
 import { authRouter } from './routes/auth';
@@ -41,7 +43,7 @@ async function main() {
   const app = express();
 
   // Middleware
-  app.use(helmet());
+  app.use(helmet(helmetOptions()));
   app.use(cors({
     origin: process.env.CORS_ORIGIN || '*',
     credentials: true,
@@ -65,6 +67,13 @@ async function main() {
   app.use('/api/provisioning', provisioningRouter); // Token-based auth
   app.use('/api/devices', authMiddleware, deviceRouter);
   app.use('/api/metrics', authMiddleware, metricsRouter);
+
+  // The built web app, when the image or the environment provides one.
+  const webApp = webAppDir();
+  if (webApp) {
+    serveWebApp(app, webApp);
+    logger.info(`Serving the web app from ${webApp}`);
+  }
 
   // Error handling
   app.use(errorHandler);

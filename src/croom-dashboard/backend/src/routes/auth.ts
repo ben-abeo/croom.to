@@ -5,7 +5,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcrypt';
 import { User } from '../models';
-import { generateToken, AuthRequest, authMiddleware } from '../middleware/auth';
+import { generateToken, AuthRequest, authMiddleware, requireRole } from '../middleware/auth';
 import { logger } from '../services/logger';
 
 export const authRouter = Router();
@@ -57,8 +57,8 @@ authRouter.post('/login', async (req: Request, res: Response) => {
   }
 });
 
-// Register (admin only in production)
-authRouter.post('/register', async (req: Request, res: Response) => {
+// Register: only a signed-in admin may create accounts.
+authRouter.post('/register', authMiddleware, requireRole('admin'), async (req: Request, res: Response) => {
   try {
     const { email, password, name, role } = req.body;
 

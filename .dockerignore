@@ -1,0 +1,8 @@
+*
+!src/croom-dashboard/backend
+!src/croom-dashboard/frontend
+src/croom-dashboard/backend/node_modules
+src/croom-dashboard/backend/dist
+src/croom-dashboard/backend/.env
+src/croom-dashboard/frontend/node_modules
+src/croom-dashboard/frontend/dist

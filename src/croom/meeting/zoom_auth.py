@@ -8,6 +8,7 @@ import asyncio
 import base64
 import hashlib
 import hmac
+import ssl
 import json
 import os
 import time
@@ -128,11 +129,21 @@ class ZoomApi:
         pair = f"{self._client_id}:{self._client_secret}".encode()
         return "Basic " + base64.b64encode(pair).decode("ascii")
 
+    @staticmethod
+    def ssl_context() -> ssl.SSLContext:
+        """Zoom's review asks for TLS 1.2 or above on every call; set the floor rather than trust OS defaults."""
+        context = ssl.create_default_context()
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        return context
+
+    def _connector(self) -> aiohttp.TCPConnector:
+        return aiohttp.TCPConnector(ssl=self.ssl_context())
+
     async def access_token(self) -> str:
         if self._token and time.time() < self._token_expires - 60:
             return self._token
         try:
-            async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
+            async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT, connector=self._connector()) as session:
                 async with session.post(
                     self._oauth_url,
                     params={"grant_type": "account_credentials", "account_id": self._account_id},
@@ -151,7 +162,7 @@ class ZoomApi:
     async def user_zak(self, user: str, ttl_seconds: int = 7200) -> str:
         token = await self.access_token()
         try:
-            async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
+            async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT, connector=self._connector()) as session:
                 async with session.get(
                     f"{self._api_url}/users/{user}/token",
                     params={"type": "zak", "ttl": str(ttl_seconds)},

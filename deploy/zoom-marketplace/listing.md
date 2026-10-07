@@ -95,19 +95,20 @@ verified for the account on the Publish page.
   4. Additional documents: optional; attach Crystal PM's security or privacy
      policy if one exists. Nothing is required.
 
-### Security tab (three questions; wording may differ)
+### Security tab (three yes/no questions)
 
-- Data stored: none of Zoom's data is stored. The device keeps its own
-  credentials (SDK client id and secret, Server-to-Server credentials, the
-  room user's address) in a root-only file; the ZAK is held in memory for one
-  join and discarded. No meeting content, recordings, chat or participant data
-  is captured or kept.
-- Data in transit: all calls to Zoom are HTTPS; meeting media is Zoom's own
-  encrypted transport inside Zoom's web SDK. The room page and the dashboard
-  are reachable only on the office network.
-- Access and retention: nothing retained; access to the device is by SSH with
-  the office's accounts; secrets can be revoked at any time by regenerating
-  them in the Marketplace or deactivating the Server-to-Server app.
+1. TLS 1.2 or above for all network traffic including Zoom user data: **Yes**.
+   Every call to Zoom (token, ZAK, SDK scripts, the meeting itself) is HTTPS,
+   and the agent sets a TLS 1.2 floor on its own Zoom calls; Chromium only
+   speaks TLS 1.2+. The room page and the dashboard are plain HTTP on the
+   office network and carry no Zoom user data.
+2. Verification tokens / x-zm-signature for incoming webhook events: **No**.
+   The app subscribes to no events and receives nothing from Zoom; say so in
+   the reviewer notes ("no webhooks or event subscriptions").
+3. Collect, store, log or retain Zoom user data including OAuth tokens: **No**.
+   The Server-to-Server access token is held in memory until it expires and
+   the ZAK for one join; neither is written to disk or logged. The device
+   keeps only its own credentials, in a root-only file.
 
 ## Publish page
 

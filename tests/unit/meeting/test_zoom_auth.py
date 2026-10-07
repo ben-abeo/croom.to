@@ -223,3 +223,12 @@ class TestZoomApiErrors:
         with pytest.raises(ZoomAuthError) as failure:
             await api.access_token()
         assert str(failure.value).startswith("could not reach Zoom")
+
+
+def test_zoom_calls_refuse_anything_below_tls_1_2():
+    """Zoom's review asks for TLS 1.2 or above on all traffic; the floor is set explicitly."""
+    import ssl
+    from croom.meeting.zoom_auth import ZoomApi
+    context = ZoomApi.ssl_context()
+    assert context.minimum_version == ssl.TLSVersion.TLSv1_2
+    assert context.verify_mode == ssl.CERT_REQUIRED

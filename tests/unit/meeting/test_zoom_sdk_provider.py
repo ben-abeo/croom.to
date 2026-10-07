@@ -34,10 +34,20 @@ class FakeApi:
 
 
 async def provider_for(credentials=FULL, api=None, stub=STUB_JS):
-    provider = ZoomSdkProvider(credentials, room_name="Room 1", api=api, headless=True,
+    from croom.meeting.display import TvDisplay
+    display = TvDisplay("about:blank", headless=True)
+    await display.start()
+    provider = ZoomSdkProvider(credentials, room_name="Room 1", api=api, display=display,
                                extra_init_script=stub, block_sdk_cdn=True)
     await provider.initialize()
+    provider._test_display = display
     return provider
+
+
+async def shutdown(provider):
+    """Providers no longer own the browser: stop the display too."""
+    await provider.shutdown()
+    await provider._test_display.stop()
 
 
 async def join_calls(provider):
@@ -60,7 +70,7 @@ class TestJoin:
             assert join["signature"].count(".") == 2
             assert api.calls == ["room1@crystalpm.com"]
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_without_a_room_user_joins_with_the_signature_only(self):
         provider = await provider_for(credentials=SDK_ONLY)
@@ -69,7 +79,7 @@ class TestJoin:
             [join] = await join_calls(provider)
             assert "zak" not in join
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_zak_failure_reports_and_opens_nothing(self):
         words = "the server-to-server app lacks the user token scope (user:read:token:admin); add it and re-activate the app"
@@ -81,7 +91,7 @@ class TestJoin:
             assert provider.current_meeting.error_message == words
             assert provider._page.url == "about:blank"
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_join_error_reaches_the_room_page_in_zooms_words(self):
         provider = await provider_for(api=FakeApi())
@@ -92,7 +102,7 @@ class TestJoin:
             assert provider.state == MeetingState.ERROR
             assert provider.current_meeting.error_message == str(failure.value)
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_waiting_room_then_connected(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.waiting = true;")
@@ -102,7 +112,7 @@ class TestJoin:
             await provider.join_meeting(LINK)
             assert states == [MeetingState.JOINING, MeetingState.IN_LOBBY, MeetingState.CONNECTED]
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_never_connecting_times_out_with_the_pages_words(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;")
@@ -113,7 +123,7 @@ class TestJoin:
             assert "Zoom did not connect; the page says:" in str(failure.value)
             assert provider.state == MeetingState.ERROR
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_a_second_join_after_a_failed_one_reloads_the_page(self):
         provider = await provider_for(api=FakeApi())
@@ -125,7 +135,7 @@ class TestJoin:
             [join] = await join_calls(provider)
             assert join["meetingNumber"] == "99612060433"
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
 
 class TestControls:
@@ -142,7 +152,7 @@ class TestControls:
             assert provider.state == MeetingState.IDLE and provider.current_meeting is None
             assert provider._page.url == "about:blank"
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_camera_off_at_join_presses_the_video_button(self):
         provider = await provider_for(api=FakeApi())
@@ -151,7 +161,7 @@ class TestControls:
             assert await provider._page.get_attribute("#stub-video", "aria-label") == "Start Video"
             assert provider.current_meeting.is_camera_on is False
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_controls_need_a_meeting(self):
         provider = await provider_for(api=FakeApi())
@@ -161,7 +171,7 @@ class TestControls:
             with pytest.raises(RuntimeError):
                 await provider.toggle_camera()
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
 
 class TestAgain:
@@ -175,7 +185,7 @@ class TestAgain:
             [join] = await join_calls(provider)
             assert join["meetingNumber"] == "99612060433"
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
 
 class TestUrlsAndConfig:
@@ -217,7 +227,7 @@ class TestReviewFixes:
             assert provider.state == MeetingState.IDLE and provider.current_meeting is None
             assert provider._page.url == "about:blank"
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_leave_during_a_join_cancels_it_quietly(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;")
@@ -235,7 +245,7 @@ class TestReviewFixes:
             assert provider.state == MeetingState.IDLE and provider.current_meeting is None
             assert MeetingState.ERROR not in states
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_entry_state_is_read_from_zoom_not_assumed(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true; window.ZoomMtg._behaviour.videoOffOnEntry = true;")
@@ -246,7 +256,7 @@ class TestReviewFixes:
             assert await provider._page.get_attribute("#stub-video", "aria-label") == "Stop Video"
             assert await provider.toggle_mute() is False
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_camera_off_join_does_not_press_when_video_is_already_off(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.videoOffOnEntry = true;")
@@ -255,7 +265,7 @@ class TestReviewFixes:
             assert info.is_camera_on is False
             assert await provider._page.get_attribute("#stub-video", "aria-label") == "Start Video"
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_join_success_without_status_events_still_connects(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.silentConnect = true;")
@@ -264,7 +274,7 @@ class TestReviewFixes:
             await provider.join_meeting(LINK)
             assert provider.state == MeetingState.CONNECTED
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_meeting_controls_on_screen_count_as_connected_at_the_deadline(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.silentConnect = true;")
@@ -274,7 +284,7 @@ class TestReviewFixes:
             await provider.join_meeting(LINK)
             assert provider.state == MeetingState.CONNECTED
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
 
     async def test_status_events_with_the_other_field_name_connect_too(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.statusField = 'status';")
@@ -283,4 +293,16 @@ class TestReviewFixes:
             await provider.join_meeting(LINK)
             assert provider.state == MeetingState.CONNECTED
         finally:
-            await provider.shutdown()
+            await shutdown(provider)
+
+
+class TestDisplay:
+    async def test_leaving_parks_the_page_on_the_screensaver(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            await provider.leave_meeting()
+            assert provider._page.url == "about:blank"
+            assert provider.state == MeetingState.IDLE
+        finally:
+            await shutdown(provider)

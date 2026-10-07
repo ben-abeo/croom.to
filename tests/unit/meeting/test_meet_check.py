@@ -63,10 +63,11 @@ def test_command_line_flag_exists():
     assert "--check-meet URL" in result.stdout
 
 
-def test_check_opens_the_page_with_the_providers_context_options():
+def test_check_opens_the_page_the_way_the_tv_display_does():
     import inspect
     from croom.meeting import meet_check
-    assert "GoogleMeetProvider.context_options()" in inspect.getsource(meet_check)
+    assert "TvDisplay.context_options()" in inspect.getsource(meet_check)
+    assert "TvDisplay.BASE_ARGS" in inspect.getsource(meet_check)
     assert "USER_AGENT" not in inspect.getsource(meet_check)
 
 

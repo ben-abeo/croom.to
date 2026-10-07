@@ -18,6 +18,7 @@ from croom.meeting.providers.base import (
     detect_platform,
 )
 from croom.meeting.providers import build_provider, get_all_providers
+from croom.meeting.display import TvDisplay
 
 logger = logging.getLogger(__name__)
 
@@ -30,33 +31,44 @@ class MeetingService(Service):
     for joining and controlling meetings across platforms.
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, display: Optional[TvDisplay] = None):
         super().__init__("meeting")
         self.config = config
+        # The TV: one browser page shared by every provider (spec 2026-10-07 TV, section 4.3).
+        self._display = display
 
         self._providers: Dict[str, MeetingProvider] = {}
         self._active_provider: Optional[MeetingProvider] = None
         self._state_callbacks: List[Callable[[MeetingState], None]] = []
 
     async def start(self) -> None:
-        """Start meeting service."""
-        # Initialize configured providers
+        """Start the TV display and the configured providers on it."""
+        if self._display is None:
+            self._display = TvDisplay.from_config(self.config)
+        built = {}
         for platform in self.config.meeting.platforms:
             try:
-                provider = build_provider(platform, self.config)
+                provider = build_provider(platform, self.config, self._display)
             except Exception as e:  # noqa: BLE001 - a bad credentials file must not stop the other platforms
                 logger.error(f"Failed to build {platform} provider: {e}")
                 continue
             if provider is not None:
-                try:
-                    await provider.initialize()
-                    self._providers[platform] = provider
-                    logger.info(f"Initialized meeting provider: {platform}")
-                except Exception as e:
-                    logger.error(f"Failed to initialize {platform} provider: {e}")
-
-        if not self._providers:
+                built[platform] = provider
+        if not built:
             logger.warning("No meeting providers available")
+            return
+        try:
+            await self._display.start()
+        except Exception as e:  # noqa: BLE001 - without a browser there is nothing to show
+            logger.error(f"The TV display could not start: {e}")
+            return
+        for platform, provider in built.items():
+            try:
+                await provider.initialize()
+                self._providers[platform] = provider
+                logger.info(f"Initialized meeting provider: {platform}")
+            except Exception as e:
+                logger.error(f"Failed to initialize {platform} provider: {e}")
 
         logger.info(f"Meeting service started with {len(self._providers)} providers")
 
@@ -76,6 +88,9 @@ class MeetingService(Service):
 
         self._providers.clear()
         self._active_provider = None
+
+        if self._display is not None:
+            await self._display.stop()
 
         logger.info("Meeting service stopped")
 

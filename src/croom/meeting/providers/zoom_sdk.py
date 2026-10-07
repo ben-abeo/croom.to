@@ -1,6 +1,6 @@
 """
-Zoom through the Meeting SDK (spec 2026-09-25 Zoom, section 4.4). The room's
-headed Chromium opens a page served on this device's loopback address, and
+Zoom through the Meeting SDK (spec 2026-09-25 Zoom, section 4.4). The TV's
+page is navigated to a page served on this device's loopback address, and
 Zoom's web SDK renders the meeting there. The device mints the signature and,
 when a room Zoom user is configured, fetches that user's ZAK first, so meetings
 hosted by other Zoom accounts can be joined too.
@@ -25,12 +25,6 @@ from croom.meeting.zoom_auth import (
 
 logger = logging.getLogger(__name__)
 
-try:
-    from playwright.async_api import async_playwright
-    PLAYWRIGHT_AVAILABLE = True
-except ImportError:
-    PLAYWRIGHT_AVAILABLE = False
-
 
 class ZoomSdkProvider(MeetingProvider):
     """Joins Zoom meetings with Zoom's Meeting SDK in the room's browser."""
@@ -43,19 +37,9 @@ class ZoomSdkProvider(MeetingProvider):
     CLOSE_TIMEOUT_S = 5
     BUTTON_TIMEOUT_MS = 3000
     VIDEO_BUTTON = '[aria-label*="Start Video" i], [aria-label*="Stop Video" i]'
-    BROWSER_ARGS = [
-        "--use-fake-ui-for-media-stream",
-        "--autoplay-policy=no-user-gesture-required",
-        "--disable-infobars",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--window-size=1920,1080",
-    ]
-    USER_AGENT = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
     def __init__(self, credentials: ZoomCredentials, room_name: str = "Conference Room",
-                 api: Optional[ZoomApi] = None, headless: bool = False,
+                 api: Optional[ZoomApi] = None, display=None,
                  extra_init_script: Optional[str] = None, block_sdk_cdn: bool = False,
                  site: Optional[ZoomSdkSite] = None):
         super().__init__()
@@ -64,14 +48,13 @@ class ZoomSdkProvider(MeetingProvider):
         if api is None and credentials.has_room_user:
             api = ZoomApi(credentials.account_id, credentials.s2s_client_id, credentials.s2s_client_secret)
         self._api = api
-        self._headless = headless
+        # The TV display (spec 2026-10-07 TV, section 4.3) owns the browser; this provider borrows its page.
+        self._display = display
         self._extra_init_script = extra_init_script
         self._block_sdk_cdn = block_sdk_cdn
         self._site = site or ZoomSdkSite()
-        self._playwright = None
-        self._browser = None
-        self._context = None
         self._page = None
+        self._exposed_on = None   # the page object crystalMeetEvent was exposed on
         self._events: Optional[asyncio.Queue] = None
         self._join_task: Optional[asyncio.Task] = None
         self._watcher: Optional[asyncio.Task] = None
@@ -79,9 +62,9 @@ class ZoomSdkProvider(MeetingProvider):
         self._camera_on = True
 
     @classmethod
-    def from_config(cls, config: Config) -> "ZoomSdkProvider":
+    def from_config(cls, config: Config, display=None) -> "ZoomSdkProvider":
         credentials = load_zoom_credentials(config.meeting.zoom_credentials_path)
-        return cls(credentials, room_name=config.room.name or "Conference Room")
+        return cls(credentials, room_name=config.room.name or "Conference Room", display=display)
 
     @property
     def name(self) -> str:
@@ -104,45 +87,32 @@ class ZoomSdkProvider(MeetingProvider):
     # ------------------------------------------------------------------
 
     async def initialize(self) -> None:
-        if not PLAYWRIGHT_AVAILABLE:
-            raise RuntimeError("Playwright not installed")
+        if self._display is None:
+            raise RuntimeError("Zoom SDK provider needs the TV display")
         self._events = asyncio.Queue()
         await self._site.start()
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(headless=self._headless, args=self.BROWSER_ARGS)
-        self._context = await self._browser.new_context(
-            permissions=["camera", "microphone"],
-            viewport={"width": 1920, "height": 1080},
-            user_agent=self.USER_AGENT,
-        )
-        if self._block_sdk_cdn:
+        context = self._display.context
+        if context is not None and self._block_sdk_cdn:
             async def abort(route):
                 await route.abort()
-            await self._context.route("https://source.zoom.us/**", abort)
-        if self._extra_init_script:
-            await self._context.add_init_script(self._extra_init_script)
-        self._page = await self._context.new_page()
-        await self._page.expose_function("crystalMeetEvent", self._on_page_event)
+            await context.route("https://source.zoom.us/**", abort)
+        if context is not None and self._extra_init_script:
+            await context.add_init_script(self._extra_init_script)
+        await self._take_page()
         logger.info(f"Zoom Meeting SDK provider ready (page on http://127.0.0.1:{self._site.port}/meeting)")
+
+    async def _take_page(self) -> None:
+        """Borrow the display's page and make sure the bridge can reach us from it."""
+        self._page = await self._display.page()
+        if self._exposed_on is not self._page:
+            await self._page.expose_function("crystalMeetEvent", self._on_page_event)
+            self._exposed_on = self._page
 
     async def shutdown(self) -> None:
         await self._cancel_tasks()
         if self._state == MeetingState.CONNECTED:
             await self.leave_meeting()
-        for attribute in ("_page", "_context", "_browser"):
-            closer = getattr(self, attribute)
-            if closer is not None:
-                try:
-                    await asyncio.wait_for(closer.close(), timeout=self.CLOSE_TIMEOUT_S)
-                except Exception as e:  # noqa: BLE001 - a hung browser must not hang the agent
-                    logger.warning(f"Zoom browser {attribute[1:]} did not close cleanly: {e}")
-                setattr(self, attribute, None)
-        if self._playwright is not None:
-            try:
-                await asyncio.wait_for(self._playwright.stop(), timeout=self.CLOSE_TIMEOUT_S)
-            except Exception as e:  # noqa: BLE001
-                logger.warning(f"Playwright did not stop cleanly: {e}")
-            self._playwright = None
+        self._page = None
         await self._site.stop()
 
     def _on_page_event(self, state: str, detail: str = "") -> None:
@@ -169,9 +139,10 @@ class ZoomSdkProvider(MeetingProvider):
                 pass
 
     async def _blank_page(self) -> None:
+        """Hand the page back to the screensaver; the page may already be gone."""
         try:
-            await self._page.goto("about:blank")
-        except Exception:  # noqa: BLE001 - the page may already be gone
+            await self._display.show_idle()
+        except Exception:  # noqa: BLE001
             pass
 
     # ------------------------------------------------------------------
@@ -180,8 +151,9 @@ class ZoomSdkProvider(MeetingProvider):
 
     async def join_meeting(self, meeting_url: str, display_name: str = "Conference Room",
                            camera_on: bool = True, mic_on: bool = True) -> MeetingInfo:
-        if self._page is None:
+        if self._display is None:
             raise RuntimeError("Provider not initialized")
+        await self._take_page()
         meeting_id = self.extract_meeting_id(meeting_url)
         if not meeting_id:
             raise ValueError(f"Invalid Zoom URL: {meeting_url}")

@@ -15,7 +15,7 @@ from croom.meeting.providers.base import MeetingProvider, MeetingInfo, MeetingSt
 logger = logging.getLogger(__name__)
 
 try:
-    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+    from playwright.async_api import Page
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -48,12 +48,15 @@ class ZoomProvider(MeetingProvider):
         re.compile(r"zoomgov\.com/j/(\d+)", re.IGNORECASE),
     ]
 
-    def __init__(self):
+    def __init__(self, display=None):
         super().__init__()
-        self._playwright = None
-        self._browser: Optional["Browser"] = None
-        self._context: Optional["BrowserContext"] = None
+        # The TV display owns the browser (spec 2026-10-07 TV, section 4.3); this provider borrows its page.
+        self._display = display
         self._page: Optional["Page"] = None
+
+    @classmethod
+    def from_config(cls, config, display=None) -> "ZoomProvider":
+        return cls(display=display)
 
     @property
     def name(self) -> str:
@@ -81,58 +84,25 @@ class ZoomProvider(MeetingProvider):
         return None
 
     async def initialize(self) -> None:
-        """Initialize browser for Zoom."""
-        if not PLAYWRIGHT_AVAILABLE:
-            raise RuntimeError("Playwright not installed")
-
-        logger.info("Initializing Zoom provider...")
-
-        self._playwright = await async_playwright().start()
-
-        self._browser = await self._playwright.chromium.launch(
-            headless=False,
-            args=[
-                "--use-fake-ui-for-media-stream",
-                "--disable-infobars",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--window-size=1920,1080",
-            ]
-        )
-
-        self._context = await self._browser.new_context(
-            permissions=["camera", "microphone"],
-            viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
-
-        self._page = await self._context.new_page()
-
-        logger.info("Zoom provider initialized")
+        """Borrow the TV page."""
+        if self._display is None:
+            raise RuntimeError("Zoom provider needs the TV display")
+        self._page = await self._display.page()
+        logger.info("Zoom provider initialized on the TV page")
 
     async def shutdown(self) -> None:
-        """Shutdown browser."""
+        """Leave the meeting if still in one; the display owns the browser."""
         if self._state == MeetingState.CONNECTED:
             await self.leave_meeting()
-
-        if self._page:
-            await self._page.close()
-            self._page = None
-
-        if self._context:
-            await self._context.close()
-            self._context = None
-
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
+        self._page = None
         logger.info("Zoom provider shutdown")
+
+    async def _show_idle(self) -> None:
+        """Hand the page back to the screensaver."""
+        if self._display is not None:
+            await self._display.show_idle()
+        elif self._page is not None:
+            await self._page.goto("about:blank")
 
     async def join_meeting(
         self,
@@ -142,6 +112,8 @@ class ZoomProvider(MeetingProvider):
         mic_on: bool = True
     ) -> MeetingInfo:
         """Join a Zoom meeting via web client."""
+        if self._display is not None:
+            self._page = await self._display.page()
         if not self._page:
             raise RuntimeError("Provider not initialized")
 
@@ -348,7 +320,7 @@ class ZoomProvider(MeetingProvider):
                 await confirm.click()
                 await asyncio.sleep(1)
 
-            await self._page.goto("about:blank")
+            await self._show_idle()
 
         except Exception as e:
             logger.error(f"Error leaving Zoom: {e}")

@@ -20,7 +20,7 @@ verified for the account on the Publish page.
 - App icon: icon.png (160 by 160), light and dark mode.
 - App gallery: gallery.png (1280 by 720).
 - Company name: Crystal PM
-- Category: Productivity (or Meetings and Rooms, if offered)
+- Marketplace Category: Productivity (or Meetings and Rooms, if offered); Industry Category: Healthcare (Crystal PM's customers) or Technology
 - Developer contact: a mailbox someone reads, for example it@crystalpm.com
 
 ## App Listing, Links and Support
@@ -29,17 +29,40 @@ verified for the account on the Publish page.
 - Privacy policy URL: https://www.crystalpm.com/privacy
 - Terms of use URL: https://www.crystalpm.com/terms
 - Documentation URL: https://github.com/ben-abeo/croom.to (the README)
+- Privacy Policy acknowledgment: tick it.
 - Support contact email: the same mailbox as above
+
+## Basic Information (Production)
+
+- OAuth Redirect URL: https://www.crystalpm.com/ (never used by the rooms; it
+  only has to be a page on a verified domain).
+- Contact Information: the developer's name and the same monitored mailbox.
 
 ## App Listing, EU and Discoverability
 
 - Discoverability: Set my app as "Unlisted".
-- EU questions: the app is used only by Crystal PM in the United States; it
-  processes no data about EU users; no EU representative.
+- The nine EU fields (business name, address, email, telephone, last 4 digits
+  of a bank account, trade register number or DUNS, bank name, identification
+  document, compliance declaration) are the EU Digital Services Act "trader"
+  details Zoom collects for apps offered to EU users. Crystal Meet Rooms is
+  not offered to anyone, so take one of these two ways out, in this order:
+  1. Email integration.testers@zoom.us: "Crystal Meet Rooms (General App,
+     account level) is an internal, device-specific app used only by Crystal
+     PM's own conference rooms. It is not offered or sold to anyone, so we are
+     not a trader under the DSA. Please remove the EU trader fields from our
+     build flow so we can submit." Zoom's docs offer exactly this.
+  2. Or turn off "List my app in the EU" in that section (the opt-out). The
+     app is then unavailable to EU Zoom accounts, which costs nothing for an
+     app nobody installs; whether that also affects joining a meeting hosted
+     by an EU account is not documented, so prefer the email.
+- If Zoom insists on the fields anyway: business name Crystal PM, the office
+  address, the monitored mailbox and the office telephone number; the bank,
+  identification and compliance items are described by Zoom as applying to
+  traders that charge for the app, which this app does not.
 
 ## Technical Design
 
-- Architecture: A Raspberry Pi behind each conference-room TV runs the Crystal
+- Application Overview (the architecture field): A Raspberry Pi behind each conference-room TV runs the Crystal
   Meet agent. When a person in the room presses Join on the room's touch
   screen, the agent opens Zoom's Meeting SDK (web, Client View) in a local
   browser on the TV and joins the meeting as a participant with the room's
@@ -48,7 +71,7 @@ verified for the account on the Publish page.
   OAuth app on the same account, so the room joins as that user. Nobody signs
   in to the app; it has no web pages, no end users outside Crystal PM, and no
   in-client surface.
-- Data: the only Zoom data the app reads is the ZAK of the room's own Zoom
+- Security Overview: the only Zoom data the app reads is the ZAK of the room's own Zoom
   user, requested per join and discarded after use. Nothing is stored or sent
   anywhere else. Credentials live in a root-only file on each device.
 - Scopes: user:read:zak:admin, to read the room user's ZAK (listed on the

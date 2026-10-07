@@ -47,9 +47,7 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
     print(f"Opening {url} as a guest, the way the room does", file=out)
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless, args=GoogleMeetProvider.BROWSER_ARGS)
-        context = await browser.new_context(permissions=["camera", "microphone"],
-                                            viewport={"width": 1920, "height": 1080},
-                                            user_agent=GoogleMeetProvider.USER_AGENT)
+        context = await browser.new_context(**GoogleMeetProvider.context_options())
         page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")

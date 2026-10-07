@@ -57,7 +57,12 @@ class GoogleMeetProvider(MeetingProvider):
         "--disable-gpu",
         "--window-size=1920,1080",
     ]
-    USER_AGENT = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+    @classmethod
+    def context_options(cls) -> dict:
+        """Browser context settings shared with `croom --check-meet`. No user-agent override:
+        Meet refuses browsers it deems too old, and the bundled Chromium's own identity is current."""
+        return {"permissions": ["camera", "microphone"], "viewport": {"width": 1920, "height": 1080}}
 
     def __init__(self):
         super().__init__()
@@ -115,11 +120,7 @@ class GoogleMeetProvider(MeetingProvider):
         )
 
         # Create context with permissions
-        self._context = await self._browser.new_context(
-            permissions=["camera", "microphone"],
-            viewport={"width": 1920, "height": 1080},
-            user_agent=self.USER_AGENT,
-        )
+        self._context = await self._browser.new_context(**self.context_options())
 
         self._page = await self._context.new_page()
 

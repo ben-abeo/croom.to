@@ -103,3 +103,11 @@ async def test_failure_quotes_what_meet_showed_and_saves_a_screenshot(tmp_path):
             assert (tmp_path / "meet-failure.png").stat().st_size > 0
         finally:
             await browser.close()
+
+
+def test_browser_identifies_as_itself():
+    """Meet refuses browsers it deems too old; the context must not claim an older Chrome."""
+    options = GoogleMeetProvider.context_options()
+    assert "user_agent" not in options
+    assert options["permissions"] == ["camera", "microphone"]
+    assert options["viewport"] == {"width": 1920, "height": 1080}

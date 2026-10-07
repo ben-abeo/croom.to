@@ -50,7 +50,7 @@ body {
   padding: var(--gutter);
   display: grid;
   gap: clamp(24px, 3.5vh, 40px);
-  grid-template-areas: "top" "now" "link" "schedule";
+  grid-template-areas: "top" "now" "link" "screen" "schedule";
   align-content: start;
 }
 @media (min-width: 1024px) {
@@ -59,7 +59,8 @@ body {
     grid-template-areas:
       "top top"
       "now schedule"
-      "link schedule";
+      "link schedule"
+      "screen schedule";
     column-gap: clamp(40px, 5vw, 96px);
   }
 }
@@ -67,6 +68,7 @@ body {
 .now { grid-area: now; }
 .schedule { grid-area: schedule; }
 .link { grid-area: link; }
+.screen-section { grid-area: screen; }
 
 .brand { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
 .logo { width: clamp(120px, 12vw, 160px); height: auto; display: block; }
@@ -189,6 +191,11 @@ body[data-state="error"] .button.quiet { border-color: var(--blue-700); color: v
   font: inherit;
 }
 .link-form input::placeholder { color: rgba(189, 206, 255, 0.7); }
+
+/* TV when idle: the screensaver picker; the chosen style stays filled in every room state. */
+.picker { display: flex; flex-wrap: wrap; gap: 10px; }
+.picker .button { min-height: 48px; padding: 0 18px; }
+.picker .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
 
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;

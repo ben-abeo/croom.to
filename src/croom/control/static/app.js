@@ -7,10 +7,14 @@
   const CONFIRM_MS = 5000;
 
   const el = (id) => document.getElementById(id);
-  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false };
+  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null };
   let confirmTimer = null;
   let lastActionsKey = null;
   let lastEventsKey = null;
+  let lastPickerKey = null;
+
+  // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
+  const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
@@ -42,6 +46,7 @@
     try {
       model.status = await api("/api/status");
       model.offline = false;
+      if (model.status.screensaver) model.screensaver = model.status.screensaver;
     } catch (e) {
       model.offline = true;
     }
@@ -76,6 +81,7 @@
   const joinEvent = (id) => act(() => post("/api/meeting/join", { event_id: id }));
   const leave = () => act(() => post("/api/meeting/leave"));
   const toggle = (kind) => act(() => post("/api/meeting/" + kind));
+  const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
 
   function button(label, className, onClick, disabled) {
     const b = document.createElement("button");
@@ -133,8 +139,10 @@
       el("headline").textContent = "Can't reach the room";
       el("detail").textContent = "Check that Crystal Meet is running on the room's device, then this page will reconnect on its own.";
       setActions([]);
+      document.querySelector(".screen-section").hidden = true;
       return;
     }
+    document.querySelector(".screen-section").hidden = false;
 
     const s = model.status;
     el("room-name").textContent = s.room.name;
@@ -174,6 +182,21 @@
     setActions(specs);
 
     renderEvents(cal);
+    renderPicker();
+  }
+
+  function renderPicker() {
+    // Rebuilt only when the choice or availability changes, so a tap is never lost to a re-render.
+    const key = JSON.stringify([model.screensaver, model.busy]);
+    if (key === lastPickerKey) return;
+    lastPickerKey = key;
+    const buttons = Object.keys(STYLE_LABELS).map((style) => {
+      const current = model.screensaver === style;
+      const b = button(STYLE_LABELS[style], current ? "primary" : "quiet", () => setScreensaver(style), false);
+      b.setAttribute("aria-pressed", current ? "true" : "false");
+      return b;
+    });
+    el("screen-picker").replaceChildren(...buttons);
   }
 
   function renderIdle(cal) {

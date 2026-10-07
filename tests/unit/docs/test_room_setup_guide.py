@@ -52,3 +52,4 @@ def test_guide_sends_the_reader_to_the_meet_guide_for_the_sign_in():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "Let Crystal Meet rooms join Google Meet" in html
     assert "joins as a guest" not in html
+    assert "stop the service first" in html

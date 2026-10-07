@@ -276,9 +276,14 @@ class GoogleMeetProvider(MeetingProvider):
             return
         if ("turn off" in label) == wanted_on:
             return
-        await button.click()
-        await asyncio.sleep(0.5)
-        label = (await button.get_attribute("aria-label") or "").lower()
+        try:
+            await button.click(timeout=self.TOGGLE_TIMEOUT_MS)
+            await asyncio.sleep(0.5)
+            label = (await button.get_attribute("aria-label") or "").lower()
+        except Exception as e:
+            logger.warning(f"Meet pre-join {device} button could not be pressed ({type(e).__name__}); "
+                           "joining with Meet's current setting")
+            return
         logger.info(f"Meet pre-join {device} is now {'on' if 'turn off' in label else 'off'} "
                     f"(wanted {'on' if wanted_on else 'off'})")
 

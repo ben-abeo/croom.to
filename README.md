@@ -52,7 +52,7 @@ sudo systemctl start croom
 /opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
 /opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml
 sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml   # once per room, service stopped
-sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet https://meet.google.com/abc-defg-hij -c /etc/croom/config.yaml
+sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet https://meet.google.com/abc-defg-hij -c /etc/croom/config.yaml   # service stopped first
 ```
 
 Installer options: `--config FILE` installs a prepared room config as

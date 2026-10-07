@@ -42,7 +42,7 @@ def test_meet_guide_quotes_the_real_commands_and_names():
                    "sudo systemctl stop croom", "--sign-in-meet -c /etc/croom/config.yaml", "DISPLAY=:0",
                    "sudo systemctl start croom", "croom --check-meet", "google_profile_dir",
                    "/var/lib/croom/meet-profile", "Join now", "Ask to join", "expired or was never done",
-                   "You can't join this video call"):
+                   "You can't join this video call", "the user the service runs as"):
         assert needle in html, needle
 
 

@@ -110,3 +110,15 @@ def test_check_command_reads_the_profile_from_the_config():
     from croom.core import agent
     source = inspect.getsource(agent)
     assert "resolve_profile(args.profile, load_config(args.config).meeting.google_profile_dir)" in source
+
+
+async def test_check_refuses_a_profile_a_live_chromium_holds(tmp_path):
+    import os
+    import socket
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    os.symlink(f"{socket.gethostname()}-{os.getpid()}", profile / "SingletonLock")
+    out = io.StringIO()
+    code = await check_meet("file:///nothing", out=out, headless=True, settle_ms=100, profile=profile)
+    assert code == 1
+    assert "sudo systemctl stop croom" in out.getvalue() and "--profile" in out.getvalue()

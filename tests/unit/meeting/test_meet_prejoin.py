@@ -225,3 +225,26 @@ async def test_waiting_to_be_admitted_is_the_lobby(tmp_path):
             assert provider._state == MeetingState.IN_LOBBY
         finally:
             await browser.close()
+
+
+COVERED_TOGGLE_FORM = SIGNED_IN_FORM.replace(
+    "</body>",
+    '<div style="position:fixed;inset:0;background:rgba(0,0,0,.01);z-index:9"></div>'
+    '<script>document.getElementById("join").style.zIndex="10";document.getElementById("join").style.position="relative";</script></body>',
+)
+
+
+async def test_a_toggle_that_cannot_be_clicked_does_not_stop_the_join(tmp_path):
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(COVERED_TOGGLE_FORM)
+        provider = GoogleMeetProvider(profile_dir=str(tmp_path / "profile"))
+        provider._page = page
+        provider.TOGGLE_TIMEOUT_MS = 500
+        try:
+            await provider._handle_prejoin("Room 3", True, True)
+            await provider._click_join_button()
+            await page.wait_for_selector("#meeting:not([hidden])", timeout=5000)
+        finally:
+            await browser.close()

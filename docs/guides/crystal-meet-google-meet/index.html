@@ -112,7 +112,7 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 <ul>
   <li><strong>Check the config.</strong> The room configs from <span class="chip">deploy/rooms/</span> already carry <span class="chip">google_profile_dir: /var/lib/croom/meet-profile</span> under <span class="ui">meeting</span>. A room installed before this guide needs that line added to <span class="chip">/etc/croom/config.yaml</span>.</li>
   <li><strong>Plug a keyboard and mouse into the Pi</strong>, then from SSH stop the room service so the browser is free: <span class="chip">sudo systemctl stop croom</span>.</li>
-  <li><strong>Open the sign-in.</strong> Type <span class="chip wrap">sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml</span> (your username instead of pi). The room's own browser opens on the TV at Google's sign-in page.</li>
+  <li><strong>Open the sign-in.</strong> Type <span class="chip wrap">sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml</span>, where pi is the user the service runs as, the one that ran the installer; the installer's completion text prints the exact command. Not as root: the profile must belong to the service's user. The room's own browser opens on the TV at Google's sign-in page.</li>
   <li><strong>Sign in on the TV</strong> as that room's user, for example <span class="chip">room1@crystalpm.com</span>, accept Google's first-run prompts, and when the account page shows, close the browser window. The command prints "Profile saved".</li>
   <li><strong>Start the service again:</strong> <span class="chip">sudo systemctl start croom</span>.</li>
 </ul>

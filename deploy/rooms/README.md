@@ -17,6 +17,10 @@ before installing it on that room's device:
   like `c_1885...@resource.calendar.google.com` (the resource email in the
   Admin console). The guide "Connect Crystal Meet rooms to Google Calendar"
   covers creating the rooms, the service account key and sharing.
+- `meeting.google_profile_dir`: where the room keeps its signed-in Google Meet
+  session, `/var/lib/croom/meet-profile`. Leave it; the guide "Let Crystal Meet
+  rooms join Google Meet" covers the room's Workspace user and the one-time
+  `croom --sign-in-meet` on the device.
 
 Zoom needs one more file per room, `zoom-credentials.json`, made from
 `zoom-credentials.example.json`: the Meeting SDK app's client id and secret

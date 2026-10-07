@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Let Crystal Meet rooms join Google Meet</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --blue-700: #003EBC;
+  --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --tint-50: #F7F9FF; --slate-500: #647087; --ink-900: #1C2024;
+  --radius: 12px; --radius-sm: 8px;
+}
+@page { size: Letter; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Lexend", "Segoe UI", Arial, sans-serif; color: var(--ink-900); font-size: 10.5pt; line-height: 1.5; }
+h1, h2, h3 { font-weight: 600; line-height: 1.15; margin: 0.2em 0; }
+h2 { font-size: 16pt; color: var(--navy-800); }
+p { margin: 0.4em 0; }
+.kicker { font-size: 9pt; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--blue-600); margin: 0 0 6px; }
+.banner { background: var(--navy-800); color: #fff; border-radius: var(--radius); padding: 28px 32px; margin-bottom: 20px; }
+.banner .kicker { color: var(--periwinkle-300); }
+.banner .kicker.top { color: #fff; margin-bottom: 2px; }
+.banner h1 { font-size: 26pt; margin: 6px 0 8px; }
+.banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
+.banner img { height: 26px; display: block; margin-bottom: 18px; }
+.intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
+.glance { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); padding: 10px 10px; }
+.glance .card:nth-child(2) { border-top-color: #2F62EA; }
+.glance .card:nth-child(3) { border-top-color: #4A78F1; }
+.glance .card:nth-child(4) { border-top-color: #6C92F5; }
+.glance .card:nth-child(5) { border-top-color: #8EABF8; }
+.glance .card:nth-child(6) { border-top-color: var(--periwinkle-300); }
+.card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
+.card .kicker { font-size: 8pt; }
+.card h3 { font-size: 10.5pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9pt; }
+.block { break-inside: avoid; }
+.block.long { break-inside: auto; }
+.step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
+ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+li { position: relative; padding-left: 18px; margin: 5px 0; break-inside: avoid; }
+li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
+.ui { font-weight: 600; color: var(--blue-600); }
+.chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.chip.wrap { white-space: normal; overflow-wrap: anywhere; }
+.see { color: var(--slate-500); font-size: 9.5pt; margin: 4px 0 0 18px; }
+.callout { border-radius: var(--radius-sm); padding: 12px 18px; margin: 12px 0; border-left: 4px solid var(--blue-600); background: var(--tint-100); break-inside: avoid; }
+.callout.warn { background: #FFF8E1; border-left-color: #E8A013; }
+.callout.tip { background: #EDFBF3; border-left-color: #1FA971; }
+.callout .kicker { margin-bottom: 4px; }
+.callout p { margin: 2px 0; }
+.trouble { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.trouble .card { break-inside: avoid; }
+.trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.trouble .card h3 { font-size: 10.5pt; }
+.page-break { break-before: page; }
+pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--blue-600); background: var(--tint-100); border-radius: var(--radius-sm); padding: 10px 14px; margin: 6px 0 0 18px; white-space: pre-wrap; }
+</style>
+</head>
+<body>
+
+<section class="banner">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker top">Crystal PM</p>
+  <p class="kicker">How-to guide</p>
+  <h1>Let Crystal Meet rooms join Google Meet</h1>
+  <p>Give each room its own Google Workspace account and sign it in once, so Meet treats the room like a colleague instead of an unknown guest.</p>
+</section>
+
+<p class="intro">Google Meet refuses guests that arrive through an automated browser, which is how a Crystal Meet room joins. A room that is signed in as a Workspace user of its own is accepted, joins your company's meetings without knocking, and asks to join everyone else's under its own name. The Workspace half takes an admin about fifteen minutes for all rooms; the sign-in on each room's Pi takes five minutes with a keyboard.</p>
+
+<div class="glance">
+  <div class="card"><p class="kicker">Step 1</p><h3>A user per room</h3><p>room1@, room2@, room3@, named after the rooms.</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>Their own unit</h3><p>Sessions that never expire, no 2-step prompt.</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>Sign the room in</h3><p>Once per Pi, on its screen.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>Test it</h3><p>An internal meeting, then an outside one.</p></div>
+</div>
+
+<div class="callout warn">
+  <p class="kicker">Before you begin</p>
+  <p><strong>Access.</strong> A Google Workspace super admin, or an admin who can create users and change security settings for an organizational unit.</p>
+  <p><strong>Cost.</strong> One Workspace seat per room. A single shared rooms account on all Pis is cheaper, but then every room appears under one name in calls and nobody can tell which room is which; this guide assumes one account per room.</p>
+  <p><strong>Secrets.</strong> Each room user's password is typed once on its Pi and then kept with the room's other secrets. The signed-in session lives on the Pi in <span class="chip">/var/lib/croom/meet-profile</span>, readable by the room service only.</p>
+</div>
+
+<section class="block">
+<div class="step"><span class="badge">1</span><h2>Create a Workspace user for each room</h2></div>
+<ul>
+  <li><strong>Add the user.</strong> In the Admin console open <span class="ui">Directory › Users › Add new user</span>. First name <span class="chip">Room</span>, last name <span class="chip">1</span>, primary email <span class="chip">room1@crystalpm.com</span>. Set a strong password yourself rather than letting Google generate one you have to change on first sign-in.</li>
+  <li><strong>Repeat</strong> for <span class="chip">room2@crystalpm.com</span> and <span class="chip">room3@crystalpm.com</span>. The display name is what hosts see when the room joins, so keep it the room's name.</li>
+  <li><strong>Nothing else is needed.</strong> No Gmail, Drive or Calendar access is required for joining; any Workspace edition's seat works.</li>
+</ul>
+<p class="see">You should now see three users named Room 1, Room 2 and Room 3 in the user list.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">2</span><h2>Put them in a unit whose sessions never expire</h2></div>
+<ul>
+  <li><strong>Make the unit.</strong> <span class="ui">Directory › Organizational units › Create organizational unit</span>, named <span class="chip">Meeting rooms</span>. Then select the three room users in the user list and use <span class="ui">Change organizational unit</span> to move them into it.</li>
+  <li><strong>Keep them signed in.</strong> <span class="ui">Security › Access and data control › Google session control</span>, select the Meeting rooms unit on the left, and set the web session duration to never expire (or the longest choice offered). Without this Google signs the rooms out on its schedule and someone has to sign them in again.</li>
+  <li><strong>No second factor on the Pi.</strong> <span class="ui">Security › Authentication › 2-Step Verification</span>, the Meeting rooms unit: allow users to turn it on, but do not enforce it, so the one-time sign-in needs only the password.</li>
+  <li><strong>Optional.</strong> Under <span class="ui">Apps › Google Workspace</span> you can turn Gmail and Drive off for the unit; Meet and Calendar stay on.</li>
+</ul>
+<p class="see">You should now see the three users inside Meeting rooms, with session control and 2-Step Verification set for that unit.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">3</span><h2>Sign each room in, once</h2></div>
+<ul>
+  <li><strong>Check the config.</strong> The room configs from <span class="chip">deploy/rooms/</span> already carry <span class="chip">google_profile_dir: /var/lib/croom/meet-profile</span> under <span class="ui">meeting</span>. A room installed before this guide needs that line added to <span class="chip">/etc/croom/config.yaml</span>.</li>
+  <li><strong>Plug a keyboard and mouse into the Pi</strong>, then from SSH stop the room service so the browser is free: <span class="chip">sudo systemctl stop croom</span>.</li>
+  <li><strong>Open the sign-in.</strong> Type <span class="chip wrap">sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml</span> (your username instead of pi). The room's own browser opens on the TV at Google's sign-in page.</li>
+  <li><strong>Sign in on the TV</strong> as that room's user, for example <span class="chip">room1@crystalpm.com</span>, accept Google's first-run prompts, and when the account page shows, close the browser window. The command prints "Profile saved".</li>
+  <li><strong>Start the service again:</strong> <span class="chip">sudo systemctl start croom</span>.</li>
+</ul>
+<p class="see">You should now see "Profile saved" in the terminal, and the room service running again.</p>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The profile folder belongs to the room service's user and nobody else. Running the sign-in again later only re-uses it; if the session ever lapses, the room page says the sign-in has expired or was never done, and these same three commands fix it.</p>
+</div>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">4</span><h2>Test it</h2></div>
+<ul>
+  <li><strong>An internal meeting.</strong> Start a meeting from a crystalpm.com account, paste its link into the room page's <span class="ui">Join with a link</span>, or book it on the room's calendar and press <span class="ui">Join now</span>. The room is in the call within about fifteen seconds; Meet shows it a <span class="ui">Join now</span> button, so nobody has to admit it.</li>
+  <li><strong>An outside meeting.</strong> Join a meeting hosted by a personal Google account or another company. The room asks to join under its own name, the room page says it is waiting, and the host admits it with <span class="ui">Ask to join</span>'s prompt.</li>
+  <li><strong>Camera and microphone.</strong> Both start in the state the room config asks for (<span class="ui">camera_default_on</span>, <span class="ui">mic_default_on</span>), whatever Meet remembered last time. Mute and camera buttons on the table page still work in the call.</li>
+  <li><strong>From a terminal.</strong> <span class="chip wrap">sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet &lt;meeting link&gt; -c /etc/croom/config.yaml</span> opens the link from the signed-in profile and prints what Meet showed, with a screenshot under <span class="chip">/tmp</span>. Stop the service first, as for the sign-in.</li>
+</ul>
+<p class="see">You should now see the room join the internal meeting on its own and the outside meeting after being admitted.</p>
+</section>
+
+<div class="page-break"></div>
+<section class="block">
+<p class="kicker">If something is off</p>
+<h2>Troubleshooting</h2>
+<div class="trouble">
+  <div class="card"><h3>The room page says the sign-in has expired or was never done</h3><p>Google's sign-in page came up instead of the meeting. Repeat step 3. If it keeps happening every couple of weeks, the session control in step 2 is not applied to the Meeting rooms unit.</p></div>
+  <div class="card"><h3>The room page quotes "You can't join this video call"</h3><p>The room is joining as a guest: either <span class="chip">google_profile_dir</span> is missing from <span class="chip">/etc/croom/config.yaml</span>, or the sign-in in step 3 was closed before it finished. Check the config, then repeat step 3.</p></div>
+  <div class="card"><h3>The wrong name shows in the call</h3><p>Meet shows the Google account's name. Change the user's first and last name in the Admin console, or sign the Pi in as the right room user.</p></div>
+  <div class="card"><h3>Camera or microphone off in the call</h3><p>The room sets both from the config before joining; if a device is missing, Meet's own default applies and the log says which button was not found. Check the camera and speakerphone are plugged into the Pi and seen by <span class="chip">arecord -l</span> and <span class="chip">v4l2-ctl --list-devices</span>.</p></div>
+  <div class="card"><h3>The sign-in command says the service is using the profile</h3><p>Stop the room service first with <span class="chip">sudo systemctl stop croom</span>, run the command again, and start the service when done.</p></div>
+  <div class="card"><h3>Google asks for a phone or a second factor on the Pi</h3><p>2-Step Verification is enforced for the room users. Set the Meeting rooms unit to allow but not enforce it (step 2), wait a few minutes, and try again.</p></div>
+</div>
+</section>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The room's browser is never disguised: it announces itself as an automated browser, which is exactly why a signed-in account is needed. To take a room's access away, suspend its user in the Admin console.</p>
+</div>
+
+</body>
+</html>

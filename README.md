@@ -22,7 +22,7 @@ network. The device joins nothing by itself; someone presses Join now.
 
 ## Set up a room
 
-Follow the four guides in this order:
+Follow the five guides in this order:
 
 1. [Set up the Crystal Meet dashboard](docs/guides/crystal-meet-dashboard.pdf): a
    fourth Raspberry Pi on the office network runs the dashboard under Docker;
@@ -33,7 +33,11 @@ Follow the four guides in this order:
 3. [Connect Crystal Meet rooms to Google Calendar](docs/guides/crystal-meet-google-calendar.pdf):
    room resources in Google Workspace, one service account and key, share each
    room calendar with it, put the key and the calendar address on the device.
-4. [Connect Crystal Meet rooms to Zoom](docs/guides/crystal-meet-zoom.pdf): a
+4. [Let Crystal Meet rooms join Google Meet](docs/guides/crystal-meet-google-meet.pdf):
+   one Workspace user per room in a unit whose sessions never expire, and the
+   one-time sign-in on each Pi, so Meet accepts the room instead of refusing an
+   automated guest.
+5. [Connect Crystal Meet rooms to Zoom](docs/guides/crystal-meet-zoom.pdf): a
    Meeting SDK app, its submission to Zoom's review (unlisted, needed only for
    meetings hosted by other accounts), a Server-to-Server app for tokens, one
    Zoom user per room, and the credentials file on the device.
@@ -47,7 +51,8 @@ sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-servi
 sudo systemctl start croom
 /opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
 /opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml
-PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet https://meet.google.com/abc-defg-hij   # what Meet shows a guest
+sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml   # once per room, service stopped
+sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet https://meet.google.com/abc-defg-hij -c /etc/croom/config.yaml
 ```
 
 Installer options: `--config FILE` installs a prepared room config as
@@ -146,6 +151,7 @@ the plan holds the how, step by step with the code.
 | Google Calendar credentials, the check command, the calendar guide | [spec](docs/superpowers/specs/2026-09-25-google-calendar-credentials-design.md) | [plan](docs/superpowers/plans/2026-09-25-google-calendar-credentials.md) |
 | Zoom joins through the Meeting SDK: signature, per-room Zoom user's ZAK for outside hosts, loopback page, `croom --check-zoom`, the Zoom guide | [spec](docs/superpowers/specs/2026-09-25-zoom-meeting-sdk-design.md) | [plan](docs/superpowers/plans/2026-09-25-zoom-meeting-sdk.md) |
 | The dashboard on a Raspberry Pi: Docker Compose packaging, production mode in the backend, the dashboard installer and guide | [spec](docs/superpowers/specs/2026-10-05-dashboard-on-a-pi-design.md) | [plan](docs/superpowers/plans/2026-10-05-dashboard-on-a-pi.md) |
+| Google Meet as a signed-in room: the persistent profile, `croom --sign-in-meet`, pre-join camera and microphone, the Meet guide | [spec](docs/superpowers/specs/2026-10-07-google-meet-room-account-design.md) | [plan](docs/superpowers/plans/2026-10-07-google-meet-room-account.md) |
 
 Decisions worth knowing before changing things:
 
@@ -155,12 +161,13 @@ Decisions worth knowing before changing things:
 - Brand assets (logo, Lexend, its OFL licence) are bundled under `src/croom/control/static` and in each guide folder, so nothing loads from the internet.
 - Nothing joins or leaves by itself; Join now opens ten minutes before a booking.
 - With a calendar address configured, only that calendar is read; the room resource's declined (double-booked) and cancelled bookings are dropped; a link typed into an event wins over an automatically added Meet.
+- Google Meet refuses guests that arrive through an automated browser, so each room joins Meet signed in as its own Workspace user from a persistent browser profile (`meeting.google_profile_dir`); the browser is never disguised. `croom --sign-in-meet` does the one-time sign-in on the room's screen.
 - Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need Zoom's review of the SDK app (it may stay unlisted; its production credentials are the approved ones) plus the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
 
 Known limitations, mostly inherited from upstream:
 
 - Stopping the meeting service can hang while closing the headed Chromium; the service unit's restart covers it.
-- Google Meet joins as a guest, so someone in the meeting must admit the room; Zoom links need their passcode in the link. A failed Meet join logs what Meet showed and saves a screenshot under `/tmp`; `croom --check-meet URL` reports the same from a terminal.
+- Zoom links need their passcode in the link. A failed Meet join logs what Meet showed and saves a screenshot under `/tmp`; `croom --check-meet URL -c CONFIG` reports the same from a terminal.
 - One headed browser window opens per configured platform when the agent starts.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.

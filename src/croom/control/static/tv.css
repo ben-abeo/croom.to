@@ -1,0 +1,88 @@
+/* Crystal Meet TV: what the room's TV shows between meetings. */
+@font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
+
+:root {
+  --navy-900: #001636;
+  --navy-800: #16244F;
+  --periwinkle-300: #BDCEFF;
+  --free: #1FA971;
+  --soon: #E8A013;
+  --busy: #FF8A80;
+  --gutter: clamp(32px, 4vw, 72px);
+  --font: "Lexend", "Segoe UI", Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0;
+  cursor: none;
+  overflow: hidden;
+  background: linear-gradient(135deg, var(--navy-900) 0%, var(--navy-800) 100%);
+  color: #fff;
+  font-family: var(--font);
+  font-size: clamp(18px, 1.6vw, 28px);
+  line-height: 1.4;
+}
+
+.tv {
+  min-height: 100%;
+  padding: var(--gutter);
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  gap: 24px;
+}
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.logo { width: clamp(120px, 10vw, 200px); height: auto; display: block; }
+.clock {
+  margin: 0;
+  font-size: clamp(2.5rem, 6vw, 6rem);
+  font-weight: 400;
+  line-height: 1;
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.status { align-self: center; }
+.room { margin: 0 0 8px; font-size: clamp(1.4rem, 2.4vw, 2.6rem); font-weight: 600; opacity: 0.92; overflow-wrap: anywhere; }
+.kicker {
+  margin: 0 0 10px;
+  font-size: clamp(0.8rem, 1.2vw, 1.2rem);
+  font-weight: 700;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+.headline {
+  margin: 0;
+  font-size: clamp(2.6rem, 7.5vw, 8rem);
+  font-weight: 600;
+  line-height: 1.02;
+  letter-spacing: -0.02em;
+  max-width: 16ch;
+  overflow-wrap: anywhere;
+}
+.headline.long { font-size: clamp(1.8rem, 4.8vw, 5rem); max-width: 26ch; }
+.detail { margin: 16px 0 0; font-size: clamp(1.2rem, 2.2vw, 2.2rem); max-width: 44ch; opacity: 0.92; overflow-wrap: anywhere; }
+.detail:empty { display: none; }
+.hint { margin: 0; font-size: clamp(1rem, 1.6vw, 1.6rem); color: var(--periwinkle-300); }
+
+/* The status colours the kicker, not the whole screen: a TV is big and bright enough. */
+body[data-state="free"] .kicker { color: var(--free); }
+body[data-state="soon"] .kicker { color: var(--soon); }
+body[data-state="occupied"] .kicker { color: var(--busy); }
+body[data-state="offline"] .kicker, body[data-state="loading"] .kicker { color: var(--periwinkle-300); }
+
+/* Quiet: the name and the status, nothing that moves. */
+body[data-style="quiet"] .clock, body[data-style="quiet"] .detail, body[data-style="quiet"] .hint { display: none; }
+
+/* Brand: the logo alone. */
+body[data-style="brand"] .top, body[data-style="brand"] .status, body[data-style="brand"] .hint { display: none; }
+.brand-logo { position: fixed; left: 50%; top: 50%; width: min(48vw, 900px); height: auto; transform: translate(-50%, -50%); }
+
+/* Bounce: the logo drifts across a black screen and takes a new brand colour at every edge. */
+body[data-style="bounce"] .top, body[data-style="bounce"] .status, body[data-style="bounce"] .hint { display: none; }
+body[data-style="bounce"] { background: #000; }
+.bounce-logo { position: fixed; left: 0; top: 0; width: 320px; color: #1B52E5; will-change: transform; }
+.bounce-logo svg { width: 100%; height: auto; display: block; }

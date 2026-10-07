@@ -8,7 +8,9 @@ when Playwright or its browser is not installed.
 
 import asyncio
 import socket
+import tempfile
 import threading
+from pathlib import Path
 
 import pytest
 
@@ -26,6 +28,7 @@ class PageServer:
         self.room_name = room_name
         self.calendar_connected = calendar_connected
         self.port_arg = port
+        self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -40,7 +43,8 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting()
         service = ControlService(
-            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": "2nd floor"},
+            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": "2nd floor",
+                    "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")},
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
         )
         await service.start()
@@ -58,6 +62,7 @@ class PageServer:
     def __exit__(self, *exc):
         self._loop.call_soon_threadsafe(self._stop.set)
         self._thread.join(5)
+        self._settings_dir.cleanup()
 
 
 @pytest.fixture(scope="module")

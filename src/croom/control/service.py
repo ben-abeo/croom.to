@@ -129,6 +129,7 @@ class ControlService(Service):
         app = web.Application(client_max_size=MAX_BODY_BYTES)
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/sign", self._handle_sign)
+        app.router.add_get("/tv", self._handle_tv)
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/calendar/events", self._handle_events)
         app.router.add_post("/api/meeting/join", self._handle_join)
@@ -338,6 +339,12 @@ class ControlService(Service):
         if not sign.is_file():
             return web.Response(text="Door sign assets are missing.", status=500)
         return web.FileResponse(sign, headers={"Cache-Control": "no-cache"})
+
+    async def _handle_tv(self, request: web.Request) -> web.StreamResponse:
+        tv = self._static_dir / "tv.html"
+        if not tv.is_file():
+            return web.Response(text="TV page assets are missing.", status=500)
+        return web.FileResponse(tv, headers={"Cache-Control": "no-cache"})
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         return web.json_response(self._status())

@@ -64,14 +64,32 @@ class GoogleMeetProvider(MeetingProvider):
         Meet refuses browsers it deems too old, and the bundled Chromium's own identity is current."""
         return {"permissions": ["camera", "microphone"], "viewport": {"width": 1920, "height": 1080}}
 
-    def __init__(self):
+    def __init__(self, profile_dir: Optional[str] = None, room_name: str = "Conference Room",
+                 headless: bool = False):
         super().__init__()
+        # The signed-in Google profile (spec 2026-10-07, section 4.2); None means a guest browser.
+        self._profile_dir: Optional[Path] = Path(profile_dir) if profile_dir else None
+        self._room_name = room_name or "Conference Room"
+        self._headless = headless
         # Where a screenshot goes when a join fails, so the TV need not be watched.
         self.failure_screenshot: Path = Path(tempfile.gettempdir()) / "croom-meet-failure.png"
         self._playwright = None
         self._browser: Optional["Browser"] = None
         self._context: Optional["BrowserContext"] = None
         self._page: Optional["Page"] = None
+
+    @classmethod
+    def from_config(cls, config) -> "GoogleMeetProvider":
+        return cls(profile_dir=config.meeting.google_profile_dir or None,
+                   room_name=config.room.name or "Conference Room")
+
+    @property
+    def profile_dir(self) -> Optional[Path]:
+        return self._profile_dir
+
+    @property
+    def room_name(self) -> str:
+        return self._room_name
 
     @property
     def name(self) -> str:

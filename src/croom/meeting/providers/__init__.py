@@ -39,7 +39,8 @@ def build_provider(platform: str, config) -> "MeetingProvider | None":
     """
     The provider instance for a platform, given the agent's Config. Zoom uses
     the Meeting SDK when its credentials file is configured; otherwise the
-    public web client, with one warning (spec 2026-09-25 Zoom, section 4.2).
+    public web client, with one warning (spec 2026-09-25 Zoom, section 4.2). Google Meet
+    gets the signed-in profile folder and the room's name (spec 2026-10-07 Google Meet, section 4.2).
     """
     if platform == "zoom":
         from croom.meeting.zoom_auth import zoom_not_configured_reason
@@ -51,6 +52,10 @@ def build_provider(platform: str, config) -> "MeetingProvider | None":
         logger.warning(f"Zoom Meeting SDK not configured: {reason}; using the web client, "
                        "which Zoom blocks for automated guests")
         return ZoomProvider()
+    if platform == "google_meet":
+        from croom.meeting.providers.google_meet import GoogleMeetProvider
+
+        return GoogleMeetProvider.from_config(config)
     provider_cls = get_provider(platform)
     return provider_cls() if provider_cls else None
 

@@ -130,6 +130,7 @@ class ControlConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8080
+    screensaver: str = "info"  # what the TV shows when idle until someone picks another style on the room page
 
 
 @dataclass
@@ -288,6 +289,7 @@ class Config:
                 "enabled": self.control.enabled,
                 "host": self.control.host,
                 "port": self.control.port,
+                "screensaver": self.control.screensaver,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

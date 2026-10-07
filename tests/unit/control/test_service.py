@@ -582,3 +582,50 @@ class TestReviewFixes:
         assert (await resp.json())["url"] == expected
         await wait_until(lambda: meeting.joins)
         assert meeting.joins[0][0] == expected
+
+
+class TestScreensaver:
+    """The TV's idle style: chosen on the room page, remembered next to the agent's state (spec 2026-10-07 TV, 4.2)."""
+
+    def settings(self, tmp_path, **overrides):
+        config = {"settings_file": str(tmp_path / "control-settings.json")}
+        config.update(overrides)
+        return config
+
+    async def test_screensaver_defaults_to_info_and_appears_in_status(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        data = await (await client.get("/api/screensaver")).json()
+        assert data == {"style": "info", "styles": ["info", "quiet", "brand", "bounce"]}
+        assert (await (await client.get("/api/status")).json())["screensaver"] == "info"
+
+    async def test_a_posted_style_is_stored_and_survives_a_restart(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        response = await client.post("/api/screensaver", json={"style": "bounce"})
+        assert response.status == 200 and (await response.json())["style"] == "bounce"
+        assert (await (await client.get("/api/status")).json())["screensaver"] == "bounce"
+        settings = tmp_path / "control-settings.json"
+        assert oct(settings.stat().st_mode & 0o777) == "0o600"
+        again = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await again.get("/api/screensaver")).json())["style"] == "bounce"
+
+    async def test_unknown_style_is_refused_and_nothing_changes(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/screensaver", json={"style": "quiet"})
+        response = await client.post("/api/screensaver", json={"style": "disco"})
+        assert response.status == 400 and "disco" in (await response.json())["error"]
+        assert (await (await client.get("/api/screensaver")).json())["style"] == "quiet"
+        assert (await client.post("/api/screensaver", data="style=brand")).status == 415
+        assert (await client.post("/api/screensaver", json=["brand"])).status == 400
+
+    async def test_corrupt_settings_file_falls_back_to_the_default(self, client_factory, tmp_path):
+        (tmp_path / "control-settings.json").write_text("{not json")
+        client = await client_factory(make_service(**self.settings(tmp_path, screensaver="brand")))
+        assert (await (await client.get("/api/screensaver")).json())["style"] == "brand"
+
+    def test_control_config_has_a_default_style(self):
+        assert Config().control.screensaver == "info"
+        config = Config.from_dict({"control": {"screensaver": "quiet"}})
+        assert Config.from_dict(config.to_dict()).control.screensaver == "quiet"
+        service = ControlService.from_config(config)
+        assert service.config["screensaver"] == "quiet"
+        assert service.config["settings_file"] == str(config.resolve_data_dir() / "control-settings.json")

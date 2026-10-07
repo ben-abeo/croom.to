@@ -6,9 +6,12 @@ meeting and calendar services on behalf of whoever is in the room.
 """
 
 import asyncio
+import json
 import logging
 import mimetypes
+import os
 import re
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -35,6 +38,8 @@ PLATFORM_HOSTS = {
 }
 # The only calendar fields the page needs; the rest stays off the network.
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
+# The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
+STYLES = ("info", "quiet", "brand", "bounce")
 
 
 def _register_font_types() -> None:
@@ -62,7 +67,8 @@ class ControlService(Service):
     Room control service ("control" under the ServiceManager).
 
     Args:
-        config: dict with host, port, room_name, room_location, static_dir.
+        config: dict with host, port, room_name, room_location, static_dir, screensaver
+            (the default idle style) and settings_file (where the chosen style is kept).
         meeting: the MeetingService instance, or None.
         calendar: the CalendarService instance, or None.
     """
@@ -75,6 +81,9 @@ class ControlService(Service):
         self._room_name = self.config.get("room_name", "Conference Room")
         self._room_location = self.config.get("room_location", "")
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
+        self._settings_file = Path(self.config.get("settings_file", "control-settings.json"))
+        self._default_style = str(self.config.get("screensaver", "info"))
+        self._screensaver = self._load_style()
         self._meeting = meeting
         self._calendar = calendar
 
@@ -96,6 +105,8 @@ class ControlService(Service):
                 "room_name": config.room.name,
                 "room_location": config.room.location,
                 "static_dir": str(STATIC_DIR),
+                "screensaver": config.control.screensaver,
+                "settings_file": str(config.resolve_data_dir() / "control-settings.json"),
             },
             meeting=meeting,
             calendar=calendar,
@@ -124,6 +135,8 @@ class ControlService(Service):
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
         app.router.add_post("/api/meeting/camera", self._handle_camera)
+        app.router.add_get("/api/screensaver", self._handle_screensaver)
+        app.router.add_post("/api/screensaver", self._handle_set_screensaver)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
         return app
@@ -250,7 +263,65 @@ class ControlService(Service):
                 "error": error,
             },
             "calendar": self._calendar_status(),
+            "screensaver": self._screensaver,
         }
+
+    # ------------------------------------------------------------------
+    # The screensaver style
+    # ------------------------------------------------------------------
+
+    @property
+    def screensaver(self) -> str:
+        return self._screensaver
+
+    def _load_style(self) -> str:
+        """The stored style, else the configured default; a missing or broken file is not an error."""
+        try:
+            data = json.loads(self._settings_file.read_text(encoding="utf-8"))
+            style = data.get("screensaver") if isinstance(data, dict) else None
+        except (OSError, ValueError):
+            style = None
+        if style in STYLES:
+            return style
+        return self._default_style if self._default_style in STYLES else "info"
+
+    def _save_style(self, style: str) -> None:
+        """Write the settings file atomically, readable by the service user only."""
+        self._settings_file.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp = tempfile.mkstemp(dir=str(self._settings_file.parent), prefix=".control-settings-")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                json.dump({"screensaver": style}, handle)
+            os.chmod(temp, 0o600)
+            os.replace(temp, self._settings_file)
+        except OSError:
+            try:
+                os.unlink(temp)
+            except OSError:
+                pass
+            raise
+
+    def _screensaver_payload(self) -> Dict[str, Any]:
+        return {"style": self._screensaver, "styles": list(STYLES)}
+
+    async def _handle_screensaver(self, request: web.Request) -> web.Response:
+        return web.json_response(self._screensaver_payload())
+
+    async def _handle_set_screensaver(self, request: web.Request) -> web.Response:
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        style = data.get("style") if data else None
+        if style not in STYLES:
+            return self._error_response(f"Unknown screensaver style {style!r}; use one of {', '.join(STYLES)}", 400)
+        try:
+            self._save_style(style)
+        except OSError as e:
+            logger.warning(f"Could not save the screensaver choice to {self._settings_file}: {e}")
+        self._screensaver = style
+        logger.info(f"Screensaver style set to {style}")
+        return web.json_response(self._screensaver_payload())
 
     # ------------------------------------------------------------------
     # Handlers

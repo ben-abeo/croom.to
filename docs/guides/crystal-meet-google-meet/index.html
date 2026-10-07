@@ -70,7 +70,7 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
   <p>Give each room its own Google Workspace account and sign it in once, so Meet treats the room like a colleague instead of an unknown guest.</p>
 </section>
 
-<p class="intro">Google Meet refuses guests that arrive through an automated browser, which is how a Crystal Meet room joins. A room that is signed in as a Workspace user of its own is accepted, joins your company's meetings without knocking, and asks to join everyone else's under its own name. The Workspace half takes an admin about fifteen minutes for all rooms; the sign-in on each room's Pi takes five minutes with a keyboard.</p>
+<p class="intro">Google Meet refuses guests that arrive through an automated browser, which is how a Crystal Meet room joins. A room that is signed in as a Workspace user of its own is accepted, joins your company's meetings without knocking, and asks to join everyone else's under its own name. The Workspace half takes an admin about fifteen minutes for all rooms; the sign-in on each room's Pi takes five minutes over VNC from your laptop; nothing is plugged into the Pi.</p>
 
 <div class="glance">
   <div class="card"><p class="kicker">Step 1</p><h3>A user per room</h3><p>room1@, room2@, room3@, named after the rooms.</p></div>
@@ -81,7 +81,7 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 
 <div class="callout warn">
   <p class="kicker">Before you begin</p>
-  <p><strong>Access.</strong> A Google Workspace super admin, or an admin who can create users and change security settings for an organizational unit.</p>
+  <p><strong>Access.</strong> A Google Workspace super admin, or an admin who can create users and change security settings for an organizational unit; SSH to each room's Pi and a VNC viewer on your laptop for the one-time sign-in.</p>
   <p><strong>Cost.</strong> One Workspace seat per room. A single shared rooms account on all Pis is cheaper, but then every room appears under one name in calls and nobody can tell which room is which; this guide assumes one account per room.</p>
   <p><strong>Secrets.</strong> Each room user's password is typed once on its Pi and then kept with the room's other secrets. The signed-in session lives on the Pi in <span class="chip">/var/lib/croom/meet-profile</span>, readable by the room service only.</p>
 </div>
@@ -111,10 +111,11 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 <div class="step"><span class="badge">3</span><h2>Sign each room in, once</h2></div>
 <ul>
   <li><strong>Check the config.</strong> The room configs from <span class="chip">deploy/rooms/</span> already carry <span class="chip">google_profile_dir: /var/lib/croom/meet-profile</span> under <span class="ui">meeting</span>. A room installed before this guide needs that line added to <span class="chip">/etc/croom/config.yaml</span>.</li>
-  <li><strong>Plug a keyboard and mouse into the Pi</strong>, then from SSH stop the room service so the browser is free: <span class="chip">sudo systemctl stop croom</span>.</li>
+  <li><strong>See the Pi's screen from your laptop.</strong> Over SSH turn on VNC once with <span class="chip">sudo raspi-config nonint do_vnc 0</span>, then open a VNC viewer on your laptop (RealVNC Viewer or TigerVNC) to <span class="chip">pimeet-3.local</span> or the Pi's address and sign in with the Pi's username. The TV's screen appears in the window, so the Pi needs no keyboard or mouse of its own.</li>
+  <li><strong>Stop the room service</strong> so the browser is free: over SSH, <span class="chip">sudo systemctl stop croom</span>.</li>
   <li><strong>Open the sign-in.</strong> Type <span class="chip wrap">sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml</span>, where pi is the user the service runs as, the one that ran the installer; the installer's completion text prints the exact command. Not as root: the profile must belong to the service's user. The room's own browser opens on the TV at Google's sign-in page.</li>
-  <li><strong>Sign in on the TV</strong> as that room's user, for example <span class="chip">room1@crystalpm.com</span>, accept Google's first-run prompts, and when the account page shows, close the browser window. The command prints "Profile saved".</li>
-  <li><strong>Start the service again:</strong> <span class="chip">sudo systemctl start croom</span>.</li>
+  <li><strong>Sign in in the VNC window</strong> as that room's user, for example <span class="chip">room1@crystalpm.com</span>, accept Google's first-run prompts, and when the account page shows, close the browser window. The command prints "Profile saved".</li>
+  <li><strong>Start the service again:</strong> <span class="chip">sudo systemctl start croom</span>. Turn VNC off again if you prefer: <span class="chip">sudo raspi-config nonint do_vnc 1</span>.</li>
 </ul>
 <p class="see">You should now see "Profile saved" in the terminal, and the room service running again.</p>
 <div class="callout">

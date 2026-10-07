@@ -446,7 +446,7 @@ print_completion() {
     fi
     if [[ -n "$ROOM_CONFIG" ]] && grep -q "google_profile_dir" "$ROOM_CONFIG"; then
         echo ""
-        echo "Sign the room in to Google Meet once, with a keyboard on this device:"
+        echo "Sign the room in to Google Meet once (over VNC from a laptop, or with a keyboard here):"
         echo "  sudo systemctl stop croom"
         echo "  sudo -u $CROOM_USER DISPLAY=:0 $INSTALL_DIR/venv/bin/croom --sign-in-meet -c $CONFIG_DIR/config.yaml"
         echo "  sudo systemctl start croom"

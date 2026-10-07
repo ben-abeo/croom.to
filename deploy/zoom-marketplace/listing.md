@@ -64,21 +64,50 @@ verified for the account on the Publish page.
 
 ## Technical Design
 
-- Application Overview (the architecture field): A Raspberry Pi behind each conference-room TV runs the Crystal
-  Meet agent. When a person in the room presses Join on the room's touch
-  screen, the agent opens Zoom's Meeting SDK (web, Client View) in a local
-  browser on the TV and joins the meeting as a participant with the room's
-  camera and microphone. For meetings hosted by other Zoom accounts the agent
-  first obtains a ZAK for the room's own Zoom user through a Server-to-Server
-  OAuth app on the same account, so the room joins as that user. Nobody signs
-  in to the app; it has no web pages, no end users outside Crystal PM, and no
-  in-client surface.
-- Security Overview: the only Zoom data the app reads is the ZAK of the room's own Zoom
-  user, requested per join and discarded after use. Nothing is stored or sent
-  anywhere else. Credentials live in a root-only file on each device.
-- Scopes: user:read:zak:admin, to read the room user's ZAK (listed on the
-  Server-to-Server app the devices use; the SDK app itself carries the same
-  scope so the room can fall back to it).
+### Overview tab
+
+- Technology Stack:
+
+  The room device is a Raspberry Pi 5 running Raspberry Pi OS (64-bit). The
+  Crystal Meet agent is a Python 3.12 service (the open-source croom.to
+  project, forked by Crystal PM) using aiohttp for its local HTTP server and
+  outbound HTTPS, Playwright with its bundled Chromium to display the meeting
+  on the TV, PyYAML for configuration, and google-api-python-client to read the
+  room's Google Calendar through a service account. Zoom pieces: the Zoom Web
+  Meeting SDK 6.5.0 (Client View) loaded from source.zoom.us into a one-page
+  site the agent serves on 127.0.0.1 only; a Meeting SDK signature (HS256 JWT,
+  Python standard library hmac/hashlib) minted from the SDK app's client id and
+  secret; the Server-to-Server OAuth token endpoint (https://zoom.us/oauth/token,
+  account_credentials grant); and GET https://api.zoom.us/v2/users/{user}/token
+  ?type=zak for the room's own Zoom user, scope user:read:zak:admin, used only
+  for meetings hosted by other accounts. The companion dashboard (Node.js,
+  Express, Postgres under Docker on a separate Raspberry Pi) tracks device
+  status on the office network and never contacts Zoom. No cloud services,
+  databases or third-party applications are involved on the Zoom path.
+
+- Architecture Diagram: upload architecture.png (or architecture.pdf) from this folder.
+- Application Development, answer honestly; "Yes" obliges you to upload evidence:
+  1. Secure software development process (SSDLC): Yes only if Crystal PM has a
+     written process it can attach; otherwise No. (Code is reviewed before merge
+     and every change ships with automated tests, which you can say in the notes.)
+  2. SAST and/or DAST: No, unless Crystal PM runs such scans on this code.
+  3. Periodic third-party penetration testing: No.
+  4. Additional documents: optional; attach Crystal PM's security or privacy
+     policy if one exists. Nothing is required.
+
+### Security tab (three questions; wording may differ)
+
+- Data stored: none of Zoom's data is stored. The device keeps its own
+  credentials (SDK client id and secret, Server-to-Server credentials, the
+  room user's address) in a root-only file; the ZAK is held in memory for one
+  join and discarded. No meeting content, recordings, chat or participant data
+  is captured or kept.
+- Data in transit: all calls to Zoom are HTTPS; meeting media is Zoom's own
+  encrypted transport inside Zoom's web SDK. The room page and the dashboard
+  are reachable only on the office network.
+- Access and retention: nothing retained; access to the device is by SSH with
+  the office's accounts; secrets can be revoked at any time by regenerating
+  them in the Marketplace or deactivating the Server-to-Server app.
 
 ## Publish page
 

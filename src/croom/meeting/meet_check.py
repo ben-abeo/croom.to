@@ -9,6 +9,7 @@ import sys
 from pathlib import Path
 from typing import Optional, TextIO
 
+from croom.meeting.browser_env import ensure_browsers_path
 from croom.meeting.providers.google_meet import GoogleMeetProvider
 
 DESCRIBE_JS = """
@@ -42,6 +43,7 @@ async def _count(page, selectors) -> int:
 
 async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Path] = None,
                      headless: bool = False, settle_ms: int = 8000, profile: Optional[Path] = None) -> int:
+    ensure_browsers_path()
     from playwright.async_api import async_playwright
 
     if profile is not None:

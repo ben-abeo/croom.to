@@ -30,6 +30,13 @@ DESCRIBE_JS = """
 """
 
 
+def resolve_profile(explicit: Optional[str], configured: str) -> Optional[Path]:
+    """The profile the check opens: an explicit --profile wins, then the config's, else a guest."""
+    if explicit:
+        return Path(explicit)
+    return Path(configured) if configured else None
+
+
 async def _count(page, selectors) -> int:
     found = 0
     for selector in selectors:

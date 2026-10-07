@@ -309,9 +309,10 @@ def main() -> None:
     if args.check_meet:
         import tempfile
         from pathlib import Path
-        from croom.meeting.meet_check import check_meet
+        from croom.meeting.meet_check import check_meet, resolve_profile
+        profile = resolve_profile(args.profile, load_config(args.config).meeting.google_profile_dir)
         raise SystemExit(asyncio.run(check_meet(args.check_meet, screenshot=Path(tempfile.gettempdir()) / "croom-meet-check.png",
-                                                profile=Path(args.profile) if args.profile else None)))
+                                                profile=profile)))
 
     if args.sign_in_meet:
         import os

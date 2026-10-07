@@ -111,3 +111,117 @@ def test_browser_identifies_as_itself():
     assert "user_agent" not in options
     assert options["permissions"] == ["camera", "microphone"]
     assert options["viewport"] == {"width": 1920, "height": 1080}
+
+# A signed-in pre-join page: no name field, "Join now", a muted microphone and a camera that is on.
+SIGNED_IN_FORM = """
+<!DOCTYPE html><html><body>
+<h2>Ready to join?</h2>
+<button id="mic" aria-label="Turn on microphone (ctrl + d)">mic_off</button>
+<button id="cam" aria-label="Turn off camera (ctrl + e)">videocam</button>
+<button id="join">Join now</button>
+<div id="meeting" hidden><button aria-label="Leave call">Leave</button></div>
+<script>
+const flip = (btn, device) => btn && btn.addEventListener('click', () => {
+  const on = btn.getAttribute('aria-label').startsWith('Turn off');
+  btn.setAttribute('aria-label', (on ? 'Turn on ' : 'Turn off ') + device);
+  btn.dataset.clicks = String(Number(btn.dataset.clicks || 0) + 1);
+});
+flip(document.getElementById('mic'), 'microphone (ctrl + d)');
+flip(document.getElementById('cam'), 'camera (ctrl + e)');
+document.getElementById('join').addEventListener('click', () => {
+  setTimeout(() => { document.getElementById('meeting').hidden = false; }, 300);
+});
+</script>
+</body></html>
+"""
+
+MIC_ONLY_FORM = SIGNED_IN_FORM.replace('<button id="cam" aria-label="Turn off camera (ctrl + e)">videocam</button>', "")
+
+SIGN_IN_PAGE = """
+<!DOCTYPE html><html><body>
+<h1>Sign in</h1>
+<p>to continue to Google Meet</p>
+<input type="email" aria-label="Email or phone">
+<button>Next</button>
+</body></html>
+"""
+
+LOBBY_PAGE = """
+<!DOCTYPE html><html><body>
+<p>Asking to join…</p>
+<p>You'll join the call when someone lets you in</p>
+<div id="meeting" hidden><button aria-label="Leave call">Leave</button></div>
+<script>setTimeout(() => { document.getElementById('meeting').hidden = false; }, 700);</script>
+</body></html>
+"""
+
+
+async def signed_in(form, tmp_path, camera_on, mic_on):
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(form)
+        provider = GoogleMeetProvider(profile_dir=str(tmp_path / "profile"))
+        provider._page = page
+        provider.failure_screenshot = tmp_path / "meet-failure.png"
+        try:
+            await provider._handle_prejoin("Room 3", camera_on, mic_on)
+            await provider._click_join_button()
+            await page.wait_for_selector("#meeting:not([hidden])", timeout=5000)
+            labels = await page.evaluate("() => [...document.querySelectorAll('#mic,#cam')].map(b => [b.id, b.getAttribute('aria-label'), b.dataset.clicks || '0'])")
+            return {row[0]: (row[1], row[2]) for row in labels}
+        finally:
+            await browser.close()
+
+
+async def test_turns_the_microphone_on_and_leaves_the_camera_alone_when_both_are_wanted_on(tmp_path):
+    state = await signed_in(SIGNED_IN_FORM, tmp_path, camera_on=True, mic_on=True)
+    assert state["mic"] == ("Turn off microphone (ctrl + d)", "1")
+    assert state["cam"] == ("Turn off camera (ctrl + e)", "0")
+
+
+async def test_turns_the_camera_off_and_leaves_the_microphone_alone_when_both_are_wanted_off(tmp_path):
+    state = await signed_in(SIGNED_IN_FORM, tmp_path, camera_on=False, mic_on=False)
+    assert state["cam"] == ("Turn on camera (ctrl + e)", "1")
+    assert state["mic"] == ("Turn on microphone (ctrl + d)", "0")
+
+
+async def test_a_missing_toggle_does_not_stop_the_join(tmp_path):
+    state = await signed_in(MIC_ONLY_FORM, tmp_path, camera_on=True, mic_on=True)
+    assert state["mic"] == ("Turn off microphone (ctrl + d)", "1")
+    assert "cam" not in state
+
+
+async def test_googles_sign_in_page_names_the_sign_in_command(tmp_path):
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(SIGN_IN_PAGE)
+        provider = GoogleMeetProvider(profile_dir=str(tmp_path / "profile"))
+        provider._page = page
+        provider.JOIN_FIND_TIMEOUT_MS = 300
+        provider.TOGGLE_TIMEOUT_MS = 300
+        try:
+            with pytest.raises(RuntimeError) as failure:
+                await provider._click_join_button()
+            assert "croom --sign-in-meet" in str(failure.value)
+            assert "expired or was never done" in str(failure.value)
+        finally:
+            await browser.close()
+
+
+async def test_waiting_to_be_admitted_is_the_lobby(tmp_path):
+    from croom.meeting.providers.base import MeetingState
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(LOBBY_PAGE)
+        provider = GoogleMeetProvider()
+        provider._page = page
+        provider.CONNECT_TIMEOUT_MS = 300
+        provider.ADMIT_TIMEOUT_MS = 5000
+        try:
+            await provider._wait_for_connection()
+            assert provider._state == MeetingState.IN_LOBBY
+        finally:
+            await browser.close()

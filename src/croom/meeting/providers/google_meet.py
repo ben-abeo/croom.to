@@ -48,6 +48,12 @@ class GoogleMeetProvider(MeetingProvider):
                       '[aria-label*="join" i][role="button"]', 'button[jsname="Qx7uuf"]']
     JOIN_FIND_TIMEOUT_MS = 4000      # per selector while looking for the join control
     JOIN_ENABLE_TIMEOUT_MS = 10000   # how long the control may stay disabled after the name is typed
+    TOGGLE_TIMEOUT_MS = 3000         # per selector while looking for a camera or microphone button
+    CONNECT_TIMEOUT_MS = 30000       # for Meet's in-call controls after pressing Join
+    ADMIT_TIMEOUT_MS = 300000        # how long a host may take to admit the room
+    LOBBY_PHRASES = ("waiting for", "asking to join", "someone lets you in", "let you in")
+    SIGN_IN_MESSAGE = ("The room's Google sign-in has expired or was never done; "
+                       "stop the service and run croom --sign-in-meet on the device")
     BROWSER_ARGS = [
         "--use-fake-ui-for-media-stream",  # Auto-accept camera/mic
         "--disable-infobars",
@@ -246,37 +252,35 @@ class GoogleMeetProvider(MeetingProvider):
                 name_input = None
         if name_input is not None:
             await name_input.fill(display_name)
-        else:
+        elif self._profile_dir is None:
             logger.warning("Meet pre-join name field not found; trying to join without a name")
+        else:
+            logger.debug("Signed in: Meet shows no name field")
 
-        # Toggle camera if needed
-        if not camera_on:
-            try:
-                camera_btn = await self._page.wait_for_selector(
-                    '[aria-label*="camera" i][role="button"]',
-                    timeout=5000
-                )
-                if camera_btn:
-                    # Check if camera is on and turn off
-                    aria_label = await camera_btn.get_attribute("aria-label")
-                    if aria_label and "turn off" in aria_label.lower():
-                        await camera_btn.click()
-            except Exception:
-                pass
+        await self._set_toggle("camera", camera_on)
+        await self._set_toggle("microphone", mic_on)
 
-        # Toggle mic if needed
-        if not mic_on:
-            try:
-                mic_btn = await self._page.wait_for_selector(
-                    '[aria-label*="microphone" i][role="button"]',
-                    timeout=5000
-                )
-                if mic_btn:
-                    aria_label = await mic_btn.get_attribute("aria-label")
-                    if aria_label and "turn off" in aria_label.lower():
-                        await mic_btn.click()
-            except Exception:
-                pass
+    async def _set_toggle(self, device: str, wanted_on: bool) -> None:
+        """Put Meet's pre-join camera or microphone button in the wanted state. The label
+        says the current state: "Turn on microphone" means it is off, "Turn off" means on."""
+        button = await self._find_first(
+            [f'button[aria-label*="{device}" i]', f'[role="button"][aria-label*="{device}" i]'],
+            timeout=self.TOGGLE_TIMEOUT_MS,
+        )
+        if button is None:
+            logger.warning(f"Meet pre-join {device} button not found; joining with Meet's default")
+            return
+        label = (await button.get_attribute("aria-label") or "").lower()
+        if "turn on" not in label and "turn off" not in label:
+            logger.warning(f"Meet pre-join {device} button has an unexpected label {label!r}; leaving it alone")
+            return
+        if ("turn off" in label) == wanted_on:
+            return
+        await button.click()
+        await asyncio.sleep(0.5)
+        label = (await button.get_attribute("aria-label") or "").lower()
+        logger.info(f"Meet pre-join {device} is now {'on' if 'turn off' in label else 'off'} "
+                    f"(wanted {'on' if wanted_on else 'off'})")
 
     async def _find_first(self, selectors, timeout=3000):
         """The first element any of the selectors finds, or None."""
@@ -297,6 +301,12 @@ class GoogleMeetProvider(MeetingProvider):
             return ""
         return " ".join(text.split())[:300]
 
+    async def _needs_sign_in(self) -> bool:
+        """True on Google's sign-in page: the profile's session is gone or was never made."""
+        if "accounts.google.com" in (self._page.url or "").lower():
+            return True
+        return (await self._page_words()).lower().startswith("sign in")
+
     async def _failure(self, reason: str) -> RuntimeError:
         """An error that quotes what Meet shows and points at a screenshot of it."""
         words = await self._page_words()
@@ -313,6 +323,8 @@ class GoogleMeetProvider(MeetingProvider):
         """Press Meet's join control once it is enabled; otherwise say what Meet shows instead."""
         button = await self._find_first(self.JOIN_SELECTORS, timeout=self.JOIN_FIND_TIMEOUT_MS)
         if button is None:
+            if await self._needs_sign_in():
+                raise RuntimeError(self.SIGN_IN_MESSAGE)
             raise await self._failure("Could not find Meet's join button")
         deadline = time.monotonic() + self.JOIN_ENABLE_TIMEOUT_MS / 1000
         while True:
@@ -325,27 +337,22 @@ class GoogleMeetProvider(MeetingProvider):
             await asyncio.sleep(0.25)
 
     async def _wait_for_connection(self) -> None:
-        """Wait for meeting connection."""
-        # Wait for indicators that we're in the meeting
+        """Wait for Meet's in-call controls; a knock that is waiting for the host is the lobby."""
         try:
-            # Wait for leave button to appear (indicates we're in meeting)
-            await self._page.wait_for_selector(
-                '[aria-label*="Leave" i]',
-                timeout=30000
-            )
+            await self._page.wait_for_selector('[aria-label*="Leave" i]', timeout=self.CONNECT_TIMEOUT_MS)
+            return
         except Exception:
-            # Check if we're in lobby
-            lobby = await self._page.query_selector(':has-text("waiting for")')
-            if lobby:
-                self._set_state(MeetingState.IN_LOBBY)
-                logger.info("Waiting in lobby...")
-                # Wait longer for host to admit
-                await self._page.wait_for_selector(
-                    '[aria-label*="Leave" i]',
-                    timeout=300000  # 5 minutes
-                )
-            else:
-                raise await self._failure("Failed to join meeting")
+            pass
+        words = (await self._page_words()).lower()
+        if any(phrase in words for phrase in self.LOBBY_PHRASES):
+            self._set_state(MeetingState.IN_LOBBY)
+            logger.info("Asked to join; waiting for the host to admit the room")
+            try:
+                await self._page.wait_for_selector('[aria-label*="Leave" i]', timeout=self.ADMIT_TIMEOUT_MS)
+                return
+            except Exception:
+                raise await self._failure("The host did not admit the room in time")
+        raise await self._failure("Failed to join meeting")
 
     async def leave_meeting(self) -> None:
         """Leave the current meeting."""

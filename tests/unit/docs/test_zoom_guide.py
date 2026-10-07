@@ -44,7 +44,7 @@ def test_zoom_guide_quotes_the_real_commands_and_names():
                    "Zoom for developers", "Admin-managed", "Development", "Production",
                    "Set my app as 'Unlisted'", "Submit", "Scope Description",
                    "Request Anonymous Join Exception", "Use Device OAuth", "programmatic join",
-                   "Enable Publishing", "Change Now", "Technical Design Document", "External Zoom users",
+                   "Request to publish", "Enable Publishing", "Technical Design Document", "External Zoom users",
                    "not yet been verified", "the first outside-hosted meeting proves it"):
         assert needle in html, needle
 

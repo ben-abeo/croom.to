@@ -279,6 +279,11 @@ def main() -> None:
         metavar="URL",
         help="Open a Google Meet link the way the room does, report what Meet shows, then exit",
     )
+    parser.add_argument(
+        "--profile",
+        metavar="DIR",
+        help="With --check-meet: use this persistent browser profile (one signed in to a Google account) instead of a guest session",
+    )
     args = parser.parse_args()
 
     # Setup logging
@@ -300,7 +305,8 @@ def main() -> None:
         import tempfile
         from pathlib import Path
         from croom.meeting.meet_check import check_meet
-        raise SystemExit(asyncio.run(check_meet(args.check_meet, screenshot=Path(tempfile.gettempdir()) / "croom-meet-check.png")))
+        raise SystemExit(asyncio.run(check_meet(args.check_meet, screenshot=Path(tempfile.gettempdir()) / "croom-meet-check.png",
+                                                profile=Path(args.profile) if args.profile else None)))
 
     # Run agent
     try:

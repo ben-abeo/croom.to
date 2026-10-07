@@ -68,3 +68,21 @@ def test_check_opens_the_page_with_the_providers_context_options():
     from croom.meeting import meet_check
     assert "GoogleMeetProvider.context_options()" in inspect.getsource(meet_check)
     assert "USER_AGENT" not in inspect.getsource(meet_check)
+
+
+async def test_profile_option_opens_the_page_from_a_persistent_browser_profile(tmp_path):
+    """A signed-in profile must be reused as-is, so the check can tell whether Meet
+    accepts an automated browser that is signed in to a Workspace account."""
+    page = tmp_path / "page.html"
+    page.write_text(PREJOIN, encoding="utf-8")
+    profile = tmp_path / "profile"
+    out = io.StringIO()
+    code = await check_meet(page.as_uri(), out=out, headless=True, settle_ms=300, profile=profile)
+    assert code == 0, out.getvalue()
+    assert f"Profile: {profile}" in out.getvalue()
+    assert profile.is_dir() and any(profile.iterdir())  # Chromium wrote its profile files there
+
+
+def test_command_line_takes_a_profile_directory():
+    result = subprocess.run([sys.executable, "-m", "croom.core.agent", "--help"], capture_output=True, text=True)
+    assert "--profile DIR" in result.stdout

@@ -41,14 +41,26 @@ async def _count(page, selectors) -> int:
 
 
 async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Path] = None,
-                     headless: bool = False, settle_ms: int = 8000) -> int:
+                     headless: bool = False, settle_ms: int = 8000, profile: Optional[Path] = None) -> int:
     from playwright.async_api import async_playwright
 
-    print(f"Opening {url} as a guest, the way the room does", file=out)
+    if profile is not None:
+        print(f"Opening {url} from the browser profile at {profile}, the way a signed-in room would", file=out)
+        print(f"Profile: {profile}", file=out)
+    else:
+        print(f"Opening {url} as a guest, the way the room does", file=out)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=headless, args=GoogleMeetProvider.BROWSER_ARGS)
-        context = await browser.new_context(**GoogleMeetProvider.context_options())
-        page = await context.new_page()
+        if profile is not None:
+            profile.mkdir(parents=True, exist_ok=True)
+            browser = None
+            context = await p.chromium.launch_persistent_context(
+                str(profile), headless=headless, args=GoogleMeetProvider.BROWSER_ARGS,
+                **GoogleMeetProvider.context_options())
+            page = context.pages[0] if context.pages else await context.new_page()
+        else:
+            browser = await p.chromium.launch(headless=headless, args=GoogleMeetProvider.BROWSER_ARGS)
+            context = await browser.new_context(**GoogleMeetProvider.context_options())
+            page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(settle_ms)
@@ -80,4 +92,6 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
                 print(f"Screenshot: {screenshot}", file=out)
             return 0 if seen["joins"] else 1
         finally:
-            await browser.close()
+            await context.close()
+            if browser is not None:
+                await browser.close()

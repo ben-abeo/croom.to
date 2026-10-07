@@ -53,6 +53,7 @@ class MeetingConfig:
     mic_default_on: bool = True
     zoom_credentials_path: str = ""  # /etc/croom/zoom-credentials.json on a room device
     google_profile_dir: str = ""  # /var/lib/croom/meet-profile on a room device; empty means a guest browser
+    kiosk: bool = True  # the TV browser fills the screen with no window chrome
 
 
 @dataclass
@@ -238,6 +239,7 @@ class Config:
                 "mic_default_on": self.meeting.mic_default_on,
                 "zoom_credentials_path": self.meeting.zoom_credentials_path,
                 "google_profile_dir": self.meeting.google_profile_dir,
+                "kiosk": self.meeting.kiosk,
             },
             "calendar": {
                 "providers": self.calendar.providers,

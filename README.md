@@ -47,6 +47,7 @@ sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-servi
 sudo systemctl start croom
 /opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
 /opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml
+PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet https://meet.google.com/abc-defg-hij   # what Meet shows a guest
 ```
 
 Installer options: `--config FILE` installs a prepared room config as
@@ -159,7 +160,7 @@ Decisions worth knowing before changing things:
 Known limitations, mostly inherited from upstream:
 
 - Stopping the meeting service can hang while closing the headed Chromium; the service unit's restart covers it.
-- Google Meet joins as a guest, so someone in the meeting must admit the room; Zoom links need their passcode in the link.
+- Google Meet joins as a guest, so someone in the meeting must admit the room; Zoom links need their passcode in the link. A failed Meet join logs what Meet showed and saves a screenshot under `/tmp`; `croom --check-meet URL` reports the same from a terminal.
 - One headed browser window opens per configured platform when the agent starts.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.

@@ -7,6 +7,9 @@ Handles joining and controlling Google Meet meetings using browser automation.
 import asyncio
 import logging
 import re
+import tempfile
+import time
+from pathlib import Path
 from typing import Optional, Dict, Any
 
 from croom.meeting.providers.base import MeetingProvider, MeetingInfo, MeetingState
@@ -35,8 +38,31 @@ class GoogleMeetProvider(MeetingProvider):
     )
     MEET_CODE_PATTERN = re.compile(r"^[a-z]{3}-[a-z]{4}-[a-z]{3}$", re.IGNORECASE)
 
+    # Meet's guest pre-join page (October 2026, seen on a room Pi): the name field's only
+    # hint is its placeholder, and "Ask to join" stays disabled until a name is typed.
+    NAME_SELECTORS = ['input[aria-label="Your name"]', 'input[placeholder="Your name"]',
+                      'input[placeholder*="name" i]', 'input[aria-label*="name" i]']
+    JOIN_SELECTORS = ['button:has-text("Ask to join")', 'button:has-text("Join now")',
+                      '[role="button"]:has-text("Ask to join")', '[role="button"]:has-text("Join now")',
+                      '[aria-label*="join" i][role="button"]', 'button[jsname="Qx7uuf"]']
+    JOIN_FIND_TIMEOUT_MS = 4000      # per selector while looking for the join control
+    JOIN_ENABLE_TIMEOUT_MS = 10000   # how long the control may stay disabled after the name is typed
+    BROWSER_ARGS = [
+        "--use-fake-ui-for-media-stream",  # Auto-accept camera/mic
+        "--disable-infobars",
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-accelerated-2d-canvas",
+        "--disable-gpu",
+        "--window-size=1920,1080",
+    ]
+    USER_AGENT = "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
     def __init__(self):
         super().__init__()
+        # Where a screenshot goes when a join fails, so the TV need not be watched.
+        self.failure_screenshot: Path = Path(tempfile.gettempdir()) / "croom-meet-failure.png"
         self._playwright = None
         self._browser: Optional["Browser"] = None
         self._context: Optional["BrowserContext"] = None
@@ -85,23 +111,14 @@ class GoogleMeetProvider(MeetingProvider):
         # Launch browser with required permissions
         self._browser = await self._playwright.chromium.launch(
             headless=False,  # Meet requires visible browser
-            args=[
-                "--use-fake-ui-for-media-stream",  # Auto-accept camera/mic
-                "--disable-infobars",
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-accelerated-2d-canvas",
-                "--disable-gpu",
-                "--window-size=1920,1080",
-            ]
+            args=self.BROWSER_ARGS,
         )
 
         # Create context with permissions
         self._context = await self._browser.new_context(
             permissions=["camera", "microphone"],
             viewport={"width": 1920, "height": 1080},
-            user_agent="Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            user_agent=self.USER_AGENT,
         )
 
         self._page = await self._context.new_page()
@@ -194,16 +211,19 @@ class GoogleMeetProvider(MeetingProvider):
         mic_on: bool
     ) -> None:
         """Handle pre-join screen settings."""
-        # Set display name if input exists
-        try:
-            name_input = await self._page.wait_for_selector(
-                'input[aria-label="Your name"]',
-                timeout=5000
-            )
-            if name_input:
-                await name_input.fill(display_name)
-        except Exception:
-            pass
+        # Type the room's name: "Ask to join" stays disabled without one.
+        name_input = await self._find_first(self.NAME_SELECTORS, timeout=2500)
+        if name_input is None:
+            try:
+                by_placeholder = self._page.get_by_placeholder(re.compile(r"your name", re.IGNORECASE))
+                if await by_placeholder.count():
+                    name_input = await by_placeholder.first.element_handle()
+            except Exception:
+                name_input = None
+        if name_input is not None:
+            await name_input.fill(display_name)
+        else:
+            logger.warning("Meet pre-join name field not found; trying to join without a name")
 
         # Toggle camera if needed
         if not camera_on:
@@ -234,26 +254,51 @@ class GoogleMeetProvider(MeetingProvider):
             except Exception:
                 pass
 
-    async def _click_join_button(self) -> None:
-        """Click the join meeting button."""
-        # Try different selectors for join button
-        join_selectors = [
-            'button:has-text("Join now")',
-            'button:has-text("Ask to join")',
-            '[aria-label*="join" i][role="button"]',
-            'button[jsname="Qx7uuf"]',
-        ]
-
-        for selector in join_selectors:
+    async def _find_first(self, selectors, timeout=3000):
+        """The first element any of the selectors finds, or None."""
+        for selector in selectors:
             try:
-                btn = await self._page.wait_for_selector(selector, timeout=3000)
-                if btn:
-                    await btn.click()
-                    return
+                element = await self._page.wait_for_selector(selector, timeout=timeout)
             except Exception:
                 continue
+            if element:
+                return element
+        return None
 
-        raise RuntimeError("Could not find join button")
+    async def _page_words(self) -> str:
+        """The first words on the page, for an error message a person can act on."""
+        try:
+            text = await self._page.evaluate("() => document.body ? document.body.innerText : ''")
+        except Exception:
+            return ""
+        return " ".join(text.split())[:300]
+
+    async def _failure(self, reason: str) -> RuntimeError:
+        """An error that quotes what Meet shows and points at a screenshot of it."""
+        words = await self._page_words()
+        message = f'{reason}; Meet shows: "{words}"' if words else reason
+        try:
+            self.failure_screenshot.parent.mkdir(parents=True, exist_ok=True)
+            await self._page.screenshot(path=str(self.failure_screenshot))
+            message += f" (screenshot: {self.failure_screenshot})"
+        except Exception as e:
+            logger.debug(f"Could not save the Meet failure screenshot: {e}")
+        return RuntimeError(message)
+
+    async def _click_join_button(self) -> None:
+        """Press Meet's join control once it is enabled; otherwise say what Meet shows instead."""
+        button = await self._find_first(self.JOIN_SELECTORS, timeout=self.JOIN_FIND_TIMEOUT_MS)
+        if button is None:
+            raise await self._failure("Could not find Meet's join button")
+        deadline = time.monotonic() + self.JOIN_ENABLE_TIMEOUT_MS / 1000
+        while True:
+            aria_disabled = await button.get_attribute("aria-disabled")
+            if await button.is_enabled() and aria_disabled != "true":
+                await button.click(timeout=self.JOIN_ENABLE_TIMEOUT_MS)
+                return
+            if time.monotonic() > deadline:
+                raise await self._failure("Meet's join button stayed disabled")
+            await asyncio.sleep(0.25)
 
     async def _wait_for_connection(self) -> None:
         """Wait for meeting connection."""
@@ -276,7 +321,7 @@ class GoogleMeetProvider(MeetingProvider):
                     timeout=300000  # 5 minutes
                 )
             else:
-                raise RuntimeError("Failed to join meeting")
+                raise await self._failure("Failed to join meeting")
 
     async def leave_meeting(self) -> None:
         """Leave the current meeting."""

@@ -274,6 +274,11 @@ def main() -> None:
         action="store_true"
     )
 
+    parser.add_argument(
+        "--check-meet",
+        metavar="URL",
+        help="Open a Google Meet link the way the room does, report what Meet shows, then exit",
+    )
     args = parser.parse_args()
 
     # Setup logging
@@ -290,6 +295,12 @@ def main() -> None:
     if args.check_zoom:
         from croom.meeting.zoom_check import check_zoom
         raise SystemExit(asyncio.run(check_zoom(load_config(args.config))))
+
+    if args.check_meet:
+        import tempfile
+        from pathlib import Path
+        from croom.meeting.meet_check import check_meet
+        raise SystemExit(asyncio.run(check_meet(args.check_meet, screenshot=Path(tempfile.gettempdir()) / "croom-meet-check.png")))
 
     # Run agent
     try:

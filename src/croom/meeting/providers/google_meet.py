@@ -6,6 +6,7 @@ Handles joining and controlling Google Meet meetings using browser automation.
 
 import asyncio
 import logging
+import os
 import re
 import tempfile
 import time
@@ -123,26 +124,30 @@ class GoogleMeetProvider(MeetingProvider):
         return None
 
     async def initialize(self) -> None:
-        """Initialize browser for Google Meet."""
+        """Open the browser: on the signed-in profile when one is configured, as a guest otherwise."""
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install chromium")
 
         logger.info("Initializing Google Meet provider...")
-
         self._playwright = await async_playwright().start()
 
-        # Launch browser with required permissions
-        self._browser = await self._playwright.chromium.launch(
-            headless=False,  # Meet requires visible browser
-            args=self.BROWSER_ARGS,
-        )
+        if self._profile_dir is not None:
+            try:
+                self._profile_dir.mkdir(parents=True, exist_ok=True)
+                os.chmod(self._profile_dir, 0o700)
+            except OSError as e:
+                raise RuntimeError(f"Google Meet profile folder {self._profile_dir} is not usable: {e}") from e
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                str(self._profile_dir), headless=self._headless, args=self.BROWSER_ARGS, **self.context_options(),
+            )
+            self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
+            logger.info(f"Google Meet provider initialized with the signed-in profile at {self._profile_dir}")
+            return
 
-        # Create context with permissions
+        self._browser = await self._playwright.chromium.launch(headless=self._headless, args=self.BROWSER_ARGS)
         self._context = await self._browser.new_context(**self.context_options())
-
         self._page = await self._context.new_page()
-
-        logger.info("Google Meet provider initialized")
+        logger.info("Google Meet provider initialized as a guest")
 
     async def shutdown(self) -> None:
         """Shutdown browser."""

@@ -53,3 +53,9 @@ def test_guide_sends_the_reader_to_the_meet_guide_for_the_sign_in():
     assert "Let Crystal Meet rooms join Google Meet" in html
     assert "joins as a guest" not in html
     assert "stop the service first" in html
+
+
+def test_guide_describes_the_tv_screensaver():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "screensaver" in html and "TV when idle" in html
+    assert "leave it open" not in html  # nobody touches the TV's browser any more

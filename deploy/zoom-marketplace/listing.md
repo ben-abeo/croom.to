@@ -18,7 +18,9 @@ verified for the account on the Publish page.
   Zoom, collects no data beyond the room's own Zoom Access Key, and is used only
   by Crystal PM, a practice-management software company in the United States.
 - App icon: icon.png (160 by 160), light and dark mode.
-- App gallery: gallery.png (1280 by 720).
+- App gallery: gallery.png (1200 by 780).
+- Cover image: cover.png (1824 by 176; the left side sits under the icon, so it carries no text).
+- Adding Your App: From Marketplace.
 - Company name: Crystal PM
 - Marketplace Category: Productivity (or Meetings and Rooms, if offered); Industry Category: Healthcare (Crystal PM's customers) or Technology
 - Developer contact: a mailbox someone reads, for example it@crystalpm.com

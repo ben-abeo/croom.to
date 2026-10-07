@@ -43,6 +43,7 @@ def test_zoom_guide_quotes_the_real_commands_and_names():
                    "Meeting SDK", "Server-to-Server OAuth", "room_user",
                    "Zoom for developers", "Admin-managed", "Development", "Production",
                    "Set my app as 'Unlisted'", "Submit", "Scope Description",
+                   "Request Anonymous Join Exception", "Use Device OAuth", "programmatic join",
                    "not yet been verified", "the first outside-hosted meeting proves it"):
         assert needle in html, needle
 

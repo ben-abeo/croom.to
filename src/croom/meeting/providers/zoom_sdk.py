@@ -101,9 +101,9 @@ class ZoomSdkProvider(MeetingProvider):
         await self._take_page()
         logger.info(f"Zoom Meeting SDK provider ready (page on http://127.0.0.1:{self._site.port}/meeting)")
 
-    async def _take_page(self) -> None:
-        """Borrow the display's page and make sure the bridge can reach us from it."""
-        self._page = await self._display.page()
+    async def _take_page(self, for_meeting: bool = False) -> None:
+        """Borrow the display's page (claim it for a meeting) and make sure the bridge can reach us from it."""
+        self._page = await (self._display.claim() if for_meeting else self._display.page())
         if self._exposed_on is not self._page:
             await self._page.expose_function("crystalMeetEvent", self._on_page_event)
             self._exposed_on = self._page
@@ -145,6 +145,16 @@ class ZoomSdkProvider(MeetingProvider):
         except Exception:  # noqa: BLE001
             pass
 
+    async def _leave_meeting_page(self) -> None:
+        """A fragment-only change would not reload the meeting page, so leave it first when still on it
+        (after a failed join, for example). The page stays claimed for the meeting that follows."""
+        if self._page.url.split("#")[0] != self._site.url("/meeting"):
+            return
+        try:
+            await self._page.goto("about:blank")
+        except Exception:  # noqa: BLE001 - the page may already be gone
+            pass
+
     # ------------------------------------------------------------------
     # Joining
     # ------------------------------------------------------------------
@@ -153,7 +163,7 @@ class ZoomSdkProvider(MeetingProvider):
                            camera_on: bool = True, mic_on: bool = True) -> MeetingInfo:
         if self._display is None:
             raise RuntimeError("Provider not initialized")
-        await self._take_page()
+        await self._take_page(for_meeting=True)
         meeting_id = self.extract_meeting_id(meeting_url)
         if not meeting_id:
             raise ValueError(f"Invalid Zoom URL: {meeting_url}")
@@ -175,9 +185,8 @@ class ZoomSdkProvider(MeetingProvider):
                 "sdkVersion": self.SDK_VERSION, "connectGraceMs": self.CONNECT_GRACE_MS,
             }
             token = self._site.register_join(params)
-            # A fragment-only change would not reload the page, so leave it first; then forget the old page's events.
-            await self._blank_page()
-            self._drain_events()
+            await self._leave_meeting_page()
+            self._drain_events()   # forget the old page's events
             await self._page.goto(self._site.url("/meeting") + "#" + token, wait_until="load")
             await self._wait_for_connection()
             await self._read_state_from_zoom()

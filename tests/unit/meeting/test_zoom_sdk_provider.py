@@ -301,8 +301,10 @@ class TestDisplay:
         provider = await provider_for(api=FakeApi())
         try:
             await provider.join_meeting(LINK)
+            assert not provider._test_display.parked              # the page is claimed for the meeting
             await provider.leave_meeting()
             assert provider._page.url == "about:blank"
             assert provider.state == MeetingState.IDLE
+            assert provider._test_display.parked
         finally:
             await shutdown(provider)

@@ -84,5 +84,5 @@ body[data-style="brand"] .top, body[data-style="brand"] .status, body[data-style
 /* Bounce: the logo drifts across a black screen and takes a new brand colour at every edge. */
 body[data-style="bounce"] .top, body[data-style="bounce"] .status, body[data-style="bounce"] .hint { display: none; }
 body[data-style="bounce"] { background: #000; }
-.bounce-logo { position: fixed; left: 0; top: 0; width: 320px; color: #1B52E5; will-change: transform; }
+.bounce-logo { position: fixed; left: 0; top: 0; width: min(320px, 60vw); color: #1B52E5; will-change: transform; }  /* never wider than the window, or it would strobe at the edges */
 .bounce-logo svg { width: 100%; height: auto; display: block; }

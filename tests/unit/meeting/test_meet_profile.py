@@ -37,3 +37,17 @@ async def test_the_provider_needs_a_display_to_initialize():
     with pytest.raises(RuntimeError) as failure:
         await GoogleMeetProvider(None).initialize()
     assert "display" in str(failure.value)
+
+
+async def test_joining_claims_the_page_for_the_meeting(tmp_path):
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.route("**/*", lambda route: route.abort())    # no network: the join fails fast
+        display = FakeDisplay(page)
+        provider = GoogleMeetProvider(display, room_name="Room 3")
+        await provider.initialize()
+        with pytest.raises(Exception):  # noqa: B017 - any failure, the claim is what is tested
+            await provider.join_meeting("https://meet.google.com/abc-defg-hij")
+        assert display.claimed == 1
+        await browser.close()

@@ -97,3 +97,18 @@ async def test_failure_message_quotes_what_zoom_showed():
             assert "Automated bots aren't allowed to join this meeting" in str(failure.value)
         finally:
             await browser.close()
+
+
+async def test_joining_claims_the_page_for_the_meeting():
+    from tests.unit.meeting.fake_display import FakeDisplay
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.route("**/*", lambda route: route.abort())    # no network: the join fails fast
+        display = FakeDisplay(page)
+        provider = ZoomProvider(display=display)
+        await provider.initialize()
+        with pytest.raises(Exception):  # noqa: B017 - any failure, the claim is what is tested
+            await provider.join_meeting("https://zoom.us/j/98765432100?pwd=abc")
+        assert display.claimed == 1
+        await browser.close()

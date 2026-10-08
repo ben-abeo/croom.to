@@ -83,3 +83,12 @@ def test_style_change_re_renders_without_a_reload(browser):
         set_style(page, server, "info")
         assert page.evaluate("window.__tvLoadedAt") == loaded_at
         page.close()
+
+
+def test_bounce_logo_fits_a_narrow_window_so_it_never_strobes(browser):
+    with PageServer() as server:
+        page = open_tv(browser, server, width=200, height=400)   # narrower than the logo's TV size
+        set_style(page, server, "bounce")
+        box = page.locator("#bounce-logo").bounding_box()
+        assert box["width"] < 200
+        page.close()

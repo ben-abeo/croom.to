@@ -3,6 +3,7 @@ The TV display owns the one browser page: parked on the screensaver, lent to a
 provider, replaced if it dies (spec 2026-10-07 TV, section 4.3).
 """
 
+import asyncio
 import logging
 from pathlib import Path
 
@@ -73,18 +74,96 @@ async def test_a_closed_page_is_replaced_and_parked_on_idle():
         await site.stop()
 
 
-async def test_show_idle_keeps_trying_until_the_page_is_served(caplog):
+async def test_the_retry_outlives_its_warning_and_never_shows_an_error_page(caplog):
     site = IdleSite()
     display = TvDisplay("http://127.0.0.1:1/tv", headless=True)   # nothing listens on port 1
-    display.RETRY_EVERY_S = 0.2
-    display.RETRY_FOR_S = 10
+    display.RETRY_EVERY_S = 0.1
+    display.RETRY_MAX_S = 0.2
+    display.RETRY_WARN_AFTER_S = 0.3
     try:
         with caplog.at_level(logging.WARNING):
             await display.start()                                 # must not raise
+            await asyncio.sleep(1.0)                              # well past the warning
+        assert any("screensaver" in r.getMessage() for r in caplog.records)
+        page = await display.page()
+        assert not page.url.startswith("chrome-error://")        # no "can't be reached" on the TV
+        assert await page.title() == "Crystal Meet"               # the dark holding page
         await site.start()
         display._idle_url = site.url                              # the test moves the site under the display
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+    finally:
+        await display.stop()
+        if site.runner:
+            await site.stop()
+
+
+async def test_a_crashed_page_is_replaced_and_parked_on_idle():
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        first = await display.page()
+        try:
+            await first.goto("chrome://crash")
+        except Exception:  # noqa: BLE001 - the renderer is gone; that is the point
+            pass
+        second = await display.page()
+        assert second is not first and not second.is_closed()
+        await second.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+async def test_a_dead_guest_browser_is_started_again():
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        first = await display.page()
+        await display._browser.close()                            # Chromium died underneath us
         page = await display.page()
-        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=8000)
+        assert page is not first and not page.is_closed()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+async def test_a_dead_profile_browser_is_started_again(tmp_path):
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, profile_dir=str(tmp_path / "profile"), headless=True)
+    try:
+        await display.start()
+        first = await display.page()
+        await display.context.close()                             # the persistent context is gone
+        page = await display.page()
+        assert page is not first and not page.is_closed()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+async def test_claim_stops_a_pending_re_park(tmp_path):
+    meeting = tmp_path / "meeting.html"
+    meeting.write_text("<title>Meeting</title>")
+    site = IdleSite()
+    display = TvDisplay("http://127.0.0.1:1/tv", headless=True)
+    display.RETRY_EVERY_S = 0.2
+    try:
+        await display.start()                                     # nothing listens: a retry is pending
+        assert display.parked
+        page = await display.claim()                              # a provider takes the page for a meeting
+        assert not display.parked
+        await page.goto(meeting.as_uri())
+        await site.start()
+        display._idle_url = site.url                              # the screensaver comes up during the meeting
+        await asyncio.sleep(1.0)
+        assert await page.title() == "Meeting"                    # the meeting was not undone
+        await display.show_idle()
+        assert display.parked
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
     finally:
         await display.stop()
         if site.runner:
@@ -132,3 +211,14 @@ def test_from_config_reads_the_control_port_profile_and_kiosk():
     assert TvDisplay.from_config(Config.from_dict({"control": {"enabled": False}})).idle_url == "about:blank"
     assert Config().meeting.kiosk is True
     assert Config.from_dict(config.to_dict()).meeting.kiosk is False
+
+
+def test_from_config_uses_the_control_host_when_it_is_not_a_wildcard():
+    assert TvDisplay.from_config(Config.from_dict({"control": {"host": "192.168.1.5", "port": 8080}})).idle_url == "http://192.168.1.5:8080/tv"
+    assert TvDisplay.from_config(Config.from_dict({"control": {"host": "0.0.0.0"}})).idle_url == "http://127.0.0.1:8080/tv"
+    assert TvDisplay.from_config(Config.from_dict({"control": {"host": "::"}})).idle_url == "http://127.0.0.1:8080/tv"
+
+
+def test_browser_args_hide_the_crash_restore_bubble():
+    args = TvDisplay("about:blank").browser_args()
+    assert "--disable-session-crashed-bubble" in args and "--hide-crash-restore-bubble" in args

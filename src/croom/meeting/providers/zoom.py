@@ -113,7 +113,7 @@ class ZoomProvider(MeetingProvider):
     ) -> MeetingInfo:
         """Join a Zoom meeting via web client."""
         if self._display is not None:
-            self._page = await self._display.page()
+            self._page = await self._display.claim()   # nothing parks the page again until the meeting ends
         if not self._page:
             raise RuntimeError("Provider not initialized")
 

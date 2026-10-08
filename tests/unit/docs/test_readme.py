@@ -41,6 +41,9 @@ def test_readme_names_the_setup_pieces():
         "screensaver",
         ":8080/tv",
         "TV when idle",
+        "install-kiosk.sh --url",
+        "?keyboard=1",
+        "Start Crystal Meet",
     ):
         assert needle in text, needle
 

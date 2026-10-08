@@ -59,3 +59,10 @@ def test_guide_describes_the_tv_screensaver():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "screensaver" in html and "TV when idle" in html
     assert "leave it open" not in html  # nobody touches the TV's browser any more
+
+
+def test_guide_sets_up_the_table_pi_and_names_the_desktop_icons():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "install-kiosk.sh --url" in html
+    assert "Room controls" in html and "Start Crystal Meet" in html
+    assert "on-screen keyboard" in html

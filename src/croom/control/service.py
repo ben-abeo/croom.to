@@ -6,12 +6,9 @@ meeting and calendar services on behalf of whoever is in the room.
 """
 
 import asyncio
-import json
 import logging
 import mimetypes
-import os
 import re
-import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -19,6 +16,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import web
 
+from croom.control.settings import SettingsStore
 from croom.core.config import Config
 from croom.core.service import Service
 from croom.meeting.providers.base import MeetingState
@@ -71,9 +69,18 @@ class ControlService(Service):
             (the default idle style) and settings_file (where the chosen style is kept).
         meeting: the MeetingService instance, or None.
         calendar: the CalendarService instance, or None.
+        devices: the room devices the page controls (sound and camera), or None.
+        store: the SettingsStore for the page's choices, or None to open settings_file.
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None, meeting=None, calendar=None):
+    def __init__(
+        self,
+        config: Optional[Dict[str, Any]] = None,
+        meeting=None,
+        calendar=None,
+        devices=None,
+        store=None,
+    ):
         super().__init__("control")
         self.config = config or {}
         self._host = str(self.config.get("host", "0.0.0.0"))
@@ -81,7 +88,10 @@ class ControlService(Service):
         self._room_name = self.config.get("room_name", "Conference Room")
         self._room_location = self.config.get("room_location", "")
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
-        self._settings_file = Path(self.config.get("settings_file", "control-settings.json"))
+        self._store = store or SettingsStore(
+            self.config.get("settings_file", "control-settings.json")
+        )
+        self._devices = devices
         self._default_style = str(self.config.get("screensaver", "info"))
         self._screensaver = self._load_style()
         self._meeting = meeting
@@ -96,7 +106,9 @@ class ControlService(Service):
         self._callback_registered = False
 
     @classmethod
-    def from_config(cls, config: Config, meeting=None, calendar=None) -> "ControlService":
+    def from_config(
+        cls, config: Config, meeting=None, calendar=None, devices=None, store=None
+    ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         return cls(
             config={
@@ -110,6 +122,8 @@ class ControlService(Service):
             },
             meeting=meeting,
             calendar=calendar,
+            devices=devices,
+            store=store,
         )
 
     @property
@@ -277,30 +291,13 @@ class ControlService(Service):
 
     def _load_style(self) -> str:
         """The stored style, else the configured default; a missing or broken file is not an error."""
-        try:
-            data = json.loads(self._settings_file.read_text(encoding="utf-8"))
-            style = data.get("screensaver") if isinstance(data, dict) else None
-        except (OSError, ValueError):
-            style = None
+        style = self._store.get("screensaver")
         if style in STYLES:
             return style
         return self._default_style if self._default_style in STYLES else "info"
 
     def _save_style(self, style: str) -> None:
-        """Write the settings file atomically, readable by the service user only."""
-        self._settings_file.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp = tempfile.mkstemp(dir=str(self._settings_file.parent), prefix=".control-settings-")
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"screensaver": style}, handle)
-            os.chmod(temp, 0o600)
-            os.replace(temp, self._settings_file)
-        except OSError:
-            try:
-                os.unlink(temp)
-            except OSError:
-                pass
-            raise
+        self._store.save("screensaver", style)
 
     def _screensaver_payload(self) -> Dict[str, Any]:
         return {"style": self._screensaver, "styles": list(STYLES)}
@@ -319,7 +316,7 @@ class ControlService(Service):
         try:
             self._save_style(style)
         except OSError as e:
-            logger.warning(f"Could not save the screensaver choice to {self._settings_file}: {e}")
+            logger.warning(f"Could not save the screensaver choice to {self._store.path}: {e}")
         self._screensaver = style
         logger.info(f"Screensaver style set to {style}")
         return web.json_response(self._screensaver_payload())

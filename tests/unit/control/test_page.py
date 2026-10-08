@@ -85,7 +85,7 @@ def open_page(browser, server):
 
 def join_by_id(page):
     page.fill("#link-input", "98765432100")
-    page.click("#link-form button")
+    page.click("#link-form button[type=submit]")   # the keyboard toggle sits before Join
     page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
 
 
@@ -216,4 +216,80 @@ def test_the_screen_picker_posts_the_style_and_marks_the_current_one(browser):
         page.wait_for_function("document.querySelector(\"#screen-picker button[aria-pressed='true']\").innerText === 'Bounce'", timeout=5000)
         assert page.request.get(f"http://127.0.0.1:{server.port}/api/screensaver").json()["style"] == "bounce"
         assert picker.locator("button[aria-pressed='true']").count() == 1
+        page.close()
+
+
+# --- the page's own keyboard (the table Pi's kiosk browser has no keyboard of its own) ---
+
+def open_kiosk_page(browser, server, width=1280, height=800):
+    page = browser.new_page(viewport={"width": width, "height": height})
+    page.goto(f"http://127.0.0.1:{server.port}/?keyboard=1", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    return page
+
+
+def tap(page, *keys):
+    for key in keys:
+        page.click(f"#keyboard button[data-key='{key}']")
+
+
+def test_the_page_keyboard_opens_on_the_kiosk_and_types_a_meet_link(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        assert page.locator("#keyboard").is_hidden()
+        page.click("#link-input")
+        assert page.locator("#keyboard").is_visible()
+        tap(page, *"meet.google.com/abc-defg-hij")
+        assert page.input_value("#link-input") == "meet.google.com/abc-defg-hij"
+        tap(page, "hide")
+        assert page.locator("#keyboard").is_hidden()
+        page.close()
+
+
+def test_the_page_keyboard_shifts_and_switches_layers(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        tap(page, *"zoom.us/j/")
+        tap(page, "symbols", *"9876?", "letters", *"pwd", "symbols", "=", "letters", "a", "shift", "b", "symbols", "1")
+        assert page.input_value("#link-input") == "zoom.us/j/9876?pwd=aB1"
+        tap(page, "backspace", "backspace")
+        assert page.input_value("#link-input") == "zoom.us/j/9876?pwd=a"
+        page.close()
+
+
+def test_the_page_keyboard_joins_and_hides(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        tap(page, "symbols", *"98765432100", "join")
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert page.locator("#keyboard").is_hidden()
+        assert server.meeting.joins[0][0].endswith("98765432100")
+        page.close()
+
+
+def test_the_keyboard_button_toggles_it_on_any_device(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)                       # no ?keyboard=1
+        page.click("#link-input")
+        assert page.locator("#keyboard").is_hidden()            # a tablet has its own keyboard
+        page.click("#keyboard-toggle")
+        assert page.locator("#keyboard").is_visible()
+        tap(page, *"abc")
+        assert page.input_value("#link-input") == "abc"
+        tap(page, "hide")
+        assert page.locator("#keyboard").is_hidden()
+        page.close()
+
+
+def test_the_page_keyboard_fits_a_phone_width(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server, width=390, height=844)
+        page.click("#link-input")
+        assert page.locator("#keyboard").is_visible()
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        box = page.locator("#link-input").bounding_box()
+        keyboard = page.locator("#keyboard").bounding_box()
+        assert box["y"] >= 0 and box["y"] + box["height"] <= keyboard["y"]   # the field stays visible above the keys
         page.close()

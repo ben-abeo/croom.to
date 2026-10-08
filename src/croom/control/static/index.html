@@ -40,6 +40,7 @@
       <label class="visually-hidden" for="link-input">Meeting link or Zoom meeting ID</label>
       <input id="link-input" type="text" inputmode="url" autocomplete="off" spellcheck="false"
              placeholder="Paste a meeting link or a Zoom meeting ID">
+      <button type="button" id="keyboard-toggle" class="button quiet keyboard-toggle" aria-label="Show keyboard" aria-pressed="false">&#9000;</button>
       <button type="submit" class="button primary">Join</button>
     </form>
   </section>
@@ -49,6 +50,7 @@
     <div id="screen-picker" class="picker" role="group" aria-label="Screensaver style"></div>
   </section>
 </main>
+<div id="keyboard" class="keyboard" role="group" aria-label="On-screen keyboard" hidden></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

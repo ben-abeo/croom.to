@@ -419,6 +419,8 @@ print_completion() {
     echo "Configuration: $CONFIG_DIR/config.yaml"
     echo "Room page: http://$(hostname).local:8080/  (or use this device's IP address)"
     echo ""
+    echo "If the service ever stops, the Start Crystal Meet icon on this device's desktop (over VNC) starts it again."
+    echo ""
     if [[ -n "$ROOM_CONFIG" ]]; then
         echo "Next steps:"
         echo "1. Start service: sudo systemctl start croom"
@@ -454,6 +456,48 @@ print_completion() {
     echo ""
 }
 
+# Desktop launcher: a "Start Crystal Meet" icon on the desktop (reachable over VNC) restarts
+# the service when it has stopped; the desktop user gets sudo for exactly that command.
+install_desktop_launcher() {
+    local home desktop_dir sudoers_dir share_dir icon_source
+    home=$(getent passwd "$CROOM_USER" | cut -d: -f6)
+    desktop_dir="${DESKTOP_DIR:-$home/Desktop}"
+    sudoers_dir="${SUDOERS_DIR:-/etc/sudoers.d}"
+    share_dir="$INSTALL_DIR/share"
+    icon_source="${ICON_SOURCE:-}"
+    if [[ -z "$icon_source" && -x "$INSTALL_DIR/venv/bin/python" ]]; then
+        icon_source=$("$INSTALL_DIR/venv/bin/python" -c "import pathlib, croom.control; print(pathlib.Path(croom.control.__file__).parent / 'static' / 'crystal-meet.svg')" 2>/dev/null || true)
+    fi
+    mkdir -p "$share_dir" "$desktop_dir" "$sudoers_dir"
+    if [[ -n "$icon_source" && -f "$icon_source" ]]; then
+        cp "$icon_source" "$share_dir/crystal-meet.svg"
+        chown "$CROOM_USER:$CROOM_USER" "$share_dir/crystal-meet.svg" 2>/dev/null || true
+    else
+        warn "Launcher icon not found; the desktop launcher shows a generic icon"
+    fi
+    cat > "$desktop_dir/crystal-meet.desktop" << DESKTOP_ENTRY
+[Desktop Entry]
+Type=Application
+Name=Start Crystal Meet
+Comment=Start the room's Crystal Meet service if it has stopped
+Exec=/usr/bin/sudo -n /usr/bin/systemctl restart croom
+Icon=$share_dir/crystal-meet.svg
+Terminal=false
+Categories=Utility;
+DESKTOP_ENTRY
+    chmod 755 "$desktop_dir/crystal-meet.desktop"
+    chown "$CROOM_USER:$CROOM_USER" "$desktop_dir/crystal-meet.desktop" 2>/dev/null || true
+    printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl start croom, /usr/bin/systemctl restart croom\n' "$CROOM_USER" > "$sudoers_dir/croom"
+    chmod 440 "$sudoers_dir/croom"
+    if [[ $EUID -eq 0 ]] && command -v visudo >/dev/null 2>&1; then
+        if ! visudo -c -f "$sudoers_dir/croom" >/dev/null 2>&1; then
+            rm -f "$sudoers_dir/croom"
+            error "The sudoers rule for the desktop launcher did not validate"
+        fi
+    fi
+    log "Desktop launcher installed: Start Crystal Meet"
+}
+
 # Main installation flow
 main() {
     echo ""
@@ -473,6 +517,7 @@ main() {
     install_credentials
     install_zoom_credentials
     create_service
+    install_desktop_launcher
     enable_services
     print_completion
 }

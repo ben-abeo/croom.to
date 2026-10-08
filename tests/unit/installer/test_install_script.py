@@ -235,3 +235,28 @@ def test_completion_names_the_meet_sign_in_when_the_room_config_has_a_profile(tm
     plain.write_text("meeting:\n  platforms: [zoom]\n")
     result = run_bash(f"source {SCRIPT}; ROOM_CONFIG={plain}; CROOM_USER=pi; print_completion")
     assert "--sign-in-meet" not in result.stdout
+
+
+def test_desktop_launcher_starts_the_service_through_a_limited_sudoers_rule(tmp_path):
+    """A 'Start Crystal Meet' icon on the TV Pi's desktop (over VNC) restarts the service; the
+    desktop user gets sudo for exactly that and nothing else."""
+    desktop, sudoers, install = tmp_path / "Desktop", tmp_path / "sudoers.d", tmp_path / "opt"
+    icon = REPO / "src" / "croom" / "control" / "static" / "crystal-meet.svg"
+    result = run_bash(f"source {SCRIPT}; CROOM_USER=$(id -un); DESKTOP_DIR={desktop}; SUDOERS_DIR={sudoers}; "
+                      f"INSTALL_DIR={install}; ICON_SOURCE={icon}; install_desktop_launcher")
+    assert result.returncode == 0, result.stderr
+    me = subprocess.check_output(["id", "-un"], text=True).strip()
+    entry = (desktop / "crystal-meet.desktop").read_text()
+    assert "[Desktop Entry]" in entry and "Name=Start Crystal Meet" in entry and "Type=Application" in entry
+    assert "Exec=/usr/bin/sudo -n /usr/bin/systemctl restart croom" in entry
+    assert "Terminal=false" in entry and f"Icon={install}/share/crystal-meet.svg" in entry
+    assert os.access(desktop / "crystal-meet.desktop", os.X_OK)
+    assert (install / "share" / "crystal-meet.svg").read_text().lstrip().startswith("<svg")
+    rule = (sudoers / "croom").read_text()
+    assert rule.strip() == f"{me} ALL=(root) NOPASSWD: /usr/bin/systemctl start croom, /usr/bin/systemctl restart croom"
+    assert oct((sudoers / "croom").stat().st_mode & 0o777) == "0o440"
+
+
+def test_completion_message_names_the_desktop_icon():
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=room.yaml; print_completion")
+    assert "Start Crystal Meet" in result.stdout

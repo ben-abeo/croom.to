@@ -104,8 +104,9 @@ kiosk: bool = True)` with `from_config(config)`: `idle_url` is
 
 - `BROWSER_ARGS`: `--use-fake-ui-for-media-stream`, `--autoplay-policy=no-user-gesture-required`,
   `--disable-infobars`, `--no-sandbox`, `--disable-setuid-sandbox`, `--disable-dev-shm-usage`,
-  `--window-size=1920,1080`, plus `--kiosk` when kiosk is on. Context options: camera and
-  microphone permissions, viewport 1920 by 1080, no user-agent override.
+  `--window-size=1920,1080` (the window when kiosk is off), plus `--kiosk` when kiosk is on. Context
+  options: camera and microphone permissions, no fixed viewport (the page fills the window, so the
+  TV is driven at whatever resolution the Pi outputs, 1080p or 4K alike), no user-agent override.
 - `start()`: starts Playwright; with a profile dir, creates it (mode 700, a clear error
   naming it when that fails) and launches a persistent context on it; otherwise launches a
   browser and a context. Takes the context's first page. Then `show_idle()`.

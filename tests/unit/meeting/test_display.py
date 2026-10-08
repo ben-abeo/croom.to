@@ -222,3 +222,25 @@ def test_from_config_uses_the_control_host_when_it_is_not_a_wildcard():
 def test_browser_args_hide_the_crash_restore_bubble():
     args = TvDisplay("about:blank").browser_args()
     assert "--disable-session-crashed-bubble" in args and "--hide-crash-restore-bubble" in args
+
+
+def test_context_options_do_not_fix_the_viewport():
+    """The page fills the TV at whatever resolution the Pi drives it; nothing is emulated."""
+    options = TvDisplay.context_options()
+    assert "viewport" not in options
+    assert options["no_viewport"] is True
+    assert options["permissions"] == ["camera", "microphone"]
+
+
+async def test_the_page_fills_the_window_whatever_its_size():
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    display.BASE_ARGS = [a for a in TvDisplay.BASE_ARGS if not a.startswith("--window-size")] + ["--window-size=1280,720"]
+    try:
+        await display.start()
+        page = await display.page()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        assert await page.evaluate("[window.innerWidth, window.innerHeight]") == [1280, 720]
+    finally:
+        await display.stop()
+        await site.stop()

@@ -36,7 +36,7 @@ class TvDisplay:
         "--no-sandbox",
         "--disable-setuid-sandbox",
         "--disable-dev-shm-usage",
-        "--window-size=1920,1080",
+        "--window-size=1920,1080",   # the window when kiosk is off; kiosk fills the screen
     ]
     RETRY_EVERY_S = 2.0       # first retry interval while the control service is still coming up
     RETRY_MAX_S = 10.0        # the interval grows to this and stays there
@@ -65,7 +65,9 @@ class TvDisplay:
 
     @classmethod
     def context_options(cls) -> dict:
-        return {"permissions": ["camera", "microphone"], "viewport": {"width": 1920, "height": 1080}}
+        """No fixed viewport: the page fills the window, so the TV is driven at whatever resolution
+        the Pi outputs (1080p or 4K alike) instead of a 1920x1080 area in its corner."""
+        return {"permissions": ["camera", "microphone"], "no_viewport": True}
 
     def browser_args(self) -> list:
         return self.BASE_ARGS + (["--kiosk"] if self._kiosk else [])

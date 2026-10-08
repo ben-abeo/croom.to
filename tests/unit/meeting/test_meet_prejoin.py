@@ -112,7 +112,7 @@ def test_browser_identifies_as_itself():
     options = TvDisplay.context_options()
     assert "user_agent" not in options
     assert options["permissions"] == ["camera", "microphone"]
-    assert options["viewport"] == {"width": 1920, "height": 1080}
+    assert options["no_viewport"] is True   # the page fills the TV, whatever its resolution
 
 # A signed-in pre-join page: no name field, "Join now", a muted microphone and a camera that is on.
 SIGNED_IN_FORM = """

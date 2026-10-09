@@ -45,6 +45,58 @@
     </form>
   </section>
 
+  <section class="sound-section">
+    <p class="kicker">Sound</p>
+    <p id="sound-note" class="note"></p>
+    <div id="sound-panel" class="sound" hidden>
+      <p id="sound-device" class="device"></p>
+      <label class="visually-hidden" for="volume-slider">Volume</label>
+      <input id="volume-slider" type="range" min="0" max="100" step="1" value="0">
+      <div class="sound-buttons">
+        <button type="button" id="quieter" class="button quiet">Quieter</button>
+        <span id="volume-level" class="level" aria-live="polite"></span>
+        <button type="button" id="louder" class="button quiet">Louder</button>
+        <button type="button" id="speaker-mute" class="button quiet" aria-pressed="false">Mute speaker</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="camera-section">
+    <p class="kicker">Camera</p>
+    <p id="camera-note" class="note"></p>
+    <details id="camera-panel" class="camera" hidden>
+      <summary class="button quiet">Camera framing</summary>
+      <p id="camera-status" class="note"></p>
+      <div class="camera-grid">
+        <div id="arrow-pad" class="arrow-pad" role="group" aria-label="Pan and tilt">
+          <span></span>
+          <button type="button" class="button quiet pad" data-pan="0" data-tilt="1" aria-label="Tilt up">&#9650;</button>
+          <span></span>
+          <button type="button" class="button quiet pad" data-pan="-1" data-tilt="0" aria-label="Pan left">&#9664;</button>
+          <button type="button" id="camera-home" class="button quiet pad" aria-label="Home">&#8962;</button>
+          <button type="button" class="button quiet pad" data-pan="1" data-tilt="0" aria-label="Pan right">&#9654;</button>
+          <span></span>
+          <button type="button" class="button quiet pad" data-pan="0" data-tilt="-1" aria-label="Tilt down">&#9660;</button>
+          <span></span>
+        </div>
+        <div class="zoom-buttons">
+          <button type="button" id="zoom-out" class="button quiet" data-zoom="-25">Zoom out</button>
+          <button type="button" id="zoom-in" class="button quiet" data-zoom="25">Zoom in</button>
+        </div>
+      </div>
+      <div id="preset-row" class="presets" hidden></div>
+      <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" hidden>Save</button>
+      <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
+      <div id="camera-setup" class="setup" hidden>
+        <p class="note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
+        <div class="setup-buttons">
+          <button type="button" id="find-stops" class="button quiet">Find the stops</button>
+          <button type="button" id="save-home" class="button primary" disabled>Save as Home</button>
+        </div>
+      </div>
+    </details>
+  </section>
+
   <section class="screen-section">
     <p class="kicker">TV when idle</p>
     <div id="screen-picker" class="picker" role="group" aria-label="Screensaver style"></div>

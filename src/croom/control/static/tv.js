@@ -73,10 +73,26 @@
       caption.textContent = failed ? "Camera preview unavailable" : "Camera preview";
     }
 
+    function release(s) {
+      s.getTracks().forEach((t) => t.stop());
+    }
+
     function stop() {
-      if (stream) stream.getTracks().forEach((t) => t.stop());
+      if (stream) release(stream);
       stream = null;
       if (video.srcObject) video.srcObject = null;
+    }
+
+    // A camera that goes away mid-preview ends its tracks, and the picture would freeze under a caption that
+    // still says "Camera preview": let the stream go, say so, and let the next poll try again.
+    function adopt(opened) {
+      stream = opened;
+      video.srcObject = opened;
+      opened.getTracks().forEach((t) => t.addEventListener("ended", () => {
+        if (stream !== opened) return;   // the track of a stream that was already let go
+        stop();
+        setFailed(true);
+      }));
     }
 
     async function start() {
@@ -90,13 +106,10 @@
       opening = false;
       if (!wanted) {
         // The preview ended while the camera was opening: nobody is waiting for this stream.
-        if (opened) opened.getTracks().forEach((t) => t.stop());
+        if (opened) release(opened);
         return;
       }
-      if (opened) {
-        stream = opened;
-        video.srcObject = opened;
-      }
+      if (opened) adopt(opened);
       setFailed(!opened);
     }
 

@@ -4,6 +4,7 @@ and bookings, switched in place when the room page picks another one
 (spec 2026-10-07 TV, section 4.1).
 """
 
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -302,6 +303,30 @@ def test_a_stream_that_opens_after_the_preview_ended_is_stopped(probed_tv):
     assert page.evaluate("window.__camera.calls") == 1
 
 
+def test_a_camera_that_ends_mid_preview_is_named_and_asked_for_again(probed_tv):
+    page, camera = probed_tv.page, probed_tv.camera
+    camera.preview_on = True
+    page.wait_for_function(FRAMES, timeout=8000)
+    # An unplugged camera ends its tracks and the browser fires "ended" at each of them. The fake camera cannot be
+    # unplugged, so the test does what the browser would have done: stops the tracks, then fires the event, in one
+    # task, so that no poll gets in between.
+    seen = page.evaluate("""() => {
+        window.__camera.streams[0].getTracks().forEach((t) => { t.stop(); t.dispatchEvent(new Event('ended')); });
+        return { caption: document.getElementById('preview-caption').textContent,
+                 cleared: document.getElementById('camera-preview').srcObject === null };
+    }""")
+    assert seen == {"caption": "Camera preview unavailable", "cleared": True}
+    page.wait_for_function("window.__camera.streams.length === 2", timeout=8000)   # the next poll asks the camera again
+    page.wait_for_function(FRAMES, timeout=8000)
+    assert page.locator("#preview-caption").inner_text() == "Camera preview"
+    assert page.evaluate("window.__camera.calls") == 2
+    # A late "ended" from the first stream's tracks leaves the new stream alone.
+    page.evaluate("window.__camera.streams[0].getTracks().forEach((t) => t.dispatchEvent(new Event('ended')))")
+    assert page.evaluate("window.__camera.streams[1].getTracks().every((t) => t.readyState === 'live')")
+    assert not page.evaluate(NO_STREAM)   # the new stream is still on the video
+    assert page.locator("#preview-caption").inner_text() == "Camera preview"
+
+
 def test_a_preview_asked_for_again_while_the_camera_opens_keeps_that_one_stream(probed_tv):
     page, camera = probed_tv.page, probed_tv.camera
     page.evaluate("window.__camera.hold = true")
@@ -334,3 +359,67 @@ def test_a_failing_camera_is_named_for_as_long_as_the_preview_is_asked_for(probe
     page.evaluate("window.__camera.release()")
     page.wait_for_function(FRAMES, timeout=8000)
     assert page.locator("#preview-caption").inner_text() == "Camera preview"
+
+
+def test_a_failing_camera_is_picked_up_again_while_the_preview_stays_asked_for(probed_tv):
+    page, camera = probed_tv.page, probed_tv.camera
+    page.evaluate("window.__camera.fail = true")
+    camera.preview_on = True
+    page.wait_for_function("document.getElementById('preview-caption').textContent === 'Camera preview unavailable'", timeout=5000)
+    page.evaluate("window.__camera.fail = false")   # the camera is mended; the preview was never switched off
+    page.wait_for_function(FRAMES, timeout=8000)
+    assert page.locator("#preview-caption").inner_text() == "Camera preview"
+    assert page.evaluate(tracks_are("live")) and page.evaluate("window.__camera.streams.length") == 1
+
+
+# What each screensaver style shows when idle: the preview takes all of it away and gives all of it back.
+STYLE_PARTS = ["#room-name", "#headline", "#detail", "#clock", "#hint", "#brand-logo", "#bounce-logo"]
+STYLE_SHOWS = {
+    "info": {"#room-name", "#headline", "#detail", "#clock", "#hint"},
+    "quiet": {"#room-name", "#headline"},
+    "brand": {"#brand-logo"},
+    "bounce": {"#bounce-logo"},
+}
+
+
+def parts_shown(page):
+    return {part for part in STYLE_PARTS if page.locator(part).is_visible()}
+
+
+@pytest.mark.parametrize("style", list(STYLE_SHOWS))
+def test_the_screensaver_comes_back_as_it_was_in_every_style(probed_tv, style):
+    page, camera, server = probed_tv.page, probed_tv.camera, probed_tv.server
+    set_style(page, server, style)
+    assert parts_shown(page) == STYLE_SHOWS[style]
+    camera.preview_on = True
+    page.wait_for_function(FRAMES, timeout=8000)
+    assert page.locator("#camera-preview").is_visible() and parts_shown(page) == set()   # none of it shows through
+    camera.preview_on = False
+    page.wait_for_function(PREVIEW_OFF, timeout=5000)
+    assert page.locator("#camera-preview").is_hidden() and parts_shown(page) == STYLE_SHOWS[style]
+    assert page.locator("body").get_attribute("data-style") == style
+
+
+def contrast_over_white(text, backing):
+    """The WCAG contrast of a text colour on a backing colour laid over white, both as the browser's rgb() strings."""
+    def channels(colour):
+        numbers = [float(n) for n in re.findall(r"[\d.]+", colour)]
+        return numbers[:3], numbers[3] if len(numbers) > 3 else 1.0
+
+    def luminance(rgb):
+        linear = [c / 255 / 12.92 if c / 255 <= 0.04045 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    text_rgb, _ = channels(text)
+    backing_rgb, alpha = channels(backing)
+    seen_rgb = [alpha * c + (1 - alpha) * 255 for c in backing_rgb]
+    lighter, darker = sorted((luminance(text_rgb), luminance(seen_rgb)), reverse=True)
+    return (lighter + 0.05) / (darker + 0.05)
+
+
+def test_the_caption_reads_over_a_white_picture(probed_tv):
+    text, backing = probed_tv.page.evaluate("""() => {
+        const style = getComputedStyle(document.getElementById('preview-caption'));
+        return [style.color, style.backgroundColor];
+    }""")
+    assert contrast_over_white(text, backing) >= 4.5

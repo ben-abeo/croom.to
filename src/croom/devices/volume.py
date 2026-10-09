@@ -102,7 +102,8 @@ class RoomVolume:
         if level is None:
             return self._fail(f"wpctl get-volume output not understood: {out.strip()!r}")
         if self._reason is not None:
-            logger.info(f"Speaker: {device} (PipeWire sink {sink_id}), level {level}")
+            names = ", ".join(description for _, _, description in sinks)
+            logger.info(f"Speaker: {device} (PipeWire sink {sink_id}), level {level}; sinks: {names}")
         self._sink_id, self._device, self._level, self._muted = sink_id, device, level, muted
         self._reason = None
         self._warned = None

@@ -4,6 +4,7 @@ home is saved, and keeps looking for devices that are missing.
 """
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -18,6 +19,9 @@ from tests.unit.devices.fake_v4l2 import MEETUP, FakeClock, FakeV4l2
 from tests.unit.devices.test_volume import FakeRunner
 
 HOME = {"pan_s": 1.0, "tilt_s": 0.5}
+# A sink node pw-dump never emits without an id: int(None) in the volume module's parser is outside its contract.
+NODE_WITHOUT_ID = json.dumps([{"type": "PipeWire:Interface:Node",
+                               "info": {"props": {"media.class": "Audio/Sink", "node.name": "odd-sink"}}}])
 
 
 def service_for(tmp_path, home=None, nodes=None, sleep=None):
@@ -31,9 +35,14 @@ def service_for(tmp_path, home=None, nodes=None, sleep=None):
     return DevicesService(RoomVolume(runner=runner), camera), v4l2, runner
 
 
+def records(caplog, text):
+    """The log records whose message contains the text."""
+    return [r for r in caplog.records if text in r.getMessage()]
+
+
 def levels(caplog, text):
-    """The levels of the log records whose message contains the text."""
-    return [r.levelno for r in caplog.records if text in r.getMessage()]
+    """The levels of those records."""
+    return [r.levelno for r in records(caplog, text)]
 
 
 async def parked(seconds):
@@ -86,8 +95,7 @@ async def test_a_missing_camera_is_looked_for_again(tmp_path):
     try:
         assert not service.camera.available
         v4l2._nodes["/dev/video0"] = dict(MEETUP)
-        await asyncio.sleep(0.12)
-        assert service.camera.available
+        await until(lambda: service.camera.available)
     finally:
         await service.stop()
 
@@ -199,6 +207,50 @@ async def test_stop_right_after_start_leaves_nothing_pending(tmp_path):
     assert asyncio.all_tasks() - before == set()
 
 
+async def test_a_homing_task_that_was_cancelled_directly_does_not_make_stop_fail(tmp_path):
+    before = asyncio.all_tasks()
+    service, v4l2, _ = service_for(tmp_path, home=HOME, sleep=parked)
+    await bounded(service.start())
+    await until(lambda: service.camera.busy)
+    service.homing.cancel()                  # something other than stop() cancels it
+    await bounded(service.stop())            # waiting for a cancelled task must not raise its cancellation ...
+    await bounded(service.stop())            # ... now, or on any later stop
+    assert service.homing.cancelled()
+    assert not service.camera.busy and not service.camera.available
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0 and v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 0   # the motors were stopped
+    assert asyncio.all_tasks() - before == set()
+
+
+async def test_a_cancel_aimed_at_stop_is_not_swallowed(tmp_path):
+    before = asyncio.all_tasks()
+    service, _, _ = service_for(tmp_path, nodes={"/dev/video19": {}})   # no camera: stop() is only waiting for the check
+    await service.start()
+    stopping = asyncio.create_task(service.stop())
+    await asyncio.sleep(0)                   # stop() has cancelled the check and is waiting for it to finish
+    stopping.cancel()
+    await asyncio.wait({stopping})
+    assert stopping.cancelled()
+    await service.stop()                     # a stop that was cancelled can be run again
+    assert asyncio.all_tasks() - before == set()
+
+
+async def test_stop_while_a_device_check_is_under_way_cancels_it(tmp_path):
+    before = asyncio.all_tasks()
+    service, _, _ = service_for(tmp_path, nodes={"/dev/video19": {}})
+    service.REDISCOVER_S = 0.01
+    entered = asyncio.Event()
+
+    async def slow():                        # a probe that takes a while, as pw-dump can (up to 2 s)
+        entered.set()
+        await asyncio.Event().wait()
+
+    await service.start()
+    service.camera.discover = slow
+    await bounded(entered.wait())
+    await bounded(service.stop())            # the cancel reaches the probe: the check does not swallow it and go on
+    assert asyncio.all_tasks() - before == set()
+
+
 async def test_stop_cancels_the_check_for_missing_devices_and_waits_for_it(tmp_path):
     before = asyncio.all_tasks()
     service, _, _ = service_for(tmp_path, nodes={"/dev/video19": {}})   # no camera, so closing it has nothing to wait for
@@ -274,9 +326,10 @@ async def test_devices_that_are_present_are_not_probed_again(tmp_path):
     assert runner.calls.count(["pw-dump"]) == 1
 
 
-async def test_a_check_that_fails_is_tried_again_on_the_next_round(tmp_path, caplog):
+async def test_a_check_that_fails_is_warned_about_once_per_message_and_tried_again(tmp_path, caplog):
     service, v4l2, _ = service_for(tmp_path, nodes={"/dev/video19": {}})
     service.REDISCOVER_S = 0.02
+    errors = ["boom", "boom", "boom", "crash"]      # a bug that repeats, then a different one
     attempts = []
     with caplog.at_level(logging.DEBUG):
         await service.start()
@@ -285,8 +338,8 @@ async def test_a_check_that_fails_is_tried_again_on_the_next_round(tmp_path, cap
 
             async def flaky():
                 attempts.append(1)
-                if len(attempts) == 1:
-                    raise RuntimeError("boom")
+                if errors:
+                    raise RuntimeError(errors.pop(0))
                 return await discover()
 
             service.camera.discover = flaky
@@ -294,5 +347,68 @@ async def test_a_check_that_fails_is_tried_again_on_the_next_round(tmp_path, cap
             await until(lambda: service.camera.available)
         finally:
             await service.stop()
-    assert len(attempts) >= 2
-    assert levels(caplog, "Device check failed") == [logging.DEBUG]
+    failures = records(caplog, "Device check failed")
+    assert [r.levelno for r in failures] == [logging.WARNING, logging.WARNING]
+    assert [r.getMessage().rsplit(": ", 1)[1] for r in failures] == ["boom", "crash"]   # a repeat is not logged again
+    assert all(r.exc_info for r in failures)                                            # each with its traceback
+    assert len(attempts) == 5                                                           # four failures, then the camera
+
+
+# ----------------------------------------------------------------------
+# A check that raises outside the device modules' contracts must not take the room down
+# ----------------------------------------------------------------------
+
+async def test_a_device_check_that_raises_at_start_does_not_stop_the_service_starting(tmp_path, caplog):
+    service, _, _ = service_for(tmp_path, home=HOME)
+    service.REDISCOVER_S = 0.02
+    attempts = []
+
+    async def broken():
+        attempts.append(1)
+        raise RuntimeError("boom")
+
+    service.camera.discover = broken
+    with caplog.at_level(logging.INFO):
+        await service.start()                # must complete: the manager would stop every service otherwise
+        try:
+            assert service.volume.available and not service.camera.available   # the speaker was found all the same
+            assert service.homing is None                                       # and there is no camera to home
+            await until(lambda: len(attempts) >= 3)                             # the check keeps looking
+        finally:
+            await service.stop()
+    failures = records(caplog, "Device check failed")
+    assert [r.levelno for r in failures] == [logging.WARNING]   # once: the same failure at start and in the check
+    assert "RuntimeError: boom" in failures[0].getMessage() and failures[0].exc_info
+
+
+async def test_a_check_that_raises_for_one_device_does_not_stop_the_other_being_looked_for(tmp_path):
+    service, _, runner = service_for(tmp_path)
+    runner.fail["pw-dump"] = "pipewire is not running"
+    service.REDISCOVER_S = 0.02
+
+    async def broken():
+        raise RuntimeError("boom")
+
+    service.camera.discover = broken         # a bug in the camera's discovery, round after round
+    await service.start()
+    try:
+        assert not service.volume.available
+        del runner.fail["pw-dump"]
+        await until(lambda: service.volume.available)      # the speaker is still looked for
+    finally:
+        await service.stop()
+
+
+async def test_a_pw_dump_node_without_an_id_does_not_stop_the_camera_being_found_and_homed(tmp_path, caplog):
+    service, _, runner = service_for(tmp_path, home=HOME)
+    runner.dump = NODE_WITHOUT_ID
+    with caplog.at_level(logging.INFO):
+        await service.start()
+        try:
+            await service.homing
+            assert not service.volume.available
+            assert service.camera.available and service.camera.position_known   # found and homed all the same
+        finally:
+            await service.stop()
+    failures = records(caplog, "Device check failed")
+    assert [r.levelno for r in failures] == [logging.WARNING] and failures[0].exc_info

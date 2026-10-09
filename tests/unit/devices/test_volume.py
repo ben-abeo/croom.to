@@ -263,6 +263,18 @@ async def test_a_second_outage_with_the_same_reason_warns_again(caplog):
     assert sum("pw-dump failed" in r.getMessage() for r in caplog.records) == 2
 
 
+async def test_the_speaker_line_names_every_sink_the_probe_saw(caplog):
+    volume, _, clock = volume_for()
+    with caplog.at_level(logging.INFO):
+        await volume.refresh()
+        clock.now += 5
+        await volume.refresh()          # nothing changed: the line is not repeated
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Speaker:")]
+    # both sinks, in the order pw-dump listed them; the Logitech source in the same dump is not a sink
+    assert lines == ["Speaker: Logitech MeetUp Speakerphone Analog Stereo (PipeWire sink 57), level 40; "
+                     "sinks: Built-in Audio Digital Stereo (HDMI), Logitech MeetUp Speakerphone Analog Stereo"]
+
+
 async def test_two_overlapping_steps_both_count():
     volume, runner, _ = volume_for(runner_class=SlowRunner)
     await asyncio.gather(volume.step(5), volume.step(5))

@@ -19,6 +19,7 @@ from aiohttp import web
 from croom.control.settings import SettingsStore
 from croom.core.config import Config
 from croom.core.service import Service
+from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 
 logger = logging.getLogger(__name__)
@@ -152,6 +153,14 @@ class ControlService(Service):
         app.router.add_post("/api/meeting/camera", self._handle_camera)
         app.router.add_get("/api/screensaver", self._handle_screensaver)
         app.router.add_post("/api/screensaver", self._handle_set_screensaver)
+        app.router.add_get("/api/audio/volume", self._handle_volume)
+        app.router.add_post("/api/audio/volume", self._handle_set_volume)
+        app.router.add_post("/api/camera/move", self._handle_camera_move)
+        app.router.add_post("/api/camera/zoom", self._handle_camera_zoom)
+        app.router.add_post("/api/camera/home", self._handle_camera_home)
+        app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
+        app.router.add_post("/api/camera/setup", self._handle_camera_setup)
+        app.router.add_post("/api/camera/preview", self._handle_camera_preview)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
         return app
@@ -279,6 +288,8 @@ class ControlService(Service):
             },
             "calendar": self._calendar_status(),
             "screensaver": self._screensaver,
+            "audio": self._audio_state(),
+            "camera": self._camera_state(),
         }
 
     # ------------------------------------------------------------------
@@ -322,6 +333,177 @@ class ControlService(Service):
         return web.json_response(self._screensaver_payload())
 
     # ------------------------------------------------------------------
+    # Room devices: the speaker's volume and the camera (spec 2026-10-08)
+    # ------------------------------------------------------------------
+
+    NO_DEVICES = {"available": False, "reason": "no devices service"}
+
+    def _volume(self):
+        return getattr(self._devices, "volume", None)
+
+    def _camera(self):
+        return getattr(self._devices, "camera", None)
+
+    async def _refresh_devices(self) -> None:
+        """Cached reads, so a status poll costs nothing most of the time and never raises."""
+        camera = self._camera()
+        readers = [getattr(self._volume(), "refresh", None)]
+        if camera is not None and camera.available:
+            # read_zoom() goes through discovery, which globs and opens /dev/video*: not on every poll of a room
+            # without a camera. The devices service looks for a missing camera itself, every 30 s.
+            readers.append(getattr(camera, "read_zoom", None))
+        for reader in readers:
+            if reader is None:
+                continue
+            try:
+                await reader()
+            except Exception as e:  # noqa: BLE001 - the status must always answer
+                logger.debug(f"Device read failed: {e}")
+
+    def _audio_state(self) -> Dict[str, Any]:
+        volume = self._volume()
+        return volume.state() if volume is not None else dict(self.NO_DEVICES, level=0, muted=False, device=None)
+
+    def _camera_state(self) -> Dict[str, Any]:
+        camera = self._camera()
+        if camera is not None:
+            return camera.state()
+        return dict(self.NO_DEVICES, device=None, moving=False, busy=False, zoom={"level": 0, "min": 0, "max": 0},
+                    position_known=False, home_saved=False, presets=[], preview=False)
+
+    async def _device_call(self, request: web.Request, device, action) -> web.Response:
+        """Run one device action: JSON in, the device's block out.
+
+        400 for input the device refuses, 409 when it cannot do it now, 415 for a body that is not JSON, and 500,
+        with the reason, when the camera's home or preset cannot be written to the settings file.
+        """
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if device is None:
+            return self._error_response("no devices service", 409)
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        try:
+            return web.json_response(await action(data))
+        except ValueError as e:
+            return self._error_response(str(e), 400)
+        except (DeviceUnavailable, NotReady, Interrupted) as e:
+            return self._error_response(str(e), 409)
+        except OSError as e:
+            # The device modules turn their own OSErrors into DeviceUnavailable, so this is the settings store
+            # failing to write the camera's home or a preset.
+            logger.warning(f"Could not save the camera settings: {e}")
+            return self._error_response(f"could not save the camera settings: {e}", 500)
+
+    @staticmethod
+    def _int_field(data: Dict[str, Any], key: str) -> int:
+        value = data.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(f"{key} must be a number")
+        try:
+            return int(value)
+        except (OverflowError, ValueError) as e:  # Python's JSON parser lets NaN, Infinity and 1e999 through
+            raise ValueError(f"{key} must be a number") from e
+
+    async def _handle_volume(self, request: web.Request) -> web.Response:
+        await self._refresh_devices()
+        return web.json_response(self._audio_state())
+
+    async def _handle_set_volume(self, request: web.Request) -> web.Response:
+        volume = self._volume()
+
+        async def action(data):
+            if "level" in data:
+                return await volume.set_level(self._int_field(data, "level"))
+            if "step" in data:
+                return await volume.step(self._int_field(data, "step"))
+            if "muted" in data:
+                if not isinstance(data["muted"], bool):
+                    raise ValueError("muted must be true or false")
+                return await volume.set_muted(data["muted"])
+            raise ValueError("Send level, step or muted")
+
+        return await self._device_call(request, volume, action)
+
+    async def _handle_camera_move(self, request: web.Request) -> web.Response:
+        camera = self._camera()
+
+        async def action(data):
+            if "pan" not in data or "tilt" not in data:
+                raise ValueError("Send pan and tilt, each -1, 0 or 1")
+            return await camera.move(self._int_field(data, "pan"), self._int_field(data, "tilt"))
+
+        return await self._device_call(request, camera, action)
+
+    async def _handle_camera_zoom(self, request: web.Request) -> web.Response:
+        camera = self._camera()
+
+        async def action(data):
+            if "level" in data:
+                await camera.zoom(self._int_field(data, "level"))
+            elif "step" in data:
+                await camera.zoom_step(self._int_field(data, "step"))
+            else:
+                raise ValueError("Send level or step")
+            return camera.state()
+
+        return await self._device_call(request, camera, action)
+
+    async def _handle_camera_home(self, request: web.Request) -> web.Response:
+        camera = self._camera()
+
+        async def action(data):
+            return await camera.home()
+
+        return await self._device_call(request, camera, action)
+
+    async def _handle_camera_preset(self, request: web.Request) -> web.Response:
+        camera = self._camera()
+        slot_text = request.match_info.get("slot", "")
+
+        async def action(data):
+            if not slot_text.isdigit():
+                raise ValueError("preset slots are 1 to 3")
+            slot = int(slot_text)
+            verb = data.get("action")
+            if verb == "recall":
+                return await camera.recall(slot)
+            if verb == "save":
+                return await camera.save(slot)
+            raise ValueError("action must be recall or save")
+
+        return await self._device_call(request, camera, action)
+
+    async def _handle_camera_setup(self, request: web.Request) -> web.Response:
+        camera = self._camera()
+
+        async def action(data):
+            verb = data.get("action")
+            if verb == "find_stops":
+                return await camera.find_stops()
+            if verb == "save_home":
+                return await camera.save_home()
+            raise ValueError("action must be find_stops or save_home")
+
+        return await self._device_call(request, camera, action)
+
+    async def _handle_camera_preview(self, request: web.Request) -> web.Response:
+        camera = self._camera()
+
+        async def action(data):
+            on = data.get("on")
+            if not isinstance(on, bool):
+                raise ValueError("on must be true or false")
+            if on and self._meeting_state() in IN_PROGRESS_STATES:
+                raise NotReady("the TV is in a meeting")
+            camera.set_preview(on)
+            return camera.state()
+
+        return await self._device_call(request, camera, action)
+
+    # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
 
@@ -344,6 +526,7 @@ class ControlService(Service):
         return web.FileResponse(tv, headers={"Cache-Control": "no-cache"})
 
     async def _handle_status(self, request: web.Request) -> web.Response:
+        await self._refresh_devices()
         return web.json_response(self._status())
 
     async def _handle_events(self, request: web.Request) -> web.Response:

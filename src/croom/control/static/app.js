@@ -543,6 +543,8 @@
   el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, true));
 
   // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
+  // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so
+  // that a lift is always seen, and a move outside the button's box ends the hold the same way a lift does.
   function holdToMove(buttonEl, start, repeatMs, stop) {
     let timer = null;
     const release = () => {
@@ -564,6 +566,13 @@
       }, repeatMs);
     });
     for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) buttonEl.addEventListener(type, release);
+    buttonEl.addEventListener("pointermove", (e) => {
+      if (timer === null) return;   // no hold: nothing to end, and the rest of a press that already ended is ignored
+      const box = buttonEl.getBoundingClientRect();
+      if (e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) return;
+      release();
+      if (buttonEl.hasPointerCapture(e.pointerId)) buttonEl.releasePointerCapture(e.pointerId);
+    });
     buttonEl.addEventListener("contextmenu", (e) => e.preventDefault());   // a long press on a touch screen must not open a menu
   }
   const moveCamera = (pan, tilt) => deviceCall("camera", "/api/camera/move", { pan: pan, tilt: tilt });

@@ -622,20 +622,51 @@ def test_holding_a_zoom_button_repeats_until_it_is_released(browser):
         page.close()
 
 
-def test_releasing_away_from_an_arrow_still_stops_the_camera(browser):
+def test_sliding_off_an_arrow_stops_the_camera_like_lifting_the_finger(browser):
     with PageServer() as server:
         page = open_page(browser, server)
         page.click("#camera-panel summary")
-        box = press(page, "#arrow-pad button[data-pan='-1'][data-tilt='0']")
-        page.mouse.move(box["x"] + 500, box["y"] + 300)            # the finger slides off the button before it lifts
-        page.wait_for_timeout(200)
+        camera = server.devices.camera
+        arrow = "#arrow-pad button[data-pan='1'][data-tilt='0']"
+        page.evaluate("(sel) => { window.__lost = 0; document.querySelector(sel).addEventListener('lostpointercapture', () => window.__lost++); }", arrow)
+        box = press(page, arrow)
+        page.mouse.move(box["x"] + 4, box["y"] + 4)                         # a nudge that stays on the button is still a hold
+        page.wait_for_timeout(100)
+        assert camera.moves == [(1, 0)] and page.evaluate("window.__lost") == 0
+        page.mouse.move(box["x"] + box["width"] + 150, box["y"] + box["height"] / 2, steps=5)   # slid well off it, still down
+        page.wait_for_timeout(300)
+        assert camera.moves == [(1, 0), (0, 0)]                             # the stop went out at once
+        assert page.evaluate("window.__lost") == 1                          # and the pointer was let go with it, before any lift
+        page.wait_for_timeout(900)                                          # longer than one re-send interval, still held
+        assert camera.moves == [(1, 0), (0, 0)]                             # nothing was re-sent
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)               # back on the button, still down
+        page.wait_for_timeout(900)
         page.mouse.up()
         page.wait_for_timeout(300)
-        moves = server.devices.camera.moves
-        assert moves[0] == (-1, 0) and moves[-1] == (0, 0)
-        sent = len(moves)
-        page.wait_for_timeout(1000)                                # no repeat survives the release
-        assert len(server.devices.camera.moves) == sent
+        assert camera.moves == [(1, 0), (0, 0)]                             # no new press, and lifting sends no second stop
+        hold(page, arrow, ms=300)                                           # a plain press and release works as before
+        page.wait_for_timeout(300)
+        assert camera.moves == [(1, 0), (0, 0), (1, 0), (0, 0)]
+        page.close()
+
+
+def test_sliding_off_a_zoom_button_ends_its_repeat(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#camera-panel summary")
+        camera = server.devices.camera
+        box = press(page, "#zoom-in")
+        page.wait_for_timeout(100)
+        assert camera.zooms == [125]
+        page.mouse.move(box["x"] - 120, box["y"] + box["height"] / 2, steps=5)                  # slid off to the side, still down
+        page.wait_for_timeout(900)                                          # two repeat intervals would have gone by
+        assert camera.zooms == [125]
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        assert camera.zooms == [125]
+        hold(page, "#zoom-in", ms=300)                                      # a plain press and release still steps once
+        page.wait_for_timeout(300)
+        assert camera.zooms == [125, 150]
         page.close()
 
 

@@ -120,6 +120,7 @@
     });
 
     return {
+      // Shows or ends the preview for this status; true while it is shown
       update(status) {
         wanted = Boolean(status && status.camera && status.camera.preview && !IN_PROGRESS.includes(status.meeting.state));
         video.hidden = !wanted;
@@ -132,6 +133,7 @@
           if (failed) setFailed(false);
           stop();
         }
+        return wanted;
       },
     };
   })();
@@ -140,8 +142,8 @@
     document.body.dataset.style = model.style;
     el("brand-logo").hidden = model.style !== "brand";
     el("bounce-logo").hidden = model.style !== "bounce";
-    bounce.setActive(model.style === "bounce");
-    preview.update(model.offline ? null : model.status);
+    const previewing = preview.update(model.offline ? null : model.status);
+    bounce.setActive(model.style === "bounce" && !previewing);   // no animation frames under the preview, which hides the logo
     if (!model.status && !model.offline) return; // still loading: wait for the first status result
     if (model.offline) {
       setStatus("offline", "Not connected", "Not connected", "Crystal Meet is not answering on this device.");

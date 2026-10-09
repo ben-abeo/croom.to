@@ -886,6 +886,51 @@ def test_a_zoom_hold_does_not_hold_back_the_speakers_status(browser):
         page.close()
 
 
+PANEL_OPEN = "document.getElementById('camera-panel').open"
+
+
+def test_the_camera_panel_closes_itself_after_ten_minutes_without_a_camera_action(browser):
+    """The table Pi's kiosk never reloads and nobody closes panels: without this, the renewal keeps the TV on the
+    live camera for good. Long stretches are fast-forwarded, as an untouched screen lives through them: each timer
+    that falls due fires once, at the end. The renewals skipped that way change nothing, because a renewal is never
+    a camera action."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        asked = preview_requests(page)
+        page.click("#camera-panel summary")
+        page.wait_for_timeout(300)
+        page.clock.run_for(60_000)                                            # renewed every 30 s ...
+        page.clock.fast_forward(8 * 60_000)                                   # ... and still at nine minutes
+        page.wait_for_timeout(300)
+        assert page.evaluate(PANEL_OPEN) is True and asked == [True] * 4
+        page.clock.fast_forward(90_000)                                       # past ten minutes without a camera action
+        page.wait_for_timeout(300)
+        assert page.evaluate(PANEL_OPEN) is False and asked == [True] * 4 + [False]   # closed, which turned the preview off
+        assert server.devices.camera.previews[-1] is False and server.devices.camera.preview_on is False
+        page.clock.run_for(60_000)
+        page.wait_for_timeout(300)
+        assert asked == [True] * 4 + [False]                                  # and no renewal after that
+        page.close()
+
+
+def test_a_camera_action_keeps_the_camera_panel_open_another_ten_minutes(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        page.click("#camera-panel summary")
+        page.wait_for_timeout(300)
+        page.clock.fast_forward(9 * 60_000)
+        hold(page, "#arrow-pad button[data-pan='1'][data-tilt='0']", ms=100)  # a nudge at nine minutes
+        page.wait_for_timeout(300)
+        assert server.devices.camera.moves == [(1, 0), (0, 0)]
+        page.clock.fast_forward(9 * 60_000)                                   # eighteen minutes open, nine since the nudge
+        page.wait_for_timeout(300)
+        assert page.evaluate(PANEL_OPEN) is True
+        page.clock.fast_forward(90_000)                                       # ten and a half since the nudge
+        page.wait_for_timeout(300)
+        assert page.evaluate(PANEL_OPEN) is False and server.devices.camera.previews[-1] is False
+        page.close()
+
+
 def test_closing_the_page_with_the_camera_panel_open_turns_the_preview_off(browser):
     with PageServer() as server:
         page = open_page(browser, server)

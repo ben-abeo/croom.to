@@ -386,6 +386,9 @@ def parts_shown(page):
     return {part for part in STYLE_PARTS if page.locator(part).is_visible()}
 
 
+BOUNCE_AT = "document.getElementById('bounce-logo').style.transform"
+
+
 @pytest.mark.parametrize("style", list(STYLE_SHOWS))
 def test_the_screensaver_comes_back_as_it_was_in_every_style(probed_tv, style):
     page, camera, server = probed_tv.page, probed_tv.camera, probed_tv.server
@@ -394,10 +397,17 @@ def test_the_screensaver_comes_back_as_it_was_in_every_style(probed_tv, style):
     camera.preview_on = True
     page.wait_for_function(FRAMES, timeout=8000)
     assert page.locator("#camera-preview").is_visible() and parts_shown(page) == set()   # none of it shows through
+    if style == "bounce":
+        # no animation frames for a logo the preview hides, while the TV decodes the camera
+        held = page.evaluate(BOUNCE_AT)
+        page.wait_for_timeout(400)
+        assert page.evaluate(BOUNCE_AT) == held
     camera.preview_on = False
     page.wait_for_function(PREVIEW_OFF, timeout=5000)
     assert page.locator("#camera-preview").is_hidden() and parts_shown(page) == STYLE_SHOWS[style]
     assert page.locator("body").get_attribute("data-style") == style
+    if style == "bounce":
+        page.wait_for_function(f"{BOUNCE_AT} !== {held!r}", timeout=5000)        # and it moves again after the preview
 
 
 def contrast_over_white(text, backing):

@@ -6,6 +6,7 @@
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
   const SLIDE_OFF_PX = 16;   // how far outside a pressed pad button a finger may drift before that counts as letting go
+  const PANEL_IDLE_MS = 10 * 60 * 1000;   // the Camera panel closes itself after this long without a camera action
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
 
   const el = (id) => document.getElementById(id);
@@ -433,10 +434,12 @@
   // user last got nor writes one, and a refusal of it is not shown or scrolled to.
   const INTERRUPTED = "the camera move was interrupted";
   const deviceNotes = { audio: "", camera: "" };
+  let lastCameraAction = 0;   // when this page last opened the Camera panel or asked the camera for something itself
 
   async function deviceCall(kind, path, body, options) {
     const long = Boolean(options && options.long);
     const background = Boolean(options && options.background);
+    if (kind === "camera" && !background) lastCameraAction = Date.now();   // the preview's own renewal is not a person
     if (long) {
       // Home, a preset recall and Find the stops run for seconds inside the request: ask the status for the camera's
       // "busy" now, so "Moving..." shows without waiting for the poll's turn.
@@ -596,6 +599,9 @@
 
   // The idle preview on the TV: asked for while the panel is open and no meeting runs, renewed every 30 s. The renewal
   // keeps running while the panel is open, so it also picks the preview up again when a meeting ends or the camera returns.
+  // The table's kiosk never reloads and nobody closes panels, so the renewal alone would keep the TV on the camera for
+  // good: after PANEL_IDLE_MS without a camera action from this page the panel closes itself, and closing it (below)
+  // turns the preview off and stops the renewal.
   function previewWanted() {
     const s = model.status;
     return Boolean(el("camera-panel").open && s && s.camera && s.camera.available && !IN_MEETING.includes(s.meeting.state));
@@ -608,8 +614,15 @@
       setPreview(false);
       return;
     }
+    lastCameraAction = Date.now();   // opening the panel counts, also in a meeting, where it asks for no preview
     if (previewWanted()) setPreview(true);
-    previewTimer = setInterval(() => { if (previewWanted()) setPreview(true, { background: true }); }, 30000);
+    previewTimer = setInterval(() => {
+      if (Date.now() - lastCameraAction > PANEL_IDLE_MS) {
+        el("camera-panel").open = false;   // the toggle handler sends preview off and clears this timer
+        return;
+      }
+      if (previewWanted()) setPreview(true, { background: true });
+    }, 30000);
   });
   window.addEventListener("pagehide", () => {
     if (!el("camera-panel").open) return;

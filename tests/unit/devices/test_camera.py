@@ -605,6 +605,51 @@ async def test_a_long_move_whose_control_call_fails_leaves_the_position_unknown_
     assert v4l2.calls[-1] == ("close", 10)                       # ... and nothing more went to the node that was closed
 
 
+async def test_cancelling_a_long_move_stops_the_camera_and_leaves_the_position_unknown():
+    camera, v4l2, _ = camera_for()
+    await camera.find_stops()
+    assert camera.position_known
+    slow_moves(camera)
+    homing = asyncio.create_task(camera.find_stops())
+    await asyncio.sleep(0.03)
+    assert camera.busy
+    homing.cancel()                                              # a shutdown, or a request that went away
+    with pytest.raises(asyncio.CancelledError):
+        await homing
+    assert not camera.busy and not camera.position_known
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0 and v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 0
+
+
+async def test_the_stop_after_a_cancelled_long_move_finishes_even_if_it_is_cancelled_again():
+    camera, v4l2, _ = camera_for()
+    await camera.find_stops()
+    slow_moves(camera)
+    stopping, resume = threading.Event(), threading.Event()
+    write = v4l2.set_many
+
+    def held_write(fd, values):                                  # the stop stays on its way to the camera until the test says so
+        if not any(values.values()):
+            stopping.set()
+            assert resume.wait(5)
+        write(fd, values)
+
+    v4l2.set_many = held_write
+    homing = asyncio.create_task(camera.find_stops())
+    await asyncio.sleep(0.03)
+    homing.cancel()
+    assert await asyncio.to_thread(stopping.wait, 2)             # the stop that follows the cancel is in flight ...
+    homing.cancel()                                              # ... when the request is cancelled again
+    with pytest.raises(asyncio.CancelledError):
+        await homing
+    resume.set()
+    for _ in range(200):                                         # the stop still finishes: nothing is left counted as moving
+        if not camera.state()["moving"]:
+            break
+        await asyncio.sleep(0.005)
+    assert camera.state()["moving"] is False and not camera.position_known
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0 and v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 0
+
+
 async def test_of_several_requests_waiting_for_a_long_move_the_last_one_wins():
     camera, _, _ = camera_for()
     slow_moves(camera)
@@ -672,8 +717,10 @@ async def test_a_long_move_is_not_stopped_by_the_watchdog_of_an_earlier_move():
     watchdog = camera._watchdog
     slow_moves(camera)                                           # ... and a homing that takes 0.16 s, well past the 50 ms
     await camera.find_stops()
-    assert watchdog.cancelled()                                  # the homing took it over: it is not left to go off inside it
-    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1, -1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [0, -1, 0]   # no stop in the middle
+    written = (v4l2.sets(V4L2_CID_PAN_SPEED), v4l2.sets(V4L2_CID_TILT_SPEED))
+    assert written == ([1, -1, 0], [0, -1, 0])                   # no stop in the middle: the homing ended at zero speeds
+    await watchdog                                               # the watchdog was left alone: it has gone off, or goes off now ...
+    assert (v4l2.sets(V4L2_CID_PAN_SPEED), v4l2.sets(V4L2_CID_TILT_SPEED)) == written   # ... and writes nothing
     assert camera.position_known
 
 
@@ -702,6 +749,30 @@ async def test_a_watchdog_armed_after_a_long_move_began_does_not_stop_it():
     assert camera.position_known and not camera.busy
 
 
+async def test_a_watchdog_that_is_already_writing_is_not_overtaken_by_a_long_move():
+    camera, v4l2, _ = camera_for()
+    camera.WATCHDOG_S = 0.01
+    stopping, resume = threading.Event(), threading.Event()
+    write = v4l2.set_many
+
+    def held_write(fd, values):                                  # the watchdog's stop stays on its way to the camera until the test says so
+        if not any(values.values()) and not stopping.is_set():
+            stopping.set()
+            assert resume.wait(5)
+        write(fd, values)
+
+    v4l2.set_many = held_write
+    await camera.move(1, 0)
+    assert await asyncio.to_thread(stopping.wait, 2)             # the page went quiet: the watchdog's stop is in flight ...
+    homing = asyncio.create_task(camera.find_stops())            # ... when a homing is asked for
+    await asyncio.sleep(0.05)                                    # time enough for a write that does not wait its turn to land first
+    resume.set()
+    await homing
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1, 0, -1, 0]        # the stop landed first, then the homing began and ended
+    assert v4l2.sets(V4L2_CID_TILT_SPEED) == [0, 0, -1, 0]
+    assert camera.position_known
+
+
 async def test_what_the_camera_cannot_do_yet_is_refused_before_it_is_touched():
     camera, v4l2, _ = camera_for()
     for action in (camera.save_home, lambda: camera.save(1), camera.home):
@@ -721,6 +792,37 @@ async def test_recall_moves_back_by_the_difference_and_the_shorter_leg_stops_fir
     await camera.recall(1)                                       # ... so both axes go back: the tilt has 1 s to go, the pan 3 s
     assert v4l2.sets(V4L2_CID_PAN_SPEED) == [-1, -1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0, 0]
     assert (camera._pan_s, camera._tilt_s) == (1.0, 2.0)
+
+
+async def test_a_recall_that_starts_while_the_camera_is_still_moving_lands_on_its_preset(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path)
+    await camera.find_stops()
+    await camera.move(1, 0)
+    await clock.sleep(1.0)
+    await camera.stop()
+    await camera.save(1)                                         # pan 1 s
+    await camera.move(1, 0)                                      # an arrow press whose release never arrives ...
+    await clock.sleep(1.0)                                       # ... the camera is a second on, and nothing has stopped it yet
+    v4l2.calls.clear()
+    await camera.recall(1)
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [-1, 0]              # back by that second, not "already there"
+    assert camera._pan_s == 1.0 and camera.position_known
+    await camera.stop()                                          # and the watchdog of that arrow press goes with it
+
+
+@pytest.mark.parametrize("start, saved, travel_s",
+                         [(0.0, 1e9, 8.0), (0.0, 7.5, 6.0), (3.0, -5.0, 8.0)],
+                         ids=["a huge number typed by hand", "the travel was lowered after saving", "a negative number"])
+async def test_a_saved_position_outside_the_travel_is_clamped_to_it(start, saved, travel_s):
+    camera, _, clock = camera_for(travel_s=travel_s)
+    await camera.find_stops()
+    camera._pan_s = camera._tilt_s = start
+    camera._presets = {"1": {"pan_s": saved, "tilt_s": saved, "zoom": 100}}
+    before = clock.now
+    await camera.recall(1)
+    target = 0.0 if saved < 0 else travel_s
+    assert clock.now - before == abs(target - start)             # both axes ran to the end of their travel, not for as long as the number says
+    assert (camera._pan_s, camera._tilt_s) == (target, target)
 
 
 async def test_find_stops_runs_for_the_configured_travel_time():

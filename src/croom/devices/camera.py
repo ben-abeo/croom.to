@@ -312,9 +312,10 @@ class RoomCamera:
 
     async def _watch(self) -> None:
         await asyncio.sleep(self.WATCHDOG_S)
-        # Not while a long move runs: it times itself and ends with its own stop. A watchdog armed by a move()
-        # that raced it (both waited for the same long move and the move woke first) would cut it short, and
-        # the position would still be marked known.
+        # Not while a long move runs: it times itself and ends with its own stop, and a watchdog going off inside
+        # it would cut it short and leave a position that is wrong marked known. That covers one armed before the
+        # move began (_long leaves it alone) and one armed by a move() that raced it (both waited for the same
+        # long move, and the move woke first).
         if self._fd is not None and (self._pan or self._tilt) and not self._busy:
             logger.info("Camera motion stopped: the page went quiet")
             try:
@@ -414,10 +415,15 @@ class RoomCamera:
             raise Interrupted("the camera move was interrupted")
 
     async def _long(self, work: Callable[[], Awaitable[None]]) -> None:
-        """Run a long move: busy while it runs, stopped and unknown if it is cut short."""
+        """Run a long move: busy while it runs, stopped and unknown if it is cut short.
+
+        A watchdog armed before the move is left alone on purpose. _watch stands down while a long move runs,
+        and cancelling a watchdog that is already writing would release the control lock before its stop has
+        landed: the move's first write could then land ahead of it, and the camera would stop under a move that
+        believes it is running. Left alone, that stop finishes first, because the lock is taken in order.
+        """
         await self._require()
         await self._cancel_long_move()
-        self._cancel_watchdog()
         self._busy = True
         self._interrupt.clear()
         self._long_done.clear()
@@ -433,6 +439,18 @@ class RoomCamera:
                 except DeviceUnavailable:
                     pass
             raise
+        except asyncio.CancelledError:
+            # The task running the move was cancelled (a shutdown, a request that went away): the same, but the
+            # stop is shielded, so that a second cancel while it is on its way cannot abandon it half done, with
+            # the control lock released and the speeds and the estimate left as the move had them.
+            self._position_known = False
+            logger.info("Camera move cancelled: the position is unknown until the camera is homed again")
+            if self._fd is not None:
+                try:
+                    await asyncio.shield(self._apply_speeds(0, 0))
+                except DeviceUnavailable:
+                    pass
+            raise
         finally:
             self._busy = False
             self._long_done.set()
@@ -445,7 +463,17 @@ class RoomCamera:
         self._position_known = True
 
     async def _move_to(self, pan_s: float, tilt_s: float) -> None:
-        """Move both axes at once by the difference from the estimate; the shorter leg stops first."""
+        """Move both axes at once to a position; the shorter leg stops first.
+
+        Each leg is the difference from where the camera is now, which includes a move still under way: a recall
+        can start while an arrow press is running, and legs worked out from the estimate as of the last speed
+        change would be short by what that press has travelled since. The targets are clamped to the travel,
+        which bounds every leg: a saved number beyond it (typed by hand, or saved before ptz_travel_seconds was
+        lowered) would otherwise run an axis against its stop for as long as the number says.
+        """
+        self._account_now()
+        pan_s = min(self._travel_s, max(0.0, pan_s))
+        tilt_s = min(self._travel_s, max(0.0, tilt_s))
         legs = sorted([(abs(pan_s - self._pan_s), "pan"), (abs(tilt_s - self._tilt_s), "tilt")])
         pan_dir, tilt_dir = _sign(pan_s - self._pan_s), _sign(tilt_s - self._tilt_s)
         await self._apply_speeds(pan_dir, tilt_dir)
@@ -479,16 +507,18 @@ class RoomCamera:
         await self._long(self._home_work)
         return self.state()
 
-    def _estimate_now(self) -> Dict[str, float]:
-        """The estimate as of this moment, rounded for storing.
-
-        Closing the motion segment here would drop the rest of a move that is still under way (another tablet
-        saving while an arrow is held), so such a move keeps counting from this moment.
-        """
+    def _account_now(self) -> None:
+        """Bring the estimate up to this moment: add the motion segment that is still open, and start the next
+        one from here. Closing the segment and stopping there would drop the rest of a move that is still under
+        way (an arrow held while another tablet saves, or a recall starts), so such a move keeps counting."""
         now = self._clock()
         self._account(now)
         if self._pan or self._tilt:
             self._segment_started = now
+
+    def _estimate_now(self) -> Dict[str, float]:
+        """The estimate as of this moment, rounded for storing."""
+        self._account_now()
         return {"pan_s": round(self._pan_s, 3), "tilt_s": round(self._tilt_s, 3)}
 
     async def save_home(self) -> Dict[str, Any]:

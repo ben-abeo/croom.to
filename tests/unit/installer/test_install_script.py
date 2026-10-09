@@ -266,3 +266,42 @@ def test_installer_adds_the_pulse_client_library_for_the_browsers_audio():
     """Chromium reaches PipeWire through libpulse; a fresh Pi may not have it."""
     body = SCRIPT.read_text().split("install_dependencies() {", 1)[1].split("\n}", 1)[0]
     assert "libpulse0" in body
+
+
+def launcher_body():
+    return SCRIPT.read_text().split("install_desktop_launcher() {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_the_sudoers_rule_is_validated_before_it_is_moved_into_place():
+    """sudo reads every file in /etc/sudoers.d: a rule written there and checked afterwards is live, broken or not,
+    until the check removes it. The rule goes to a temporary file beside it (a name with a dot, which sudo skips),
+    is checked there, and only a rule that passed is moved into place, already at mode 440."""
+    body = launcher_body()
+    assert '> "$sudoers_dir/croom"' not in body                       # never written where sudo reads it
+    write = body.index('> "$rule_tmp"')
+    check = body.index('sudoers_rule_valid "$rule_tmp"')
+    mode = body.index('chmod 440 "$rule_tmp"')
+    move = body.index('mv -f "$rule_tmp" "$sudoers_dir/croom"')
+    assert write < check < move and mode < move
+    assert 'mktemp "$sudoers_dir/.croom.' in body
+    check_function = SCRIPT.read_text().split("sudoers_rule_valid() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'visudo -c -f "$1"' in check_function and "$EUID -eq 0" in check_function
+
+
+def test_a_sudoers_rule_that_does_not_validate_is_removed_with_a_warning(tmp_path):
+    desktop, sudoers, install = tmp_path / "Desktop", tmp_path / "sudoers.d", tmp_path / "opt"
+    result = run_bash(f"source {SCRIPT}; sudoers_rule_valid() {{ return 1; }}; CROOM_USER=$(id -un); DESKTOP_DIR={desktop}; "
+                      f"SUDOERS_DIR={sudoers}; INSTALL_DIR={install}; ICON_SOURCE=/nonexistent; install_desktop_launcher")
+    assert result.returncode == 0, result.stderr                       # a warning, not the end of the installation
+    assert [line for line in result.stdout.splitlines() if "[Warning]" in line and "did not validate" in line]
+    assert list(sudoers.iterdir()) == []                               # nothing left where sudo would read it
+    assert (desktop / "crystal-meet.desktop").exists()
+
+
+def test_a_sudoers_rule_that_validates_leaves_only_the_rule_behind(tmp_path):
+    desktop, sudoers, install = tmp_path / "Desktop", tmp_path / "sudoers.d", tmp_path / "opt"
+    result = run_bash(f"source {SCRIPT}; CROOM_USER=$(id -un); DESKTOP_DIR={desktop}; SUDOERS_DIR={sudoers}; "
+                      f"INSTALL_DIR={install}; ICON_SOURCE=/nonexistent; install_desktop_launcher")
+    assert result.returncode == 0, result.stderr
+    assert [path.name for path in sudoers.iterdir()] == ["croom"]      # the temporary file was moved, not copied
+    assert oct((sudoers / "croom").stat().st_mode & 0o777) == "0o440"

@@ -457,10 +457,18 @@ print_completion() {
     echo ""
 }
 
+# True when a sudoers fragment parses. Only root runs visudo here; anyone else (the tests, with
+# SUDOERS_DIR in a scratch folder) cannot check and gets a pass.
+sudoers_rule_valid() {
+    if [[ $EUID -eq 0 ]] && command -v visudo >/dev/null 2>&1; then
+        visudo -c -f "$1" >/dev/null 2>&1
+    fi
+}
+
 # Desktop launcher: a "Start Crystal Meet" icon on the desktop (reachable over VNC) restarts
 # the service when it has stopped; the desktop user gets sudo for exactly that command.
 install_desktop_launcher() {
-    local home desktop_dir sudoers_dir share_dir icon_source
+    local home desktop_dir sudoers_dir share_dir icon_source rule_tmp
     home=$(getent passwd "$CROOM_USER" | cut -d: -f6)
     desktop_dir="${DESKTOP_DIR:-$home/Desktop}"
     sudoers_dir="${SUDOERS_DIR:-/etc/sudoers.d}"
@@ -488,14 +496,17 @@ Categories=Utility;
 DESKTOP_ENTRY
     chmod 755 "$desktop_dir/crystal-meet.desktop"
     chown "$CROOM_USER:$CROOM_USER" "$desktop_dir/crystal-meet.desktop" 2>/dev/null || true
-    printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl start croom, /usr/bin/systemctl restart croom\n' "$CROOM_USER" > "$sudoers_dir/croom"
-    chmod 440 "$sudoers_dir/croom"
-    if [[ $EUID -eq 0 ]] && command -v visudo >/dev/null 2>&1; then
-        if ! visudo -c -f "$sudoers_dir/croom" >/dev/null 2>&1; then
-            rm -f "$sudoers_dir/croom"
-            error "The sudoers rule for the desktop launcher did not validate"
-        fi
+    # sudo reads every file in sudoers.d, so the rule is written beside it under a name with a dot (which
+    # sudo skips), checked there, and moved into place only once it has passed, already at mode 440.
+    rule_tmp=$(mktemp "$sudoers_dir/.croom.XXXXXX")
+    printf '%s ALL=(root) NOPASSWD: /usr/bin/systemctl start croom, /usr/bin/systemctl restart croom\n' "$CROOM_USER" > "$rule_tmp"
+    chmod 440 "$rule_tmp"
+    if ! sudoers_rule_valid "$rule_tmp"; then
+        rm -f "$rule_tmp"
+        warn "The sudoers rule for the desktop launcher did not validate and was not installed: the Start Crystal Meet icon cannot start the service"
+        return 0
     fi
+    mv -f "$rule_tmp" "$sudoers_dir/croom"
     log "Desktop launcher installed: Start Crystal Meet"
 }
 

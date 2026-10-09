@@ -86,3 +86,10 @@ body[data-style="bounce"] .top, body[data-style="bounce"] .status, body[data-sty
 body[data-style="bounce"] { background: #000; }
 .bounce-logo { position: fixed; left: 0; top: 0; width: min(320px, 60vw); color: #1B52E5; will-change: transform; }  /* never wider than the window, or it would strobe at the edges */
 .bounce-logo svg { width: 100%; height: auto; display: block; }
+
+/* The idle camera preview: the room, full screen on black, while the room page's Camera panel is open. */
+body[data-preview="on"] { background: #000; }
+body[data-preview="on"] .top, body[data-preview="on"] .status, body[data-preview="on"] .hint,
+body[data-preview="on"] .brand-logo, body[data-preview="on"] .bounce-logo { display: none; }
+.camera-preview { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+.preview-caption { position: fixed; left: var(--gutter); bottom: var(--gutter); margin: 0; font-size: clamp(1rem, 1.6vw, 1.6rem); color: var(--periwinkle-300); }

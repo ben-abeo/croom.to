@@ -57,11 +57,78 @@
   const upcomingEvent = (now) => model.events.filter((ev) => startMs(ev) > now).sort((a, b) => startMs(a) - startMs(b))[0] || null;
   const earliest = (a, b) => (!a ? b : !b ? a : startMs(a) <= startMs(b) ? a : b);
 
+  // The idle camera preview (spec 2026-10-08, section 4.7): on while the room page's Camera panel is
+  // open and no meeting runs. One stream at a time, and every way out stops its tracks, so the camera
+  // is free again before a meeting provider needs it.
+  const preview = (function () {
+    const video = el("camera-preview");
+    const caption = el("preview-caption");
+    let wanted = false;   // the preview is asked for right now
+    let opening = false;  // a getUserMedia call is pending
+    let stream = null;    // the live stream
+    let failed = false;   // the camera did not open, and the preview is still asked for
+
+    function setFailed(value) {
+      failed = value;
+      caption.textContent = failed ? "Camera preview unavailable" : "Camera preview";
+    }
+
+    function stop() {
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+      stream = null;
+      if (video.srcObject) video.srcObject = null;
+    }
+
+    async function start() {
+      opening = true;
+      let opened = null;
+      try {
+        opened = await navigator.mediaDevices.getUserMedia({ video: true });
+      } catch (e) {
+        // no camera, no permission or a busy camera: the caption says so, and the next poll tries again
+      }
+      opening = false;
+      if (!wanted) {
+        // The preview ended while the camera was opening: nobody is waiting for this stream.
+        if (opened) opened.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      if (opened) {
+        stream = opened;
+        video.srcObject = opened;
+      }
+      setFailed(!opened);
+    }
+
+    // Leaving the page, as a meeting provider takes the browser over, lets the camera go too.
+    window.addEventListener("pagehide", () => {
+      wanted = false;
+      stop();
+    });
+
+    return {
+      update(status) {
+        wanted = Boolean(status && status.camera && status.camera.preview && !IN_PROGRESS.includes(status.meeting.state));
+        video.hidden = !wanted;
+        caption.hidden = !wanted;
+        if (wanted) {
+          document.body.dataset.preview = "on";
+          if (!stream && !opening) start();
+        } else {
+          delete document.body.dataset.preview;
+          if (failed) setFailed(false);
+          stop();
+        }
+      },
+    };
+  })();
+
   function render() {
     document.body.dataset.style = model.style;
     el("brand-logo").hidden = model.style !== "brand";
     el("bounce-logo").hidden = model.style !== "bounce";
     bounce.setActive(model.style === "bounce");
+    preview.update(model.offline ? null : model.status);
     if (!model.status && !model.offline) return; // still loading: wait for the first status result
     if (model.offline) {
       setStatus("offline", "Not connected", "Not connected", "Crystal Meet is not answering on this device.");

@@ -3,6 +3,8 @@ One small JSON file next to the agent's state holds the screensaver choice and t
 camera's home and presets (spec 2026-10-08 sound and camera, section 4.5).
 """
 
+import pytest
+
 from croom.control.settings import SettingsStore
 
 
@@ -36,3 +38,16 @@ def test_a_file_that_is_not_an_object_reads_as_empty(tmp_path):
     path = tmp_path / "control-settings.json"
     path.write_text("[1, 2]")
     assert SettingsStore(path).load() == {}
+
+
+def test_an_unserialisable_value_raises_and_changes_nothing(tmp_path):
+    path = tmp_path / "control-settings.json"
+    store = SettingsStore(path)
+    store.save("screensaver", "quiet")
+    with pytest.raises(TypeError):
+        store.save("camera", {"home": object()})
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["control-settings.json"]
+    assert store.get("screensaver") == "quiet" and store.get("camera") is None
+    assert SettingsStore(path).load() == {"screensaver": "quiet"}
+    store.save("screensaver", "bounce")
+    assert SettingsStore(path).get("screensaver") == "bounce"

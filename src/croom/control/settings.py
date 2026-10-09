@@ -32,16 +32,20 @@ class SettingsStore:
         return self._data.get(key, default)
 
     def save(self, key: str, value: Any) -> None:
-        """Set one key and write the whole file atomically, mode 600."""
+        """Set one key and write the whole file atomically, mode 600.
+
+        A value that cannot be serialised raises before anything changes.
+        """
+        text = json.dumps({**self._data, key: value})
         self._data[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=str(self._path.parent), prefix=f".{self._path.name}-")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(self._data, handle)
+                handle.write(text)
             os.chmod(temp, 0o600)
             os.replace(temp, self._path)
-        except OSError:
+        except BaseException:
             try:
                 os.unlink(temp)
             except OSError:

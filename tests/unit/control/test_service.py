@@ -853,6 +853,17 @@ class TestRoomDevices:
         assert devices.camera.previews == [True, False]
         assert (await client.post("/api/camera/preview", json={"on": "yes"})).status == 400
 
+    async def test_preview_is_refused_when_the_camera_is_unavailable(self, client_factory):
+        devices = StubDevices(camera=StubCamera(available=False))
+        client = await client_factory(make_service(devices=devices))
+        response = await client.post("/api/camera/preview", json={"on": True})
+        assert response.status == 409 and (await response.json())["error"] == "no controllable camera found"
+        assert devices.camera.previews == []
+        # turning it off is always possible, as in a meeting: closing the panel must bring the screensaver back
+        response = await client.post("/api/camera/preview", json={"on": False})
+        assert response.status == 200 and (await response.json())["preview"] is False
+        assert devices.camera.previews == [False]
+
     @pytest.mark.parametrize("path, body, writer", [
         ("/api/camera/presets/1", {"action": "save"}, "save"),
         ("/api/camera/setup", {"action": "save_home"}, "save_home"),

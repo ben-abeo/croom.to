@@ -496,6 +496,10 @@ class ControlService(Service):
             on = data.get("on")
             if not isinstance(on, bool):
                 raise ValueError("on must be true or false")
+            # Both refusals are for turning the preview on: turning it off always works, so closing the panel
+            # brings the screensaver back whatever state the camera or the meeting is in.
+            if on and not camera.available:
+                raise DeviceUnavailable(camera.state()["reason"])
             if on and self._meeting_state() in IN_PROGRESS_STATES:
                 raise NotReady("the TV is in a meeting")
             camera.set_preview(on)

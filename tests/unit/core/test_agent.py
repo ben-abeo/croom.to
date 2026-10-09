@@ -25,12 +25,17 @@ def make_config(tmp_path, dashboard_url: str = "", control: bool = False) -> Con
 
 @pytest.fixture
 def no_hardware():
-    """Make every hardware probe find nothing and keep meeting providers from launching browsers."""
+    """Make every hardware probe find nothing and keep meeting providers from launching browsers.
+
+    The devices service finds nothing too: no pw-dump runs and no /dev/video* is opened here.
+    """
     with patch("croom.audio.service.get_audio_devices", return_value=[]), \
          patch("croom.video.service.get_cameras", return_value=[]), \
          patch("croom.display.service.DisplayService.initialize", new=AsyncMock(return_value=False)), \
          patch("croom.calendar.service.CalendarService.initialize", new=AsyncMock(return_value=False)), \
-         patch("croom.meeting.service.build_provider", return_value=None):
+         patch("croom.meeting.service.build_provider", return_value=None), \
+         patch("croom.devices.volume.RoomVolume.refresh", new=AsyncMock(return_value=None)), \
+         patch("croom.devices.camera.RoomCamera.discover", new=AsyncMock(return_value=False)):
         yield
 
 
@@ -44,7 +49,7 @@ class TestServiceRegistration:
         agent = make_agent(make_config(tmp_path))
         agent._initialize_services()
         assert sorted(agent.service_manager.get_all_services()) == [
-            "audio", "calendar", "display", "meeting", "video",
+            "audio", "calendar", "devices", "display", "meeting", "video",
         ]
 
     def test_registers_dashboard_client_when_enabled(self, tmp_path, no_hardware):
@@ -87,6 +92,19 @@ class TestControlRegistration:
         order = agent.service_manager._start_order
         assert order.index("control") > order.index("meeting")
         assert order.index("control") > order.index("calendar")
+
+    def test_devices_are_registered_and_handed_to_the_control_page(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        devices = agent.service_manager.get_service("devices")
+        control = agent.service_manager.get_service("control")
+        assert devices is not None and devices.name == "devices"
+        assert control._devices is devices
+        assert control._store.path == agent.config.resolve_data_dir() / "control-settings.json"
+        # one store for both: two stores on one file would each write only the keys they know
+        assert devices.camera._store is control._store
+        order = agent.service_manager._start_order
+        assert order.index("video") < order.index("devices") < order.index("control")
 
     def test_control_is_absent_when_disabled(self, tmp_path, no_hardware):
         agent = make_agent(make_config(tmp_path, control=False))

@@ -51,6 +51,10 @@ class RoomVolume:
         self._reason: Optional[str] = "not checked yet"
         self._checked_at: Optional[float] = None
         self._warned: Optional[str] = None
+        # One command sequence at a time: a probe, a set and a step each read and write the state
+        # across awaits, so overlapping calls queue instead of interleaving. Every public coroutine
+        # takes the lock and calls the private helpers, which never take it.
+        self._lock = asyncio.Lock()
 
     @classmethod
     def from_config(cls, config) -> "RoomVolume":
@@ -70,6 +74,12 @@ class RoomVolume:
 
     async def refresh(self, force: bool = False) -> Dict[str, Any]:
         """Find the sink and read its level; cached for a few seconds unless forced."""
+        async with self._lock:
+            return await self._refresh(force)
+
+    async def _refresh(self, force: bool = False) -> Dict[str, Any]:
+        """The body of refresh(), for a caller that holds the lock. A caller that had to wait for the
+        lock re-checks the cache here, so it can use the probe it waited for."""
         now = self._clock()
         if not force and self._checked_at is not None and now - self._checked_at < CACHE_S:
             return self.state()
@@ -152,12 +162,16 @@ class RoomVolume:
     # ------------------------------------------------------------------
 
     async def _sink(self) -> int:
-        await self.refresh()
+        await self._refresh()
         if not self.available:
             raise DeviceUnavailable(self._reason or "no audio sink")
         return self._sink_id
 
     async def set_level(self, level: int) -> Dict[str, Any]:
+        async with self._lock:
+            return await self._set_level(level)
+
+    async def _set_level(self, level: int) -> Dict[str, Any]:
         sink_id = await self._sink()
         level = max(0, min(100, int(level)))
         code, out = await self._run(["wpctl", "set-volume", str(sink_id), f"{level / 100:.2f}"])
@@ -169,15 +183,17 @@ class RoomVolume:
         return self.state()
 
     async def step(self, delta: int) -> Dict[str, Any]:
-        await self.refresh(force=True)
-        return await self.set_level(self._level + int(delta))
+        async with self._lock:
+            await self._refresh(force=True)
+            return await self._set_level(self._level + int(delta))
 
     async def set_muted(self, muted: bool) -> Dict[str, Any]:
-        sink_id = await self._sink()
-        code, out = await self._run(["wpctl", "set-mute", str(sink_id), "1" if muted else "0"])
-        if code != 0:
-            self._fail(f"wpctl set-mute failed: {out.strip() or code}")
-            raise DeviceUnavailable(self._reason)
-        self._muted = bool(muted)
-        self._checked_at = None
-        return self.state()
+        async with self._lock:
+            sink_id = await self._sink()
+            code, out = await self._run(["wpctl", "set-mute", str(sink_id), "1" if muted else "0"])
+            if code != 0:
+                self._fail(f"wpctl set-mute failed: {out.strip() or code}")
+                raise DeviceUnavailable(self._reason)
+            self._muted = bool(muted)
+            self._checked_at = None
+            return self.state()

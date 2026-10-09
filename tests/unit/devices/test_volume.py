@@ -3,6 +3,7 @@ The room's sound level through PipeWire, against a fake pw-dump and wpctl in the
 shape PiMeet-3 produces (spec 2026-10-08 sound and camera, section 4.2).
 """
 
+import asyncio
 import json
 import logging
 
@@ -37,13 +38,25 @@ class FakeRunner:
 
     async def __call__(self, args):
         self.calls.append(args)
-        if args[0] in self.fail:
-            return 1, self.fail[args[0]]
+        for key in (args[0], " ".join(args[:2])):  # a command fails whole, or one subcommand of it
+            if key in self.fail:
+                return 1, self.fail[key]
         if args == ["pw-dump"]:
             return 0, self.dump
         if args[:2] == ["wpctl", "get-volume"]:
             return 0, self.volume
         return 0, ""
+
+
+class SlowRunner(FakeRunner):
+    """Like the real thing: each command takes a moment, and a set-volume sticks."""
+
+    async def __call__(self, args):
+        await asyncio.sleep(0.01)
+        code, text = await super().__call__(args)
+        if code == 0 and args[:2] == ["wpctl", "set-volume"]:
+            self.volume = f"Volume: {args[3]}\n"
+        return code, text
 
 
 class FakeClock:
@@ -54,8 +67,8 @@ class FakeClock:
         return self.now
 
 
-def volume_for(preference="auto", **runner_args):
-    runner = FakeRunner(**runner_args)
+def volume_for(preference="auto", runner_class=FakeRunner, **runner_args):
+    runner = runner_class(**runner_args)
     clock = FakeClock()
     return RoomVolume(preference, runner=runner, clock=clock), runner, clock
 
@@ -154,3 +167,117 @@ async def test_run_command_reports_a_timeout_and_a_missing_command(monkeypatch):
     assert code == 127
     code, text = await run_command(["echo", "hello"])
     assert (code, text.strip()) == (0, "hello")
+
+
+async def test_a_change_drops_the_cache_so_the_next_refresh_reads_the_speaker_back():
+    volume, runner, _ = volume_for()
+    await volume.refresh()
+    runner.volume = "Volume: 0.70\n"  # what wpctl reports is what the speaker did, whatever it was asked
+    assert (await volume.set_level(80))["level"] == 80
+    assert (await volume.refresh())["level"] == 70
+    assert (await volume.set_muted(True))["muted"] is True
+    assert (await volume.refresh())["muted"] is False
+
+
+async def test_the_cache_still_holds_at_2_9_seconds_and_has_run_out_by_3_1():
+    volume, runner, clock = volume_for()
+    await volume.refresh()
+    clock.now += 2.9
+    await volume.refresh()
+    assert runner.calls.count(["pw-dump"]) == 1
+    clock.now += 0.2
+    await volume.refresh()
+    assert runner.calls.count(["pw-dump"]) == 2
+
+
+@pytest.mark.parametrize("wanted", ["MEETUP", "SPEAKERPHONE", "LOGITECH_MEETUP"])
+async def test_a_preference_matches_the_description_or_the_name_whatever_the_case(wanted):
+    # MEETUP is in both; SPEAKERPHONE only in the description; LOGITECH_MEETUP only in the node name
+    volume, _, _ = volume_for(wanted)
+    state = await volume.refresh()
+    assert state["available"] is True and state["device"] == "Logitech MeetUp Speakerphone Analog Stereo"
+
+
+async def test_step_reads_the_level_first_even_inside_the_cache_window():
+    volume, runner, _ = volume_for()
+    await volume.refresh()
+    runner.volume = "Volume: 0.60\n"  # someone used the speaker's own buttons since the last look
+    assert (await volume.step(5))["level"] == 65
+    assert runner.calls[-1] == ["wpctl", "set-volume", "57", "0.65"]
+
+
+async def test_a_failing_wpctl_set_command_raises_and_makes_it_unavailable():
+    volume, runner, _ = volume_for()
+    runner.fail["wpctl set-volume"] = "no such node"
+    with pytest.raises(DeviceUnavailable, match="wpctl set-volume failed: no such node"):
+        await volume.set_level(50)
+    assert runner.calls[-1] == ["wpctl", "set-volume", "57", "0.50"]
+    assert volume.state()["available"] is False
+
+    volume, runner, _ = volume_for()
+    runner.fail["wpctl set-mute"] = "no such node"
+    with pytest.raises(DeviceUnavailable, match="wpctl set-mute failed: no such node"):
+        await volume.set_muted(True)
+    assert runner.calls[-1] == ["wpctl", "set-mute", "57", "1"]
+    assert volume.state()["available"] is False
+
+
+def sink_node(node_id, name, description=None, nick=None):
+    props = {"media.class": "Audio/Sink", "node.name": name}
+    if description:
+        props["node.description"] = description
+    if nick:
+        props["node.nick"] = nick
+    return {"id": node_id, "type": "PipeWire:Interface:Node", "version": 3, "info": {"props": props}}
+
+
+SINKS_NAMED_THREE_WAYS = json.dumps([
+    sink_node(1, "alpha", description="Alpha described", nick="Alpha nick"),
+    sink_node(2, "bravo", nick="Bravo nick"),
+    sink_node(3, "charlie"),
+])
+
+
+@pytest.mark.parametrize("wanted, device", [
+    ("alpha", "Alpha described"), ("bravo", "Bravo nick"), ("charlie", "charlie")])
+async def test_the_device_is_named_by_description_then_nick_then_node_name(wanted, device):
+    volume, _, _ = volume_for(wanted, dump=SINKS_NAMED_THREE_WAYS)
+    assert (await volume.refresh())["device"] == device
+
+
+async def test_a_second_outage_with_the_same_reason_warns_again(caplog):
+    volume, runner, clock = volume_for()
+
+    async def outage_then_recovery():
+        runner.fail["pw-dump"] = "connection refused"
+        for _ in range(2):
+            clock.now += 5
+            assert (await volume.refresh())["available"] is False
+        del runner.fail["pw-dump"]
+        clock.now += 5
+        assert (await volume.refresh())["available"] is True
+
+    with caplog.at_level(logging.WARNING):
+        await outage_then_recovery()
+        await outage_then_recovery()
+    assert sum("pw-dump failed" in r.getMessage() for r in caplog.records) == 2
+
+
+async def test_two_overlapping_steps_both_count():
+    volume, runner, _ = volume_for(runner_class=SlowRunner)
+    await asyncio.gather(volume.step(5), volume.step(5))
+    sets = [call for call in runner.calls if call[:2] == ["wpctl", "set-volume"]]
+    assert sets[-1] == ["wpctl", "set-volume", "57", "0.50"]
+    assert volume.state()["level"] == 50
+
+
+@pytest.mark.parametrize("call", ["refresh", "set_level", "set_muted"])
+async def test_a_caller_arriving_during_a_reprobe_waits_for_it(call):
+    args = {"refresh": (), "set_level": (60,), "set_muted": (True,)}[call]
+    volume, runner, clock = volume_for(runner_class=SlowRunner)
+    runner.fail["pw-dump"] = "connection refused"
+    assert (await volume.refresh())["available"] is False
+    del runner.fail["pw-dump"]  # PipeWire is back
+    clock.now += 5  # and the cache has run out
+    results = await asyncio.gather(getattr(volume, call)(*args), getattr(volume, call)(*args), return_exceptions=True)
+    assert all(isinstance(result, dict) and result["available"] for result in results), results

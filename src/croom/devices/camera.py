@@ -24,6 +24,14 @@ def _sign(value: float) -> int:
     return 1 if value > 0 else -1 if value < 0 else 0
 
 
+def _whole_number(value: Any, what: str) -> int:
+    """A caller's number as an int. None, a list, text that is not a number, nan and infinity are a ValueError."""
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError) as e:
+        raise ValueError(f"{what} must be a finite number") from e
+
+
 class RoomCamera:
     WATCHDOG_S = 1.5       # motion stops this long after the last move request
     ZOOM_STEP = 25
@@ -161,6 +169,7 @@ class RoomCamera:
             logger.warning(f"Camera unavailable: {reason}")
             self._warned = reason
         if self._fd is not None:
+            self._stop_motors()
             try:
                 self._v4l2.close(self._fd)
             except OSError:
@@ -170,6 +179,30 @@ class RoomCamera:
         self._pan = self._tilt = 0
         self._segment_started = None
         self._position_known = False
+
+    def _speed_controls(self, pan: int, tilt: int) -> Dict[int, int]:
+        """The speed controls this node has, with the values to write; pan and tilt go out in one call."""
+        speeds: Dict[int, int] = {}
+        if self._has_pan:
+            speeds[V4L2_CID_PAN_SPEED] = pan
+        if self._has_tilt:
+            speeds[V4L2_CID_TILT_SPEED] = tilt
+        return speeds
+
+    def _stop_motors(self) -> None:
+        """One best-effort zero write of both speed controls on the node that is about to be closed.
+
+        A call that failed while the camera was moving must not leave the motors running with nothing able
+        to stop them: the speed controls keep their value until told otherwise. On an unplugged node the
+        write fails at once; any error is ignored, because there is nothing more to do for a node that is gone.
+        """
+        speeds = self._speed_controls(0, 0)
+        if not speeds:
+            return
+        try:
+            self._v4l2.set_many(self._fd, speeds)
+        except OSError as e:
+            logger.debug(f"Could not stop the camera before closing it: {e}")
 
     async def _require(self) -> None:
         if not await self.discover():
@@ -184,6 +217,14 @@ class RoomCamera:
         self._check_open()
         try:
             await asyncio.to_thread(self._v4l2.set, self._fd, cid, value)
+        except OSError as e:
+            self._fail(f"camera call failed: {e}")
+            raise DeviceUnavailable(self._reason) from e
+
+    async def _set_many(self, values: Dict[int, int]) -> None:
+        self._check_open()
+        try:
+            await asyncio.to_thread(self._v4l2.set_many, self._fd, values)
         except OSError as e:
             self._fail(f"camera call failed: {e}")
             raise DeviceUnavailable(self._reason) from e
@@ -217,7 +258,8 @@ class RoomCamera:
 
     async def move(self, pan: int, tilt: int) -> Dict[str, Any]:
         """Start, change or stop motion; a second request within WATCHDOG_S keeps it going."""
-        if pan not in (-1, 0, 1) or tilt not in (-1, 0, 1):
+        if (isinstance(pan, bool) or isinstance(tilt, bool)   # True and False equal 1 and 0 but are not directions
+                or pan not in (-1, 0, 1) or tilt not in (-1, 0, 1)):
             raise ValueError("pan and tilt must each be -1, 0 or 1")
         await self._require()
         await self._cancel_long_move()
@@ -228,8 +270,12 @@ class RoomCamera:
         return self.state()
 
     async def stop(self) -> Dict[str, Any]:
+        """Stop all motion. A node lost while the camera was moving is looked for again first, so the stop
+        can still reach it; when no camera is found this simply reports the state."""
         await self._cancel_long_move()
         self._cancel_watchdog()
+        if self._fd is None:
+            await self.discover()
         if self._fd is not None:
             await self._apply_speeds(0, 0)
         return self.state()
@@ -251,22 +297,26 @@ class RoomCamera:
     async def _apply_speeds(self, pan: int, tilt: int) -> None:
         """Set the speed controls and close the motion segment that ends here (the position estimate).
 
-        The whole sequence runs under the control lock, so another request's pan and tilt writes
-        cannot land between these two.
+        The whole sequence runs under the control lock, so no other request's write lands in the middle of
+        it. Pan and tilt go out in ONE call: on a UVC camera they are the two halves of one relative control,
+        and two separate writes could cancel each other. The clock is read after the write has landed: the
+        old speeds applied up to that reading and the new ones apply from it, so the time the write itself
+        takes is not dropped from the estimate.
         """
         async with self._io_lock:
-            self._account()
-            if self._has_pan:
-                await self._set(V4L2_CID_PAN_SPEED, pan)
-            if self._has_tilt:
-                await self._set(V4L2_CID_TILT_SPEED, tilt)
+            speeds = self._speed_controls(pan, tilt)
+            if speeds:
+                await self._set_many(speeds)
+            now = self._clock()
+            self._account(now)
             self._pan, self._tilt = (pan if self._has_pan else 0), (tilt if self._has_tilt else 0)
-            self._segment_started = self._clock() if (self._pan or self._tilt) else None
+            self._segment_started = now if (self._pan or self._tilt) else None
 
-    def _account(self) -> None:
+    def _account(self, until: Optional[float] = None) -> None:
+        """Add the motion segment that ends at `until` (default: now) to the estimate, and close it."""
         if self._segment_started is None:
             return
-        elapsed = max(0.0, self._clock() - self._segment_started)
+        elapsed = max(0.0, (self._clock() if until is None else until) - self._segment_started)
         self._pan_s = min(self._travel_s, max(0.0, self._pan_s + self._pan * elapsed))
         self._tilt_s = min(self._travel_s, max(0.0, self._tilt_s + self._tilt * elapsed))
         self._segment_started = None
@@ -292,8 +342,9 @@ class RoomCamera:
             return self._zoom
 
     async def zoom(self, level: int) -> int:
+        level = _whole_number(level, "the zoom level")
         await self._require()
-        level = max(self._zoom_range[0], min(self._zoom_range[1], int(level)))
+        level = max(self._zoom_range[0], min(self._zoom_range[1], level))
         async with self._io_lock:
             await self._set(V4L2_CID_ZOOM_ABSOLUTE, level)
             self._zoom = level
@@ -301,5 +352,6 @@ class RoomCamera:
         return level
 
     async def zoom_step(self, delta: int) -> int:
+        delta = _whole_number(delta, "the zoom step")
         current = await self.read_zoom()
-        return await self.zoom((current if current is not None else self._zoom_range[0]) + int(delta))
+        return await self.zoom((current if current is not None else self._zoom_range[0]) + delta)

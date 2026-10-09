@@ -11,14 +11,19 @@ DECODER = {}   # /dev/video19, the Pi's HEVC decoder: no camera controls
 
 
 class FakeV4l2:
-    def __init__(self, nodes=None):
+    def __init__(self, nodes=None, latency_s=0.0):
+        # latency_s: how long each control call takes, as a USB round trip does. Tests that look for
+        # overlapping calls set it; every other test leaves it at zero and stays instant.
         self._nodes = dict(nodes if nodes is not None else {"/dev/video0": MEETUP, "/dev/video1": {}, "/dev/video19": DECODER})
         self.values = {}
         self.calls = []
-        self.fail = False
+        self.fail = False         # the camera is gone: every control call raises
+        self.fail_next = 0        # a transient fault: the next N control calls raise, then it answers again
         self.unopenable = set()   # nodes whose open() is refused, as a busy or unreadable one is
         self.in_flight = 0        # control calls running right now (the camera runs them in worker threads) ...
         self.overlapped = False   # ... and whether two of them were ever running at the same time
+        self.set_many_calls = []  # one dict per set_many() call: the controls that were written together
+        self._latency_s = latency_s
         self._counter = threading.Lock()
 
     def nodes(self):
@@ -39,26 +44,43 @@ class FakeV4l2:
     def query(self, fd, cid):
         return self._nodes[self._path(fd)].get(cid)
 
-    def get(self, fd, cid):
+    def _check_fault(self):
         if self.fail:
             raise OSError(19, "No such device")
+        with self._counter:
+            if self.fail_next > 0:
+                self.fail_next -= 1
+                raise OSError(5, "Input/output error")
+
+    def get(self, fd, cid):
+        self._check_fault()
         value = self.values.get((fd, cid), self._nodes[self._path(fd)][cid][3])
         self._round_trip()
         return value
 
     def set(self, fd, cid, value):
-        if self.fail:
-            raise OSError(19, "No such device")
+        self._check_fault()
         self._round_trip()
         self.calls.append(("set", fd, cid, value))
         self.values[(fd, cid)] = value
 
+    def set_many(self, fd, values):
+        """Several controls in one call (VIDIOC_S_EXT_CTRLS): one round trip, one entry in set_many_calls, and
+        one ("set", ...) entry per control, in order, so sets() sees them as it sees single writes."""
+        self._check_fault()
+        self._round_trip()
+        self.set_many_calls.append(dict(values))
+        for cid, value in values.items():
+            self.calls.append(("set", fd, cid, value))
+            self.values[(fd, cid)] = value
+
     def _round_trip(self):
-        """A control call takes a moment, like a USB round trip; two in flight at once are recorded."""
+        """A control call takes latency_s, like a USB round trip; two in flight at once are recorded."""
         with self._counter:
             self.in_flight += 1
         try:
-            time.sleep(0.005)
+            if self._latency_s:
+                time.sleep(self._latency_s)
             with self._counter:
                 if self.in_flight > 1:
                     self.overlapped = True

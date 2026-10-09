@@ -19,6 +19,10 @@ from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID
 logger = logging.getLogger(__name__)
 
 NO_CAMERA = "no controllable camera found"
+# What a setting of the wrong kind falls back to: the config's own defaults (VideoConfig.ptz_travel_seconds and
+# ControlConfig.camera_presets)
+DEFAULT_TRAVEL_S = 8.0
+DEFAULT_PRESET_NAMES = ("Wide", "Table", "Whiteboard")
 
 
 def _sign(value: float) -> int:
@@ -43,6 +47,11 @@ def _finite(value: Any) -> bool:
         return False
 
 
+def _span(control: Optional[tuple]) -> str:
+    """A queried control's range for the log, or "none" when the node does not have the control."""
+    return "none" if control is None else f"{control[0]}..{control[1]}"
+
+
 def _saved_position(entry: Any, *numbers: str) -> bool:
     """A home or preset read back from the store: a dict whose named values are all finite numbers."""
     return isinstance(entry, dict) and all(_finite(entry.get(name)) for name in numbers)
@@ -58,8 +67,20 @@ class RoomCamera:
     def __init__(self, device: str = "auto", travel_s: float = 8.0, preset_names: Optional[List[str]] = None,
                  store=None, v4l2=None, clock=time.monotonic, sleep=asyncio.sleep):
         self._device_pref = device or "auto"
-        self._travel_s = float(travel_s)
-        names = [str(n) for n in (preset_names or [])][:self.SLOTS]
+        # The room config is hand-written YAML: a setting of the wrong kind is warned about and replaced by the default,
+        # rather than stopping the service ("fast") or homing for no time at all (0, nan)
+        if _finite(travel_s) and travel_s > 0:
+            self._travel_s = float(travel_s)
+        else:
+            logger.warning(f"video.ptz_travel_seconds must be a number of seconds above 0, not {travel_s!r}: "
+                           f"using {DEFAULT_TRAVEL_S:g}")
+            self._travel_s = DEFAULT_TRAVEL_S
+        if preset_names is not None and not (isinstance(preset_names, (list, tuple))
+                                             and all(isinstance(name, str) for name in preset_names)):
+            logger.warning(f"control.camera_presets must be a list of names, not {preset_names!r}: "
+                           f"using {', '.join(DEFAULT_PRESET_NAMES)}")
+            preset_names = DEFAULT_PRESET_NAMES
+        names = list(preset_names or [])[:self.SLOTS]
         self._names = names + [f"Preset {i}" for i in range(len(names) + 1, self.SLOTS + 1)]
         self._store = store
         self._v4l2 = v4l2 or V4l2Controls()
@@ -167,11 +188,17 @@ class RoomCamera:
         """Open the configured node, or the first one with a zoom or pan control."""
         if self._fd is not None:
             return True
-        candidates = [self._device_pref] if self._device_pref != "auto" else self._v4l2.nodes()
+        explicit = self._device_pref != "auto"
+        candidates = [self._device_pref] if explicit else self._v4l2.nodes()
         for path in candidates:
             try:
                 fd = self._v4l2.open(path)
             except OSError as e:
+                if explicit:
+                    # The config names this node: say why it cannot be used (permission denied, busy, gone), warned
+                    # about once per reason like any other
+                    self._fail(f"could not open {path}: {e}")
+                    return False
                 logger.debug(f"Could not open {path}: {e}")
                 continue
             zoom = self._v4l2.query(fd, V4L2_CID_ZOOM_ABSOLUTE)
@@ -187,8 +214,7 @@ class RoomCamera:
                 self._zoom = zoom[3]
             self._reason = None
             self._warned = None
-            logger.info(f"Camera: {path} (zoom {self._zoom_range[0]}..{self._zoom_range[1]}, "
-                        f"pan {'yes' if self._has_pan else 'no'}, tilt {'yes' if self._has_tilt else 'no'})")
+            logger.info(f"Camera: {path} (zoom {_span(zoom)}, pan {_span(pan)}, tilt {_span(tilt)})")
             return True
         self._fail(NO_CAMERA)
         return False
@@ -414,6 +440,15 @@ class RoomCamera:
         if self._interrupt.is_set():
             raise Interrupted("the camera move was interrupted")
 
+    async def _stop_quietly(self) -> None:
+        """The best-effort stop at the end of a long move. A write that fails has already made the camera unavailable
+        and warned about it, so its error ends here: shielded and left running by a second cancel, this task still
+        ends without an exception that nobody retrieves."""
+        try:
+            await self._apply_speeds(0, 0)
+        except DeviceUnavailable:
+            pass
+
     async def _long(self, work: Callable[[], Awaitable[None]]) -> None:
         """Run a long move: busy while it runs, stopped and unknown if it is cut short.
 
@@ -434,10 +469,7 @@ class RoomCamera:
             if isinstance(e, Interrupted):
                 logger.info("Camera move cut short: the position is unknown until the camera is homed again")
             if self._fd is not None:
-                try:
-                    await self._apply_speeds(0, 0)
-                except DeviceUnavailable:
-                    pass
+                await self._stop_quietly()
             raise
         except asyncio.CancelledError:
             # The task running the move was cancelled (a shutdown, a request that went away): the same, but the
@@ -446,10 +478,16 @@ class RoomCamera:
             self._position_known = False
             logger.info("Camera move cancelled: the position is unknown until the camera is homed again")
             if self._fd is not None:
-                try:
-                    await asyncio.shield(self._apply_speeds(0, 0))
-                except DeviceUnavailable:
-                    pass
+                await asyncio.shield(self._stop_quietly())
+            raise
+        except Exception as e:
+            # Anything else (a refusal from the work itself, or a bug in it or under it): the motors are still stopped,
+            # because a speed control keeps its value until told otherwise and nothing else would stop them
+            self._position_known = False
+            logger.info(f"Camera move failed ({type(e).__name__}: {e}): the position is unknown until the camera is "
+                        "homed again")
+            if self._fd is not None:
+                await self._stop_quietly()
             raise
         finally:
             self._busy = False
@@ -457,7 +495,8 @@ class RoomCamera:
 
     async def _find_stops_work(self) -> None:
         await self._apply_speeds(-1, -1)
-        await self._wait(self._travel_s)
+        if self._speed_controls(-1, -1):        # a zoom-only node has nothing to drive into a stop: no wait
+            await self._wait(self._travel_s)
         await self._apply_speeds(0, 0)
         self._pan_s, self._tilt_s = 0.0, 0.0
         self._position_known = True
@@ -471,6 +510,8 @@ class RoomCamera:
         which bounds every leg: a saved number beyond it (typed by hand, or saved before ptz_travel_seconds was
         lowered) would otherwise run an axis against its stop for as long as the number says.
         """
+        if not self._speed_controls(1, 1):      # a zoom-only node cannot pan or tilt: nothing to wait for
+            return
         self._account_now()
         pan_s = min(self._travel_s, max(0.0, pan_s))
         tilt_s = min(self._travel_s, max(0.0, tilt_s))
@@ -525,8 +566,9 @@ class RoomCamera:
         """Remember where the camera is now as its home, the place homing goes back to."""
         if not self._position_known:
             raise NotReady("home the camera first")
-        self._home = self._estimate_now()
-        self._persist()
+        home = self._estimate_now()
+        self._persist(home, self._presets)      # written first: a write that fails leaves the camera as it was
+        self._home = home
         logger.info(f"Camera home saved at {self._home}")
         return self.state()
 
@@ -544,8 +586,9 @@ class RoomCamera:
         zoom = await self.read_zoom()          # first: it may wait for the camera, and the position is taken right after
         if not self._position_known:           # a long move was cut short, or a call failed, while the zoom was read
             raise NotReady("home the camera first")
-        self._presets[key] = {**self._estimate_now(), "zoom": zoom if zoom is not None else self._zoom_range[0]}
-        self._persist()
+        presets = {**self._presets, key: {**self._estimate_now(), "zoom": zoom if zoom is not None else self._zoom_range[0]}}
+        self._persist(self._home, presets)      # written first: a write that fails leaves the camera as it was
+        self._presets = presets
         logger.info(f"Camera preset {key} ({self._names[slot - 1]}) saved: {self._presets[key]}")
         return self.state()
 
@@ -569,12 +612,14 @@ class RoomCamera:
         await self._long(work)
         return self.state()
 
-    def _persist(self) -> None:
-        """Write the home and presets through the store, as copies: the store keeps what it is given by
-        reference, so a later save of another key would otherwise write a preset that is half edited."""
+    def _persist(self, home: Optional[Dict[str, Any]], presets: Dict[str, Dict[str, Any]]) -> None:
+        """Write a home and presets through the store, as copies: the store keeps what it is given by
+        reference, so a later save of another key would otherwise write a preset that is half edited.
+        The callers write the new values first and keep them only once this has returned: a save that
+        raises (a full disk) must not leave the camera reporting a home or preset that is not on disk."""
         if self._store is not None:
-            self._store.save("camera", {"home": dict(self._home) if self._home is not None else None,
-                                        "presets": {k: dict(v) for k, v in self._presets.items()}})
+            self._store.save("camera", {"home": dict(home) if home is not None else None,
+                                        "presets": {k: dict(v) for k, v in presets.items()}})
 
     # ------------------------------------------------------------------
     # Preview

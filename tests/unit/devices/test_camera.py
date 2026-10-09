@@ -5,6 +5,7 @@ homing, presets and the preview.
 """
 
 import asyncio
+import gc
 import logging
 import threading
 
@@ -35,7 +36,7 @@ async def test_auto_picks_the_first_node_with_camera_controls(caplog):
     assert state["zoom"] == {"level": 100, "min": 100, "max": 500}
     assert v4l2.calls[0] == ("open", "/dev/video0")
     assert ("open", "/dev/video1") not in v4l2.calls   # found on the first node, the rest is left alone
-    assert any("/dev/video0" in r.getMessage() for r in caplog.records)
+    assert "Camera: /dev/video0 (zoom 100..500, pan -1..1, tilt -1..1)" in [r.getMessage() for r in caplog.records]
 
 
 async def test_a_node_without_controls_is_closed_again_and_the_next_one_tried():
@@ -211,14 +212,17 @@ async def test_a_node_that_cannot_be_opened_is_skipped_and_the_next_one_tried():
     assert v4l2.calls[:2] == [("open", "/dev/video0"), ("open", "/dev/video2")]
     only, v4l2, _ = camera_for(nodes={"/dev/video0": MEETUP}, device="/dev/video0")
     v4l2.unopenable = {"/dev/video0"}
-    assert await only.discover() is False and only.state()["reason"] == "no controllable camera found"
+    assert await only.discover() is False and only.state()["reason"] == "could not open /dev/video0: [Errno 13] Permission denied"
 
 
-async def test_a_camera_with_only_zoom_or_only_pan_and_tilt_is_still_found():
+async def test_a_camera_with_only_zoom_or_only_pan_and_tilt_is_still_found(caplog):
     zoom_only, _, _ = camera_for(nodes={"/dev/video0": {V4L2_CID_ZOOM_ABSOLUTE: (100, 500, 1, 100)}})
-    assert await zoom_only.discover() is True
     moves_only, _, _ = camera_for(nodes={"/dev/video0": {V4L2_CID_PAN_SPEED: (-1, 1, 1, 1), V4L2_CID_TILT_SPEED: (-1, 1, 1, 1)}})
-    assert await moves_only.discover() is True
+    with caplog.at_level(logging.INFO):
+        assert await zoom_only.discover() is True
+        assert await moves_only.discover() is True
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Camera: ")]
+    assert lines == ["Camera: /dev/video0 (zoom 100..500, pan none, tilt none)", "Camera: /dev/video0 (zoom none, pan -1..1, tilt -1..1)"]
 
 
 async def test_controls_the_node_does_not_have_are_never_written():
@@ -977,3 +981,157 @@ async def test_the_camera_gives_the_store_copies_of_its_home_and_presets(tmp_pat
     camera._store.save("screensaver", "clock")                   # ... while another key is saved, which rewrites the whole file
     saved = SettingsStore(tmp_path / "control-settings.json").get("camera")
     assert saved == {"home": {"pan_s": 0.0, "tilt_s": 0.0}, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}}}
+
+
+# --- the final fix pass: an explained open failure, settings with defaults, no wait without motors, every failure stops ---
+
+async def test_a_configured_node_that_cannot_be_opened_says_why_once(caplog):
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": MEETUP, "/dev/video2": MEETUP}, device="/dev/video2")
+    v4l2.unopenable = {"/dev/video2"}                            # not readable by the service user
+    with caplog.at_level(logging.DEBUG):
+        for _ in range(3):                                       # the start-up look and the 30 s re-checks
+            assert await camera.discover() is False
+    assert camera.state()["reason"] == "could not open /dev/video2: [Errno 13] Permission denied"
+    warnings = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warnings == ["Camera unavailable: could not open /dev/video2: [Errno 13] Permission denied"]
+    assert ("open", "/dev/video0") not in v4l2.calls             # only the node the config names is tried
+
+
+async def test_with_auto_a_node_that_cannot_be_opened_is_only_a_debug_line(caplog):
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": MEETUP})
+    v4l2.unopenable = {"/dev/video0"}
+    with caplog.at_level(logging.DEBUG):
+        assert await camera.discover() is False
+    assert camera.state()["reason"] == "no controllable camera found"
+    assert [r.levelno for r in caplog.records if "Could not open /dev/video0" in r.getMessage()] == [logging.DEBUG]
+
+
+@pytest.mark.parametrize("travel_s", [0, -1, "fast", float("nan"), float("inf")], ids=["zero", "negative", "text", "nan", "infinity"])
+def test_a_travel_time_that_is_not_a_number_of_seconds_falls_back_to_eight(travel_s, caplog):
+    with caplog.at_level(logging.WARNING):
+        camera = RoomCamera(travel_s=travel_s, v4l2=FakeV4l2())
+    assert camera._travel_s == 8.0
+    assert [r.levelno for r in caplog.records] == [logging.WARNING] and "ptz_travel_seconds" in caplog.records[0].getMessage()
+
+
+def test_preset_names_that_are_not_a_list_of_names_fall_back_to_the_defaults(caplog):
+    from croom.core.config import ControlConfig
+    with caplog.at_level(logging.WARNING):
+        camera = RoomCamera(preset_names="Wide", v4l2=FakeV4l2())   # a YAML string, not a list: not "W", "i", "d"
+    assert [preset["name"] for preset in camera.state()["presets"]] == ControlConfig().camera_presets == ["Wide", "Table", "Whiteboard"]
+    assert [r.levelno for r in caplog.records] == [logging.WARNING] and "camera_presets" in caplog.records[0].getMessage()
+    four = RoomCamera(preset_names=["A", "B", "C", "D"], v4l2=FakeV4l2())
+    assert [preset["name"] for preset in four.state()["presets"]] == ["A", "B", "C"]   # more than three: the first three, as before
+
+
+def test_from_config_survives_settings_of_the_wrong_kind(tmp_path, caplog):
+    from croom.core.config import Config
+    config = Config.from_dict({"video": {"ptz_travel_seconds": "fast"}, "control": {"camera_presets": "Wide"}})
+    with caplog.at_level(logging.WARNING):
+        camera = RoomCamera.from_config(config, SettingsStore(tmp_path / "s.json"))   # warned about, not a crash at start
+    assert camera._travel_s == 8.0 and [p["name"] for p in camera.state()["presets"]] == ["Wide", "Table", "Whiteboard"]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+
+
+async def test_a_zoom_only_camera_does_not_wait_the_travel_time():
+    camera, v4l2, clock = camera_for(nodes={"/dev/video0": {V4L2_CID_ZOOM_ABSOLUTE: (100, 500, 1, 100)}})
+    before = clock.now
+    state = await camera.find_stops()
+    assert clock.now == before                                   # nothing to drive into a stop, so nothing to wait for
+    assert state["position_known"] is True and (camera._pan_s, camera._tilt_s) == (0.0, 0.0)
+    camera._home = {"pan_s": 3.0, "tilt_s": 2.0}
+    await camera.zoom(300)
+    state = await camera.home()                                  # nor for the legs of a move to a home it cannot pan to
+    assert clock.now == before and state["position_known"] is True and state["zoom"]["level"] == 100
+    assert v4l2.set_many_calls == []
+
+
+class FullDiskStore(SettingsStore):
+    """Writes like the real store until `full` is set; from then on every save fails, as on a full disk."""
+
+    full = False
+
+    def save(self, key, value):
+        if self.full:
+            raise OSError(28, "No space left on device")
+        super().save(key, value)
+
+
+async def test_a_home_or_preset_that_could_not_be_written_is_not_reported_saved(tmp_path):
+    path = tmp_path / "control-settings.json"
+    store, v4l2, clock = FullDiskStore(path), FakeV4l2(), FakeClock()
+    camera = RoomCamera(store=store, v4l2=v4l2, clock=clock, sleep=clock.sleep)
+    await camera.find_stops()
+    await camera.save(1)                                         # one preset that was written
+    before = path.read_bytes()
+    store.full = True
+    with pytest.raises(OSError):
+        await camera.save_home()                                 # the page answers 500 ...
+    with pytest.raises(OSError):
+        await camera.save(2)
+    state = camera.state()                                       # ... and the next status must not say saved
+    assert state["home_saved"] is False and [preset["saved"] for preset in state["presets"]] == [True, False, False]
+    assert path.read_bytes() == before
+    store.full = False
+    await camera.save(3)                                         # the next write that works holds only what was saved
+    assert SettingsStore(path).get("camera") == {"home": None, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100},
+                                                                          "3": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}}}
+
+
+async def test_a_long_move_that_fails_in_any_other_way_still_stops_the_motors():
+    camera, v4l2, _ = camera_for()
+    await camera.find_stops()
+
+    async def work():                                            # a bug in the middle of a move
+        await camera._apply_speeds(1, 1)
+        raise RuntimeError("something unexpected")
+
+    with pytest.raises(RuntimeError, match="something unexpected"):
+        await camera._long(work)
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_SPEED: 0, V4L2_CID_TILT_SPEED: 0}
+    assert camera.state()["moving"] is False and camera.position_known is False and camera.busy is False
+    assert (await camera.find_stops())["position_known"] is True   # and the next long move is not left waiting for it
+
+
+async def test_a_stop_that_fails_after_a_second_cancel_leaves_no_unretrieved_error():
+    """The shielded stop outlives the cancelled move. When its write then fails, the error is handled where it
+    happens: asyncio reports a task whose exception nobody retrieved through the loop's exception handler, as the
+    task is collected, so the test records what reaches that handler and collects the garbage itself."""
+    camera, v4l2, _ = camera_for()
+    await camera.find_stops()
+    slow_moves(camera)
+    stopping, resume = threading.Event(), threading.Event()
+    write = v4l2.set_many
+
+    def held_then_failing_write(fd, values):                     # the stop is held on its way, then the camera is gone
+        if not any(values.values()):
+            stopping.set()
+            assert resume.wait(5)
+            raise OSError(19, "No such device")
+        write(fd, values)
+
+    v4l2.set_many = held_then_failing_write
+    loop = asyncio.get_running_loop()
+    reports, handler = [], loop.get_exception_handler()
+    loop.set_exception_handler(lambda loop, context: reports.append(context))
+    try:
+        homing = asyncio.create_task(camera.find_stops())
+        await asyncio.sleep(0.03)
+        homing.cancel()
+        assert await asyncio.to_thread(stopping.wait, 2)         # the stop that follows the cancel is in flight ...
+        homing.cancel()                                          # ... when the request is cancelled again
+        with pytest.raises(asyncio.CancelledError):
+            await homing
+        resume.set()                                             # the write fails: the camera is gone
+        for _ in range(200):
+            if not camera.available:
+                break
+            await asyncio.sleep(0.005)
+        assert not camera.available and camera.state()["reason"] == "camera call failed: [Errno 19] No such device"
+        for _ in range(3):
+            await asyncio.sleep(0)
+        del homing
+        gc.collect()
+    finally:
+        loop.set_exception_handler(handler)
+    assert [context.get("message") for context in reports] == []

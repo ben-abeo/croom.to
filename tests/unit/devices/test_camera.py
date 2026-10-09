@@ -6,11 +6,12 @@ homing, presets and the preview.
 
 import asyncio
 import logging
+import threading
 
 import pytest
 
 from croom.control.settings import SettingsStore
-from croom.devices.errors import DeviceUnavailable
+from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.devices.camera import RoomCamera
 from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID_ZOOM_ABSOLUTE
 from tests.unit.devices.fake_v4l2 import MEETUP, FakeClock, FakeV4l2
@@ -421,3 +422,429 @@ def test_a_motion_segment_can_be_closed_at_a_given_time():
     clock.now += 0.5
     camera._account()                                            # no argument: until now
     assert camera._pan_s == 1.5
+
+
+# --- position, homing, presets, preview (part two) ---
+
+async def test_find_stops_drives_both_axes_to_the_corner_and_the_position_becomes_known():
+    camera, v4l2, clock = camera_for()
+    before = clock.now
+    await camera.find_stops()
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [-1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0]
+    assert clock.now - before == 8.0                      # ptz_travel_seconds
+    assert camera.position_known and (camera._pan_s, camera._tilt_s) == (0.0, 0.0)
+
+
+async def test_moves_are_counted_in_seconds_of_travel_from_the_stop():
+    camera, v4l2, clock = camera_for()
+    await camera.find_stops()
+    await camera.move(1, 1)
+    await clock.sleep(2.5)
+    await camera.move(0, 1)        # pan stops after 2.5 s, tilt keeps going
+    await clock.sleep(1.0)
+    await camera.stop()
+    assert (camera._pan_s, camera._tilt_s) == (2.5, 3.5)
+    await camera.move(-1, 0)
+    await clock.sleep(10.0)        # longer than the travel: clamped at the stop
+    await camera.stop()
+    assert camera._pan_s == 0.0
+
+
+async def test_save_home_needs_a_known_position_and_home_returns_there(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path)
+    with pytest.raises(NotReady) as failure:
+        await camera.save_home()
+    assert str(failure.value) == "home the camera first"
+    with pytest.raises(NotReady) as failure:
+        await camera.home()
+    assert str(failure.value) == "save a home first"
+    await camera.find_stops()
+    await camera.move(1, 1)
+    await clock.sleep(3.0)
+    await camera.move(0, 1)
+    await clock.sleep(1.0)
+    await camera.stop()
+    await camera.zoom(200)
+    await camera.save_home()
+    assert camera.home_saved
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["home"] == {"pan_s": 3.0, "tilt_s": 4.0}
+    v4l2.calls.clear()
+    await camera.home()
+    # to the stops, then 3 s of pan and 4 s of tilt at once (pan stops first), then zoom back to 100
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [-1, 0, 1, 0, 0]
+    assert v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0, 1, 1, 0]
+    assert (camera._pan_s, camera._tilt_s) == (3.0, 4.0) and camera.position_known
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE)[-1] == 100
+
+
+async def test_presets_are_saved_against_the_estimate_and_recalled_by_the_difference(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path, names=["Wide", "Table", "Whiteboard"])
+    with pytest.raises(NotReady) as failure:
+        await camera.save(2)
+    assert str(failure.value) == "home the camera first"
+    await camera.find_stops()
+    await camera.save_home()
+    await camera.move(1, 1)
+    await clock.sleep(4.0)
+    await camera.stop()
+    await camera.zoom(230)
+    await camera.save(2)
+    assert camera.state()["presets"][1] == {"slot": 2, "name": "Table", "saved": True}
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["presets"] == {"2": {"pan_s": 4.0, "tilt_s": 4.0, "zoom": 230}}
+    await camera.move(-1, 0)        # elsewhere: pan back 1.5 s
+    await clock.sleep(1.5)
+    await camera.stop()
+    await camera.zoom(100)
+    v4l2.calls.clear()
+    await camera.recall(2)
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [0, 0]
+    assert (camera._pan_s, camera._tilt_s) == (4.0, 4.0) and v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE) == [230]
+    with pytest.raises(NotReady) as failure:
+        await camera.recall(3)
+    assert str(failure.value) == "nothing saved in this slot"
+    with pytest.raises(ValueError):
+        await camera.recall(4)
+
+
+async def test_recall_from_an_unknown_position_homes_first(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path)
+    await camera.find_stops()
+    await camera.save_home()
+    await camera.move(1, 0)
+    await clock.sleep(2.0)
+    await camera.stop()
+    await camera.save(1)
+    camera._position_known = False         # what an interrupted move leaves behind
+    v4l2.calls.clear()
+    await camera.recall(1)
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[:2] == [-1, 0]   # homed first
+    assert camera.position_known and camera._pan_s == 2.0
+    other, _, _ = camera_for(tmp_path)
+    await other.find_stops()
+    other._home = None
+    other._position_known = False
+    other._presets = {"1": {"pan_s": 2.0, "tilt_s": 0.0, "zoom": 100}}
+    with pytest.raises(NotReady) as failure:
+        await other.recall(1)
+    assert str(failure.value) == "home the camera first"
+
+
+async def test_a_new_command_interrupts_a_long_move_and_the_position_is_unknown(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path)
+
+    async def slow_sleep(seconds):          # a long move that takes real time, so it can be interrupted
+        await asyncio.sleep(0.02 * seconds)
+
+    camera._sleep = slow_sleep
+    homing = asyncio.create_task(camera.find_stops())
+    await asyncio.sleep(0.03)
+    assert camera.busy
+    await camera.move(0, 1)                   # a person presses an arrow while the camera is homing
+    with pytest.raises(Interrupted):
+        await homing
+    assert not camera.busy and not camera.position_known
+    assert v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 1 and v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0
+
+
+async def test_preview_lasts_three_minutes_unless_renewed_or_cleared():
+    camera, _, clock = camera_for()
+    assert camera.preview is False
+    assert camera.set_preview(True) is True and camera.preview is True
+    clock.now += 170
+    assert camera.preview is True
+    camera.set_preview(True)
+    clock.now += 170
+    assert camera.preview is True
+    clock.now += 11
+    assert camera.preview is False
+    camera.set_preview(True)
+    assert camera.set_preview(False) is False and camera.preview is False
+
+
+def test_saved_home_and_presets_are_read_back_from_the_store(tmp_path):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": {"pan_s": 1.0, "tilt_s": 2.0}, "presets": {"3": {"pan_s": 0.5, "tilt_s": 0.5, "zoom": 300}}})
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    assert camera.home_saved and camera.state()["presets"][2]["saved"] is True
+
+
+# --- long moves: cut short, failed, asked for twice, or refused ---
+
+def slow_moves(camera, seconds_per_second=0.02):
+    """Make a long move take real time, so that a test can cut it short: the fake clock would finish it at once."""
+
+    async def sleep(seconds):
+        await asyncio.sleep(seconds_per_second * seconds)
+
+    camera._sleep = sleep
+
+
+async def test_close_cuts_a_long_move_short_and_leaves_the_motors_stopped():
+    camera, v4l2, _ = camera_for()
+    slow_moves(camera)
+    homing = asyncio.create_task(camera.find_stops())
+    await asyncio.sleep(0.03)
+    assert camera.busy
+    await camera.close()
+    with pytest.raises(Interrupted):
+        await homing
+    assert not camera.busy and not camera.available
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0 and v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 0
+    assert v4l2.calls[-1] == ("close", 10)                       # stopped first, then the node was released
+
+
+async def test_a_long_move_whose_control_call_fails_leaves_the_position_unknown_and_nothing_running():
+    camera, v4l2, _ = camera_for()
+    await camera.find_stops()
+    assert camera.position_known
+    v4l2.fail_next = 1                                           # the first speed write of the next homing fails once
+    with pytest.raises(DeviceUnavailable):
+        await camera.find_stops()
+    assert not camera.busy and not camera.position_known and not camera.available
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_SPEED: 0, V4L2_CID_TILT_SPEED: 0}   # the failure's own stop write ...
+    assert v4l2.calls[-1] == ("close", 10)                       # ... and nothing more went to the node that was closed
+
+
+async def test_of_several_requests_waiting_for_a_long_move_the_last_one_wins():
+    camera, _, _ = camera_for()
+    slow_moves(camera)
+    first = asyncio.create_task(camera.find_stops())
+    await asyncio.sleep(0.03)
+    second = asyncio.create_task(camera.find_stops())            # both wait for the first one to stop ...
+    third = asyncio.create_task(camera.find_stops())
+    results = await asyncio.gather(first, second, third, return_exceptions=True)
+    assert isinstance(results[0], Interrupted)
+    assert isinstance(results[1], Interrupted)                   # ... and the second is cut short by the third, not run beside it
+    assert isinstance(results[2], dict) and camera.position_known and not camera.busy
+
+
+async def test_a_recall_that_cuts_another_short_is_refused_cleanly_when_no_home_is_saved(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path)
+    await camera.find_stops()                                    # this room never saved a home
+    await camera.move(1, 0)
+    await clock.sleep(2.0)
+    await camera.stop()
+    await camera.save(1)                                         # pan 2 s
+    await camera.move(1, 0)
+    await clock.sleep(2.0)
+    await camera.stop()
+    await camera.save(2)                                         # pan 4 s
+    slow_moves(camera, 0.1)
+    first = asyncio.create_task(camera.recall(1))                # 2 s of pan back: 0.2 s of real time
+    await asyncio.sleep(0.03)
+    with pytest.raises(NotReady) as failure:
+        await camera.recall(2)                                   # cuts the first one short, which leaves the position unknown ...
+    assert str(failure.value) == "home the camera first"         # ... and with no home there is nothing to find it again from
+    with pytest.raises(Interrupted):
+        await first
+    assert not camera.busy and not camera.position_known and camera.state()["moving"] is False
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0 and v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 0
+
+
+async def test_the_long_moves_need_a_camera():
+    camera, v4l2, _ = camera_for(nodes={"/dev/video19": {}})
+    camera._home = {"pan_s": 1.0, "tilt_s": 1.0}
+    camera._presets = {"1": {"pan_s": 1.0, "tilt_s": 1.0, "zoom": 200}}
+    for action in (camera.find_stops, camera.home, lambda: camera.recall(1)):
+        with pytest.raises(DeviceUnavailable):
+            await action()
+    assert not camera.busy
+    assert v4l2.set_many_calls == [] and v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE) == []
+
+
+async def test_a_recall_refused_for_want_of_a_home_leaves_a_homing_under_way_alone(tmp_path):
+    camera, _, _ = camera_for(tmp_path)
+    camera._presets = {"1": {"pan_s": 1.0, "tilt_s": 1.0, "zoom": 200}}
+    slow_moves(camera)
+    homing = asyncio.create_task(camera.find_stops())            # the position is unknown until this ends, and no home is saved
+    await asyncio.sleep(0.03)
+    with pytest.raises(NotReady) as failure:
+        await camera.recall(1)
+    assert str(failure.value) == "home the camera first"
+    await homing                                                 # the refusal did not cut it short: it runs to the end
+    assert camera.position_known and not camera.busy
+
+
+async def test_a_long_move_is_not_stopped_by_the_watchdog_of_an_earlier_move():
+    camera, v4l2, _ = camera_for()
+    camera.WATCHDOG_S = 0.05
+    await camera.move(1, 0)                                      # a move whose watchdog is armed ...
+    slow_moves(camera)                                           # ... and a homing that takes 0.16 s, well past the 50 ms
+    await camera.find_stops()
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1, -1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [0, -1, 0]   # no stop in the middle
+    assert camera.position_known
+
+
+async def test_what_the_camera_cannot_do_yet_is_refused_before_it_is_touched():
+    camera, v4l2, _ = camera_for()
+    for action in (camera.save_home, lambda: camera.save(1), camera.home):
+        with pytest.raises(NotReady):
+            await action()
+    assert v4l2.calls == []                                      # not even opened
+
+
+# --- moving by the difference, saving a position, naming a slot ---
+
+async def test_recall_moves_back_by_the_difference_and_the_shorter_leg_stops_first():
+    camera, v4l2, _ = camera_for()
+    await camera.find_stops()
+    camera._pan_s, camera._tilt_s = 4.0, 3.0                     # up and to the right of a saved view ...
+    camera._presets = {"1": {"pan_s": 1.0, "tilt_s": 2.0, "zoom": 100}}
+    v4l2.calls.clear()
+    await camera.recall(1)                                       # ... so both axes go back: the tilt has 1 s to go, the pan 3 s
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [-1, -1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0, 0]
+    assert (camera._pan_s, camera._tilt_s) == (1.0, 2.0)
+
+
+async def test_find_stops_runs_for_the_configured_travel_time():
+    camera, _, clock = camera_for(travel_s=6.0)
+    before = clock.now
+    await camera.find_stops()
+    assert clock.now - before == 6.0
+    await camera.move(1, 0)
+    await clock.sleep(10.0)
+    await camera.stop()
+    assert camera._pan_s == 6.0                                  # the estimate stops at the configured travel
+
+
+async def test_a_saved_position_is_rounded_to_the_millisecond(tmp_path):
+    camera, _, clock = camera_for(tmp_path)
+    await camera.find_stops()
+    await camera.move(1, 0)
+    await clock.sleep(0.1)
+    await clock.sleep(0.2)
+    await camera.stop()
+    assert camera._pan_s != 0.3                                  # floating point: the estimate itself is 0.29999999999999716
+    await camera.save_home()
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["home"]["pan_s"] == 0.3
+
+
+async def test_saving_while_the_camera_is_still_moving_does_not_lose_the_rest_of_the_move(tmp_path):
+    camera, _, clock = camera_for(tmp_path)
+    await camera.find_stops()
+    await camera.move(1, 0)
+    await clock.sleep(2.0)
+    await camera.save_home()                                     # a second tablet saves while the arrow is still held
+    await clock.sleep(1.0)
+    await camera.save(1)
+    await clock.sleep(1.0)
+    await camera.stop()
+    saved = SettingsStore(tmp_path / "control-settings.json").get("camera")
+    assert saved["home"] == {"pan_s": 2.0, "tilt_s": 0.0} and saved["presets"]["1"]["pan_s"] == 3.0
+    assert camera._pan_s == 4.0                                  # every second of the move is in the estimate
+
+
+async def test_a_preset_is_not_saved_when_the_position_becomes_unknown_while_the_zoom_is_read(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path)
+    await camera.find_stops()
+    reading, resume = threading.Event(), threading.Event()
+    read = v4l2.get
+
+    def held_read(fd, cid):                                      # the zoom read stays on its way to the camera until the test says so
+        reading.set()
+        assert resume.wait(5)
+        return read(fd, cid)
+
+    v4l2.get = held_read
+    saving = asyncio.create_task(camera.save(1))                 # the zoom was never read, so this goes to the camera
+    assert await asyncio.to_thread(reading.wait, 5)
+    camera._position_known = False                               # a long move was cut short in the meantime
+    resume.set()
+    with pytest.raises(NotReady) as failure:
+        await saving
+    assert str(failure.value) == "home the camera first"
+    assert camera.state()["presets"][0]["saved"] is False
+
+
+async def test_the_position_commands_answer_with_the_state_they_leave_behind(tmp_path):
+    camera, _, _ = camera_for(tmp_path)
+    assert (await camera.find_stops())["position_known"] is True
+    assert (await camera.save_home())["home_saved"] is True
+    assert (await camera.save(1))["presets"][0]["saved"] is True
+    state = await camera.home()
+    assert state["busy"] is False and state["moving"] is False and state["position_known"] is True
+    state = await camera.recall(1)
+    assert state["busy"] is False and state["moving"] is False and state["zoom"]["level"] == 100
+
+
+@pytest.mark.parametrize("slot", [0, 4, True, 2.0, "2"], ids=["zero", "four", "True", "2.0", "text"])
+async def test_a_preset_slot_is_a_whole_number_from_1_to_3(tmp_path, slot):
+    camera, _, _ = camera_for(tmp_path)
+    await camera.find_stops()
+    with pytest.raises(ValueError):                              # True == 1 and 2.0 == 2, but neither is a slot number
+        await camera.save(slot)
+    with pytest.raises(ValueError):
+        await camera.recall(slot)
+    assert [preset["saved"] for preset in camera.state()["presets"]] == [False, False, False]
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera") is None      # nothing was written
+
+
+# --- what is read back from the store ---
+
+def test_a_corrupt_saved_home_and_preset_are_ignored_and_a_good_preset_beside_them_is_kept(tmp_path, caplog):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": {"pan_s": "far", "tilt_s": 1.0},
+                          "presets": {"1": {"pan_s": 1.0, "tilt_s": True, "zoom": 200},
+                                      "2": {"pan_s": 0.5, "tilt_s": 1.5, "zoom": 300}}})
+    with caplog.at_level(logging.DEBUG):
+        camera = RoomCamera(store=store, v4l2=FakeV4l2())        # a damaged file does not stop the service
+    assert camera.home_saved is False
+    assert [preset["saved"] for preset in camera.state()["presets"]] == [False, True, False]
+    assert [r.levelno for r in caplog.records if "ignor" in r.getMessage().lower()] == [logging.DEBUG, logging.DEBUG]
+    assert not [r for r in caplog.records if r.levelno > logging.DEBUG]                  # quietly: it is not an error
+
+
+@pytest.mark.parametrize("bad", [None, "1", True, float("nan"), float("inf"), 10 ** 400],
+                         ids=["None", "text", "a boolean", "nan", "infinity", "an integer too large for a float"])
+def test_a_saved_value_that_is_not_a_finite_number_drops_its_entry(tmp_path, bad):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    good = {"pan_s": 1.0, "tilt_s": 2.0, "zoom": 300}
+    store.save("camera", {"home": {"pan_s": 1.0, "tilt_s": bad},
+                          "presets": {"1": {**good, "pan_s": bad}, "2": {**good, "tilt_s": bad}, "3": {**good, "zoom": bad}}})
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    assert camera.home_saved is False
+    assert [preset["saved"] for preset in camera.state()["presets"]] == [False, False, False]
+
+
+def test_a_saved_home_or_preset_that_lacks_a_number_is_ignored(tmp_path):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": {"pan_s": 1.0},
+                          "presets": {"1": {"pan_s": 1.0, "tilt_s": 2.0}, "2": {"tilt_s": 2.0, "zoom": 300}, "3": {"pan_s": 1.0, "zoom": 300}}})
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    assert camera.home_saved is False
+    assert [preset["saved"] for preset in camera.state()["presets"]] == [False, False, False]
+
+
+def test_whole_numbers_are_valid_saved_positions(tmp_path):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": {"pan_s": 1, "tilt_s": 2}, "presets": {"1": {"pan_s": 0, "tilt_s": 2, "zoom": 300}}})
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    assert camera.home_saved is True and camera.state()["presets"][0]["saved"] is True
+
+
+# --- the store keeps what it is given, so the camera and the store never share a dict ---
+
+def test_the_camera_keeps_its_own_copies_of_what_it_loads(tmp_path):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": {"pan_s": 1.0, "tilt_s": 2.0}, "presets": {"3": {"pan_s": 0.5, "tilt_s": 0.5, "zoom": 300}}})
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    camera._home["pan_s"] = 9.0                                  # an edit under way, not saved ...
+    camera._presets["3"]["zoom"] = 999
+    store.save("screensaver", "clock")                           # ... while another key is saved, which rewrites the whole file
+    saved = SettingsStore(tmp_path / "control-settings.json").get("camera")
+    assert saved == {"home": {"pan_s": 1.0, "tilt_s": 2.0}, "presets": {"3": {"pan_s": 0.5, "tilt_s": 0.5, "zoom": 300}}}
+
+
+async def test_the_camera_gives_the_store_copies_of_its_home_and_presets(tmp_path):
+    camera, _, _ = camera_for(tmp_path)
+    await camera.find_stops()
+    await camera.save(1)                                         # a preset before any home
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["home"] is None
+    reloaded = RoomCamera(store=SettingsStore(tmp_path / "control-settings.json"), v4l2=FakeV4l2())
+    assert reloaded.home_saved is False and reloaded.state()["presets"][0]["saved"] is True
+    await camera.save_home()
+    camera._home["pan_s"] = 9.0                                  # an edit under way, not saved ...
+    camera._presets["1"]["zoom"] = 999
+    camera._store.save("screensaver", "clock")                   # ... while another key is saved, which rewrites the whole file
+    saved = SettingsStore(tmp_path / "control-settings.json").get("camera")
+    assert saved == {"home": {"pan_s": 0.0, "tilt_s": 0.0}, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}}}

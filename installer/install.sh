@@ -119,6 +119,7 @@ install_dependencies() {
         python3-venv \
         "$CHROMIUM_PKG" \
         pulseaudio \
+        libpulse0 \
         v4l-utils \
         libcamera-apps \
         cec-utils \

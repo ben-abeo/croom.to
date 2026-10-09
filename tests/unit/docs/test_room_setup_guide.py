@@ -66,3 +66,9 @@ def test_guide_sets_up_the_table_pi_and_names_the_desktop_icons():
     assert "install-kiosk.sh --url" in html
     assert "Room controls" in html and "Start Crystal Meet" in html
     assert "on-screen keyboard" in html
+
+
+def test_guide_sets_up_the_camera_and_the_sound():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "Find the stops" in html and "Save as Home" in html and "Mute speaker" in html
+    assert "Devices the browser sees" in html

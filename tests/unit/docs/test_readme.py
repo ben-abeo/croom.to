@@ -44,6 +44,11 @@ def test_readme_names_the_setup_pieces():
         "install-kiosk.sh --url",
         "?keyboard=1",
         "Start Crystal Meet",
+        "audio.output_device",
+        "ptz_travel_seconds",
+        "camera_presets",
+        "/api/audio/volume",
+        "Find the stops",
     ):
         assert needle in text, needle
 

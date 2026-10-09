@@ -30,6 +30,15 @@ DESCRIBE_JS = """
 }
 """
 
+DEVICES_JS = """
+async () => {
+  try { const s = await navigator.mediaDevices.getUserMedia({audio: true, video: true}); s.getTracks().forEach(t => t.stop()); } catch (e) {}
+  const all = await navigator.mediaDevices.enumerateDevices();
+  const names = (kind) => all.filter(d => d.kind === kind && d.label).map(d => d.label);
+  return { microphones: names('audioinput'), speakers: names('audiooutput'), cameras: names('videoinput') };
+}
+"""
+
 
 def resolve_profile(explicit: Optional[str], configured: str) -> Optional[Path]:
     """The profile the check opens: an explicit --profile wins, then the config's, else a guest."""
@@ -78,6 +87,16 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(settle_ms)
+            try:
+                devices = await page.evaluate(DEVICES_JS)
+            except Exception as e:  # noqa: BLE001 - a page without media APIs still gets the rest of the report
+                devices = {"microphones": [], "speakers": [], "cameras": [], "error": str(e)}
+
+            def listed(names):
+                return ", ".join(names) if names else "none"
+
+            print(f"Devices the browser sees: microphones: {listed(devices['microphones'])}; "
+                  f"speakers: {listed(devices['speakers'])}; cameras: {listed(devices['cameras'])}", file=out)
             seen = await page.evaluate(DESCRIBE_JS)
             if seen["inputs"]:
                 field = seen["inputs"][0]

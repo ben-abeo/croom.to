@@ -123,3 +123,13 @@ async def test_check_refuses_a_profile_a_live_chromium_holds(tmp_path):
     code = await check_meet("file:///nothing", out=out, headless=True, settle_ms=100, profile=profile)
     assert code == 1
     assert "sudo systemctl stop croom" in out.getvalue() and "--profile" in out.getvalue()
+
+
+async def test_reports_the_devices_the_browser_sees(tmp_path):
+    page = tmp_path / "prejoin.html"
+    page.write_text(PREJOIN)
+    out = io.StringIO()
+    await check_meet(page.as_uri(), out=out, headless=True, settle_ms=200)
+    text = out.getvalue()
+    assert "Devices the browser sees:" in text
+    assert "microphones:" in text and "speakers:" in text and "cameras:" in text

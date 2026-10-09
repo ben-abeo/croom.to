@@ -13,7 +13,7 @@ the command, the service units and the folders under `/etc` and `/opt`.
 | Piece | Where it runs | What it does |
 |---|---|---|
 | Room device, the `croom` agent | A Raspberry Pi behind the TV, one per room, with no keyboard or mouse | Owns the one browser page on the TV: the screensaver between meetings, the meeting when Join is pressed. Reads the room's Google Calendar, serves the room page, the door sign and the TV page, reports to the dashboard. |
-| Room page `http://<device>:8080/` | Any browser on the office network: a tablet on the table, or a Raspberry Pi with the touch display set up by `installer/install-kiosk.sh --url http://<device>:8080/` | Today's bookings, Join now, Mute, Turn camera off, Leave, a box to paste a Zoom or Meet link, and its own on-screen keyboard (toggled beside the box; opens on its own when the page is loaded with `?keyboard=1`, as the kiosk Pi does). |
+| Room page `http://<device>:8080/` | Any browser on the office network: a tablet on the table, or a Raspberry Pi with the touch display set up by `installer/install-kiosk.sh --url http://<device>:8080/` | Today's bookings, Join now, Mute, Turn camera off, Leave, a box to paste a Zoom or Meet link, and its own on-screen keyboard (toggled beside the box; opens on its own when the page is loaded with `?keyboard=1`, as the kiosk Pi does). Sound (the room speaker's level and mute) and Camera (hold-to-move, zoom, Home, three presets) panels, with a live camera preview on the TV while framing between meetings. |
 | Door sign `http://<device>:8080/sign` | A small screen by the door, PoE or Wi-Fi | Green when free, amber ten minutes before a booking, red while in use or booked. |
 | TV page `http://<device>:8080/tv` | The room's TV, in the device's own browser | The screensaver between meetings: Information (name, status, next booking, clock), Quiet, Brand, or the bouncing Crystal PM logo. Chosen under **TV when idle** on the room page and remembered. |
 | Dashboard, `src/croom-dashboard` | A fourth Raspberry Pi (or any 64-bit Docker host) on the office network, from `deploy/dashboard/` | Fleet overview, device status, enrollment tokens on the Provisioning page. |
@@ -80,7 +80,9 @@ lists the values to replace. The sections that matter:
 | `room` | `name`, `location`, `timezone` | The name is shown on the page, the sign and the dashboard. |
 | `meeting` | `platforms: [zoom, google_meet]`, `zoom_credentials_path`, `google_profile_dir`, `kiosk` | Which links the room can join; joins are limited to those platforms' hostnames. Zoom joins go through Zoom's Meeting SDK with the credentials file (`deploy/rooms/zoom-credentials.example.json`); without it the public web client is used, and Zoom blocks automated guests there. |
 | `calendar` | `providers: [google]`, `google_credentials_path`, `google_calendar_id`, `sync_interval_seconds` | The room's calendar address looks like `c_1885...@resource.calendar.google.com`. A placeholder or a missing key logs one line and the room works with pasted links only. |
-| `control` | `enabled`, `host`, `port`, `screensaver` | The room page, sign and TV page on port 8080, open on the LAN by design. `screensaver` is the TV's style until someone picks another on the room page (`info`, `quiet`, `brand` or `bounce`); the choice is kept in `control-settings.json` under the data directory. |
+| `control` | `enabled`, `host`, `port`, `screensaver`, `camera_presets` | The room page, sign and TV page on port 8080, open on the LAN by design. `screensaver` is the TV's style until someone picks another on the room page (`info`, `quiet`, `brand` or `bounce`); the choice is kept in `control-settings.json` under the data directory. `camera_presets` is the three preset names the Camera panel shows (default `Wide`, `Table`, `Whiteboard`); the saved Home and presets are kept in the same file. |
+| `audio` | `output_device` | The speaker the Sound panel drives: `auto` means PipeWire's default output; otherwise the first output whose name contains this text (`HDMI`, `MeetUp`), so `audio.output_device: HDMI` sends the room's sound to the TV. With no match the room page says No speaker found. |
+| `video` | `device`, `ptz_travel_seconds` | The camera the Camera panel drives (`auto`: the first video node with zoom or pan controls; with none, the room page says No controllable camera found) and how long it is driven to reach an end stop when homing (8 s). |
 | `dashboard` | `url`, `enrollment_token`, `heartbeat_interval_seconds` | The token comes from the dashboard's Provisioning page and works once. |
 
 Never commit a real token or key.
@@ -160,7 +162,7 @@ the plan holds the how, step by step with the code.
 Decisions worth knowing before changing things:
 
 - Internal names stay `croom`; only what a person sees says Crystal Meet.
-- The room page and sign are open on the LAN by design; joins are restricted to the configured platforms' hostnames and every POST must be JSON.
+- The room page and sign are open on the LAN by design; joins are restricted to the configured platforms' hostnames and every POST must be JSON. The Sound and Camera panels call `/api/audio/volume` and `/api/camera/{move,zoom,home,presets/<slot>,setup,preview}`, and `/api/status` carries their `audio` and `camera` blocks.
 - The dark theme is Tailwind's stock charcoal (`#111827` page, `#1F2937` cards) with the Crystal PM blue accent and Lexend; navy was rejected for dark mode.
 - Brand assets (logo, Lexend, its OFL licence) are bundled under `src/croom/control/static` and in each guide folder, so nothing loads from the internet.
 - Nothing joins or leaves by itself; Join now opens ten minutes before a booking.
@@ -169,6 +171,7 @@ Decisions worth knowing before changing things:
 - With a calendar address configured, only that calendar is read; the room resource's declined (double-booked) and cancelled bookings are dropped; a link typed into an event wins over an automatically added Meet.
 - Google Meet refuses guests that arrive through an automated browser, so each room joins Meet signed in as its own Workspace user from a persistent browser profile (`meeting.google_profile_dir`); the browser is never disguised. `croom --sign-in-meet` does the one-time sign-in on the room's screen.
 - Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need Zoom's review of the SDK app (it may stay unlisted; its production credentials are the approved ones) plus the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
+- The MeetUp reports no pan or tilt position, so presets are timed moves from a home found against the end stops: Set up on the room page is **Find the stops**, nudge to the view, **Save as Home**, then save the presets. The camera homes at service start once a home is saved, on Home, and before a recall that finds its position unknown; the position is tracked in seconds of travel and recalls move only the difference, so Home and a recall take seconds and the page says Moving… meanwhile. Volume goes through PipeWire's own tools (`pw-dump`, `wpctl`), never through the upstream audio service.
 
 Known limitations, mostly inherited from upstream:
 

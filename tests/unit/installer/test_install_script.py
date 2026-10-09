@@ -260,3 +260,9 @@ def test_desktop_launcher_starts_the_service_through_a_limited_sudoers_rule(tmp_
 def test_completion_message_names_the_desktop_icon():
     result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=room.yaml; print_completion")
     assert "Start Crystal Meet" in result.stdout
+
+
+def test_installer_adds_the_pulse_client_library_for_the_browsers_audio():
+    """Chromium reaches PipeWire through libpulse; a fresh Pi may not have it."""
+    body = SCRIPT.read_text().split("install_dependencies() {", 1)[1].split("\n}", 1)[0]
+    assert "libpulse0" in body

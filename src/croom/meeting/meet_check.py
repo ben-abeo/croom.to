@@ -5,6 +5,7 @@ terminal instead of by watching the TV. Exit 0 when a join control was found,
 1 otherwise.
 """
 
+import asyncio
 import sys
 from pathlib import Path
 from typing import Optional, TextIO
@@ -38,6 +39,8 @@ async () => {
   return { microphones: names('audioinput'), speakers: names('audiooutput'), cameras: names('videoinput') };
 }
 """
+# An unresponsive Pulse socket can leave getUserMedia or enumerateDevices pending for good; the check must not wait on it.
+DEVICES_TIMEOUT_S = 10
 
 
 def resolve_profile(explicit: Optional[str], configured: str) -> Optional[Path]:
@@ -87,16 +90,22 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
         try:
             await page.goto(url, wait_until="domcontentloaded")
             await page.wait_for_timeout(settle_ms)
+            nothing = {"microphones": [], "speakers": [], "cameras": []}
             try:
-                devices = await page.evaluate(DEVICES_JS)
+                devices = await asyncio.wait_for(page.evaluate(DEVICES_JS), DEVICES_TIMEOUT_S)
+            except asyncio.TimeoutError:
+                devices = {**nothing, "error": f"timed out after {DEVICES_TIMEOUT_S} s"}
             except Exception as e:  # noqa: BLE001 - a page without media APIs still gets the rest of the report
-                devices = {"microphones": [], "speakers": [], "cameras": [], "error": str(e)}
+                devices = {**nothing, "error": str(e) or type(e).__name__}
 
             def listed(names):
                 return ", ".join(names) if names else "none"
 
-            print(f"Devices the browser sees: microphones: {listed(devices['microphones'])}; "
-                  f"speakers: {listed(devices['speakers'])}; cameras: {listed(devices['cameras'])}", file=out)
+            print(f"Devices the browser sees: microphones: {listed(devices.get('microphones'))}; "
+                  f"speakers: {listed(devices.get('speakers'))}; cameras: {listed(devices.get('cameras'))}", file=out)
+            failure = str(devices.get("error") or "").strip()
+            if failure:   # a failed listing reads differently from an empty one: say why
+                print(f"Listing the devices failed: {failure.splitlines()[0]}", file=out)
             seen = await page.evaluate(DESCRIBE_JS)
             if seen["inputs"]:
                 field = seen["inputs"][0]

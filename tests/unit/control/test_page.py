@@ -10,7 +10,7 @@ import asyncio
 import socket
 import tempfile
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -326,6 +326,16 @@ def hold(page, selector, ms=120):
     page.mouse.up()
 
 
+def page_on_a_stopped_clock(browser, server, width=1280, height=800):
+    """The room page, loaded, with its timers stopped: from here they run only when the test calls page.clock.run_for."""
+    page = browser.new_page(viewport={"width": width, "height": height})
+    page.clock.install()
+    page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+    return page
+
+
 def test_sound_panel_shows_the_speaker_and_changes_the_level(browser):
     with PageServer() as server:
         page = open_page(browser, server)
@@ -455,6 +465,30 @@ class SlowHomeCamera(StubCamera):
 class BusySpeaker(StubVolume):
     async def set_level(self, level):
         raise NotReady("the speaker is busy")
+
+
+class ZoomingOnRenewalCamera(StubCamera):
+    """The second request for the preview (the first renewal) leaves the zoom at 300: a change only that answer carries."""
+
+    asked = 0
+
+    def set_preview(self, on):
+        if on:
+            self.asked += 1
+            if self.asked == 2:
+                self.zoom_level = 300
+        return super().set_preview(on)
+
+
+class PreviewRefusingCamera(StubCamera):
+    """Asking for the preview is refused once `refusing` is set, as when a meeting has just started."""
+
+    refusing = False
+
+    def set_preview(self, on):
+        if on and self.refusing:
+            raise NotReady("the TV is in a meeting")
+        return super().set_preview(on)
 
 
 def test_a_refused_camera_command_shows_its_reason_and_the_next_one_clears_it(browser):
@@ -630,10 +664,12 @@ def test_sliding_off_an_arrow_stops_the_camera_like_lifting_the_finger(browser):
         arrow = "#arrow-pad button[data-pan='1'][data-tilt='0']"
         page.evaluate("(sel) => { window.__lost = 0; document.querySelector(sel).addEventListener('lostpointercapture', () => window.__lost++); }", arrow)
         box = press(page, arrow)
+        middle = box["y"] + box["height"] / 2
         page.mouse.move(box["x"] + 4, box["y"] + 4)                         # a nudge that stays on the button is still a hold
+        page.mouse.move(box["x"] + box["width"] + 8, middle)               # 8 px past its edge is a finger's jitter: still a hold
         page.wait_for_timeout(100)
         assert camera.moves == [(1, 0)] and page.evaluate("window.__lost") == 0
-        page.mouse.move(box["x"] + box["width"] + 150, box["y"] + box["height"] / 2, steps=5)   # slid well off it, still down
+        page.mouse.move(box["x"] + box["width"] + 40, middle, steps=5)     # 40 px off it, well past the margin, still down
         page.wait_for_timeout(300)
         assert camera.moves == [(1, 0), (0, 0)]                             # the stop went out at once
         assert page.evaluate("window.__lost") == 1                          # and the pointer was let go with it, before any lift
@@ -658,7 +694,7 @@ def test_sliding_off_a_zoom_button_ends_its_repeat(browser):
         box = press(page, "#zoom-in")
         page.wait_for_timeout(100)
         assert camera.zooms == [125]
-        page.mouse.move(box["x"] - 120, box["y"] + box["height"] / 2, steps=5)                  # slid off to the side, still down
+        page.mouse.move(box["x"] - 40, box["y"] + box["height"] / 2, steps=5)                   # 40 px off to the side, still down
         page.wait_for_timeout(900)                                          # two repeat intervals would have gone by
         assert camera.zooms == [125]
         page.mouse.up()
@@ -670,7 +706,7 @@ def test_sliding_off_a_zoom_button_ends_its_repeat(browser):
         page.close()
 
 
-def test_an_arrow_held_while_the_camera_goes_busy_stops_repeating_and_sends_no_stop(browser):
+def test_an_arrow_held_while_the_camera_goes_busy_stops_repeating_and_a_late_lift_sends_no_stop(browser):
     with PageServer() as server:
         camera = server.devices.camera
         page = open_page(browser, server)
@@ -685,6 +721,22 @@ def test_an_arrow_held_while_the_camera_goes_busy_stops_repeating_and_sends_no_s
         page.mouse.up()
         page.wait_for_timeout(300)
         assert len(camera.moves) == sent and set(camera.moves) == {(1, 0)}    # no more starts, and no stop to cut that move short
+        page.close()
+
+
+def test_lifting_an_arrow_right_after_the_camera_went_busy_sends_no_stop(browser):
+    with PageServer() as server:
+        camera = server.devices.camera
+        page = page_on_a_stopped_clock(browser, server)
+        page.click("#camera-panel summary")
+        press(page, "#arrow-pad button[data-pan='1'][data-tilt='0']")
+        page.wait_for_timeout(100)
+        camera.busy = True                                         # a Home or a preset from another screen
+        page.clock.run_for(2000)                                   # the poll sees it and the pad goes disabled; the repeat's next tick is 250 ms of page time away
+        page.wait_for_function("document.querySelector(\"#arrow-pad button[data-pan='1']\").disabled", timeout=5000)
+        page.mouse.up()                                            # the lift beats that tick, and must not cut the long move short
+        page.wait_for_timeout(300)
+        assert (1, 0) in camera.moves and (0, 0) not in camera.moves
         page.close()
 
 
@@ -732,11 +784,8 @@ def run_until_the_page_shows(page, state):
 def test_the_preview_is_renewed_every_30_seconds_but_not_in_a_meeting(browser):
     with PageServer() as server:
         base = f"http://127.0.0.1:{server.port}"
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page = page_on_a_stopped_clock(browser, server)
         asked = preview_requests(page)
-        page.clock.install()                                       # the page's timers run only when the test says so
-        page.goto(base + "/", wait_until="networkidle")
-        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.click("#camera-panel summary")
         page.wait_for_timeout(300)
         assert asked == [True]
@@ -755,11 +804,8 @@ def test_the_preview_is_renewed_every_30_seconds_but_not_in_a_meeting(browser):
 def test_a_panel_opened_in_a_meeting_asks_for_the_preview_once_the_room_is_idle(browser):
     with PageServer() as server:
         base = f"http://127.0.0.1:{server.port}"
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page = page_on_a_stopped_clock(browser, server)
         asked = preview_requests(page)
-        page.clock.install()
-        page.goto(base + "/", wait_until="networkidle")
-        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.request.post(base + "/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
         run_until_the_page_shows(page, "meeting")
@@ -771,4 +817,110 @@ def test_a_panel_opened_in_a_meeting_asks_for_the_preview_once_the_room_is_idle(
         page.clock.run_for(30000)
         page.wait_for_timeout(300)
         assert asked == [True]                                     # the panel is still open: the next renewal asks
+        page.close()
+
+
+def test_a_preview_renewal_that_works_does_not_clear_the_users_last_refusal(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, width=1024, height=600)
+        page.click("#camera-panel summary")
+        page.click("#preset-row button[data-slot='3']")                       # the user's own refusal: nothing is saved there
+        page.wait_for_function("document.getElementById('camera-note').innerText === 'nothing saved in this slot'", timeout=5000)
+        page.clock.run_for(30000)                                             # the renewal goes out and the camera accepts it
+        page.wait_for_timeout(300)
+        assert server.devices.camera.previews == [True, True]
+        assert page.locator("#camera-note").inner_text() == "nothing saved in this slot"
+        page.close()
+
+
+def test_a_preview_renewal_updates_the_page_from_its_answer(browser):
+    camera = ZoomingOnRenewalCamera()
+    with PageServer(devices=StubDevices(camera=camera)) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        page.click("#camera-panel summary")
+        page.wait_for_timeout(300)
+        assert camera.previews == [True] and "Zoom 100" in page.locator("#camera-status").inner_text()
+        held = []
+        page.route("**/api/status", lambda route: held.append(route))         # no poll comes back from here on: the answer is all there is
+        page.clock.run_for(30000)
+        page.wait_for_function("document.getElementById('camera-status').innerText.includes('Zoom 300')", timeout=5000)
+        for route in held:
+            route.continue_()
+        page.close()
+
+
+def test_a_refused_preview_renewal_writes_no_note_and_does_not_scroll_the_page(browser):
+    camera = PreviewRefusingCamera()
+    with PageServer(devices=StubDevices(camera=camera)) as server:
+        page = page_on_a_stopped_clock(browser, server, width=1024, height=600)
+        page.click("#camera-panel summary")
+        page.click("#preset-row button[data-slot='3']")
+        page.wait_for_function("document.getElementById('camera-note').innerText === 'nothing saved in this slot'", timeout=5000)
+        page.evaluate("document.getElementById('preset-row').scrollIntoView({block: 'center'})")
+        assert page.locator("#camera-note").bounding_box()["y"] < 0           # the user's note is above the fold
+        scrolled_to = page.evaluate("window.scrollY")
+        asked = preview_requests(page)
+        camera.refusing = True                                                # a meeting has just started: the page's status is behind
+        page.clock.run_for(30000)
+        page.wait_for_timeout(300)
+        assert asked == [True] and camera.previews == [True]                  # the renewal went out and was refused
+        assert page.locator("#camera-note").inner_text() == "nothing saved in this slot"
+        assert page.evaluate("window.scrollY") == scrolled_to
+        page.close()
+
+
+def test_a_zoom_hold_does_not_hold_back_the_speakers_status(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#camera-panel summary")
+        page.evaluate("""() => {
+            const real = window.fetch;
+            window.fetch = (url, init) => String(url).endsWith('/api/status')
+                ? real(url, init).then((r) => new Promise((done) => setTimeout(() => done(r), 1200)))   // each poll is on its way for 1.2 s
+                : real(url, init);
+        }""")
+        press(page, "#zoom-in")                                               # the camera answers every 400 ms from here on
+        server.devices.volume.level = 55                                      # and somebody else turns the speaker up
+        page.wait_for_function("document.getElementById('volume-level').innerText === '55'", timeout=6000)
+        page.mouse.up()
+        page.close()
+
+
+def test_closing_the_page_with_the_camera_panel_open_turns_the_preview_off(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#camera-panel summary")
+        page.wait_for_timeout(300)
+        assert server.devices.camera.previews == [True]
+        page.goto("about:blank")                                              # the page goes away with the panel still open
+        for _ in range(50):
+            if len(server.devices.camera.previews) == 2:
+                break
+            page.wait_for_timeout(100)
+        assert server.devices.camera.previews == [True, False]
+        page.close()
+
+
+def colour(page, selector):
+    return page.evaluate(f"getComputedStyle(document.querySelector({selector!r})).color")
+
+
+def test_the_section_labels_and_quiet_buttons_keep_their_colour_when_the_status_card_changes(browser):
+    periwinkle, white, card_blue, dark_blue = "rgb(189, 206, 255)", "rgb(255, 255, 255)", "rgb(27, 82, 229)", "rgb(0, 62, 188)"
+    with PageServer(calendar_events=[event("c1", "Standup", -2)]) as server:   # happening now: the card turns light
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        assert colour(page, ".sound-section .kicker") == periwinkle and colour(page, ".camera-section .kicker") == periwinkle
+        assert colour(page, "#kicker") == card_blue                          # the card's own label still follows its state
+        page.close()
+    with PageServer() as server:
+        server.meeting.fail_before_joining = RuntimeError("Could not open the meeting")
+        page = open_page(browser, server)
+        page.fill("#link-input", "98765432100")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=5000)
+        assert colour(page, ".sound-section .kicker") == periwinkle and colour(page, ".camera-section .kicker") == periwinkle
+        assert colour(page, "#louder") == white and colour(page, "#screen-picker button") == white
+        assert colour(page, "#kicker") == dark_blue and colour(page, "#actions button") == dark_blue
         page.close()

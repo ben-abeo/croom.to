@@ -5,6 +5,8 @@
   const STATUS_EVERY_MS = 2000;
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
+  const SLIDE_OFF_PX = 16;   // how far outside a pressed pad button a finger may drift before that counts as letting go
+  const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
 
   const el = (id) => document.getElementById(id);
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null };
@@ -16,7 +18,7 @@
   let lastCameraKey = null;
   let presetSaveMode = false;
   let setupOpen = false;
-  let deviceEpoch = 0;   // counts the devices' answers, so a poll already on its way cannot undo one
+  const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
@@ -48,13 +50,13 @@
   }
 
   async function refreshStatus() {
-    const epoch = deviceEpoch;
+    const epochs = Object.assign({}, deviceEpoch);
     try {
       const status = await api("/api/status");
-      if (epoch !== deviceEpoch && model.status) {
-        // A device answered a command while this poll was on its way: its block is newer than the poll's.
-        status.audio = model.status.audio;
-        status.camera = model.status.camera;
+      for (const kind of Object.keys(epochs)) {
+        // A device answered a command while this poll was on its way: its block is newer than the poll's. The other
+        // device's block is still the poll's to give.
+        if (epochs[kind] !== deviceEpoch[kind] && model.status) status[kind] = model.status[kind];
       }
       model.status = status;
       model.offline = false;
@@ -167,7 +169,7 @@
     const cal = s.calendar;
     const label = m.title || (m.platform ? platformName(m.platform) + " meeting" : "the meeting");
     // A join is refused while a meeting is in progress, so do not offer the link form then.
-    document.querySelector(".link").hidden = ["joining", "in_lobby", "connected", "leaving"].includes(m.state);
+    document.querySelector(".link").hidden = IN_MEETING.includes(m.state);
 
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
@@ -426,10 +428,15 @@
   // A success answers with the device's own block, which replaces the model's at once (no waiting for the next poll).
   // Any refusal (a non-2xx) puts its reason in that panel's note and leaves the model as it was. A long move that a
   // newer command cut short answers 409 "interrupted": the newer tap is the normal cause, so that says nothing at all.
+  // options.long: Home, a preset recall and Find the stops run for seconds inside the request. options.background: a
+  // call the page makes on its own (the preview's renewal): its answer is applied, but it neither clears the note the
+  // user last got nor writes one, and a refusal of it is not shown or scrolled to.
   const INTERRUPTED = "the camera move was interrupted";
   const deviceNotes = { audio: "", camera: "" };
 
-  async function deviceCall(kind, path, body, long) {
+  async function deviceCall(kind, path, body, options) {
+    const long = Boolean(options && options.long);
+    const background = Boolean(options && options.background);
     if (long) {
       // Home, a preset recall and Find the stops run for seconds inside the request: ask the status for the camera's
       // "busy" now, so "Moving..." shows without waiting for the poll's turn.
@@ -441,7 +448,7 @@
     try {
       block = await post(path, body);
     } catch (e) {
-      if (e.message !== INTERRUPTED) {
+      if (!background && e.message !== INTERRUPTED) {
         deviceNotes[kind] = e.message;
         if (kind === "audio") lastSoundKey = null; else lastCameraKey = null;   // drawn again from the model: a slider the finger moved goes back
         render();
@@ -450,9 +457,9 @@
       }
       return false;
     }
-    deviceNotes[kind] = "";
+    if (!background) deviceNotes[kind] = "";
     if (model.status) model.status[kind] = block;
-    deviceEpoch += 1;
+    deviceEpoch[kind] += 1;
     render();
     return true;
   }
@@ -487,7 +494,6 @@
   });
 
   // --- Camera ---
-  const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];
   let previewTimer = null;
 
   function renderCamera(camera) {
@@ -529,29 +535,32 @@
     const action = presetSaveMode ? "save" : "recall";
     presetSaveMode = false;
     lastCameraKey = null;
-    deviceCall("camera", "/api/camera/presets/" + slot, { action: action }, action === "recall");
+    deviceCall("camera", "/api/camera/presets/" + slot, { action: action }, { long: action === "recall" });
   }
 
   el("preset-save-mode").addEventListener("click", () => { presetSaveMode = !presetSaveMode; lastCameraKey = null; render(); });
   el("setup-link").addEventListener("click", () => { setupOpen = !setupOpen; lastCameraKey = null; render(); });
-  el("find-stops").addEventListener("click", () => deviceCall("camera", "/api/camera/setup", { action: "find_stops" }, true));
+  el("find-stops").addEventListener("click", () => deviceCall("camera", "/api/camera/setup", { action: "find_stops" }, { long: true }));
   el("save-home").addEventListener("click", () => {
     deviceCall("camera", "/api/camera/setup", { action: "save_home" }).then((saved) => {
       if (saved) { setupOpen = false; render(); }   // Set up closes only once the home is really saved
     });
   });
-  el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, true));
+  el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, { long: true }));
 
   // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
   // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so
-  // that a lift is always seen, and a move outside the button's box ends the hold the same way a lift does.
+  // that a lift is always seen, and a move more than SLIDE_OFF_PX outside the button's box (a finger resting on the
+  // edge jitters) ends the hold the same way a lift does.
   function holdToMove(buttonEl, start, repeatMs, stop) {
     let timer = null;
     const release = () => {
       if (timer === null) return;
       clearInterval(timer);
       timer = null;
-      if (stop) stop();
+      // A pad that has gone disabled (a Home or a preset from another screen made the camera busy) sends no stop: it
+      // would cut that long move short.
+      if (stop && !buttonEl.disabled) stop();
     };
     buttonEl.addEventListener("pointerdown", (e) => {
       e.preventDefault();
@@ -569,7 +578,8 @@
     buttonEl.addEventListener("pointermove", (e) => {
       if (timer === null) return;   // no hold: nothing to end, and the rest of a press that already ended is ignored
       const box = buttonEl.getBoundingClientRect();
-      if (e.clientX >= box.left && e.clientX <= box.right && e.clientY >= box.top && e.clientY <= box.bottom) return;
+      const slack = SLIDE_OFF_PX;
+      if (e.clientX >= box.left - slack && e.clientX <= box.right + slack && e.clientY >= box.top - slack && e.clientY <= box.bottom + slack) return;
       release();
       if (buttonEl.hasPointerCapture(e.pointerId)) buttonEl.releasePointerCapture(e.pointerId);
     });
@@ -590,7 +600,7 @@
     const s = model.status;
     return Boolean(el("camera-panel").open && s && s.camera && s.camera.available && !IN_MEETING.includes(s.meeting.state));
   }
-  const setPreview = (on) => deviceCall("camera", "/api/camera/preview", { on: on });
+  const setPreview = (on, options) => deviceCall("camera", "/api/camera/preview", { on: on }, options);
   el("camera-panel").addEventListener("toggle", () => {
     clearInterval(previewTimer);
     previewTimer = null;
@@ -599,7 +609,7 @@
       return;
     }
     if (previewWanted()) setPreview(true);
-    previewTimer = setInterval(() => { if (previewWanted()) setPreview(true); }, 30000);
+    previewTimer = setInterval(() => { if (previewWanted()) setPreview(true, { background: true }); }, 30000);
   });
   window.addEventListener("pagehide", () => {
     if (!el("camera-panel").open) return;

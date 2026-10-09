@@ -120,7 +120,7 @@ h1 { margin: 0; font-size: clamp(1.3rem, 2.2vw, 2rem); font-weight: 600; line-he
 .actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
 
 body[data-state="soon"] .status-card { background: var(--tint-100); color: var(--navy-800); }
-body[data-state="soon"] .kicker { color: var(--blue-600); }
+body[data-state="soon"] .status-card .kicker { color: var(--blue-600); }
 body[data-state="soon"] .detail { color: var(--slate-500); }
 body[data-state="meeting"] .status-card { background: var(--blue-600); }
 body[data-state="meeting"] .kicker, body[data-state="meeting"] .detail { color: #fff; }
@@ -130,7 +130,7 @@ body[data-state="error"] .status-card {
   border-left: 6px solid var(--warn-bar);
   border-radius: var(--radius-sm);
 }
-body[data-state="error"] .kicker { color: var(--blue-700); }
+body[data-state="error"] .status-card .kicker { color: var(--blue-700); }
 body[data-state="error"] .detail { color: var(--ink-900); }
 body[data-state="error"] .message { color: #A3260F; }
 

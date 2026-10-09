@@ -44,6 +44,7 @@ class CroomAgent:
 
         self._running = False
         self._main_task: Optional[asyncio.Task] = None
+        self._stop_task: Optional[asyncio.Task] = None
 
         logger.info(f"Croom Agent initialized on {self.platform_info.device.value}")
         logger.info(f"AI accelerators: {self.platform_info.ai_accelerators}")
@@ -197,10 +198,21 @@ class CroomAgent:
             await self.stop()
 
     async def stop(self) -> None:
-        """Stop the Croom agent and all services."""
-        if not self._running:
-            return
+        """Stop the Croom agent and all services, once, however many callers ask.
 
+        A signal's stop and start()'s finally both get here, usually together: stop_all sets the shutdown event, which
+        wakes start(). The first call starts the one stop as a task and every call waits for that task, so start()
+        (and with it the process) does not end while services are still stopping; returning early would let the
+        event loop cancel the stop half way, leaving the services registered before the one being stopped (the
+        devices service and its camera's motors among them) running when the process dies.
+        """
+        if self._stop_task is None:
+            if not self._running:
+                return  # never started: nothing to stop
+            self._stop_task = asyncio.create_task(self._stop_everything())
+        await self._stop_task
+
+    async def _stop_everything(self) -> None:
         logger.info("Stopping Croom Agent...")
         self._running = False
 

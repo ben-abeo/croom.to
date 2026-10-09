@@ -2,6 +2,8 @@
 Tests for croom.core.agent: service registration and startup without hardware.
 """
 
+import asyncio
+import signal
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -79,6 +81,40 @@ class TestStartup:
             svc._state == ServiceState.STOPPED
             for svc in agent.service_manager.get_all_services().values()
         )
+
+    async def test_a_signal_and_the_main_task_share_one_stop_that_runs_to_the_end(self, tmp_path, no_hardware):
+        """SIGTERM's stop sets the shutdown event, which wakes start(): start() must not return (and the process end)
+        while the signal's stop_all is still stopping services, the devices service with its camera among them."""
+        agent = make_agent(make_config(tmp_path, control=True))
+        stop_all, stops = agent.service_manager.stop_all, {"begun": 0, "ended": 0}
+
+        async def counted_stop_all():
+            stops["begun"] += 1
+            await stop_all()
+            stops["ended"] += 1
+
+        agent.service_manager.stop_all = counted_stop_all
+        services = agent.service_manager.get_all_services
+        with patch.object(agent, "_setup_signal_handlers"):          # the test delivers the signal itself
+            running = asyncio.create_task(agent.start())
+            for _ in range(500):
+                await asyncio.sleep(0.01)
+                if services() and all(svc._state == ServiceState.RUNNING for svc in services().values()):
+                    break
+            assert services() and all(svc._state == ServiceState.RUNNING for svc in services().values())
+            signalled = asyncio.create_task(agent._handle_signal(signal.SIGTERM))
+            await asyncio.wait_for(running, 10)
+            # start() returned: as in asyncio.run, whatever is still pending now would be cancelled
+            assert stops == {"begun": 1, "ended": 1}
+            assert signalled.done() and not signalled.cancelled() and signalled.exception() is None
+        assert all(svc._state == ServiceState.STOPPED for svc in services().values()), \
+            {name: svc._state for name, svc in services().items()}
+
+    async def test_stop_before_start_does_nothing(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path))
+        agent.service_manager.stop_all = AsyncMock()
+        await agent.stop()
+        agent.service_manager.stop_all.assert_not_called()
 
 
 class TestControlRegistration:

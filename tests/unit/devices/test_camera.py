@@ -140,3 +140,170 @@ def test_from_config_reads_the_device_travel_time_and_preset_names(tmp_path):
                                          {"slot": 2, "name": "Desk", "saved": False},
                                          {"slot": 3, "name": "Preset 3", "saved": False}]
     assert camera._device_pref == "/dev/video2" and camera._travel_s == 6.0
+
+
+# --- control calls are serialised ---
+
+async def test_control_writes_never_interleave():
+    camera, v4l2, _ = camera_for()
+    for _ in range(20):
+        await asyncio.gather(camera.move(1, 0), camera.stop())   # a repeat request and a release, at the same moment
+    assert v4l2.overlapped is False                              # they queue: no two control calls were in flight at once
+    assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 0 and v4l2.sets(V4L2_CID_TILT_SPEED)[-1] == 0
+    assert camera.state()["moving"] is False
+    await camera.stop()                                          # the last move's watchdog goes with it
+
+
+async def test_zoom_reads_and_writes_never_interleave():
+    camera, v4l2, clock = camera_for()
+    await camera.discover()
+    for _ in range(10):
+        clock.now += 3.1                                         # the cached level has expired: the read goes to the camera
+        await asyncio.gather(camera.read_zoom(), camera.zoom(250))
+    assert v4l2.overlapped is False
+    assert camera.state()["zoom"]["level"] == 250 and v4l2.values[(10, V4L2_CID_ZOOM_ABSOLUTE)] == 250
+
+
+async def test_a_call_that_waited_for_the_lock_sees_that_the_camera_went_away():
+    camera, v4l2, _ = camera_for()
+    await camera.discover()
+    async with camera._io_lock:                                  # a control call is in flight ...
+        waiting = [asyncio.create_task(camera.zoom(200)), asyncio.create_task(camera.move(1, 0)),
+                   asyncio.create_task(camera.read_zoom())]
+        await asyncio.sleep(0.01)                                # ... three more requests queue behind it ...
+        camera._fail("camera call failed: gone")                 # ... and that call fails, which closes the node
+    for task in waiting:
+        with pytest.raises(DeviceUnavailable) as failure:        # a clean refusal, not a write to a closed node
+            await task
+        assert "gone" in str(failure.value)
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE) == [] and v4l2.sets(V4L2_CID_PAN_SPEED) == []
+
+
+# --- a corrupt saved camera value is ignored, not fatal ---
+
+@pytest.mark.parametrize("saved", ["oops", ["home"], {"presets": ["a", "b"]}, {"home": [1, 2], "presets": {"1": "x", "2": 5}}],
+                         ids=["camera is a string", "camera is a list", "presets is a list", "home and presets entries are not dicts"])
+def test_corrupt_saved_settings_are_ignored(tmp_path, saved):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", saved)
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    assert camera.home_saved is False
+    assert [preset["saved"] for preset in camera.state()["presets"]] == [False, False, False]
+
+
+def test_valid_saved_settings_beside_corrupt_ones_are_kept(tmp_path):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": {"pan_s": 1.0, "tilt_s": 2.0},
+                          "presets": {"3": {"pan_s": 0.5, "tilt_s": 0.5, "zoom": 300}, "2": "x"}})
+    camera = RoomCamera(store=store, v4l2=FakeV4l2())
+    assert camera.home_saved is True
+    assert [preset["saved"] for preset in camera.state()["presets"]] == [False, False, True]
+
+
+# --- behaviours the first tests left unpinned ---
+
+async def test_a_node_that_cannot_be_opened_is_skipped_and_the_next_one_tried():
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": MEETUP, "/dev/video2": MEETUP})
+    v4l2.unopenable = {"/dev/video0"}                            # busy, or not readable by the service user
+    assert await camera.discover() is True and camera.state()["device"] == "/dev/video2"
+    assert v4l2.calls[:2] == [("open", "/dev/video0"), ("open", "/dev/video2")]
+    only, v4l2, _ = camera_for(nodes={"/dev/video0": MEETUP}, device="/dev/video0")
+    v4l2.unopenable = {"/dev/video0"}
+    assert await only.discover() is False and only.state()["reason"] == "no controllable camera found"
+
+
+async def test_a_camera_with_only_zoom_or_only_pan_and_tilt_is_still_found():
+    zoom_only, _, _ = camera_for(nodes={"/dev/video0": {V4L2_CID_ZOOM_ABSOLUTE: (100, 500, 1, 100)}})
+    assert await zoom_only.discover() is True
+    moves_only, _, _ = camera_for(nodes={"/dev/video0": {V4L2_CID_PAN_SPEED: (-1, 1, 1, 1), V4L2_CID_TILT_SPEED: (-1, 1, 1, 1)}})
+    assert await moves_only.discover() is True
+
+
+async def test_controls_the_node_does_not_have_are_never_written():
+    zoom_only, v4l2, _ = camera_for(nodes={"/dev/video0": {V4L2_CID_ZOOM_ABSOLUTE: (100, 500, 1, 100)}})
+    await zoom_only.move(1, 1)
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []
+    assert zoom_only.state()["moving"] is False                  # nothing can move, so nothing is counted as moving
+    no_tilt, v4l2, _ = camera_for(nodes={"/dev/video0": {V4L2_CID_PAN_SPEED: (-1, 1, 1, 1)}})
+    await no_tilt.move(1, 1)
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1] and v4l2.sets(V4L2_CID_TILT_SPEED) == []
+    assert no_tilt.state()["moving"] is True
+    await zoom_only.stop()
+    await no_tilt.stop()
+
+
+async def test_a_failed_call_leaves_nothing_moving_and_the_position_unknown():
+    camera, v4l2, _ = camera_for()
+    await camera.move(1, 0)
+    camera._position_known = True                                # as after homing (Task 5)
+    v4l2.fail = True
+    with pytest.raises(DeviceUnavailable):
+        await camera.read_zoom()
+    state = camera.state()
+    assert state["available"] is False and state["device"] is None
+    assert state["reason"] == "camera call failed: [Errno 19] No such device"
+    assert state["moving"] is False                              # the speeds are forgotten with the node
+    assert camera.position_known is False                        # it may have been unplugged, and moved, meanwhile
+    assert ("close", 10) in v4l2.calls
+    await camera.stop()
+
+
+async def test_a_missing_camera_is_warned_about_once(caplog):
+    camera, _, _ = camera_for(nodes={"/dev/video19": {}})
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):                                       # the periodic re-check, again and again
+            assert await camera.discover() is False
+    assert len([r for r in caplog.records if "Camera unavailable" in r.getMessage()]) == 1
+
+
+async def test_the_same_failure_is_warned_about_again_after_a_recovery(caplog):
+    camera, v4l2, _ = camera_for()
+    await camera.discover()
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            v4l2.fail = True
+            with pytest.raises(DeviceUnavailable):
+                await camera.move(1, 0)
+            v4l2.fail = False
+            assert await camera.discover() is True               # plugged back in
+    assert len([r for r in caplog.records if "Camera unavailable" in r.getMessage()]) == 2
+
+
+async def test_stop_on_a_missing_camera_changes_nothing_and_does_not_raise():
+    camera, v4l2, _ = camera_for(nodes={"/dev/video19": {}})
+    assert await camera.discover() is False
+    state = await camera.stop()
+    assert state["available"] is False and state["moving"] is False
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []
+
+
+async def test_zoom_updates_the_reported_level_and_the_cached_read():
+    camera, v4l2, clock = camera_for()
+    await camera.zoom(250)
+    assert camera.state()["zoom"] == {"level": 250, "min": 100, "max": 500}
+    v4l2.values[(10, V4L2_CID_ZOOM_ABSOLUTE)] = 400              # the camera moved on its own
+    assert await camera.read_zoom() == 250                       # what was just set is trusted for ZOOM_CACHE_S
+    clock.now += 3.1
+    assert await camera.read_zoom() == 400
+
+
+async def test_read_zoom_finds_the_camera_by_itself():
+    camera, _, _ = camera_for()
+    assert await camera.read_zoom() == 100                       # no discover() first
+    assert camera.available is True
+    missing, _, _ = camera_for(nodes={"/dev/video19": {}})
+    with pytest.raises(DeviceUnavailable):
+        await missing.read_zoom()
+
+
+async def test_close_cancels_the_watchdog():
+    camera, _, _ = camera_for()
+    await camera.move(1, 0)
+    watchdog = camera._watchdog
+    await camera.close()
+    assert watchdog.cancelled()                                  # not left sleeping for WATCHDOG_S
+
+
+async def test_an_empty_device_setting_means_auto():
+    camera, _, _ = camera_for(device="")
+    assert await camera.discover() is True and camera.state()["device"] == "/dev/video0"

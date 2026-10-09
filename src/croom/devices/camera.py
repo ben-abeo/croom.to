@@ -61,10 +61,21 @@ class RoomCamera:
         self._interrupt = asyncio.Event()
         self._long_done = asyncio.Event()
         self._long_done.set()
+        # One control sequence at a time: a pan write then a tilt write, a zoom write, a zoom read.
+        # Overlapping requests (a repeat move and a release, two tablets, the watchdog) would otherwise
+        # mix their writes and leave the camera, the estimate and the cached zoom disagreeing. Held only
+        # around the short control calls and their bookkeeping, never across a wait, so a long move can
+        # still be interrupted by move() and stop().
+        self._io_lock = asyncio.Lock()
         self._preview_until = 0.0
         saved = (store.get("camera") if store is not None else None) or {}
+        if not isinstance(saved, dict):   # a hand-edited or damaged file is ignored, not fatal
+            saved = {}
+        presets = saved.get("presets")
+        if not isinstance(presets, dict):
+            presets = {}
         self._home = saved.get("home") if isinstance(saved.get("home"), dict) else None
-        self._presets = {str(k): v for k, v in (saved.get("presets") or {}).items() if isinstance(v, dict)}
+        self._presets = {str(k): v for k, v in presets.items() if isinstance(v, dict)}
 
     @classmethod
     def from_config(cls, config, store) -> "RoomCamera":
@@ -164,7 +175,13 @@ class RoomCamera:
         if not await self.discover():
             raise DeviceUnavailable(self._reason or NO_CAMERA)
 
+    def _check_open(self) -> None:
+        """A call that waited for the lock may find the camera gone: refuse cleanly rather than write to no node."""
+        if self._fd is None:
+            raise DeviceUnavailable(self._reason or NO_CAMERA)
+
     async def _set(self, cid: int, value: int) -> None:
+        self._check_open()
         try:
             await asyncio.to_thread(self._v4l2.set, self._fd, cid, value)
         except OSError as e:
@@ -172,6 +189,7 @@ class RoomCamera:
             raise DeviceUnavailable(self._reason) from e
 
     async def _get(self, cid: int) -> int:
+        self._check_open()
         try:
             return await asyncio.to_thread(self._v4l2.get, self._fd, cid)
         except OSError as e:
@@ -231,14 +249,19 @@ class RoomCamera:
         self._watchdog = None
 
     async def _apply_speeds(self, pan: int, tilt: int) -> None:
-        """Set the speed controls and close the motion segment that ends here (the position estimate)."""
-        self._account()
-        if self._has_pan:
-            await self._set(V4L2_CID_PAN_SPEED, pan)
-        if self._has_tilt:
-            await self._set(V4L2_CID_TILT_SPEED, tilt)
-        self._pan, self._tilt = (pan if self._has_pan else 0), (tilt if self._has_tilt else 0)
-        self._segment_started = self._clock() if (self._pan or self._tilt) else None
+        """Set the speed controls and close the motion segment that ends here (the position estimate).
+
+        The whole sequence runs under the control lock, so another request's pan and tilt writes
+        cannot land between these two.
+        """
+        async with self._io_lock:
+            self._account()
+            if self._has_pan:
+                await self._set(V4L2_CID_PAN_SPEED, pan)
+            if self._has_tilt:
+                await self._set(V4L2_CID_TILT_SPEED, tilt)
+            self._pan, self._tilt = (pan if self._has_pan else 0), (tilt if self._has_tilt else 0)
+            self._segment_started = self._clock() if (self._pan or self._tilt) else None
 
     def _account(self) -> None:
         if self._segment_started is None:
@@ -260,18 +283,21 @@ class RoomCamera:
 
     async def read_zoom(self) -> Optional[int]:
         await self._require()
-        now = self._clock()
-        if self._zoom is None or self._zoom_read_at is None or now - self._zoom_read_at >= self.ZOOM_CACHE_S:
-            self._zoom = await self._get(V4L2_CID_ZOOM_ABSOLUTE)
-            self._zoom_read_at = now
-        return self._zoom
+        async with self._io_lock:
+            # the cache is checked inside the lock: a caller that waited here can use the read it waited for
+            now = self._clock()
+            if self._zoom is None or self._zoom_read_at is None or now - self._zoom_read_at >= self.ZOOM_CACHE_S:
+                self._zoom = await self._get(V4L2_CID_ZOOM_ABSOLUTE)
+                self._zoom_read_at = now
+            return self._zoom
 
     async def zoom(self, level: int) -> int:
         await self._require()
         level = max(self._zoom_range[0], min(self._zoom_range[1], int(level)))
-        await self._set(V4L2_CID_ZOOM_ABSOLUTE, level)
-        self._zoom = level
-        self._zoom_read_at = self._clock()
+        async with self._io_lock:
+            await self._set(V4L2_CID_ZOOM_ABSOLUTE, level)
+            self._zoom = level
+            self._zoom_read_at = self._clock()
         return level
 
     async def zoom_step(self, delta: int) -> int:

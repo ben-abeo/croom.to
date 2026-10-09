@@ -146,7 +146,8 @@ class StubVolume:
 
 class StubCamera:
     def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2)):
-        self.available, self.home_saved, self.position_known = available, home_saved, position_known
+        self.available, self.home_saved = available, home_saved
+        self.position_known = position_known and available      # a missing camera never knows its position
         self.saved = set(saved)
         self.zoom_level, self.moving, self.busy = 100, False, False
         self.preview_on = False
@@ -176,9 +177,10 @@ class StubCamera:
         return self.zoom_level
 
     async def move(self, pan, tilt):
-        if pan not in (-1, 0, 1) or tilt not in (-1, 0, 1):
+        if isinstance(pan, bool) or isinstance(tilt, bool) or pan not in (-1, 0, 1) or tilt not in (-1, 0, 1):
             raise ValueError("pan and tilt must each be -1, 0 or 1")
         self._check()
+        pan, tilt = int(pan), int(tilt)
         self.moves.append((pan, tilt))
         self.moving = bool(pan or tilt)
         return self.state()
@@ -194,9 +196,9 @@ class StubCamera:
 
     async def home(self):
         from croom.devices.errors import NotReady
-        self._check()
         if not self.home_saved:
             raise NotReady("save a home first")
+        self._check()
         self.homes += 1
         self.position_known = True
         return self.state()
@@ -209,32 +211,39 @@ class StubCamera:
 
     async def save_home(self):
         from croom.devices.errors import NotReady
-        self._check()
         if not self.position_known:
             raise NotReady("home the camera first")
+        self._check()
         self.setups.append("save_home")
         self.home_saved = True
         return self.state()
 
+    @staticmethod
+    def _slot(slot):
+        """RoomCamera's rule: True is 1 and 2.0 is 2 to Python, but neither is a slot number."""
+        if isinstance(slot, bool) or not isinstance(slot, int) or not 1 <= slot <= 3:
+            raise ValueError("preset slots are 1 to 3")
+
     async def save(self, slot):
         from croom.devices.errors import NotReady
-        if slot not in (1, 2, 3):
-            raise ValueError("preset slots are 1 to 3")
-        self._check()
+        self._slot(slot)
         if not self.position_known:
             raise NotReady("home the camera first")
+        self._check()
         self.saves.append(slot)
         self.saved.add(slot)
         return self.state()
 
     async def recall(self, slot):
         from croom.devices.errors import NotReady
-        if slot not in (1, 2, 3):
-            raise ValueError("preset slots are 1 to 3")
-        self._check()
+        self._slot(slot)
         if slot not in self.saved:
             raise NotReady("nothing saved in this slot")
+        if not self.position_known and not self.home_saved:
+            raise NotReady("home the camera first")
+        self._check()
         self.recalls.append(slot)
+        self.position_known = True          # an unknown position is homed first: the camera knows where it is now
         return self.state()
 
     def set_preview(self, on):
@@ -247,6 +256,14 @@ class StubDevices:
     def __init__(self, volume=None, camera=None):
         self.volume = volume if volume is not None else StubVolume()
         self.camera = camera if camera is not None else StubCamera()
+
+
+def real_states():
+    """What RoomVolume and RoomCamera report before they have looked for a device: the shape every block must
+    have. Constructing them does no I/O."""
+    from croom.devices.camera import RoomCamera
+    from croom.devices.volume import RoomVolume
+    return RoomVolume().state(), RoomCamera().state()
 
 
 def event(event_id, title, starts_in_minutes, duration=30, url="https://zoom.us/j/98765432100?pwd=abc",
@@ -807,6 +824,9 @@ class TestRoomDevices:
         assert (await (await client.post("/api/camera/move", json={"pan": 1, "tilt": 0})).json())["moving"] is True
         assert (await client.post("/api/camera/move", json={"pan": 2, "tilt": 0})).status == 400
         assert (await client.post("/api/camera/move", json={"pan": 0})).status == 400
+        assert (await client.post("/api/camera/move", json={"pan": 0.5, "tilt": 0})).status == 400
+        assert (await client.post("/api/camera/move", json={"pan": 1.5, "tilt": 0})).status == 400
+        assert (await client.post("/api/camera/move", json={"pan": 0, "tilt": 1.9})).status == 400
         assert (await (await client.post("/api/camera/zoom", json={"level": 300})).json())["zoom"]["level"] == 300
         assert (await (await client.post("/api/camera/zoom", json={"step": 25})).json())["zoom"]["level"] == 325
         assert (await client.post("/api/camera/zoom", json={})).status == 400
@@ -829,17 +849,26 @@ class TestRoomDevices:
         assert response.status == 409 and (await response.json())["error"] == "nothing saved in this slot"
         assert (await client.post("/api/camera/presets/9", json={"action": "recall"})).status == 400
         assert (await client.post("/api/camera/presets/x", json={"action": "recall"})).status == 400
+        for slot in ("٢", "²"):        # "٢" is 2 to int() and "²" is a digit to str.isdigit(); neither is a slot number
+            response = await client.post(f"/api/camera/presets/{slot}", json={"action": "recall"})
+            assert response.status == 400 and (await response.json())["error"] == "preset slots are 1 to 3", slot
         assert (await client.post("/api/camera/presets/2", json={"action": "eat"})).status == 400
         assert devices.camera.setups == ["find_stops", "save_home"] and devices.camera.saves == [2] and devices.camera.recalls == [2]
 
     async def test_an_unavailable_camera_answers_409_everywhere(self, client_factory):
         client = await client_factory(make_service(devices=StubDevices(camera=StubCamera(available=False))))
-        for path, body in (("/api/camera/move", {"pan": 1, "tilt": 0}), ("/api/camera/zoom", {"step": 25}),
-                           ("/api/camera/home", {}), ("/api/camera/presets/1", {"action": "recall"}),
-                           ("/api/camera/setup", {"action": "find_stops"})):
+        missing, unknown = "no controllable camera found", "home the camera first"
+        # a missing camera never knows its position, so saving one is refused for that first, as RoomCamera does
+        for path, body, reason in (("/api/camera/move", {"pan": 1, "tilt": 0}, missing),
+                                   ("/api/camera/zoom", {"step": 25}, missing),
+                                   ("/api/camera/home", {}, missing),
+                                   ("/api/camera/presets/1", {"action": "recall"}, missing),
+                                   ("/api/camera/presets/1", {"action": "save"}, unknown),
+                                   ("/api/camera/setup", {"action": "find_stops"}, missing),
+                                   ("/api/camera/setup", {"action": "save_home"}, unknown)):
             response = await client.post(path, json=body)
-            assert response.status == 409, path
-            assert (await response.json())["error"] == "no controllable camera found"
+            assert response.status == 409, (path, body)
+            assert (await response.json())["error"] == reason, (path, body)
 
     async def test_preview_is_refused_during_a_meeting(self, client_factory):
         devices = StubDevices()
@@ -928,10 +957,12 @@ class TestRoomDevices:
         response = await client.post("/api/camera/presets/1", json={"action": "recall"})
         assert response.status == 409 and (await response.json())["error"] == "the camera move was interrupted"
 
-    async def test_without_a_devices_service_the_blocks_have_the_same_keys_and_the_routes_say_so(self, client_factory):
+    async def test_without_a_devices_service_the_blocks_have_the_real_keys_and_the_routes_say_so(self, client_factory):
         client = await client_factory(make_service())
         data = await (await client.get("/api/status")).json()
-        assert set(data["audio"]) == set(StubVolume().state()) and set(data["camera"]) == set(StubCamera().state())
+        speaker, camera = real_states()
+        assert set(data["audio"]) == set(speaker)
+        assert set(data["camera"]) == set(camera) and set(data["camera"]["zoom"]) == set(camera["zoom"])
         assert data["audio"]["reason"] == data["camera"]["reason"] == "no devices service"
         assert (await (await client.get("/api/audio/volume")).json()) == data["audio"]
         for path, body in (("/api/audio/volume", {"level": 10}), ("/api/camera/move", {"pan": 1, "tilt": 0}),
@@ -962,3 +993,78 @@ class TestRoomDevices:
                                          headers={"Content-Type": "application/json"})
             assert response.status == 400, (path, key, text)
             assert (await response.json())["error"] == f"{key} must be a number"
+
+    def test_the_stubs_have_the_keys_of_the_real_modules(self):
+        speaker, camera = real_states()
+        for stub in (StubVolume(), StubVolume(available=False)):
+            assert set(stub.state()) == set(speaker)
+        for stub in (StubCamera(), StubCamera(available=False)):
+            state = stub.state()
+            assert set(state) == set(camera) and set(state["zoom"]) == set(camera["zoom"])
+            assert [set(p) for p in state["presets"]] == [set(p) for p in camera["presets"]]
+            assert [p["slot"] for p in state["presets"]] == [p["slot"] for p in camera["presets"]]
+
+    @pytest.mark.parametrize("path, body, message", [
+        ("/api/audio/volume", {"level": True}, "level must be a number"),
+        ("/api/audio/volume", {"step": True}, "step must be a number"),
+        ("/api/audio/volume", {"muted": "yes"}, "muted must be true or false"),
+        ("/api/audio/volume", {"muted": 1}, "muted must be true or false"),
+        ("/api/camera/move", {"pan": True, "tilt": 0}, "pan must be a number"),
+        ("/api/camera/move", {"pan": 0, "tilt": True}, "tilt must be a number"),
+        ("/api/camera/zoom", {"level": True}, "level must be a number"),
+        ("/api/camera/zoom", {"step": True}, "step must be a number"),
+    ])
+    async def test_a_boolean_is_not_a_number_and_a_number_is_not_a_boolean(self, client_factory, path, body, message):
+        devices = StubDevices()
+        client = await client_factory(make_service(devices=devices))
+        response = await client.post(path, json=body)
+        assert response.status == 400 and (await response.json())["error"] == message
+        assert devices.volume.calls == [] and devices.camera.moves == [] and devices.camera.zooms == []
+
+    async def test_a_volume_body_names_one_change_only(self, client_factory):
+        devices = StubDevices()
+        client = await client_factory(make_service(devices=devices))
+        for body in ({}, {"level": 50, "muted": True}, {"level": 50, "step": 5}, {"step": 5, "muted": False},
+                     {"level": 50, "step": 5, "muted": True}):
+            response = await client.post("/api/audio/volume", json=body)
+            assert response.status == 400, body
+            assert (await response.json())["error"] == "Send one of level, step or muted", body
+        assert devices.volume.calls == []
+
+    async def test_a_failing_device_read_is_warned_about_once_per_distinct_message(self, client_factory, caplog):
+        devices = StubDevices()
+        said = {"speaker": "pw-dump gave no answer", "camera": "the zoom control is gone"}
+
+        async def broken_speaker(*args, **kwargs):
+            raise RuntimeError(said["speaker"])
+
+        async def broken_camera(*args, **kwargs):
+            raise RuntimeError(said["camera"])
+
+        devices.volume.refresh, devices.camera.read_zoom = broken_speaker, broken_camera
+        client = await client_factory(make_service(devices=devices))
+
+        def warnings_about(text):
+            return [r for r in caplog.records if r.levelname == "WARNING" and text in r.getMessage()]
+
+        for _ in range(3):
+            assert (await client.get("/api/status")).status == 200
+        # once each, with the traceback, though the two readers fail one after the other on every poll
+        assert len(warnings_about("pw-dump gave no answer")) == 1
+        assert len(warnings_about("the zoom control is gone")) == 1
+        assert warnings_about("pw-dump gave no answer")[0].exc_info is not None
+        said["speaker"] = "pw-dump timed out"
+        await client.get("/api/status")
+        assert len(warnings_about("pw-dump timed out")) == 1 and len(warnings_about("the zoom control is gone")) == 1
+
+    async def test_a_device_lost_during_the_read_is_not_warned_about_again(self, client_factory, caplog):
+        from croom.devices.errors import DeviceUnavailable
+        devices = StubDevices()
+
+        async def gone(*args, **kwargs):
+            raise DeviceUnavailable("camera call failed: [Errno 19] No such device")
+
+        devices.camera.read_zoom = gone      # RoomCamera warns about this itself, as it marks itself unavailable
+        client = await client_factory(make_service(devices=devices))
+        assert (await client.get("/api/status")).status == 200
+        assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []

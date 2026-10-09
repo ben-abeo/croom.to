@@ -93,6 +93,7 @@ class ControlService(Service):
             self.config.get("settings_file", "control-settings.json")
         )
         self._devices = devices
+        self._read_failures: Dict[str, str] = {}
         self._default_style = str(self.config.get("screensaver", "info"))
         self._screensaver = self._load_style()
         self._meeting = meeting
@@ -347,18 +348,28 @@ class ControlService(Service):
     async def _refresh_devices(self) -> None:
         """Cached reads, so a status poll costs nothing most of the time and never raises."""
         camera = self._camera()
-        readers = [getattr(self._volume(), "refresh", None)]
+        readers = [("speaker", getattr(self._volume(), "refresh", None))]
         if camera is not None and camera.available:
             # read_zoom() goes through discovery, which globs and opens /dev/video*: not on every poll of a room
             # without a camera. The devices service looks for a missing camera itself, every 30 s.
-            readers.append(getattr(camera, "read_zoom", None))
-        for reader in readers:
+            readers.append(("camera zoom", getattr(camera, "read_zoom", None)))
+        for label, reader in readers:
             if reader is None:
                 continue
             try:
                 await reader()
+            except DeviceUnavailable as e:
+                # A device lost in the middle of the read: its module has already warned about it, and it answers
+                # with an unavailable state from now on.
+                logger.debug(f"The {label} went away while it was read: {e}")
             except Exception as e:  # noqa: BLE001 - the status must always answer
-                logger.debug(f"Device read failed: {e}")
+                # Anything else is a bug in a device module, and this runs on every poll: warned about with its
+                # traceback once per distinct message, as the devices service does, and per device so that two
+                # failing readers do not take turns at resetting each other's message.
+                message = f"Could not read the {label}: {type(e).__name__}: {e}"
+                if message != self._read_failures.get(label):
+                    self._read_failures[label] = message
+                    logger.warning(message, exc_info=True)
 
     def _audio_state(self) -> Dict[str, Any]:
         volume = self._volume()
@@ -398,10 +409,17 @@ class ControlService(Service):
             return self._error_response(f"could not save the camera settings: {e}", 500)
 
     @staticmethod
-    def _int_field(data: Dict[str, Any], key: str) -> int:
+    def _number_field(data: Dict[str, Any], key: str) -> float:
+        """A number from the body exactly as sent. A boolean is not one, though True is 1 to Python."""
         value = data.get(key)
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             raise ValueError(f"{key} must be a number")
+        return value
+
+    @classmethod
+    def _int_field(cls, data: Dict[str, Any], key: str) -> int:
+        """A whole number from the body, for the levels and steps the device modules clamp."""
+        value = cls._number_field(data, key)
         try:
             return int(value)
         except (OverflowError, ValueError) as e:  # Python's JSON parser lets NaN, Infinity and 1e999 through
@@ -415,15 +433,16 @@ class ControlService(Service):
         volume = self._volume()
 
         async def action(data):
-            if "level" in data:
+            named = [key for key in ("level", "step", "muted") if key in data]
+            if len(named) != 1:
+                raise ValueError("Send one of level, step or muted")
+            if named[0] == "level":
                 return await volume.set_level(self._int_field(data, "level"))
-            if "step" in data:
+            if named[0] == "step":
                 return await volume.step(self._int_field(data, "step"))
-            if "muted" in data:
-                if not isinstance(data["muted"], bool):
-                    raise ValueError("muted must be true or false")
-                return await volume.set_muted(data["muted"])
-            raise ValueError("Send level, step or muted")
+            if not isinstance(data["muted"], bool):
+                raise ValueError("muted must be true or false")
+            return await volume.set_muted(data["muted"])
 
         return await self._device_call(request, volume, action)
 
@@ -433,7 +452,9 @@ class ControlService(Service):
         async def action(data):
             if "pan" not in data or "tilt" not in data:
                 raise ValueError("Send pan and tilt, each -1, 0 or 1")
-            return await camera.move(self._int_field(data, "pan"), self._int_field(data, "tilt"))
+            # As sent, not truncated: the camera refuses anything but -1, 0 or 1, so 0.5 or 1.9 is a 400 and not a
+            # move in a direction nobody asked for.
+            return await camera.move(self._number_field(data, "pan"), self._number_field(data, "tilt"))
 
         return await self._device_call(request, camera, action)
 
@@ -464,7 +485,7 @@ class ControlService(Service):
         slot_text = request.match_info.get("slot", "")
 
         async def action(data):
-            if not slot_text.isdigit():
+            if not (slot_text.isascii() and slot_text.isdecimal()):   # isdigit() takes "²"; int() turns "٢" into 2
                 raise ValueError("preset slots are 1 to 3")
             slot = int(slot_text)
             verb = data.get("action")

@@ -49,6 +49,8 @@ def test_readme_names_the_setup_pieces():
         "camera_presets",
         "/api/audio/volume",
         "Find the stops",
+        "also becomes PipeWire's default sink",
+        "reads the same key as a PyAudio device id",
     ):
         assert needle in text, needle
 

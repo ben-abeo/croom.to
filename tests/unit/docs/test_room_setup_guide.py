@@ -75,6 +75,7 @@ def test_guide_sets_up_the_camera_and_the_sound():
     # what the page shows while the camera moves, and in place of a panel whose device is missing
     assert "Moving…" in html and "No controllable camera found" in html and "No speaker found" in html
     assert "audio.output_device: HDMI" in html
+    assert "the panel closes after ten minutes without a tap" in html   # the Camera panel does not keep the TV on the camera
 
 
 def test_guide_says_what_to_do_when_the_browser_cannot_see_the_meetup():

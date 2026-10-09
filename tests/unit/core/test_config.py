@@ -316,5 +316,26 @@ class TestControlConfig:
         assert config.control.enabled is False
         assert config.control.host == "127.0.0.1"
         assert config.control.port == 9090
-        assert config.to_dict()["control"] == {"enabled": False, "host": "127.0.0.1", "port": 9090, "screensaver": "info"}
+        assert config.to_dict()["control"] == {"enabled": False, "host": "127.0.0.1", "port": 9090, "screensaver": "info",
+                                               "camera_presets": ["Wide", "Table", "Whiteboard"]}
         assert Config.from_dict(config.to_dict()).control.port == 9090
+
+
+class TestRoomDeviceConfig:
+    """Volume and camera settings (spec 2026-10-08 sound and camera, section 4.5)."""
+
+    def test_defaults(self):
+        config = Config()
+        assert config.audio.output_device == "auto"
+        assert config.video.device == "auto"
+        assert config.video.ptz_travel_seconds == 8.0
+        assert config.control.camera_presets == ["Wide", "Table", "Whiteboard"]
+
+    def test_round_trips_through_dict(self):
+        config = Config.from_dict({"audio": {"output_device": "HDMI"},
+                                   "video": {"device": "/dev/video2", "ptz_travel_seconds": 6.5},
+                                   "control": {"camera_presets": ["Room", "Desk", "Board"]}})
+        again = Config.from_dict(config.to_dict())
+        assert again.audio.output_device == "HDMI"
+        assert again.video.device == "/dev/video2" and again.video.ptz_travel_seconds == 6.5
+        assert again.control.camera_presets == ["Room", "Desk", "Board"]

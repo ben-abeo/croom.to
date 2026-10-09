@@ -30,11 +30,13 @@ V4L2_CTRL_CLASS_CAMERA = 0x009a0000   # the `which` of an extended-control call 
 
 class _v4l2_ext_value(ctypes.Union):
     _pack_ = 1
+    _layout_ = "ms"   # Python 3.14 wants it beside _pack_; earlier versions ignore it
     _fields_ = [("value", ctypes.c_int32), ("value64", ctypes.c_int64), ("ptr", ctypes.c_void_p)]
 
 
 class v4l2_ext_control(ctypes.Structure):   # packed in the kernel header: 20 bytes
     _pack_ = 1
+    _layout_ = "ms"   # Python 3.14 wants it beside _pack_; earlier versions ignore it
     _fields_ = [("id", ctypes.c_uint32), ("size", ctypes.c_uint32), ("reserved2", ctypes.c_uint32 * 1), ("u", _v4l2_ext_value)]
 
 

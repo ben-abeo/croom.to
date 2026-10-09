@@ -34,10 +34,11 @@ class SettingsStore:
     def save(self, key: str, value: Any) -> None:
         """Set one key and write the whole file atomically, mode 600.
 
-        A value that cannot be serialised raises before anything changes.
+        A value that cannot be serialised, or a write that fails, raises before anything changes:
+        the value is remembered only once it is on disk, so a later save of another key cannot
+        carry a value the caller was told did not save.
         """
         text = json.dumps({**self._data, key: value})
-        self._data[key] = value
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=str(self._path.parent), prefix=f".{self._path.name}-")
         try:
@@ -45,6 +46,7 @@ class SettingsStore:
                 handle.write(text)
             os.chmod(temp, 0o600)
             os.replace(temp, self._path)
+            self._data[key] = value
         except BaseException:
             try:
                 os.unlink(temp)

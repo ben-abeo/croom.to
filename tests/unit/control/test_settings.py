@@ -3,6 +3,8 @@ One small JSON file next to the agent's state holds the screensaver choice and t
 camera's home and presets (spec 2026-10-08 sound and camera, section 4.5).
 """
 
+import json
+
 import pytest
 
 from croom.control.settings import SettingsStore
@@ -51,3 +53,22 @@ def test_an_unserialisable_value_raises_and_changes_nothing(tmp_path):
     assert SettingsStore(path).load() == {"screensaver": "quiet"}
     store.save("screensaver", "bounce")
     assert SettingsStore(path).get("screensaver") == "bounce"
+
+
+def test_a_write_that_fails_changes_nothing(tmp_path, monkeypatch):
+    """The value is remembered only once it is on disk: a later save of another key must not carry a value
+    the caller was told did not save (a camera home after a full disk)."""
+    store = SettingsStore(tmp_path / "s.json")
+    store.save("screensaver", "info")
+
+    def refuse(src, dst):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("croom.control.settings.os.replace", refuse)
+    with pytest.raises(OSError):
+        store.save("camera", {"home": {"pan_s": 1.0, "tilt_s": 2.0}})
+    assert store.get("camera") is None
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["s.json"]          # the temp file is gone
+    monkeypatch.undo()
+    store.save("screensaver", "quiet")
+    assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8")) == {"screensaver": "quiet"}

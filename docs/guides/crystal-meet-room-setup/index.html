@@ -71,7 +71,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <div class="card"><p class="kicker">Step 1</p><h3>Prepare the device</h3><p>Install Raspberry Pi OS, sign in, connect the TV and camera.</p></div>
   <div class="card"><p class="kicker">Step 2</p><h3>Create the room</h3><p>Add the room on the dashboard's <span class="ui">Provisioning</span> page and copy its token.</p></div>
   <div class="card"><p class="kicker">Step 3</p><h3>Install Crystal Meet</h3><p>One command with the room's config file.</p></div>
-  <div class="card"><p class="kicker">Step 4</p><h3>First run and screens</h3><p>Join a test call, then point the table screen and the door sign at the device.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>First run and screens</h3><p>Join a test call, pick the TV's screensaver, then point the table screen and the door sign at the device.</p></div>
 </div>
 
 <div class="callout warn">
@@ -117,7 +117,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <li><strong>Run the installer.</strong> Type <span class="chip">sudo bash installer/install.sh --config ~/room.yaml</span>. It installs the browser and the room software; expect 10 to 20 minutes.</li>
   <li><strong>Start it.</strong> When the installer prints <span class="ui">Crystal Meet installation complete</span>, type <span class="chip">sudo systemctl start croom</span>. The service also starts on every boot from now on.</li>
 </ul>
-<p class="see">You should now see a browser window open on the TV. That window is the room's meeting screen; leave it open.</p>
+<p class="see">You should now see the room's screensaver fill the TV: the room's name, its status and the time. That is the room's meeting screen; it needs no keyboard or mouse, and nobody has to touch it.</p>
 </section>
 
 <section class="block">
@@ -126,7 +126,8 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <li><strong>Open the room page.</strong> On your laptop or phone on the office network, go to <span class="chip">http://crystal-meet-room-1.local:8080</span>, or use the device's IP address with <span class="chip">:8080</span>.</li>
   <li><strong>Check the dashboard.</strong> On <span class="ui">Devices</span>, the room should show <span class="ui">online</span> within a minute.</li>
   <li><strong>Join a test call.</strong> Paste a Zoom link, or a Zoom meeting ID, into <span class="ui">Join with a link</span> and press <span class="ui">Join</span>. The TV shows the meeting joining; the page turns blue and offers <span class="ui">Mute</span>, <span class="ui">Turn camera off</span> and <span class="ui">Leave</span>.</li>
-  <li><strong>Leave.</strong> Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>.</li>
+  <li><strong>Leave.</strong> Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>. The TV returns to the screensaver.</li>
+  <li><strong>Pick the TV's idle look.</strong> Under <span class="ui">TV when idle</span> on the room page, choose <span class="ui">Information</span> (name, status, next booking and the time), <span class="ui">Quiet</span> (name and status only), <span class="ui">Brand</span> (the logo) or <span class="ui">Bounce</span> (the logo drifting around the screen). The TV changes at once and the choice is remembered.</li>
   <li><strong>Connect the calendar.</strong> To show real bookings and let people join them, follow the guide <span class="ui">Connect Crystal Meet rooms to Google Calendar</span> next. Until then the room page works with pasted links only.</li>
   <li><strong>Connect Zoom.</strong> To join Zoom meetings, including ones hosted by other companies, follow the guide <span class="ui">Connect Crystal Meet rooms to Zoom</span>. Without it, Zoom turns the room away as an automated guest.</li>
   <li><strong>Set up the table screen.</strong> On the tablet or panel, open its kiosk browser (Fully Kiosk Browser on Android, Guided Access with Safari on an iPad) and set the start page to <span class="chip">http://&lt;device address&gt;:8080/</span>. Turn on full screen and keep the screen awake.</li>
@@ -148,7 +149,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <div class="card"><h3>The device shows offline</h3><p>From the Pi, type <span class="chip">curl http://&lt;dashboard address&gt;:3001/health</span>. If nothing comes back, the dashboard is not reachable from the room's network: check the address in <span class="chip">~/room.yaml</span> and that the dashboard Pi is up (its guide has the checks). If the token was already used, create a new one and run the installer again with the updated config.</p></div>
   <div class="card"><h3>The browser opens but never joins</h3><p>Zoom needs the passcode inside the link; paste the full invitation link. Google Meet needs the room signed in (the guide "Let Crystal Meet rooms join Google Meet"); the room page says so when the sign-in is missing or expired. The room page quotes what Meet showed and the log names a screenshot under <span class="chip">/tmp</span>; from the Pi, <span class="chip wrap">PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet &lt;link&gt;</span> reports the same (stop the service first: <span class="chip">sudo systemctl stop croom</span>).</p></div>
   <div class="card"><h3>The screens cannot open the page</h3><p>Use the device's IP address rather than its <span class="chip">.local</span> name; many tablets do not resolve those. Check that the screen and the device are on the same network, then open <span class="chip">http://&lt;device address&gt;:8080/api/status</span> from a laptop to confirm the device answers.</p></div>
-  <div class="card"><h3>No browser window opens on the TV</h3><p>The service waits for the desktop before it starts, so give a freshly booted Pi a minute. If the window still does not appear, type <span class="chip">sudo journalctl -u croom -n 50</span> and look for "Failed to initialize". The browser is installed under <span class="chip">/opt/croom/browsers</span>; if that folder is missing, run the installer again.</p></div>
+  <div class="card"><h3>No browser window opens on the TV</h3><p>The service waits for the desktop before it starts, so give a freshly booted Pi a minute. If the screensaver still does not appear, type <span class="chip">sudo journalctl -u croom -n 50</span> and look for "Failed to initialize". The browser is installed under <span class="chip">/opt/croom/browsers</span>; if that folder is missing, run the installer again.</p></div>
   <div class="card"><h3>No sound or picture in the call</h3><p>Check the USB camera and speakerphone are connected before the device starts, then reboot the Pi. The service runs as the signed-in desktop user so it can use the room's screen and audio.</p></div>
 </div>
 </section>

@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Crystal Meet</title>
+<link rel="icon" href="/static/crystalpm-logo-white.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/static/tv.css">
+</head>
+<body data-state="loading" data-style="info">
+<main class="tv">
+  <header class="top">
+    <img class="logo" src="/static/crystalpm-logo-white.svg" alt="Crystal PM">
+    <p id="clock" class="clock"></p>
+  </header>
+
+  <section class="status" aria-live="polite">
+    <p id="room-name" class="room"></p>
+    <p id="kicker" class="kicker">Connecting</p>
+    <p id="headline" class="headline">Connecting</p>
+    <p id="detail" class="detail"></p>
+  </section>
+
+  <p id="hint" class="hint">Press Join on the controller to start a meeting</p>
+
+  <img id="brand-logo" class="brand-logo" src="/static/crystalpm-logo-white.svg" alt="Crystal PM" hidden>
+  <div id="bounce-logo" class="bounce-logo" hidden>
+    <svg viewBox="0 0 2000 541.43" aria-hidden="true"></svg>
+  </div>
+</main>
+<script src="/static/tv.js"></script>
+</body>
+</html>

@@ -12,9 +12,10 @@ the command, the service units and the folders under `/etc` and `/opt`.
 
 | Piece | Where it runs | What it does |
 |---|---|---|
-| Room device, the `croom` agent | A Raspberry Pi behind the TV, one per room | Joins meetings in a headed Chromium, reads the room's Google Calendar, serves the room page and the door sign, reports to the dashboard. |
+| Room device, the `croom` agent | A Raspberry Pi behind the TV, one per room, with no keyboard or mouse | Owns the one browser page on the TV: the screensaver between meetings, the meeting when Join is pressed. Reads the room's Google Calendar, serves the room page, the door sign and the TV page, reports to the dashboard. |
 | Room page `http://<device>:8080/` | Any browser on the office network, usually a tablet on the table | Today's bookings, Join now, Mute, Turn camera off, Leave, and a box to paste a Zoom or Meet link. |
 | Door sign `http://<device>:8080/sign` | A small screen by the door, PoE or Wi-Fi | Green when free, amber ten minutes before a booking, red while in use or booked. |
+| TV page `http://<device>:8080/tv` | The room's TV, in the device's own browser | The screensaver between meetings: Information (name, status, next booking, clock), Quiet, Brand, or the bouncing Crystal PM logo. Chosen under **TV when idle** on the room page and remembered. |
 | Dashboard, `src/croom-dashboard` | A fourth Raspberry Pi (or any 64-bit Docker host) on the office network, from `deploy/dashboard/` | Fleet overview, device status, enrollment tokens on the Provisioning page. |
 
 Neither screen is cabled to the Pi: each only needs a browser, power and the
@@ -76,9 +77,9 @@ lists the values to replace. The sections that matter:
 | Section | Keys | Notes |
 |---|---|---|
 | `room` | `name`, `location`, `timezone` | The name is shown on the page, the sign and the dashboard. |
-| `meeting` | `platforms: [zoom, google_meet]`, `zoom_credentials_path` | Which links the room can join; joins are limited to those platforms' hostnames. Zoom joins go through Zoom's Meeting SDK with the credentials file (`deploy/rooms/zoom-credentials.example.json`); without it the public web client is used, and Zoom blocks automated guests there. |
+| `meeting` | `platforms: [zoom, google_meet]`, `zoom_credentials_path`, `google_profile_dir`, `kiosk` | Which links the room can join; joins are limited to those platforms' hostnames. Zoom joins go through Zoom's Meeting SDK with the credentials file (`deploy/rooms/zoom-credentials.example.json`); without it the public web client is used, and Zoom blocks automated guests there. |
 | `calendar` | `providers: [google]`, `google_credentials_path`, `google_calendar_id`, `sync_interval_seconds` | The room's calendar address looks like `c_1885...@resource.calendar.google.com`. A placeholder or a missing key logs one line and the room works with pasted links only. |
-| `control` | `enabled`, `host`, `port` | The room page and sign on port 8080, open on the LAN by design. |
+| `control` | `enabled`, `host`, `port`, `screensaver` | The room page, sign and TV page on port 8080, open on the LAN by design. `screensaver` is the TV's style until someone picks another on the room page (`info`, `quiet`, `brand` or `bounce`); the choice is kept in `control-settings.json` under the data directory. |
 | `dashboard` | `url`, `enrollment_token`, `heartbeat_interval_seconds` | The token comes from the dashboard's Provisioning page and works once. |
 
 Never commit a real token or key.
@@ -152,6 +153,7 @@ the plan holds the how, step by step with the code.
 | Zoom joins through the Meeting SDK: signature, per-room Zoom user's ZAK for outside hosts, loopback page, `croom --check-zoom`, the Zoom guide | [spec](docs/superpowers/specs/2026-09-25-zoom-meeting-sdk-design.md) | [plan](docs/superpowers/plans/2026-09-25-zoom-meeting-sdk.md) |
 | The dashboard on a Raspberry Pi: Docker Compose packaging, production mode in the backend, the dashboard installer and guide | [spec](docs/superpowers/specs/2026-10-05-dashboard-on-a-pi-design.md) | [plan](docs/superpowers/plans/2026-10-05-dashboard-on-a-pi.md) |
 | Google Meet as a signed-in room: the persistent profile, `croom --sign-in-meet`, pre-join camera and microphone, the Meet guide | [spec](docs/superpowers/specs/2026-10-07-google-meet-room-account-design.md) | [plan](docs/superpowers/plans/2026-10-07-google-meet-room-account.md) |
+| The TV screensaver and the one page on the TV: `TvDisplay` owns the browser, providers borrow its page, the `/tv` page with four styles, `/api/screensaver`, the picker on the room page | [spec](docs/superpowers/specs/2026-10-07-tv-screensaver-and-one-page-design.md) | [plan](docs/superpowers/plans/2026-10-07-tv-screensaver-and-one-page.md) |
 
 Decisions worth knowing before changing things:
 
@@ -160,6 +162,7 @@ Decisions worth knowing before changing things:
 - The dark theme is Tailwind's stock charcoal (`#111827` page, `#1F2937` cards) with the Crystal PM blue accent and Lexend; navy was rejected for dark mode.
 - Brand assets (logo, Lexend, its OFL licence) are bundled under `src/croom/control/static` and in each guide folder, so nothing loads from the internet.
 - Nothing joins or leaves by itself; Join now opens ten minutes before a booking.
+- The TV shows one page, owned by the agent: the screensaver when idle, the meeting when joined. The providers borrow that page and hand it back; nothing else ever opens a window on the TV, and the TV needs no keyboard or mouse. The browser runs in kiosk mode (`meeting.kiosk`) on the Meet sign-in profile when one is configured, with no fixed viewport: the page fills the TV at whatever resolution the Pi drives it.
 - With a calendar address configured, only that calendar is read; the room resource's declined (double-booked) and cancelled bookings are dropped; a link typed into an event wins over an automatically added Meet.
 - Google Meet refuses guests that arrive through an automated browser, so each room joins Meet signed in as its own Workspace user from a persistent browser profile (`meeting.google_profile_dir`); the browser is never disguised. `croom --sign-in-meet` does the one-time sign-in on the room's screen.
 - Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need Zoom's review of the SDK app (it may stay unlisted; its production credentials are the approved ones) plus the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
@@ -168,7 +171,6 @@ Known limitations, mostly inherited from upstream:
 
 - Stopping the meeting service can hang while closing the headed Chromium; the service unit's restart covers it.
 - Zoom links need their passcode in the link. A failed Meet join logs what Meet showed and saves a screenshot under `/tmp`; `croom --check-meet URL -c CONFIG` reports the same from a terminal.
-- One headed browser window opens per configured platform when the agent starts.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.
 - The dashboard speaks plain HTTP on the office network, with no TLS, and has no database migrations; a model change that needs an altered table is a manual `psql` step in production.

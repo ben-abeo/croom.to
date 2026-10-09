@@ -12,6 +12,8 @@ import pytest
 playwright = pytest.importorskip("playwright.async_api")
 
 from croom.meeting.providers.google_meet import GoogleMeetProvider  # noqa: E402
+from croom.meeting.display import TvDisplay  # noqa: E402
+from tests.unit.meeting.fake_display import FakeDisplay  # noqa: E402
 
 # A <button disabled> with the text in a nested span, a name field with a placeholder only.
 BUTTON_FORM = """
@@ -64,7 +66,7 @@ async def drive(form, tmp_path, name="Room 1"):
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(form)
-        provider = GoogleMeetProvider()
+        provider = GoogleMeetProvider(FakeDisplay())
         provider._page = page
         provider.failure_screenshot = tmp_path / "meet-failure.png"
         try:
@@ -90,7 +92,7 @@ async def test_failure_quotes_what_meet_showed_and_saves_a_screenshot(tmp_path):
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(REFUSAL_PAGE)
-        provider = GoogleMeetProvider()
+        provider = GoogleMeetProvider(FakeDisplay())
         provider._page = page
         provider.failure_screenshot = tmp_path / "meet-failure.png"
         provider.JOIN_FIND_TIMEOUT_MS = 300
@@ -107,10 +109,10 @@ async def test_failure_quotes_what_meet_showed_and_saves_a_screenshot(tmp_path):
 
 def test_browser_identifies_as_itself():
     """Meet refuses browsers it deems too old; the context must not claim an older Chrome."""
-    options = GoogleMeetProvider.context_options()
+    options = TvDisplay.context_options()
     assert "user_agent" not in options
     assert options["permissions"] == ["camera", "microphone"]
-    assert options["viewport"] == {"width": 1920, "height": 1080}
+    assert options["no_viewport"] is True   # the page fills the TV, whatever its resolution
 
 # A signed-in pre-join page: no name field, "Join now", a muted microphone and a camera that is on.
 SIGNED_IN_FORM = """
@@ -161,7 +163,7 @@ async def signed_in(form, tmp_path, camera_on, mic_on):
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(form)
-        provider = GoogleMeetProvider(profile_dir=str(tmp_path / "profile"))
+        provider = GoogleMeetProvider(FakeDisplay(profile_dir=str(tmp_path / "profile")))
         provider._page = page
         provider.failure_screenshot = tmp_path / "meet-failure.png"
         try:
@@ -197,7 +199,7 @@ async def test_googles_sign_in_page_names_the_sign_in_command(tmp_path):
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(SIGN_IN_PAGE)
-        provider = GoogleMeetProvider(profile_dir=str(tmp_path / "profile"))
+        provider = GoogleMeetProvider(FakeDisplay(profile_dir=str(tmp_path / "profile")))
         provider._page = page
         provider.JOIN_FIND_TIMEOUT_MS = 300
         provider.TOGGLE_TIMEOUT_MS = 300
@@ -216,7 +218,7 @@ async def test_waiting_to_be_admitted_is_the_lobby(tmp_path):
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(LOBBY_PAGE)
-        provider = GoogleMeetProvider()
+        provider = GoogleMeetProvider(FakeDisplay())
         provider._page = page
         provider.CONNECT_TIMEOUT_MS = 300
         provider.ADMIT_TIMEOUT_MS = 5000
@@ -239,7 +241,7 @@ async def test_a_toggle_that_cannot_be_clicked_does_not_stop_the_join(tmp_path):
         browser = await p.chromium.launch()
         page = await browser.new_page()
         await page.set_content(COVERED_TOGGLE_FORM)
-        provider = GoogleMeetProvider(profile_dir=str(tmp_path / "profile"))
+        provider = GoogleMeetProvider(FakeDisplay(profile_dir=str(tmp_path / "profile")))
         provider._page = page
         provider.TOGGLE_TIMEOUT_MS = 500
         try:

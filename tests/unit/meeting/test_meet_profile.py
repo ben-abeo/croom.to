@@ -1,56 +1,53 @@
 """
-With a profile folder the Meet provider keeps its browser session there, so a
-one-time Google sign-in survives restarts (spec 2026-10-07, section 4.3).
+The Meet provider on the shared TV page: it joins by navigating the display's
+page and hands it back to the screensaver when it leaves.
 """
 
 import pytest
 
 playwright = pytest.importorskip("playwright.async_api")
 
+from croom.meeting.providers.base import MeetingState  # noqa: E402
 from croom.meeting.providers.google_meet import GoogleMeetProvider  # noqa: E402
+from tests.unit.meeting.fake_display import FakeDisplay  # noqa: E402
 
 
-def page_file(tmp_path):
-    page = tmp_path / "page.html"
-    page.write_text("<!DOCTYPE html><html><head><title>Crystal Meet</title></head><body>hello</body></html>")
-    return page
-
-
-async def test_profile_launch_creates_a_private_folder_and_a_working_page(tmp_path):
-    profile = tmp_path / "profile"
-    provider = GoogleMeetProvider(profile_dir=str(profile), room_name="Room 3", headless=True)
-    await provider.initialize()
-    try:
-        assert oct(profile.stat().st_mode & 0o777) == "0o700"
-        await provider._page.goto(page_file(tmp_path).as_uri())
-        assert await provider._page.title() == "Crystal Meet"
-        assert provider._browser is None  # a persistent context owns its browser
-    finally:
+async def test_leaving_hands_the_page_back_to_the_screensaver(tmp_path):
+    idle = tmp_path / "idle.html"
+    idle.write_text("<title>Crystal Meet TV</title>")
+    meeting = tmp_path / "meeting.html"
+    meeting.write_text("<title>Meet</title><button aria-label='Leave call'>Leave</button>")
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        display = FakeDisplay(page, idle_url=idle.as_uri())
+        provider = GoogleMeetProvider(display, room_name="Room 3")
+        await provider.initialize()
+        assert provider._page is page
+        await page.goto(meeting.as_uri())
+        provider._set_state(MeetingState.CONNECTED)
+        await provider.leave_meeting()
+        assert display.shown == 1 and page.url == idle.as_uri()
         await provider.shutdown()
-    assert provider._context is None and provider._playwright is None
-    assert any(profile.iterdir())  # Chromium wrote the profile there
+        assert not page.is_closed()   # the display, not the provider, owns the page
+        await browser.close()
 
 
-async def test_guest_launch_still_works_without_a_profile(tmp_path):
-    provider = GoogleMeetProvider(headless=True)
-    await provider.initialize()
-    try:
-        await provider._page.goto(page_file(tmp_path).as_uri())
-        assert await provider._page.title() == "Crystal Meet"
-        assert provider._browser is not None
-    finally:
-        await provider.shutdown()
+async def test_the_provider_needs_a_display_to_initialize():
+    with pytest.raises(RuntimeError) as failure:
+        await GoogleMeetProvider(None).initialize()
+    assert "display" in str(failure.value)
 
 
-async def test_unusable_profile_folder_is_a_clear_error(tmp_path):
-    parent = tmp_path / "locked"
-    parent.mkdir()
-    parent.chmod(0o500)
-    provider = GoogleMeetProvider(profile_dir=str(parent / "profile"), headless=True)
-    try:
-        with pytest.raises(RuntimeError) as failure:
-            await provider.initialize()
-        assert str(parent / "profile") in str(failure.value)
-    finally:
-        await provider.shutdown()
-        parent.chmod(0o700)
+async def test_joining_claims_the_page_for_the_meeting(tmp_path):
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.route("**/*", lambda route: route.abort())    # no network: the join fails fast
+        display = FakeDisplay(page)
+        provider = GoogleMeetProvider(display, room_name="Room 3")
+        await provider.initialize()
+        with pytest.raises(Exception):  # noqa: B017 - any failure, the claim is what is tested
+            await provider.join_meeting("https://meet.google.com/abc-defg-hij")
+        assert display.claimed == 1
+        await browser.close()

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional, TextIO
 
 from croom.meeting.browser_env import ensure_browsers_path, profile_holder
+from croom.meeting.display import TvDisplay
 from croom.meeting.providers.google_meet import GoogleMeetProvider
 
 DESCRIBE_JS = """
@@ -67,12 +68,12 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
             profile.mkdir(parents=True, exist_ok=True)
             browser = None
             context = await p.chromium.launch_persistent_context(
-                str(profile), headless=headless, args=GoogleMeetProvider.BROWSER_ARGS,
-                **GoogleMeetProvider.context_options())
+                str(profile), headless=headless, args=TvDisplay.BASE_ARGS,
+                **TvDisplay.context_options())
             page = context.pages[0] if context.pages else await context.new_page()
         else:
-            browser = await p.chromium.launch(headless=headless, args=GoogleMeetProvider.BROWSER_ARGS)
-            context = await browser.new_context(**GoogleMeetProvider.context_options())
+            browser = await p.chromium.launch(headless=headless, args=TvDisplay.BASE_ARGS)
+            context = await browser.new_context(**TvDisplay.context_options())
             page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")

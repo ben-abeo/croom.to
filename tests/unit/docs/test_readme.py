@@ -38,6 +38,9 @@ def test_readme_names_the_setup_pieces():
         "not yet verified against a live outside-hosted meeting",
         "npm run dev",
         ".venv/bin/pytest",
+        "screensaver",
+        ":8080/tv",
+        "TV when idle",
     ):
         assert needle in text, needle
 

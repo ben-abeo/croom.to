@@ -6,7 +6,6 @@ Handles joining and controlling Google Meet meetings using browser automation.
 
 import asyncio
 import logging
-import os
 import re
 import tempfile
 import time
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Playwright is optional - used for browser automation
 try:
-    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+    from playwright.async_api import Page
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -54,45 +53,28 @@ class GoogleMeetProvider(MeetingProvider):
     LOBBY_PHRASES = ("waiting for", "asking to join", "someone lets you in", "let you in")
     SIGN_IN_MESSAGE = ("The room's Google sign-in has expired or was never done; "
                        "stop the service and run croom --sign-in-meet on the device")
-    BROWSER_ARGS = [
-        "--use-fake-ui-for-media-stream",  # Auto-accept camera/mic
-        "--disable-infobars",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--disable-gpu",
-        "--window-size=1920,1080",
-    ]
-
-    @classmethod
-    def context_options(cls) -> dict:
-        """Browser context settings shared with `croom --check-meet`. No user-agent override:
-        Meet refuses browsers it deems too old, and the bundled Chromium's own identity is current."""
-        return {"permissions": ["camera", "microphone"], "viewport": {"width": 1920, "height": 1080}}
-
-    def __init__(self, profile_dir: Optional[str] = None, room_name: str = "Conference Room",
-                 headless: bool = False):
+    def __init__(self, display=None, room_name: str = "Conference Room"):
         super().__init__()
-        # The signed-in Google profile (spec 2026-10-07, section 4.2); None means a guest browser.
-        self._profile_dir: Optional[Path] = Path(profile_dir) if profile_dir else None
+        # The TV display (spec 2026-10-07 TV, section 4.3) owns the browser and, when configured, the
+        # signed-in Google profile (spec 2026-10-07 Google Meet, section 4.2); this provider borrows its page.
+        self._display = display
         self._room_name = room_name or "Conference Room"
-        self._headless = headless
         # Where a screenshot goes when a join fails, so the TV need not be watched.
         self.failure_screenshot: Path = Path(tempfile.gettempdir()) / "croom-meet-failure.png"
-        self._playwright = None
-        self._browser: Optional["Browser"] = None
-        self._context: Optional["BrowserContext"] = None
         self._page: Optional["Page"] = None
 
     @classmethod
-    def from_config(cls, config) -> "GoogleMeetProvider":
-        return cls(profile_dir=config.meeting.google_profile_dir or None,
-                   room_name=config.room.name or "Conference Room")
+    def from_config(cls, config, display=None) -> "GoogleMeetProvider":
+        return cls(display, room_name=config.room.name or "Conference Room")
 
     @property
-    def profile_dir(self) -> Optional[Path]:
-        return self._profile_dir
+    def display(self):
+        return self._display
+
+    @property
+    def _signed_in(self) -> bool:
+        """Whether the TV browser runs on a signed-in profile; a guest sees Meet's name field."""
+        return self._display is not None and getattr(self._display, "profile_dir", None) is not None
 
     @property
     def room_name(self) -> str:
@@ -130,53 +112,25 @@ class GoogleMeetProvider(MeetingProvider):
         return None
 
     async def initialize(self) -> None:
-        """Open the browser: on the signed-in profile when one is configured, as a guest otherwise."""
-        if not PLAYWRIGHT_AVAILABLE:
-            raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install chromium")
-
-        logger.info("Initializing Google Meet provider...")
-        self._playwright = await async_playwright().start()
-
-        if self._profile_dir is not None:
-            try:
-                self._profile_dir.mkdir(parents=True, exist_ok=True)
-                os.chmod(self._profile_dir, 0o700)
-            except OSError as e:
-                raise RuntimeError(f"Google Meet profile folder {self._profile_dir} is not usable: {e}") from e
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                str(self._profile_dir), headless=self._headless, args=self.BROWSER_ARGS, **self.context_options(),
-            )
-            self._page = self._context.pages[0] if self._context.pages else await self._context.new_page()
-            logger.info(f"Google Meet provider initialized with the signed-in profile at {self._profile_dir}")
-            return
-
-        self._browser = await self._playwright.chromium.launch(headless=self._headless, args=self.BROWSER_ARGS)
-        self._context = await self._browser.new_context(**self.context_options())
-        self._page = await self._context.new_page()
-        logger.info("Google Meet provider initialized as a guest")
+        """Borrow the TV page; the display owns the browser and the signed-in profile."""
+        if self._display is None:
+            raise RuntimeError("Google Meet provider needs the TV display")
+        self._page = await self._display.page()
+        logger.info("Google Meet provider ready on the TV page")
 
     async def shutdown(self) -> None:
-        """Shutdown browser."""
+        """Leave the meeting if still in one; the display owns the browser."""
         if self._state == MeetingState.CONNECTED:
             await self.leave_meeting()
-
-        if self._page:
-            await self._page.close()
-            self._page = None
-
-        if self._context:
-            await self._context.close()
-            self._context = None
-
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
+        self._page = None
         logger.info("Google Meet provider shutdown")
+
+    async def _show_idle(self) -> None:
+        """Hand the page back to the screensaver."""
+        if self._display is not None:
+            await self._display.show_idle()
+        elif self._page is not None:
+            await self._page.goto("about:blank")
 
     async def join_meeting(
         self,
@@ -186,6 +140,8 @@ class GoogleMeetProvider(MeetingProvider):
         mic_on: bool = True
     ) -> MeetingInfo:
         """Join a Google Meet meeting."""
+        if self._display is not None:
+            self._page = await self._display.claim()   # nothing parks the page again until the meeting ends
         if not self._page:
             raise RuntimeError("Provider not initialized")
 
@@ -252,7 +208,7 @@ class GoogleMeetProvider(MeetingProvider):
                 name_input = None
         if name_input is not None:
             await name_input.fill(display_name)
-        elif self._profile_dir is None:
+        elif not self._signed_in:
             logger.warning("Meet pre-join name field not found; trying to join without a name")
         else:
             logger.debug("Signed in: Meet shows no name field")
@@ -374,8 +330,8 @@ class GoogleMeetProvider(MeetingProvider):
                 await leave_btn.click()
                 await asyncio.sleep(1)
 
-            # Navigate away
-            await self._page.goto("about:blank")
+            # Hand the TV back to the screensaver
+            await self._show_idle()
 
         except Exception as e:
             logger.error(f"Error leaving meeting: {e}")

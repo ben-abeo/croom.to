@@ -913,6 +913,22 @@ def test_the_camera_panel_closes_itself_after_ten_minutes_without_a_camera_actio
         page.close()
 
 
+def test_an_automatic_close_during_an_outage_leaves_no_note(browser):
+    """The automatic close is nobody's action: when the agent cannot be reached at that moment, the page must not
+    show "Failed to fetch" above a panel nobody touched."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        page.click("#camera-panel summary")
+        page.wait_for_timeout(300)
+        page.route("**/api/camera/preview", lambda route: route.abort())
+        page.clock.fast_forward(11 * 60_000)
+        page.wait_for_timeout(300)
+        assert page.evaluate(PANEL_OPEN) is False
+        note = page.evaluate("() => document.querySelector('#camera-note').textContent.trim()")
+        assert "fetch" not in note.lower() and "failed" not in note.lower()
+        page.close()
+
+
 def test_a_camera_action_keeps_the_camera_panel_open_another_ten_minutes(browser):
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server)

@@ -434,6 +434,7 @@
   // user last got nor writes one, and a refusal of it is not shown or scrolled to.
   const INTERRUPTED = "the camera move was interrupted";
   const deviceNotes = { audio: "", camera: "" };
+  let closingOnIdle = false;  // the next close of the Camera panel is the idle timer's, not a person's
   let lastCameraAction = 0;   // when this page last opened the Camera panel or asked the camera for something itself
 
   async function deviceCall(kind, path, body, options) {
@@ -611,13 +612,16 @@
     clearInterval(previewTimer);
     previewTimer = null;
     if (!el("camera-panel").open) {
-      setPreview(false);
+      const quiet = closingOnIdle;   // an automatic close is nobody's action: no note, no scroll if it fails
+      closingOnIdle = false;
+      setPreview(false, quiet ? { background: true } : undefined);
       return;
     }
     lastCameraAction = Date.now();   // opening the panel counts, also in a meeting, where it asks for no preview
     if (previewWanted()) setPreview(true);
     previewTimer = setInterval(() => {
       if (Date.now() - lastCameraAction > PANEL_IDLE_MS) {
+        closingOnIdle = true;
         el("camera-panel").open = false;   // the toggle handler sends preview off and clears this timer
         return;
       }

@@ -312,7 +312,10 @@ class RoomCamera:
 
     async def _watch(self) -> None:
         await asyncio.sleep(self.WATCHDOG_S)
-        if self._fd is not None and (self._pan or self._tilt):
+        # Not while a long move runs: it times itself and ends with its own stop. A watchdog armed by a move()
+        # that raced it (both waited for the same long move and the move woke first) would cut it short, and
+        # the position would still be marked known.
+        if self._fd is not None and (self._pan or self._tilt) and not self._busy:
             logger.info("Camera motion stopped: the page went quiet")
             try:
                 await self._apply_speeds(0, 0)

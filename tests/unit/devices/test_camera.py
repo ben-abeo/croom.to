@@ -669,10 +669,37 @@ async def test_a_long_move_is_not_stopped_by_the_watchdog_of_an_earlier_move():
     camera, v4l2, _ = camera_for()
     camera.WATCHDOG_S = 0.05
     await camera.move(1, 0)                                      # a move whose watchdog is armed ...
+    watchdog = camera._watchdog
     slow_moves(camera)                                           # ... and a homing that takes 0.16 s, well past the 50 ms
     await camera.find_stops()
+    assert watchdog.cancelled()                                  # the homing took it over: it is not left to go off inside it
     assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1, -1, 0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [0, -1, 0]   # no stop in the middle
     assert camera.position_known
+
+
+async def test_a_watchdog_armed_after_a_long_move_began_does_not_stop_it():
+    camera, v4l2, _ = camera_for()
+    camera.WATCHDOG_S = 0.02
+    release = asyncio.Event()
+
+    async def held(seconds):                                     # a long move waits here until the test lets it go
+        await release.wait()
+
+    camera._sleep = held
+    first = asyncio.create_task(camera.find_stops())
+    while not camera.busy:
+        await asyncio.sleep(0)
+    arrow = asyncio.create_task(camera.move(1, 0))               # an arrow press and a second homing request both wait for the first ...
+    homing = asyncio.create_task(camera.find_stops())
+    with pytest.raises(Interrupted):
+        await first
+    await arrow                                                  # ... the arrow wakes first, so its watchdog is armed after the new homing began
+    await camera._watchdog                                       # and goes off while that homing is waiting at the stops
+    release.set()
+    await homing
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [-1, 0, 1, -1, 0]    # first homing, its stop, the arrow, the new homing, its own stop: nothing between
+    assert v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0, 0, -1, 0]
+    assert camera.position_known and not camera.busy
 
 
 async def test_what_the_camera_cannot_do_yet_is_refused_before_it_is_touched():

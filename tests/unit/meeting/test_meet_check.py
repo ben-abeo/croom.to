@@ -63,10 +63,11 @@ def test_command_line_flag_exists():
     assert "--check-meet URL" in result.stdout
 
 
-def test_check_opens_the_page_with_the_providers_context_options():
+def test_check_opens_the_page_the_way_the_tv_display_does():
     import inspect
     from croom.meeting import meet_check
-    assert "GoogleMeetProvider.context_options()" in inspect.getsource(meet_check)
+    assert "TvDisplay.context_options()" in inspect.getsource(meet_check)
+    assert "TvDisplay.BASE_ARGS" in inspect.getsource(meet_check)
     assert "USER_AGENT" not in inspect.getsource(meet_check)
 
 
@@ -86,3 +87,39 @@ async def test_profile_option_opens_the_page_from_a_persistent_browser_profile(t
 def test_command_line_takes_a_profile_directory():
     result = subprocess.run([sys.executable, "-m", "croom.core.agent", "--help"], capture_output=True, text=True)
     assert "--profile DIR" in result.stdout
+
+
+def test_check_profile_comes_from_the_config_unless_given():
+    from pathlib import Path
+    from croom.meeting.meet_check import resolve_profile
+    assert resolve_profile(None, "/var/lib/croom/meet-profile") == Path("/var/lib/croom/meet-profile")
+    assert resolve_profile("/tmp/other", "/var/lib/croom/meet-profile") == Path("/tmp/other")
+    assert resolve_profile(None, "") is None
+
+
+async def test_check_without_a_configured_profile_is_a_guest(tmp_path):
+    page = tmp_path / "page.html"
+    page.write_text(PREJOIN, encoding="utf-8")
+    out = io.StringIO()
+    code = await check_meet(page.as_uri(), out=out, headless=True, settle_ms=300, profile=None)
+    assert code == 0
+    assert "as a guest" in out.getvalue() and "Profile:" not in out.getvalue()
+
+
+def test_check_command_reads_the_profile_from_the_config():
+    import inspect
+    from croom.core import agent
+    source = inspect.getsource(agent)
+    assert "resolve_profile(args.profile, load_config(args.config).meeting.google_profile_dir)" in source
+
+
+async def test_check_refuses_a_profile_a_live_chromium_holds(tmp_path):
+    import os
+    import socket
+    profile = tmp_path / "profile"
+    profile.mkdir()
+    os.symlink(f"{socket.gethostname()}-{os.getpid()}", profile / "SingletonLock")
+    out = io.StringIO()
+    code = await check_meet("file:///nothing", out=out, headless=True, settle_ms=100, profile=profile)
+    assert code == 1
+    assert "sudo systemctl stop croom" in out.getvalue() and "--profile" in out.getvalue()

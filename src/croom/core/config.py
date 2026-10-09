@@ -52,6 +52,8 @@ class MeetingConfig:
     camera_default_on: bool = True
     mic_default_on: bool = True
     zoom_credentials_path: str = ""  # /etc/croom/zoom-credentials.json on a room device
+    google_profile_dir: str = ""  # /var/lib/croom/meet-profile on a room device; empty means a guest browser
+    kiosk: bool = True  # the TV browser fills the screen with no window chrome
 
 
 @dataclass
@@ -128,6 +130,7 @@ class ControlConfig:
     enabled: bool = True
     host: str = "0.0.0.0"
     port: int = 8080
+    screensaver: str = "info"  # what the TV shows when idle until someone picks another style on the room page
 
 
 @dataclass
@@ -236,6 +239,8 @@ class Config:
                 "camera_default_on": self.meeting.camera_default_on,
                 "mic_default_on": self.meeting.mic_default_on,
                 "zoom_credentials_path": self.meeting.zoom_credentials_path,
+                "google_profile_dir": self.meeting.google_profile_dir,
+                "kiosk": self.meeting.kiosk,
             },
             "calendar": {
                 "providers": self.calendar.providers,
@@ -284,6 +289,7 @@ class Config:
                 "enabled": self.control.enabled,
                 "host": self.control.host,
                 "port": self.control.port,
+                "screensaver": self.control.screensaver,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

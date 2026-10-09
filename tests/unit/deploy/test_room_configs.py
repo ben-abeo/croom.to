@@ -30,6 +30,7 @@ def test_room_configs_load(path):
     assert config.calendar.google_credentials_path == "/etc/croom/google-service-account.json"
     assert config.calendar.google_calendar_id == "REPLACE_WITH_ROOM_CALENDAR_ID"
     assert config.meeting.zoom_credentials_path == "/etc/croom/zoom-credentials.json"
+    assert config.meeting.google_profile_dir == "/var/lib/croom/meet-profile"
 
 
 def test_there_are_three_rooms():

@@ -35,11 +35,13 @@ def get_provider(platform: str) -> type:
     return providers.get(platform)
 
 
-def build_provider(platform: str, config) -> "MeetingProvider | None":
+def build_provider(platform: str, config, display=None) -> "MeetingProvider | None":
     """
-    The provider instance for a platform, given the agent's Config. Zoom uses
+    The provider instance for a platform, given the agent's Config and the TV
+    display whose page it borrows (spec 2026-10-07 TV, section 4.3). Zoom uses
     the Meeting SDK when its credentials file is configured; otherwise the
-    public web client, with one warning (spec 2026-09-25 Zoom, section 4.2).
+    public web client, with one warning (spec 2026-09-25 Zoom, section 4.2). Google Meet
+    gets the room's name (spec 2026-10-07 Google Meet, section 4.2).
     """
     if platform == "zoom":
         from croom.meeting.zoom_auth import zoom_not_configured_reason
@@ -47,10 +49,14 @@ def build_provider(platform: str, config) -> "MeetingProvider | None":
 
         reason = zoom_not_configured_reason(config.meeting.zoom_credentials_path)
         if reason is None:
-            return ZoomSdkProvider.from_config(config)
+            return ZoomSdkProvider.from_config(config, display)
         logger.warning(f"Zoom Meeting SDK not configured: {reason}; using the web client, "
                        "which Zoom blocks for automated guests")
-        return ZoomProvider()
+        return ZoomProvider(display=display)
+    if platform == "google_meet":
+        from croom.meeting.providers.google_meet import GoogleMeetProvider
+
+        return GoogleMeetProvider.from_config(config, display)
     provider_cls = get_provider(platform)
     return provider_cls() if provider_cls else None
 

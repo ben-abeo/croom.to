@@ -284,6 +284,11 @@ def main() -> None:
         metavar="DIR",
         help="With --check-meet: use this persistent browser profile (one signed in to a Google account) instead of a guest session",
     )
+    parser.add_argument(
+        "--sign-in-meet",
+        action="store_true",
+        help="Open the room's browser on its screen to sign in to Google once (needs DISPLAY and meeting.google_profile_dir), then exit",
+    )
     args = parser.parse_args()
 
     # Setup logging
@@ -304,9 +309,20 @@ def main() -> None:
     if args.check_meet:
         import tempfile
         from pathlib import Path
-        from croom.meeting.meet_check import check_meet
+        from croom.meeting.meet_check import check_meet, resolve_profile
+        profile = resolve_profile(args.profile, load_config(args.config).meeting.google_profile_dir)
         raise SystemExit(asyncio.run(check_meet(args.check_meet, screenshot=Path(tempfile.gettempdir()) / "croom-meet-check.png",
-                                                profile=Path(args.profile) if args.profile else None)))
+                                                profile=profile)))
+
+    if args.sign_in_meet:
+        import os
+        from pathlib import Path
+        from croom.meeting.meet_signin import sign_in_meet
+        profile = load_config(args.config).meeting.google_profile_dir
+        if not profile:
+            print("Set meeting.google_profile_dir in the config first; the room configs use /var/lib/croom/meet-profile", file=sys.stderr)
+            raise SystemExit(1)
+        raise SystemExit(sign_in_meet(Path(profile), display=os.environ.get("DISPLAY")))
 
     # Run agent
     try:

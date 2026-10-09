@@ -16,6 +16,7 @@ meeting:
   camera_default_on: true
   mic_default_on: true
   zoom_credentials_path: /etc/croom/zoom-credentials.json
+  google_profile_dir: /var/lib/croom/meet-profile
 
 calendar:
   providers: [google]

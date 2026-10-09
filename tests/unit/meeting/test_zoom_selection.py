@@ -14,6 +14,7 @@ from croom.meeting.providers.google_meet import GoogleMeetProvider
 from croom.meeting.providers.zoom import ZoomProvider
 from croom.meeting.providers.zoom_sdk import ZoomSdkProvider
 from croom.meeting.service import MeetingService
+from tests.unit.meeting.fake_display import FakeDisplay
 
 
 def config_with(tmp_path, credentials):
@@ -50,16 +51,17 @@ def test_other_platforms_and_unknown_names(tmp_path):
 
 async def test_meeting_service_starts_the_sdk_provider(tmp_path):
     config = config_with(tmp_path, {"sdk_client_id": "a", "sdk_client_secret": "b"})
-    service = MeetingService(config)
+    service = MeetingService(config, display=FakeDisplay())
     with patch.object(ZoomSdkProvider, "initialize", new=AsyncMock()), \
          patch.object(GoogleMeetProvider, "initialize", new=AsyncMock()):
         await service.start()
     assert isinstance(service._providers["zoom"], ZoomSdkProvider)
     assert service.get_available_platforms() == ["zoom", "google_meet"]
+    assert service._display.started == 1
 
 
 async def test_meeting_service_falls_back_to_the_web_client(tmp_path):
-    service = MeetingService(config_with(tmp_path, None))
+    service = MeetingService(config_with(tmp_path, None), display=FakeDisplay())
     with patch.object(ZoomProvider, "initialize", new=AsyncMock()), \
          patch.object(GoogleMeetProvider, "initialize", new=AsyncMock()):
         await service.start()

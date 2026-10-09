@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Playwright is optional - used for browser automation
 try:
-    from playwright.async_api import async_playwright, Browser, Page, BrowserContext
+    from playwright.async_api import Page
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
@@ -47,31 +47,38 @@ class GoogleMeetProvider(MeetingProvider):
                       '[aria-label*="join" i][role="button"]', 'button[jsname="Qx7uuf"]']
     JOIN_FIND_TIMEOUT_MS = 4000      # per selector while looking for the join control
     JOIN_ENABLE_TIMEOUT_MS = 10000   # how long the control may stay disabled after the name is typed
-    BROWSER_ARGS = [
-        "--use-fake-ui-for-media-stream",  # Auto-accept camera/mic
-        "--disable-infobars",
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-accelerated-2d-canvas",
-        "--disable-gpu",
-        "--window-size=1920,1080",
-    ]
-
-    @classmethod
-    def context_options(cls) -> dict:
-        """Browser context settings shared with `croom --check-meet`. No user-agent override:
-        Meet refuses browsers it deems too old, and the bundled Chromium's own identity is current."""
-        return {"permissions": ["camera", "microphone"], "viewport": {"width": 1920, "height": 1080}}
-
-    def __init__(self):
+    TOGGLE_TIMEOUT_MS = 3000         # per selector while looking for a camera or microphone button
+    CONNECT_TIMEOUT_MS = 30000       # for Meet's in-call controls after pressing Join
+    ADMIT_TIMEOUT_MS = 300000        # how long a host may take to admit the room
+    LOBBY_PHRASES = ("waiting for", "asking to join", "someone lets you in", "let you in")
+    SIGN_IN_MESSAGE = ("The room's Google sign-in has expired or was never done; "
+                       "stop the service and run croom --sign-in-meet on the device")
+    def __init__(self, display=None, room_name: str = "Conference Room"):
         super().__init__()
+        # The TV display (spec 2026-10-07 TV, section 4.3) owns the browser and, when configured, the
+        # signed-in Google profile (spec 2026-10-07 Google Meet, section 4.2); this provider borrows its page.
+        self._display = display
+        self._room_name = room_name or "Conference Room"
         # Where a screenshot goes when a join fails, so the TV need not be watched.
         self.failure_screenshot: Path = Path(tempfile.gettempdir()) / "croom-meet-failure.png"
-        self._playwright = None
-        self._browser: Optional["Browser"] = None
-        self._context: Optional["BrowserContext"] = None
         self._page: Optional["Page"] = None
+
+    @classmethod
+    def from_config(cls, config, display=None) -> "GoogleMeetProvider":
+        return cls(display, room_name=config.room.name or "Conference Room")
+
+    @property
+    def display(self):
+        return self._display
+
+    @property
+    def _signed_in(self) -> bool:
+        """Whether the TV browser runs on a signed-in profile; a guest sees Meet's name field."""
+        return self._display is not None and getattr(self._display, "profile_dir", None) is not None
+
+    @property
+    def room_name(self) -> str:
+        return self._room_name
 
     @property
     def name(self) -> str:
@@ -105,49 +112,25 @@ class GoogleMeetProvider(MeetingProvider):
         return None
 
     async def initialize(self) -> None:
-        """Initialize browser for Google Meet."""
-        if not PLAYWRIGHT_AVAILABLE:
-            raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install chromium")
-
-        logger.info("Initializing Google Meet provider...")
-
-        self._playwright = await async_playwright().start()
-
-        # Launch browser with required permissions
-        self._browser = await self._playwright.chromium.launch(
-            headless=False,  # Meet requires visible browser
-            args=self.BROWSER_ARGS,
-        )
-
-        # Create context with permissions
-        self._context = await self._browser.new_context(**self.context_options())
-
-        self._page = await self._context.new_page()
-
-        logger.info("Google Meet provider initialized")
+        """Borrow the TV page; the display owns the browser and the signed-in profile."""
+        if self._display is None:
+            raise RuntimeError("Google Meet provider needs the TV display")
+        self._page = await self._display.page()
+        logger.info("Google Meet provider ready on the TV page")
 
     async def shutdown(self) -> None:
-        """Shutdown browser."""
+        """Leave the meeting if still in one; the display owns the browser."""
         if self._state == MeetingState.CONNECTED:
             await self.leave_meeting()
-
-        if self._page:
-            await self._page.close()
-            self._page = None
-
-        if self._context:
-            await self._context.close()
-            self._context = None
-
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
+        self._page = None
         logger.info("Google Meet provider shutdown")
+
+    async def _show_idle(self) -> None:
+        """Hand the page back to the screensaver."""
+        if self._display is not None:
+            await self._display.show_idle()
+        elif self._page is not None:
+            await self._page.goto("about:blank")
 
     async def join_meeting(
         self,
@@ -157,6 +140,8 @@ class GoogleMeetProvider(MeetingProvider):
         mic_on: bool = True
     ) -> MeetingInfo:
         """Join a Google Meet meeting."""
+        if self._display is not None:
+            self._page = await self._display.claim()   # nothing parks the page again until the meeting ends
         if not self._page:
             raise RuntimeError("Provider not initialized")
 
@@ -223,37 +208,40 @@ class GoogleMeetProvider(MeetingProvider):
                 name_input = None
         if name_input is not None:
             await name_input.fill(display_name)
-        else:
+        elif not self._signed_in:
             logger.warning("Meet pre-join name field not found; trying to join without a name")
+        else:
+            logger.debug("Signed in: Meet shows no name field")
 
-        # Toggle camera if needed
-        if not camera_on:
-            try:
-                camera_btn = await self._page.wait_for_selector(
-                    '[aria-label*="camera" i][role="button"]',
-                    timeout=5000
-                )
-                if camera_btn:
-                    # Check if camera is on and turn off
-                    aria_label = await camera_btn.get_attribute("aria-label")
-                    if aria_label and "turn off" in aria_label.lower():
-                        await camera_btn.click()
-            except Exception:
-                pass
+        await self._set_toggle("camera", camera_on)
+        await self._set_toggle("microphone", mic_on)
 
-        # Toggle mic if needed
-        if not mic_on:
-            try:
-                mic_btn = await self._page.wait_for_selector(
-                    '[aria-label*="microphone" i][role="button"]',
-                    timeout=5000
-                )
-                if mic_btn:
-                    aria_label = await mic_btn.get_attribute("aria-label")
-                    if aria_label and "turn off" in aria_label.lower():
-                        await mic_btn.click()
-            except Exception:
-                pass
+    async def _set_toggle(self, device: str, wanted_on: bool) -> None:
+        """Put Meet's pre-join camera or microphone button in the wanted state. The label
+        says the current state: "Turn on microphone" means it is off, "Turn off" means on."""
+        button = await self._find_first(
+            [f'button[aria-label*="{device}" i]', f'[role="button"][aria-label*="{device}" i]'],
+            timeout=self.TOGGLE_TIMEOUT_MS,
+        )
+        if button is None:
+            logger.warning(f"Meet pre-join {device} button not found; joining with Meet's default")
+            return
+        label = (await button.get_attribute("aria-label") or "").lower()
+        if "turn on" not in label and "turn off" not in label:
+            logger.warning(f"Meet pre-join {device} button has an unexpected label {label!r}; leaving it alone")
+            return
+        if ("turn off" in label) == wanted_on:
+            return
+        try:
+            await button.click(timeout=self.TOGGLE_TIMEOUT_MS)
+            await asyncio.sleep(0.5)
+            label = (await button.get_attribute("aria-label") or "").lower()
+        except Exception as e:
+            logger.warning(f"Meet pre-join {device} button could not be pressed ({type(e).__name__}); "
+                           "joining with Meet's current setting")
+            return
+        logger.info(f"Meet pre-join {device} is now {'on' if 'turn off' in label else 'off'} "
+                    f"(wanted {'on' if wanted_on else 'off'})")
 
     async def _find_first(self, selectors, timeout=3000):
         """The first element any of the selectors finds, or None."""
@@ -274,6 +262,12 @@ class GoogleMeetProvider(MeetingProvider):
             return ""
         return " ".join(text.split())[:300]
 
+    async def _needs_sign_in(self) -> bool:
+        """True on Google's sign-in page: the profile's session is gone or was never made."""
+        if "accounts.google.com" in (self._page.url or "").lower():
+            return True
+        return (await self._page_words()).lower().startswith("sign in")
+
     async def _failure(self, reason: str) -> RuntimeError:
         """An error that quotes what Meet shows and points at a screenshot of it."""
         words = await self._page_words()
@@ -290,6 +284,8 @@ class GoogleMeetProvider(MeetingProvider):
         """Press Meet's join control once it is enabled; otherwise say what Meet shows instead."""
         button = await self._find_first(self.JOIN_SELECTORS, timeout=self.JOIN_FIND_TIMEOUT_MS)
         if button is None:
+            if await self._needs_sign_in():
+                raise RuntimeError(self.SIGN_IN_MESSAGE)
             raise await self._failure("Could not find Meet's join button")
         deadline = time.monotonic() + self.JOIN_ENABLE_TIMEOUT_MS / 1000
         while True:
@@ -302,27 +298,22 @@ class GoogleMeetProvider(MeetingProvider):
             await asyncio.sleep(0.25)
 
     async def _wait_for_connection(self) -> None:
-        """Wait for meeting connection."""
-        # Wait for indicators that we're in the meeting
+        """Wait for Meet's in-call controls; a knock that is waiting for the host is the lobby."""
         try:
-            # Wait for leave button to appear (indicates we're in meeting)
-            await self._page.wait_for_selector(
-                '[aria-label*="Leave" i]',
-                timeout=30000
-            )
+            await self._page.wait_for_selector('[aria-label*="Leave" i]', timeout=self.CONNECT_TIMEOUT_MS)
+            return
         except Exception:
-            # Check if we're in lobby
-            lobby = await self._page.query_selector(':has-text("waiting for")')
-            if lobby:
-                self._set_state(MeetingState.IN_LOBBY)
-                logger.info("Waiting in lobby...")
-                # Wait longer for host to admit
-                await self._page.wait_for_selector(
-                    '[aria-label*="Leave" i]',
-                    timeout=300000  # 5 minutes
-                )
-            else:
-                raise await self._failure("Failed to join meeting")
+            pass
+        words = (await self._page_words()).lower()
+        if any(phrase in words for phrase in self.LOBBY_PHRASES):
+            self._set_state(MeetingState.IN_LOBBY)
+            logger.info("Asked to join; waiting for the host to admit the room")
+            try:
+                await self._page.wait_for_selector('[aria-label*="Leave" i]', timeout=self.ADMIT_TIMEOUT_MS)
+                return
+            except Exception:
+                raise await self._failure("The host did not admit the room in time")
+        raise await self._failure("Failed to join meeting")
 
     async def leave_meeting(self) -> None:
         """Leave the current meeting."""
@@ -339,8 +330,8 @@ class GoogleMeetProvider(MeetingProvider):
                 await leave_btn.click()
                 await asyncio.sleep(1)
 
-            # Navigate away
-            await self._page.goto("about:blank")
+            # Hand the TV back to the screensaver
+            await self._show_idle()
 
         except Exception as e:
             logger.error(f"Error leaving meeting: {e}")

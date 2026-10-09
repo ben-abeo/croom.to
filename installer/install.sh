@@ -163,6 +163,9 @@ create_directories() {
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
     mkdir -p "$INSTALL_DIR/models"
+    # The room's signed-in Google Meet profile: the service user's alone (spec 2026-10-07, section 4.6)
+    mkdir -p "$DATA_DIR/meet-profile"
+    chmod 700 "$DATA_DIR/meet-profile"
 
     chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR"
     chown -R "$CROOM_USER:$CROOM_USER" "$DATA_DIR"
@@ -440,6 +443,13 @@ print_completion() {
     if [[ -n "$ZOOM_CREDENTIALS_FILE" ]]; then
         echo ""
         echo "Check Zoom: $INSTALL_DIR/venv/bin/croom --check-zoom -c $CONFIG_DIR/config.yaml"
+    fi
+    if [[ -n "$ROOM_CONFIG" ]] && grep -q "google_profile_dir" "$ROOM_CONFIG"; then
+        echo ""
+        echo "Sign the room in to Google Meet once (over VNC from a laptop, or with a keyboard here):"
+        echo "  sudo systemctl stop croom"
+        echo "  sudo -u $CROOM_USER DISPLAY=:0 $INSTALL_DIR/venv/bin/croom --sign-in-meet -c $CONFIG_DIR/config.yaml"
+        echo "  sudo systemctl start croom"
     fi
     echo ""
 }

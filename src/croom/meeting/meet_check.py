@@ -9,6 +9,8 @@ import sys
 from pathlib import Path
 from typing import Optional, TextIO
 
+from croom.meeting.browser_env import ensure_browsers_path, profile_holder
+from croom.meeting.display import TvDisplay
 from croom.meeting.providers.google_meet import GoogleMeetProvider
 
 DESCRIBE_JS = """
@@ -29,6 +31,13 @@ DESCRIBE_JS = """
 """
 
 
+def resolve_profile(explicit: Optional[str], configured: str) -> Optional[Path]:
+    """The profile the check opens: an explicit --profile wins, then the config's, else a guest."""
+    if explicit:
+        return Path(explicit)
+    return Path(configured) if configured else None
+
+
 async def _count(page, selectors) -> int:
     found = 0
     for selector in selectors:
@@ -42,6 +51,11 @@ async def _count(page, selectors) -> int:
 
 async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Path] = None,
                      headless: bool = False, settle_ms: int = 8000, profile: Optional[Path] = None) -> int:
+    ensure_browsers_path()
+    if profile is not None and profile_holder(profile) is not None:
+        print(f"The room service is using {profile}; stop it first: sudo systemctl stop croom, "
+              "or pass --profile DIR to check another profile", file=out)
+        return 1
     from playwright.async_api import async_playwright
 
     if profile is not None:
@@ -54,12 +68,12 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
             profile.mkdir(parents=True, exist_ok=True)
             browser = None
             context = await p.chromium.launch_persistent_context(
-                str(profile), headless=headless, args=GoogleMeetProvider.BROWSER_ARGS,
-                **GoogleMeetProvider.context_options())
+                str(profile), headless=headless, args=TvDisplay.BASE_ARGS,
+                **TvDisplay.context_options())
             page = context.pages[0] if context.pages else await context.new_page()
         else:
-            browser = await p.chromium.launch(headless=headless, args=GoogleMeetProvider.BROWSER_ARGS)
-            context = await browser.new_context(**GoogleMeetProvider.context_options())
+            browser = await p.chromium.launch(headless=headless, args=TvDisplay.BASE_ARGS)
+            context = await browser.new_context(**TvDisplay.context_options())
             page = await context.new_page()
         try:
             await page.goto(url, wait_until="domcontentloaded")

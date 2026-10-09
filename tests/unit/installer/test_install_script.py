@@ -212,3 +212,26 @@ def test_completion_message_names_the_zoom_check_when_zoom_credentials_were_inst
     assert "croom --check-zoom -c /etc/croom/config.yaml" in result.stdout
     result = run_bash(f"source {SCRIPT}; ROOM_CONFIG=/tmp/room.yaml; print_completion")
     assert "--check-zoom" not in result.stdout
+
+
+def test_profile_folder_is_private_to_the_service_user(tmp_path):
+    result = run_bash(
+        f"source {SCRIPT}; INSTALL_DIR={tmp_path / 'opt'}; CONFIG_DIR={tmp_path / 'etc'}; DATA_DIR={tmp_path / 'lib'}; "
+        f"LOG_DIR={tmp_path / 'log'}; CROOM_USER=$(id -un); create_directories"
+    )
+    assert result.returncode == 0, result.stderr
+    profile = tmp_path / "lib" / "meet-profile"
+    assert profile.is_dir() and oct(profile.stat().st_mode & 0o777) == "0o700"
+
+
+def test_completion_names_the_meet_sign_in_when_the_room_config_has_a_profile(tmp_path):
+    room = tmp_path / "room.yaml"
+    room.write_text("meeting:\n  google_profile_dir: /var/lib/croom/meet-profile\n")
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG={room}; CROOM_USER=pi; print_completion")
+    assert result.returncode == 0, result.stderr
+    assert "sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml" in result.stdout
+    assert "sudo systemctl stop croom" in result.stdout
+    plain = tmp_path / "plain.yaml"
+    plain.write_text("meeting:\n  platforms: [zoom]\n")
+    result = run_bash(f"source {SCRIPT}; ROOM_CONFIG={plain}; CROOM_USER=pi; print_completion")
+    assert "--sign-in-meet" not in result.stdout

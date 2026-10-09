@@ -29,13 +29,18 @@ def test_readme_names_the_setup_pieces():
         "--zoom-credentials",
         "croom --check-zoom",
         "SDK_VERSION",
-        "Follow the four guides",
+        "Follow the five guides",
+        "docs/guides/crystal-meet-google-meet.pdf",
+        "--sign-in-meet",
         "docs/guides/crystal-meet-dashboard.pdf",
         "install-dashboard.sh --admin-email",
         "deploy/dashboard/",
         "not yet verified against a live outside-hosted meeting",
         "npm run dev",
         ".venv/bin/pytest",
+        "screensaver",
+        ":8080/tv",
+        "TV when idle",
     ):
         assert needle in text, needle
 

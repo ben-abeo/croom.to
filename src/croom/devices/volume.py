@@ -47,10 +47,15 @@ class RoomVolume:
         self._sink_id: Optional[int] = None
         self._device: Optional[str] = None
         self._level = 0
+        self._raw_level = 0.0   # what wpctl reports, which PipeWire lets go above 1.0; the page sees at most 100
         self._muted = False
         self._reason: Optional[str] = "not checked yet"
         self._checked_at: Optional[float] = None
         self._warned: Optional[str] = None
+        # The (chosen sink, default sink) pair a `wpctl set-default` was last run for: a failure, or a default that
+        # did not follow, is not tried again every few seconds; a different pair (the default moved again, the
+        # sink came back with a new id) is.
+        self._asked_default: Optional[Tuple[int, Optional[str]]] = None
         # One command sequence at a time: a probe, a set and a step each read and write the state
         # across awaits, so overlapping calls queue instead of interleaving. Every public coroutine
         # takes the lock and calls the private helpers, which never take it.
@@ -89,29 +94,56 @@ class RoomVolume:
             return self._fail(f"pw-dump failed: {out.strip() or code}")
         try:
             sinks, default_name = self._parse_dump(out)
-        except ValueError as e:
+        except (ValueError, TypeError, AttributeError, KeyError) as e:
+            # ValueError: not JSON at all; the others: JSON of another shape (an id of null, props that are not an object)
             return self._fail(f"pw-dump output not understood: {e}")
         chosen = self._choose(sinks, default_name)
         if chosen is None:
             return self._fail(f"no sink matches {self._preference!r}" if self._preference else "no audio sink")
-        sink_id, device = chosen
+        sink_id, name, device = chosen
+        if self._preference and name != default_name:
+            await self._make_default(sink_id, device, default_name)
+        else:
+            self._asked_default = None
         code, out = await self._run(["wpctl", "get-volume", str(sink_id)])
         if code != 0:
             return self._fail(f"wpctl get-volume failed: {out.strip() or code}")
-        level, muted = self._parse_volume(out)
-        if level is None:
+        raw, muted = self._parse_volume(out)
+        if raw is None:
             return self._fail(f"wpctl get-volume output not understood: {out.strip()!r}")
+        level = round(min(1.0, raw) * 100)
         if self._reason is not None:
             names = ", ".join(description for _, _, description in sinks)
             logger.info(f"Speaker: {device} (PipeWire sink {sink_id}), level {level}; sinks: {names}")
-        self._sink_id, self._device, self._level, self._muted = sink_id, device, level, muted
+        self._sink_id, self._device, self._level, self._raw_level, self._muted = sink_id, device, level, raw, muted
         self._reason = None
         self._warned = None
         return self.state()
 
+    async def _make_default(self, sink_id: int, device: str, default_name: Optional[str]) -> None:
+        """Make the sink the room chose PipeWire's default, which the browser plays the call through: without this,
+        audio.output_device would move the slider of one sink while the call plays on another.
+
+        Once for each (sink, default) pair: a failure warns once and leaves the chosen sink in place, so the slider
+        still works; it is not tried again until the default or the sink changes.
+        """
+        if self._asked_default == (sink_id, default_name):
+            return
+        self._asked_default = (sink_id, default_name)
+        code, out = await self._run(["wpctl", "set-default", str(sink_id)])
+        if code != 0:
+            logger.warning(f"Could not make {device} (PipeWire sink {sink_id}) the default output, so the call may play "
+                           f"on another speaker: {out.strip() or code}")
+            return
+        logger.info(f"Made {device} (PipeWire sink {sink_id}) the default output, as audio.output_device asks "
+                    f"(it was {default_name or 'unset'})")
+
     @staticmethod
     def _parse_dump(text: str) -> Tuple[List[Tuple[int, str, str]], Optional[str]]:
-        """Sinks as (id, node.name, description) and the default sink's node.name, from pw-dump's JSON."""
+        """Sinks as (id, node.name, description) and the default sink's node.name, from pw-dump's JSON.
+
+        pw-dump prints a value that looks like a number without quotes, so the names are made text here.
+        """
         objects = json.loads(text)
         if not isinstance(objects, list):
             raise ValueError("not a list")
@@ -122,33 +154,38 @@ class RoomVolume:
             if obj.get("type") == "PipeWire:Interface:Node":
                 props = (obj.get("info") or {}).get("props") or {}
                 if props.get("media.class") == "Audio/Sink":
-                    name = props.get("node.name", "")
+                    name = props.get("node.name")
+                    name = "" if name is None else str(name)
                     description = props.get("node.description") or props.get("node.nick") or name
-                    sinks.append((int(obj.get("id")), name, description))
+                    sinks.append((int(obj.get("id")), name, str(description)))
             elif obj.get("type") == "PipeWire:Interface:Metadata" and (obj.get("props") or {}).get("metadata.name") == "default":
                 for entry in obj.get("metadata") or []:
                     if entry.get("key") == "default.audio.sink" and isinstance(entry.get("value"), dict):
-                        default_name = entry["value"].get("name")
+                        default = entry["value"].get("name")
+                        default_name = None if default is None else str(default)
         return sinks, default_name
 
-    def _choose(self, sinks, default_name) -> Optional[Tuple[int, str]]:
+    def _choose(self, sinks, default_name) -> Optional[Tuple[int, str, str]]:
+        """The sink the slider drives, as (id, node.name, description)."""
         if self._preference:
             wanted = self._preference.casefold()
-            for sink_id, name, description in sinks:
+            for sink in sinks:
+                _, name, description = sink
                 if wanted in description.casefold() or wanted in name.casefold():
-                    return sink_id, description
+                    return sink
             return None
-        for sink_id, name, description in sinks:
-            if name == default_name:
-                return sink_id, description
-        return (sinks[0][0], sinks[0][2]) if sinks else None
+        for sink in sinks:
+            if sink[1] == default_name:
+                return sink
+        return sinks[0] if sinks else None
 
     @staticmethod
-    def _parse_volume(text: str) -> Tuple[Optional[int], bool]:
+    def _parse_volume(text: str) -> Tuple[Optional[float], bool]:
+        """The level as wpctl prints it (1.0 is 100 %, and PipeWire allows more) and whether the sink is muted."""
         match = VOLUME_LINE.search(text)
         if not match:
             return None, False
-        return round(min(1.0, float(match.group(1))) * 100), bool(match.group(2))
+        return float(match.group(1)), bool(match.group(2))
 
     def _fail(self, reason: str) -> Dict[str, Any]:
         if self._warned != reason:
@@ -179,14 +216,19 @@ class RoomVolume:
         if code != 0:
             self._fail(f"wpctl set-volume failed: {out.strip() or code}")
             raise DeviceUnavailable(self._reason)
-        self._level = level
+        self._level, self._raw_level = level, level / 100
         self._checked_at = None  # the next status reads it back
         return self.state()
 
     async def step(self, delta: int) -> Dict[str, Any]:
+        """Louder or quieter from the level the speaker is at now. PipeWire allows more than 100 %, which the page
+        shows as 100: Louder from there writes nothing (100 % would be quieter), Quieter goes down from 100."""
         async with self._lock:
             await self._refresh(force=True)
-            return await self._set_level(self._level + int(delta))
+            delta = int(delta)
+            if delta > 0 and self.available and self._raw_level >= 1.0:
+                return self.state()
+            return await self._set_level(self._level + delta)
 
     async def set_muted(self, muted: bool) -> Dict[str, Any]:
         async with self._lock:

@@ -19,7 +19,7 @@ from tests.unit.devices.fake_v4l2 import MEETUP, FakeClock, FakeV4l2
 from tests.unit.devices.test_volume import FakeRunner
 
 HOME = {"pan_s": 1.0, "tilt_s": 0.5}
-# A sink node pw-dump never emits without an id: int(None) in the volume module's parser is outside its contract.
+# A sink node pw-dump never emits without an id: the volume module answers "output not understood" for it.
 NODE_WITHOUT_ID = json.dumps([{"type": "PipeWire:Interface:Node",
                                "info": {"props": {"media.class": "Audio/Sink", "node.name": "odd-sink"}}}])
 
@@ -407,6 +407,24 @@ async def test_a_pw_dump_node_without_an_id_does_not_stop_the_camera_being_found
         try:
             await service.homing
             assert not service.volume.available
+            assert service.volume.state()["reason"].startswith("pw-dump output not understood: ")
+            assert service.camera.available and service.camera.position_known   # found and homed all the same
+        finally:
+            await service.stop()
+    assert records(caplog, "Device check failed") == []         # the speaker's module handled it: no bug escaped
+
+
+async def test_a_speaker_check_that_raises_does_not_stop_the_camera_being_found_and_homed(tmp_path, caplog):
+    service, _, _ = service_for(tmp_path, home=HOME)
+
+    async def broken(force=False):
+        raise RuntimeError("boom")
+
+    service.volume.refresh = broken          # a bug in the speaker's module, outside its contract
+    with caplog.at_level(logging.INFO):
+        await service.start()
+        try:
+            await service.homing
             assert service.camera.available and service.camera.position_known   # found and homed all the same
         finally:
             await service.stop()

@@ -293,3 +293,111 @@ async def test_a_caller_arriving_during_a_reprobe_waits_for_it(call):
     clock.now += 5  # and the cache has run out
     results = await asyncio.gather(getattr(volume, call)(*args), getattr(volume, call)(*args), return_exceptions=True)
     assert all(isinstance(result, dict) and result["available"] for result in results), results
+
+
+# --- the room's choice is the call's speaker too; above 100 %; a dump that is odd or malformed ---
+
+HDMI = "alsa_output.platform-fef00700.hdmi.hdmi-stereo"
+
+
+def dump_with_default(name):
+    """PW_DUMP with another sink named in the default metadata, as after WirePlumber has switched."""
+    objects = json.loads(PW_DUMP)
+    objects[0]["metadata"][0]["value"]["name"] = name
+    return json.dumps(objects)
+
+
+def set_defaults(runner):
+    return [call for call in runner.calls if call[:2] == ["wpctl", "set-default"]]
+
+
+async def test_a_preferred_sink_becomes_pipewires_default_once_per_change(caplog):
+    volume, runner, clock = volume_for("HDMI")
+    with caplog.at_level(logging.INFO):
+        state = await volume.refresh()
+    assert state["available"] is True and state["device"] == "Built-in Audio Digital Stereo (HDMI)"
+    # the browser plays the call through the default sink: the room's choice is made the default before it is read
+    assert runner.calls == [["pw-dump"], ["wpctl", "set-default", "35"], ["wpctl", "get-volume", "35"]]
+    assert [r.levelno for r in caplog.records if "default output" in r.getMessage()] == [logging.INFO]
+    runner.dump = dump_with_default(HDMI)                        # WirePlumber has made it the default
+    for _ in range(2):
+        clock.now += 5
+        await volume.refresh()
+    assert set_defaults(runner) == [["wpctl", "set-default", "35"]]   # not again while it is the default
+    runner.dump = PW_DUMP                                        # something made the MeetUp the default again
+    clock.now += 5
+    await volume.refresh()
+    assert set_defaults(runner) == [["wpctl", "set-default", "35"]] * 2
+
+
+async def test_without_a_preference_the_default_sink_is_left_alone():
+    volume, runner, clock = volume_for()
+    await volume.refresh()
+    runner.dump = dump_with_default(HDMI)                        # the default moves: the slider follows it, nothing is written
+    clock.now += 5
+    assert (await volume.refresh())["device"] == "Built-in Audio Digital Stereo (HDMI)"
+    runner.dump = SINKS_NAMED_THREE_WAYS                         # no default named at all: the first sink, and still nothing written
+    clock.now += 5
+    assert (await volume.refresh())["device"] == "Alpha described"
+    assert set_defaults(runner) == []
+
+
+async def test_a_preferred_sink_that_is_already_the_default_is_left_alone():
+    volume, runner, _ = volume_for("MeetUp")
+    assert (await volume.refresh())["available"] is True
+    assert set_defaults(runner) == []
+
+
+async def test_a_failing_set_default_warns_once_and_leaves_the_slider_on_the_chosen_sink(caplog):
+    volume, runner, clock = volume_for("HDMI")
+    runner.fail["wpctl set-default"] = "no such object"
+    with caplog.at_level(logging.WARNING):
+        for _ in range(3):
+            state = await volume.refresh()
+            clock.now += 5
+    assert state["available"] is True and state["device"] == "Built-in Audio Digital Stereo (HDMI)" and state["reason"] is None
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1 and "no such object" in warnings[0]
+    assert set_defaults(runner) == [["wpctl", "set-default", "35"]]   # not tried again every few seconds
+    assert (await volume.set_level(60))["level"] == 60 and runner.calls[-1] == ["wpctl", "set-volume", "35", "0.60"]
+
+
+async def test_louder_from_above_one_hundred_percent_writes_nothing():
+    volume, runner, _ = volume_for(volume="Volume: 1.50\n")       # PipeWire allows more than 100 %
+    assert (await volume.step(5))["level"] == 100
+    assert [call for call in runner.calls if call[:2] == ["wpctl", "set-volume"]] == []   # 1.00 would make the room quieter
+    runner.volume = "Volume: 1.00\n"
+    assert (await volume.step(5))["level"] == 100
+    assert [call for call in runner.calls if call[:2] == ["wpctl", "set-volume"]] == []
+
+
+async def test_quieter_from_above_one_hundred_percent_goes_down_from_one_hundred():
+    volume, runner, _ = volume_for(volume="Volume: 1.50\n")
+    assert (await volume.step(-5))["level"] == 95
+    assert runner.calls[-1] == ["wpctl", "set-volume", "57", "0.95"]
+
+
+async def test_a_description_pw_dump_prints_as_a_number_is_still_a_name(caplog):
+    dump = json.dumps([sink_node(7, "alsa_output.usb-Box", description=1234)])   # pw-dump prints a numeric value unquoted
+    volume, _, _ = volume_for(dump=dump)
+    with caplog.at_level(logging.INFO):
+        state = await volume.refresh()
+    assert state["available"] is True and state["device"] == "1234"
+    assert "Speaker: 1234 (PipeWire sink 7), level 40; sinks: 1234" in [r.getMessage() for r in caplog.records]
+    volume, _, _ = volume_for("123", dump=dump)                  # and a preference matches it as text
+    assert (await volume.refresh())["device"] == "1234"
+
+
+@pytest.mark.parametrize("objects", [
+    [{"id": None, "type": "PipeWire:Interface:Node", "info": {"props": {"media.class": "Audio/Sink", "node.name": "x"}}}],
+    [{"id": 36, "type": "PipeWire:Interface:Metadata", "props": ["metadata.name", "default"], "metadata": []}],
+    [{"id": 36, "type": "PipeWire:Interface:Metadata", "props": {"metadata.name": "default"}, "metadata": ["default.audio.sink"]}],
+    [{"id": 57, "type": "PipeWire:Interface:Node", "info": {"props": "Audio/Sink"}}],
+], ids=["a node whose id is null", "metadata whose props is a list", "a metadata entry that is not an object",
+        "a node whose props is not an object"])
+async def test_a_malformed_dump_is_output_not_understood(objects, caplog):
+    volume, _, _ = volume_for(dump=json.dumps(objects))
+    with caplog.at_level(logging.WARNING):
+        state = await volume.refresh()
+    assert state["available"] is False and state["reason"].startswith("pw-dump output not understood: ")
+    assert [r.getMessage() for r in caplog.records] == [f"Speaker unavailable: {state['reason']}"]

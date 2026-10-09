@@ -83,7 +83,10 @@ to both services.
 ### 4.2 Volume (`src/croom/devices/volume.py`, class `RoomVolume`)
 
 - Talks to PipeWire through two commands already on Raspberry Pi OS: `pw-dump` to
-  list sinks and the default sink, `wpctl` to read and set a sink's level and mute.
+  list sinks and the default sink, `wpctl` to read and set a sink's level and mute
+  and, when a preference names a sink that is not PipeWire's default, `wpctl
+  set-default` once per change so the call's audio follows the room's choice
+  (WirePlumber remembers it; `auto` leaves the default alone).
   Commands run through an injectable async runner (default: `asyncio` subprocess,
   2 s timeout). Nothing is imported from the upstream audio service.
 - `from_config(config)`: the preference is `config.audio.output_device`; `auto` (the
@@ -188,8 +191,9 @@ All POSTs are JSON-only (415 otherwise) and answer with the block they changed.
 - The slider sends `level` on change (release), the buttons send `step`; the panel
   shows the level and the device name.
 - Preview: opening the Camera panel while idle sends `preview on` and renews it every
-  30 s; closing it, or the page unloading, sends `preview off`. The panel is a
-  collapsible section; it opens closed.
+  30 s; closing it, or the page unloading, sends `preview off`. The panel closes
+  itself after ten minutes without a camera action, so an always-on kiosk returns
+  the TV to the screensaver. The panel is a collapsible section; it opens closed.
 - `style.css`: the arrow pad is a 3 by 3 grid of 64 px buttons; everything wraps at
   phone width with no horizontal scroll (the existing phone test keeps guarding it).
 

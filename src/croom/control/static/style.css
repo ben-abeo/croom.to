@@ -82,6 +82,7 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 .meeting-state { margin: 0; font-weight: 600; }
 .meeting-elapsed { margin: 0; color: var(--periwinkle-300); font-variant-numeric: tabular-nums; }
 .next-warning, .offline-note { margin: 0; padding: 8px 14px; border-radius: var(--radius-sm); background: var(--warn-fill); color: var(--ink-900); font-weight: 600; }
+.next-warning { max-width: 40ch; overflow-wrap: anywhere; }   /* a long title wraps inside the pill; one with no break in it cannot push the clock off the bar */
 .meeting-state[hidden], .meeting-elapsed[hidden], .next-warning[hidden], .offline-note[hidden], .nav[hidden] { display: none; }
 
 .brand { display: flex; flex-direction: column; gap: 14px; min-width: 0; }

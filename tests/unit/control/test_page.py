@@ -1275,6 +1275,7 @@ def test_upcoming_says_so_when_nothing_else_is_booked(browser):
         assert page.locator("#next-warning").is_hidden()
         page.click("#open-upcoming")
         assert page.locator("#upcoming-list .event").count() == 0 and page.locator("#upcoming-empty").is_visible()
+        assert page.locator("#upcoming-empty").inner_text() == "No more meetings today"
         page.close()
 
 
@@ -1297,7 +1298,9 @@ def test_the_camera_during_a_meeting_recalls_and_nudges_but_never_sets_up(browse
         page.wait_for_function("document.body.dataset.view === 'camera'", timeout=5000)
         page.wait_for_timeout(300)
         assert asked == []                                     # no preview during a meeting
+        assert server.devices.camera.recalls == [1] and server.devices.camera.saves == []   # the tap recalled the preset and saved nothing
         hold(page, "#arrow-pad button[data-pan='1']")
+        page.wait_for_timeout(300)                             # the stop is a request still on its way when the release returns
         assert server.devices.camera.moves[-2:] == [(1, 0), (0, 0)]
         page.close()
 
@@ -1388,4 +1391,113 @@ def test_the_next_booking_warning_is_for_a_call_and_only_when_it_is_close(browse
         server.meeting.set_state(MeetingState.JOINING)           # any state of a call
         page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
         assert page.locator("#next-warning").is_visible() == close
+        page.close()
+
+
+# --- what the meeting screen's refactor rebuilt, and the meeting you are in ---
+
+def test_a_booking_reads_the_same_in_the_today_list_and_the_upcoming_list(browser):
+    """One builder makes both rows: the Today row, less its Join button, is the Upcoming row."""
+    skip_if_day_ends_within(1.5)                               # the last booking starts in 40 minutes, and the service lists today's only
+    bookings = [event("e1", "Design review", 8), event("e2", "Board lunch", 40, url=None)]   # one with a link, one without
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.querySelectorAll('#events .event').length === 2 && document.querySelectorAll('#upcoming-list .event').length === 2", timeout=5000)
+        rows = page.evaluate("""() => {
+            const read = (li) => {
+                const bare = li.cloneNode(true);
+                bare.querySelectorAll('button').forEach((b) => b.remove());
+                const platform = li.querySelector('.platform');
+                return { html: bare.outerHTML, time: li.querySelector('time').textContent, title: li.querySelector('.title').textContent, platform: platform && platform.textContent };
+            };
+            return { today: [...document.querySelectorAll('#events .event')].map(read), upcoming: [...document.querySelectorAll('#upcoming-list .event')].map(read) };
+        }""")
+        assert rows["today"] == rows["upcoming"]
+        assert [row["title"] for row in rows["upcoming"]] == ["Design review", "Board lunch"]
+        assert [row["platform"] for row in rows["upcoming"]] == ["Zoom", None]      # the platform line is there when the booking has a link
+        assert page.locator("#events .event button").count() == 1                   # Join is Today's own, on the booking inside its window
+        assert page.locator("#upcoming-list button").count() == 0
+        page.close()
+
+
+def test_the_elapsed_time_in_the_top_bar_moves_between_status_polls(browser):
+    """The once-a-second timer moves the time; a status poll every two seconds alone would skip a value."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("/^\\d+:\\d\\d$/.test(document.getElementById('meeting-elapsed').innerText)", timeout=5000)
+        held = []
+        page.route("**/api/status", lambda route: held.append(route))             # no answer from here on, so nothing is drawn again ...
+        page.route("**/api/calendar/events", lambda route: held.append(route))    # ... and only the timer can move the time
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)                         # a poll has come and been held: every earlier one was answered
+        assert held
+        before = page.locator("#meeting-elapsed").inner_text()
+        page.wait_for_timeout(2200)                            # two ticks at least
+        assert page.locator("#meeting-elapsed").inner_text() != before
+        for route in held:
+            route.continue_()
+        page.close()
+
+
+def test_a_long_unbroken_title_in_the_warning_wraps_inside_the_top_bar(browser):
+    skip_if_day_ends_within(1)                                 # the booking starts in 8 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Q" * 100, 8)]) as server:   # a title with no space or hyphen to break at
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        join_by_id(page)                                       # by link: the booking is still the next one
+        page.wait_for_function("!document.getElementById('next-warning').hidden", timeout=5000)
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        clock = page.locator("#clock").bounding_box()
+        assert clock["x"] >= 0 and clock["x"] + clock["width"] <= 1280      # the clock is still on the bar
+        assert fits(page)
+        page.close()
+
+
+def test_the_meeting_you_are_in_is_not_next(browser):
+    """Joined from its window, a booking has not started yet: the bar and the Upcoming list leave it out, and
+    the list goes on showing a later one."""
+    skip_if_day_ends_within(2)                                 # the last booking starts in 90 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 8), event("e2", "Sales call", 90)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.click("#actions button:has-text('Join now')")    # this booking, not a link
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-state").inner_text() == "In a meeting"
+        assert page.locator("#next-warning").is_hidden()       # eight minutes away, but it is the meeting we are in
+        page.click("#open-upcoming")
+        assert page.locator("#upcoming-list .title").all_inner_texts() == ["Sales call"]
+        assert page.locator("#upcoming-empty").is_hidden()
+        page.click("#back-from-upcoming")
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        assert page.locator("#upcoming-list .title").all_text_contents() == ["Design review", "Sales call"]   # a booking again once the call is over
+        page.close()
+
+
+def test_a_booking_whose_platform_changes_is_redrawn_in_both_lists(browser):
+    """An organiser swaps the link on a booking: at the next poll its rows say so, in the Today list and in the Upcoming list."""
+    skip_if_day_ends_within(1.5)                               # the booking starts in 40 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        swapped = []
+
+        def answer(route):
+            data = route.fetch().json()
+            if swapped:
+                for booking in data["events"]:
+                    booking["meeting_platform"] = "teams"
+            route.fulfill(json=data)
+
+        page.route("**/api/calendar/events", answer)
+        platforms = "[...document.querySelectorAll('#events .platform, #upcoming-list .platform')].map((p) => p.textContent).join()"
+        assert page.evaluate(platforms) == "Zoom,Zoom"
+        swapped.append(True)
+        page.clock.run_for(30000)                              # the bookings are polled every 30 seconds
+        page.wait_for_function(f"{platforms} === 'Teams,Teams'", timeout=5000)
         page.close()

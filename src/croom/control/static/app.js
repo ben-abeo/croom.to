@@ -167,10 +167,16 @@
   const WARN_BEFORE_MS = 10 * 60 * 1000;
   const STATE_LABELS = { joining: "Joining", in_lobby: "In the lobby", connected: "In a meeting", leaving: "Leaving" };
 
+  // What is still to come today. In meeting mode the booking the room joined from its window has not started yet, and
+  // must not show as "next" to the call that is in it: the status carries that meeting's title, so a booking with the
+  // same title is left out. A meeting joined by link has no title and leaves nothing out.
   function upcoming() {
     const now = Date.now();
-    return model.events.filter((ev) => new Date(ev.start_time).getTime() > now);
+    const title = mode() === "meeting" ? model.status.meeting.title : "";
+    return model.events.filter((ev) => new Date(ev.start_time).getTime() > now && !(title && ev.title === title));
   }
+
+  const rowFields = (ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform];   // what eventItem reads: the key of either list covers it
 
   // The top bar in meeting mode: what the call is doing, for how long, and a warning when the next booking is close.
   function renderMeetingBar(m) {
@@ -212,7 +218,7 @@
   function renderUpcoming() {
     // Rebuilt only when what a row shows changes, so the list keeps its scroll position while the page polls.
     const items = upcoming();
-    const key = JSON.stringify(items.map((ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform]));
+    const key = JSON.stringify(items.map(rowFields));
     if (key === lastUpcomingKey) return;
     lastUpcomingKey = key;
     el("upcoming-empty").hidden = items.length > 0;
@@ -248,7 +254,7 @@
     if (viewMode(view()) !== mode()) applyView(MAIN_SCREEN[mode()], true);   // a meeting began or ended: land on that mode's screen
     if (m.state !== lastMeetingState) {
       // A join that failed while someone was on Options: the "Couldn't join" card is on the idle screen.
-      if (m.state === "error") applyView("idle", true);
+      if (m.state === "error" && view() !== "idle") applyView("idle", true);
       lastMeetingState = m.state;
     }
     renderMeetingBar(m);
@@ -355,7 +361,7 @@
     const note = el("calendar-note");
     const meetingState = model.status ? model.status.meeting.state : "idle";
     const key = JSON.stringify([cal.connected, cal.current && cal.current.id, meetingState, model.busy,
-      model.events.map((ev) => [ev.id, ev.title, ev.start_time, ev.joinable, joinWindow(ev).open, joinWindow(ev).past])]);
+      model.events.map((ev) => [...rowFields(ev), joinWindow(ev).open, joinWindow(ev).past])]);
     if (key === lastEventsKey) return;
     lastEventsKey = key;
     list.replaceChildren();

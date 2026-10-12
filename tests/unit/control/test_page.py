@@ -263,6 +263,17 @@ def test_the_door_sign_hides_the_location_line_when_the_room_has_none(browser):
         page.close()
 
 
+def test_the_door_sign_shows_the_location_line_when_the_room_has_one(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#room-location").is_visible()
+        assert page.locator("#room-location").inner_text() == "2nd floor"
+        assert page.locator("#room-name").inner_text() == "Lab"
+        page.close()
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -599,6 +610,35 @@ def test_a_short_day_keeps_each_booking_at_its_own_height(browser):
         page.wait_for_function("document.querySelectorAll('#events .event').length === 1", timeout=5000)
         row, box = page.locator("#events .event").bounding_box(), page.locator("#events").bounding_box()
         assert row["height"] < 120 < box["height"]                           # a row, not the whole bookings box
+        page.close()
+
+
+def test_a_booking_in_progress_keeps_its_row_inside_the_today_list(browser):
+    """The row of the booking in progress carries the class "now", which once also placed the status card in the idle
+    grid: the row left its list. It must stay in the list's one column with the other rows, and the card in the grid's
+    first cell, beside the bookings and above the link box."""
+    skip_if_day_ends_within(1)                                               # the others start in 20 and 35 minutes, and the service lists today's only
+    now = datetime.now().astimezone()
+    into_the_day = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 60
+    bookings = [event("b1", "Standup", -min(5, into_the_day), duration=30),  # begun a few minutes ago, never before today's midnight; has a link
+                event("b2", "Design review", 20), event("b3", "Retro", 35)]
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon' && document.querySelectorAll('#events .event').length === 3", timeout=5000)
+        assert page.locator("#kicker").inner_text().upper() == "HAPPENING NOW"
+        assert page.locator("#events .event.now").count() == 1 and "Standup" in page.locator("#events .event.now").inner_text()
+        box = page.locator("#events").bounding_box()
+        rows = [page.locator("#events .event").nth(i).bounding_box() for i in range(3)]
+        assert rows[0]["y"] < rows[1]["y"] < rows[2]["y"], rows              # in the order of the day: the one in progress stays first
+        for row in rows:                                                     # every row, the one in progress too, is inside the list, in the same column
+            assert box["x"] - 0.5 <= row["x"] and row["x"] + row["width"] <= box["x"] + box["width"] + 0.5, rows
+            assert box["y"] - 0.5 <= row["y"] and row["y"] + row["height"] <= box["y"] + box["height"] + 0.5, rows
+            assert abs(row["x"] - rows[0]["x"]) < 1 and abs(row["width"] - rows[0]["width"]) < 1, rows
+        view = page.locator(".view[data-view='idle']").bounding_box()
+        card, link, schedule = (page.locator(selector).bounding_box() for selector in (".status-card", ".link", ".schedule"))
+        assert abs(card["x"] - view["x"]) < 1 and abs(card["y"] - view["y"]) < 1       # still the first cell of the idle grid
+        assert card["x"] + card["width"] <= schedule["x"] and card["y"] + card["height"] <= link["y"] + 1   # beside the bookings, above the link box
         page.close()
 
 

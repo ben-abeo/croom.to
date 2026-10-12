@@ -65,7 +65,9 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
   grid-template-areas: "now schedule" "link schedule" ". schedule";
   column-gap: clamp(32px, 4vw, 72px);
 }
-.now { grid-area: now; }
+/* The status card only. The Today list's row for the booking in progress carries the class "now" too (.event.now, below),
+   and a bare .now rule sent that row to a column of its own in the list's grid, out of its place among the bookings. */
+.view[data-view="idle"] > .status-card { grid-area: now; }
 .link { grid-area: link; }
 .schedule { grid-area: schedule; display: flex; flex-direction: column; }
 .upcoming-box { display: flex; flex-direction: column; width: 100%; }
@@ -89,7 +91,7 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 .logo { width: clamp(96px, 9vw, 120px); height: auto; display: block; }
 h1 { margin: 0; font-size: clamp(1.3rem, 2.2vw, 2rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
 .location { margin: 2px 0 0; color: var(--periwinkle-300); }
-.location[hidden] { display: none; }
+.location[hidden] { display: none; }   /* defensive: .location sets no display today; this keeps the hidden attribute winning if one is added above */
 
 .clock {
   margin: 0;
@@ -297,8 +299,9 @@ body.keyboard-open .schedule { display: none; }
   .camera-left { flex-wrap: wrap; }
   /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, so its width is not left to what a
      shared row has spare. While it shows, the right side of the bar drops under the name onto a line of its own, the
-     width of the bar, and the warning takes a row of that line: as wide as the bar whatever the room is called. A bar
-     without the warning keeps its one row; the kiosk's bar is not touched. */
+     width of the bar, and the warning takes a row of that line: the full width of the bar up to a screen about 430 px
+     wide, and above that its own cap of 40ch (about 400 px), whatever the room is called. A bar without the warning
+     keeps its one row; the kiosk's bar is not touched. */
   .top:has(.next-warning:not([hidden])) { flex-wrap: wrap; row-gap: 12px; }
   .top:has(.next-warning:not([hidden])) .top-right { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
   .top:has(.next-warning:not([hidden])) .next-warning { flex: 1 1 100%; }

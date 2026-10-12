@@ -354,6 +354,11 @@ class TestRoomLocationPlaceholder:
     def test_a_real_location_is_kept_and_trimmed(self):
         assert RoomConfig(location=" 2nd floor ").location == "2nd floor"
 
+    def test_a_padded_placeholder_counts_as_no_location(self):
+        """The spaces go first, then the prefix is looked for: a placeholder someone padded is still a placeholder."""
+        assert RoomConfig(location="  REPLACE_WITH_ANYTHING ").location == ""
+        assert without_placeholder("  REPLACE_WITH_ANYTHING ") == ""
+
     def test_from_dict_and_to_dict_carry_the_blank(self):
         config = Config.from_dict({"room": {"name": "Room 1", "location": "REPLACE_WITH_LOCATION"}})
         assert config.room.location == ""

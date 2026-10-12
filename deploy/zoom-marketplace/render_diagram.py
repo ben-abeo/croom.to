@@ -49,13 +49,13 @@ svg {{ position: absolute; left: 0; top: 0; width: 1600px; height: 1000px; point
 <div class="box" style="left:90px; top:360px; width:300px;"><b>Door sign</b>PoE panel showing free / booked / in use, read from the room device.</div>
 <div class="box" style="left:90px; top:500px; width:300px;"><b>Dashboard (Raspberry Pi)</b>Node/Express + Postgres under Docker. Fleet status and enrollment tokens.<br><span>Never talks to Zoom.</span></div>
 
-<div class="box dark" style="left:470px; top:170px; width:600px; height:640px;"><b>Room device: Raspberry Pi 5 behind the room's TV (one per room)</b><span>Raspberry Pi OS 64-bit. The croom agent, Python 3.12, runs as a systemd service.</span>
+<div class="box dark" style="left:470px; top:170px; width:600px; height:668px;"><b>Room device: Raspberry Pi 5 behind the room's TV (one per room)</b><span>Raspberry Pi OS 64-bit. The croom agent, Python 3.12, runs as a systemd service.</span>
   <div class="box inner" style="left:22px; top:92px; width:264px;"><b>Control service</b>aiohttp on :8080, LAN only. Room page, door sign, /api/meeting/*.</div>
   <div class="box inner" style="left:314px; top:92px; width:264px;"><b>Calendar service</b>Google Calendar read-only via a service account (today's bookings).</div>
   <div class="box inner" style="left:22px; top:248px; width:556px;"><b>Meeting service, Zoom provider</b>1. Mints the Meeting SDK signature (HS256 JWT) from the SDK app's client id and secret.<br>2. For a meeting hosted by another account: Server-to-Server OAuth token, then GET /users/&lt;room user&gt;/token?type=zak.<br>3. Serves a one-page site on 127.0.0.1 that loads Zoom's Web Meeting SDK 6.5.0 (Client View) from source.zoom.us.<br>4. Opens it in the bundled Chromium (Playwright) on the TV; mute, camera and leave go through the SDK's bridge.</div>
-  <div class="box inner" style="left:22px; top:500px; width:556px;"><b>Credentials</b>/etc/croom/zoom-credentials.json, root-only (mode 600): SDK client id and secret, Server-to-Server account id, client id and secret, the room's Zoom user. Nothing else is stored; the ZAK lives in memory for one join.</div>
+  <div class="box inner" style="left:22px; top:500px; width:556px;"><b>Credentials</b>/etc/croom/zoom-credentials.json (service user, mode 600): both apps' client ids and secrets, the account id, the room's Zoom user. Nothing else is stored: the ZAK lives in memory for one join, and the join page is sent with no-store, so the browser keeps no copy.</div>
 </div>
-<div class="note" style="left:470px; top:830px;">Camera and speakerphone are USB devices on the room device; media goes straight from Chromium to Zoom's meeting servers over TLS/DTLS-SRTP, as in any Zoom web client.</div>
+<div class="note" style="left:470px; top:858px; max-width:600px;">Camera and speakerphone are USB devices on the room device; media goes straight from Chromium to Zoom's meeting servers over TLS/DTLS-SRTP, as in any Zoom web client.</div>
 
 <div class="box" style="left:1200px; top:170px; width:314px;"><b>App Marketplace</b>General App "Crystal Meet Rooms" (Meeting SDK) and a Server-to-Server OAuth app with scope user:read:zak:admin. Unlisted.</div>
 <div class="box" style="left:1200px; top:330px; width:314px;"><b>zoom.us/oauth/token</b>account_credentials grant (HTTPS). Token cached in memory until expiry.</div>

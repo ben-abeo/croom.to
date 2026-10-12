@@ -18,7 +18,13 @@ verified for the account on the Publish page.
   Zoom, collects no data beyond the room's own Zoom Access Key, and is used only
   by Crystal PM, a practice-management software company in the United States.
 - App icon: icon.png (160 by 160), light and dark mode.
-- App gallery: gallery.png (1200 by 780).
+- App gallery: five images, each 1200 by 780, uploaded in this order, with these captions:
+  1. gallery.png: Crystal Meet rooms join Zoom meetings from the room's TV when someone presses Join on the table screen.
+  2. gallery-2-room-page.png: The room page on the table's touch screen: today's bookings, with Join now for a Zoom meeting about to start.
+  3. gallery-3-in-meeting.png: During a Zoom meeting, the room page offers Mute, Turn camera off and Leave.
+  4. gallery-4-tv.png: Between meetings the TV shows the room's status and next booking; Zoom's meeting appears here when someone presses Join.
+  5. gallery-5-door-sign.png: The door sign shows the room as in use while it is in a meeting.
+  render_assets.py draws the first; render_gallery.py renders the other four from the real room page, TV page and door sign.
 - Cover image: cover.png (1824 by 176; the left side sits under the icon, so it carries no text).
 - Adding Your App: From Marketplace.
 - Company name: Crystal PM
@@ -27,10 +33,15 @@ verified for the account on the Publish page.
 
 ## App Listing, Links and Support
 
-- Support URL: https://www.crystalpm.com/contact (or the support page you have)
-- Privacy policy URL: https://www.crystalpm.com/privacy
-- Terms of use URL: https://www.crystalpm.com/terms
-- Documentation URL: https://github.com/ben-abeo/croom.to (the README)
+- Support URL: https://www.crystalpm.com/support/ (https://www.crystalpm.com/contact redirects there)
+- Privacy policy URL: https://www.crystalpm.com/crystal-meet/zoom/privacy.html (docs/privacy.html)
+- Terms of use URL: https://www.crystalpm.com/crystal-meet/zoom/terms.html (docs/terms.html)
+- Documentation URL: https://www.crystalpm.com/crystal-meet/zoom/ (docs/index.html)
+- The three crystal-meet/zoom addresses are placeholders until the pages in docs/ are hosted
+  there. Before resubmitting: host them (the privacy policy and terms after legal review), check
+  that each opens without a login, and verify crystalpm.com on the Publish page. Zoom's first
+  review rejected /privacy and /terms (they do not exist) and the GitHub documentation link (not
+  a company-owned domain).
 - Privacy Policy acknowledgment: tick it.
 - Support contact email: the same mailbox as above
 
@@ -107,8 +118,11 @@ verified for the account on the Publish page.
    the reviewer notes ("no webhooks or event subscriptions").
 3. Collect, store, log or retain Zoom user data including OAuth tokens: **No**.
    The Server-to-Server access token is held in memory until it expires and
-   the ZAK for one join; neither is written to disk or logged. The device
-   keeps only its own credentials, in a root-only file.
+   the ZAK for one join; neither is written to disk or logged. The device's
+   browser gets the signature and ZAK from a loopback-only join page served
+   with Cache-Control: no-store, so its profile keeps no copy. The device
+   keeps only its own credentials, in a file readable only by the service
+   user (mode 600).
 
 ## Publish page
 

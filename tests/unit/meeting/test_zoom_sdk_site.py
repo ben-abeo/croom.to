@@ -48,6 +48,23 @@ async def test_join_parameters_are_served_once():
         await client.close()
 
 
+async def test_join_parameters_are_never_cached():
+    # The answer carries the signature, the passcode and the room user's ZAK, and the TV's browser keeps a
+    # persistent profile: without no-store, Chromium writes the answer to that profile's disk cache.
+    site = ZoomSdkSite()
+    token = site.register_join({"meetingNumber": "123", "signature": "sig", "zak": "zak-token"})
+    client = await client_for(site)
+    try:
+        first = await client.get(f"/join/{token}")
+        second = await client.get(f"/join/{token}")
+        assert (first.status, second.status) == (200, 404)
+        for response in (first, second):
+            assert response.headers.get("Cache-Control") == "no-store"
+            assert response.headers.get("Pragma") == "no-cache"
+    finally:
+        await client.close()
+
+
 async def test_tokens_are_unguessable_and_distinct():
     site = ZoomSdkSite()
     tokens = {site.register_join({"n": i}) for i in range(20)}

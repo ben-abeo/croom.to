@@ -315,7 +315,9 @@
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING,
-    onRender: (fn) => renderHooks.push(fn),
+    // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
+    // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.
+    onRender: (fn) => { renderHooks.push(fn); if (model.status && !model.offline) fn(model.status); },
   };
 
   tick();

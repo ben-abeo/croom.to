@@ -777,6 +777,31 @@ def test_the_panels_degrade_without_a_devices_service(browser):
         page.close()
 
 
+def test_the_panels_are_drawn_even_when_their_script_arrives_after_the_first_poll(browser):
+    """On a slow link the first poll can be answered before devices.js has run: it is given that status as it registers."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        held = []
+        page.route("**/static/devices.js", lambda route: held.append(route))      # the request stalls until the test lets it go
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="commit")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)   # app.js has polled and rendered
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)
+        assert len(held) == 1
+        assert page.locator("#sound-panel").is_hidden() and page.locator("#camera-panel").is_hidden()   # nobody was there to draw them
+        held[0].continue_()
+        page.wait_for_load_state("load")
+        # No waiting for the next poll, two seconds away: the panels were drawn as the script registered.
+        assert page.locator("#sound-panel").is_visible() and page.locator("#camera-panel").is_visible()
+        assert page.locator("#volume-level").inner_text() == "40"
+        assert errors == []
+        page.close()
+
+
 def test_save_and_the_set_up_link_wait_for_a_saved_home(browser):
     with PageServer(devices=StubDevices(camera=StubCamera(home_saved=False, position_known=False, saved=()))) as server:
         page = open_page(browser, server)

@@ -63,6 +63,7 @@
     const s = model.status;
     el("room-name").textContent = s.room.name;
     el("room-location").textContent = s.room.location;
+    el("room-location").hidden = !s.room.location;
     const m = s.meeting;
     const cal = s.calendar;
     const now = Date.now();

@@ -26,9 +26,10 @@ playwright = pytest.importorskip("playwright.sync_api")
 class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
-    def __init__(self, calendar_events=(), room_name="Lab", calendar_connected=True, port=0, devices=None):
+    def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None):
         self.events = list(calendar_events)
         self.room_name = room_name
+        self.room_location = room_location
         self.calendar_connected = calendar_connected
         self.port_arg = port
         self.devices = devices if devices is not None else StubDevices()
@@ -50,7 +51,7 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting()
         service = ControlService(
-            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": "2nd floor",
+            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
                     "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")},
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
             devices=self.devices,
@@ -195,6 +196,29 @@ def test_door_sign_hides_the_schedule_without_a_calendar(browser):
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert page.locator("#headline").inner_text() == "Free"
         assert page.locator("#upcoming").count() == 1 and not page.locator("#upcoming").is_visible()
+        page.close()
+
+
+def test_the_location_line_disappears_when_the_room_has_none(browser):
+    with PageServer(room_location="") as server:
+        page = open_page(browser, server)
+        assert page.locator("#room-location").is_hidden()
+        assert page.locator("#room-location").evaluate("el => getComputedStyle(el).display") == "none"   # an empty paragraph is already "hidden" to Playwright
+        assert page.locator("#room-name").inner_text() == "Lab"
+        page.close()
+    with PageServer() as server:
+        page = open_page(browser, server)
+        assert page.locator("#room-location").is_visible() and page.locator("#room-location").inner_text() == "2nd floor"
+        page.close()
+
+
+def test_the_door_sign_hides_the_location_line_when_the_room_has_none(browser):
+    with PageServer(room_location="") as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#room-location").is_hidden()
+        assert page.locator("#room-location").evaluate("el => getComputedStyle(el).display") == "none"
         page.close()
 
 

@@ -5,6 +5,7 @@ version: 2
 
 room:
   name: "Room 2"
+  # What people call the place, e.g. "2nd floor, by the kitchen". Leave the placeholder or delete the line to show the room's name alone.
   location: "REPLACE_WITH_LOCATION"
   timezone: "America/Chicago"
 

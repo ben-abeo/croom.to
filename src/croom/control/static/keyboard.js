@@ -1,6 +1,7 @@
-// The page's own keyboard, for screens without one (spec 2026-10-08, the kiosk package): the table Pi's kiosk browser
-// opens the page with ?keyboard=1 and the keyboard appears when the link field is tapped; the button beside the field
-// toggles it on any device. Keys never take the focus from the field.
+// The page's own keyboard, for screens without one (added with the table Pi's kiosk installer, 2026-10-08): the table
+// Pi's kiosk browser opens the page with ?keyboard=1 and the keyboard appears when the link field is tapped; the button
+// beside the field toggles it on any device. Keys never take the focus from the field. The link field is on the idle
+// screen only, so the keyboard opens there only and hides when the view changes (spec 2026-10-12, section 4.1).
 (function () {
   "use strict";
   const P = window.croomPage;
@@ -79,6 +80,7 @@
   }
 
   function show() {
+    if (P.view() !== "idle") return;   // nothing to type into on any other screen
     if (open) return;
     open = true;
     render();
@@ -107,5 +109,5 @@
     show();
     input.focus();
   });
-  return { show: show, hide: hide };
+  P.onViewChange((name) => { if (name !== "idle") hide(); });
 })();

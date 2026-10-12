@@ -26,12 +26,10 @@
   // user last got nor writes one, and a refusal of it is not shown or scrolled to.
   const INTERRUPTED = "the camera move was interrupted";
   const deviceNotes = { audio: "", camera: "" };
-  let lastCameraAction = 0;   // when this page last opened the Camera panel or asked the camera for something itself
 
   async function deviceCall(kind, path, body, options) {
     const long = Boolean(options && options.long);
     const background = Boolean(options && options.background);
-    if (kind === "camera" && !background) lastCameraAction = Date.now();   // the preview's own renewal is not a person
     if (long) {
       // Home, a preset recall and Find the stops run for seconds inside the request: ask the status for the camera's
       // "busy" now, so "Moving..." shows without waiting for the poll's turn.
@@ -193,8 +191,9 @@
 
   // The idle preview on the TV follows the Camera framing screen (spec 2026-10-12, section 4.2): asked for while the
   // camera view is shown in idle mode and no meeting runs, renewed every 30 s, and turned off once when the page
-  // leaves that view: by Back, or on its own when a meeting begins, which is nobody's action (a background call: no
-  // note, no scroll if it fails). The camera view opened from a meeting never asks for it.
+  // leaves that view: by Back, or on its own when a meeting begins or the idle return fires (app.js, ten minutes
+  // without a tap), which is nobody's action (a background call: no note, no scroll if it fails). The camera view
+  // opened from a meeting never asks for it.
   function previewWanted() {
     const s = model.status;
     return Boolean(P.view() === "camera" && P.cameraMode() === "idle" && s && s.camera && s.camera.available && !IN_MEETING.includes(s.meeting.state));
@@ -210,7 +209,6 @@
     }
     if (name === "camera" && P.cameraMode() === "idle") {
       previewing = true;
-      lastCameraAction = Date.now();
       if (previewWanted()) setPreview(true);
       previewTimer = setInterval(() => { if (previewWanted()) setPreview(true, { background: true }); }, 30000);
     }

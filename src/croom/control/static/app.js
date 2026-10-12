@@ -26,12 +26,25 @@
     if (name === "camera") cameraMode = mode();
     document.body.dataset.view = name;
     for (const fn of viewHooks) fn(name, Boolean(automatic));
+    armIdleReturn();   // every view change, an automatic one too, starts or clears the wait
   }
   function setView(name, automatic) {
     if (view() === name) return;
     applyView(name, automatic);
     render();
   }
+
+  // Idle mode returns to the idle screen on its own: the kiosk never reloads and nobody presses Back, so a room left on
+  // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns.
+  const IDLE_RETURN_MS = 10 * 60 * 1000;
+  let idleReturnTimer = null;
+  function armIdleReturn() {
+    clearTimeout(idleReturnTimer);
+    idleReturnTimer = null;
+    if (mode() === "idle" && view() !== "idle") idleReturnTimer = setTimeout(() => setView("idle", true), IDLE_RETURN_MS);
+  }
+  document.addEventListener("pointerdown", armIdleReturn, true);
+
   let confirmTimer = null;
   let lastEventsKey = null;
   let lastPickerKey = null;

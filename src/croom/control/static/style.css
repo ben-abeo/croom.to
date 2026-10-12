@@ -233,6 +233,7 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
 .keyboard .key:active { background: var(--blue-700); }
 body.keyboard-open .screen { padding-bottom: 290px; }
 body.keyboard-open { height: auto; min-height: 100vh; }   /* the screen may grow under the keys, so the field can scroll above them */
+body.keyboard-open .schedule { display: none; }   /* the bookings make room; the link box stays above the keys */
 @media (max-width: 480px) { .keyboard .key { min-height: 44px; font-size: 0.95rem; } .keyboard .key.wide { font-size: 0.8rem; } }
 
 /* Screensaver: the picker; the chosen style stays filled in every room state. */
@@ -282,7 +283,7 @@ body.keyboard-open { height: auto; min-height: 100vh; }   /* the screen may grow
   .schedule, .upcoming-box { min-height: 0; }
   .schedule .events, .upcoming-box .events { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
   /* A title can run to a hundred characters: three lines of headline at most, so the link box stays on the screen.
-     The full title is in the detail line and the Today list. */
+     The full title is in the Today list, and in the detail line when the booking is the next one. */
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 }
 @media (max-width: 1023px) {
@@ -291,4 +292,10 @@ body.keyboard-open { height: auto; min-height: 100vh; }   /* the screen may grow
   .menu { grid-template-columns: 1fr; }
   .camera-grid { grid-template-columns: 1fr; gap: 24px; }   /* the pad, then the presets: two columns need about 800 px */
   .camera-left { flex-wrap: wrap; }
+  /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, and the bar's one row has no room for
+     it beside the name, the state and the clock. While it shows, the right side takes what the name leaves, wraps, and the
+     warning takes a row of its own. A bar without it keeps its one row; the kiosk's bar is not touched. */
+  .top:has(.next-warning:not([hidden])) .brand { max-width: 50%; }
+  .top:has(.next-warning:not([hidden])) .top-right { flex: 1 1 0; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
+  .next-warning { flex: 1 1 100%; }
 }

@@ -2,10 +2,6 @@
 <!--
   DRAFT for Crystal PM's legal review; not approved for publication. Fill in every [TO CONFIRM]
   and remove this comment once legal has signed the text off.
-  Engineering note: the ZAK sentence under "What is kept, and where" describes the device software as
-  it is today, whose browser can keep the one-time join response in its disk cache. Once that response
-  is sent with "Cache-Control: no-store", the sentence can read: "Neither token is written to disk or
-  to a log."
 -->
 <html lang="en">
 <head>
@@ -118,7 +114,7 @@ footer a { color: var(--slate-500); }
 <h2>What is kept, and where</h2>
 <ul>
   <li><strong>On the room's device:</strong> one credentials file, <code>/etc/croom/zoom-credentials.json</code>, with the two apps' client IDs and secrets, the Zoom account ID and the room's Zoom user. Its file permissions let only the account that the Crystal Meet service runs as read it.</li>
-  <li><strong>Short-lived tokens:</strong> the account access token stays in the Crystal Meet service's memory until it expires, within an hour. The room's ZAK is fetched for one join and is valid for at most two hours; it is handed to the room's own browser for that join, which may keep a copy in its cache on the device. Neither token is written to a log.</li>
+  <li><strong>Short-lived tokens:</strong> the account access token stays in the Crystal Meet service's memory until it expires, within an hour. The room's ZAK is fetched for one join and is valid for at most two hours. Neither token is written to disk or to a log. The room's own browser receives the ZAK, the meeting's signature and its passcode from a one-time join page on the device, served with an instruction not to store it (no-store), so the browser keeps no copy of them in its profile.</li>
   <li><strong>In the device's service log:</strong> the meeting number when the room joins and leaves a meeting and, when a join fails, the link that was tried and Zoom's reason. The log stays on the device for troubleshooting and ages out with the operating system's log rotation.</li>
   <li><strong>Nowhere:</strong> the integration does not record, store or transcribe meeting audio, video, chat or shared screens, and keeps no participant names or lists. It contains no analytics, advertising or tracking, and sends no Zoom information to Crystal PM's servers or anyone else.</li>
 </ul>
@@ -144,7 +140,7 @@ footer a { color: var(--slate-500); }
 <ul>
   <li>Every connection from the device to Zoom uses HTTPS with TLS 1.2 or higher.</li>
   <li>The credentials file can be read only by the account the Crystal Meet service runs as (file permissions 600).</li>
-  <li>The page that hosts the Meeting SDK runs on the device itself and answers only the device, and each join's details can be fetched from it only once.</li>
+  <li>The page that hosts the Meeting SDK runs on the device itself and answers only the device. Each join's details can be fetched from it only once, and are served with no-store, so the browser does not keep them.</li>
   <li>The room page and the door sign are served only on the office network.</li>
 </ul>
 </section>

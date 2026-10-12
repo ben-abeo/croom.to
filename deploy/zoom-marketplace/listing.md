@@ -118,8 +118,11 @@ verified for the account on the Publish page.
    the reviewer notes ("no webhooks or event subscriptions").
 3. Collect, store, log or retain Zoom user data including OAuth tokens: **No**.
    The Server-to-Server access token is held in memory until it expires and
-   the ZAK for one join; neither is written to disk or logged. The device
-   keeps only its own credentials, in a root-only file.
+   the ZAK for one join; neither is written to disk or logged. The device's
+   browser gets the signature and ZAK from a loopback-only join page served
+   with Cache-Control: no-store, so its profile keeps no copy. The device
+   keeps only its own credentials, in a file readable only by the service
+   user (mode 600).
 
 ## Publish page
 

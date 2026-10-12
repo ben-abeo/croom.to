@@ -18,6 +18,9 @@ CROSS_ORIGIN_HEADERS = {
     "Cross-Origin-Embedder-Policy": "credentialless",
 }
 LOOPBACK_PEERS = ("127.0.0.1", "::1")
+# The join answer carries the signature, the passcode and the room user's ZAK. The TV's browser keeps a persistent
+# profile, so the answer must never reach its disk cache.
+NO_STORE_HEADERS = {"Cache-Control": "no-store", "Pragma": "no-cache"}
 LEFT_PAGE = (
     "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>Crystal Meet</title></head>"
     "<body style=\"margin:0;background:#111827;color:#fff;font-family:Lexend,'Segoe UI',Arial,sans-serif;"
@@ -74,8 +77,9 @@ class ZoomSdkSite:
     async def _join(self, request: web.Request) -> web.Response:
         params = self._joins.pop(request.match_info["token"], None)
         if params is None:
-            return web.json_response({"error": "unknown or already used join token"}, status=404)
-        return web.json_response(params)
+            return web.json_response({"error": "unknown or already used join token"}, status=404,
+                                     headers=NO_STORE_HEADERS)
+        return web.json_response(params, headers=NO_STORE_HEADERS)
 
     async def _left(self, request: web.Request) -> web.Response:
         return web.Response(text=LEFT_PAGE, content_type="text/html")

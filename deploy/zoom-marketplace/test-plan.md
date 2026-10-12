@@ -14,7 +14,8 @@
   - a Meeting SDK signature (HS256 JWT) minted on the device from the General App's Client ID and Client Secret, and
   - a ZAK for the room's Zoom user, fetched through the account's Server-to-Server OAuth app. Zoom requires this since March 2, 2026, for SDK joins of meetings hosted outside the app's own account.
 - **There is no end-user login, no OAuth authorization (consent) flow, no user roles and no screen inside the Zoom client.** The app is admin-managed: an account admin creates the apps and puts their credentials on the device. The only "user" of the app is the room device; the people in the room never sign in to anything.
-- No webhooks or event subscriptions. Nothing is recorded. The device keeps a credentials file (`/etc/croom/zoom-credentials.json`, mode 600). Every call to Zoom uses HTTPS with TLS 1.2 or higher.
+- No webhooks or event subscriptions. Nothing is recorded. The device keeps a credentials file (`/etc/croom/zoom-credentials.json`), readable only by the service user (mode 600). Every call to Zoom uses HTTPS with TLS 1.2 or higher.
+- The signature, the passcode and the ZAK reach the device's own browser through a one-time join page on 127.0.0.1. That page is served with `Cache-Control: no-store`, so the browser's profile keeps no copy of them. The access token and the ZAK are never written to disk or logged.
 
 ## 2. Environment and prerequisites
 

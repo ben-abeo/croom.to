@@ -269,7 +269,7 @@ Ready: this room can join meetings on your own Zoom account now; meetings hosted
   <li><strong>Rooms can no longer join Zoom meetings.</strong> With the optional change in step 1, the room page offers no Join for Zoom bookings and refuses Zoom links as "Unsupported meeting link". Without it, Zoom bookings still show Join, but Zoom turns the room away: its web client does not admit automated guests.</li>
   <li><strong>Everything else keeps working:</strong> Google Meet, today's bookings on the room page, the Sound and Camera controls, the TV's idle screens and the door sign.</li>
   <li><strong>Nothing of yours stays on Zoom's side.</strong> The integration stores nothing at Zoom. Deactivating or deleting the apps revokes their credentials, and the tokens the device fetched expire on their own: the account token within an hour, the room's ZAK within two hours. The room's Zoom user stays in your account until you remove it in step 3.</li>
-  <li><strong>On the device,</strong> deleting the credentials file ends the integration's access to Zoom. What remains is the device's service log, which notes the meetings the room joined and ages out with the system's log rotation, and possibly expired join details in the TV browser's cache.</li>
+  <li><strong>On the device,</strong> deleting the credentials file ends the integration's access to Zoom. What remains is the device's service log, which notes the meetings the room joined and ages out with the system's log rotation. The TV's browser never kept the join details: the device serves them with no-store.</li>
 </ul>
 <p>To use Zoom in the rooms again, follow <a href="#adding">Adding the app</a> once more.</p>
 </section>

@@ -59,3 +59,27 @@ def test_guide_describes_the_tv_screensaver():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "screensaver" in html and "TV when idle" in html
     assert "leave it open" not in html  # nobody touches the TV's browser any more
+
+
+def test_guide_sets_up_the_table_pi_and_names_the_desktop_icons():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "install-kiosk.sh --url" in html
+    assert "Room controls" in html and "Start Crystal Meet" in html
+    assert "on-screen keyboard" in html
+
+
+def test_guide_sets_up_the_camera_and_the_sound():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "Find the stops" in html and "Save as Home" in html and "Mute speaker" in html
+    assert "Devices the browser sees" in html
+    # what the page shows while the camera moves, and in place of a panel whose device is missing
+    assert "Moving…" in html and "No controllable camera found" in html and "No speaker found" in html
+    assert "audio.output_device: HDMI" in html
+    assert "the panel closes after ten minutes without a tap" in html   # the Camera panel does not keep the TV on the camera
+
+
+def test_guide_says_what_to_do_when_the_browser_cannot_see_the_meetup():
+    """The check starts its own Chromium, so a restart of the service does not answer a device missing from its list."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "wpctl status" in html and "the browser cannot reach PipeWire" in html
+    assert "libpulse0" in html and "the installer adds it" in html and "the desktop user" in html

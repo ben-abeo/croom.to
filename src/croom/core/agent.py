@@ -44,6 +44,7 @@ class CroomAgent:
 
         self._running = False
         self._main_task: Optional[asyncio.Task] = None
+        self._stop_task: Optional[asyncio.Task] = None
 
         logger.info(f"Croom Agent initialized on {self.platform_info.device.value}")
         logger.info(f"AI accelerators: {self.platform_info.ai_accelerators}")
@@ -135,6 +136,17 @@ class CroomAgent:
             except ImportError as e:
                 logger.warning(f"Dashboard client not available: {e}")
 
+        # Room devices: the speaker's volume and the camera's framing (spec 2026-10-08)
+        settings_store = None
+        try:
+            from croom.control.settings import SettingsStore
+            from croom.devices.service import DevicesService
+            settings_store = SettingsStore(self.config.resolve_data_dir() / "control-settings.json")
+            self.service_manager.register(DevicesService.from_config(self.config, settings_store))
+            logger.info("Room devices registered")
+        except ImportError as e:
+            logger.warning(f"Room devices not available: {e}")
+
         # Room control page (local web UI for the room)
         if self.config.control.enabled:
             try:
@@ -143,8 +155,10 @@ class CroomAgent:
                     self.config,
                     meeting=self.service_manager.get_service("meeting"),
                     calendar=self.service_manager.get_service("calendar"),
+                    devices=self.service_manager.get_service("devices"),
+                    store=settings_store,
                 )
-                self.service_manager.register(control_service, dependencies=["meeting", "calendar"])
+                self.service_manager.register(control_service, dependencies=["meeting", "calendar", "devices"])
                 logger.info("Room control page registered")
             except ImportError as e:
                 logger.warning(f"Room control page not available: {e}")
@@ -184,10 +198,21 @@ class CroomAgent:
             await self.stop()
 
     async def stop(self) -> None:
-        """Stop the Croom agent and all services."""
-        if not self._running:
-            return
+        """Stop the Croom agent and all services, once, however many callers ask.
 
+        A signal's stop and start()'s finally both get here, usually together: stop_all sets the shutdown event, which
+        wakes start(). The first call starts the one stop as a task and every call waits for that task, so start()
+        (and with it the process) does not end while services are still stopping; returning early would let the
+        event loop cancel the stop half way, leaving the services registered before the one being stopped (the
+        devices service and its camera's motors among them) running when the process dies.
+        """
+        if self._stop_task is None:
+            if not self._running:
+                return  # never started: nothing to stop
+            self._stop_task = asyncio.create_task(self._stop_everything())
+        await self._stop_task
+
+    async def _stop_everything(self) -> None:
         logger.info("Stopping Croom Agent...")
         self._running = False
 

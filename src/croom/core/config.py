@@ -103,6 +103,7 @@ class VideoConfig:
     device: str = "auto"
     resolution: str = "1080p"
     framerate: int = 30
+    ptz_travel_seconds: float = 8.0  # how long the camera is driven to reach an end stop when homing
 
 
 @dataclass
@@ -131,6 +132,7 @@ class ControlConfig:
     host: str = "0.0.0.0"
     port: int = 8080
     screensaver: str = "info"  # what the TV shows when idle until someone picks another style on the room page
+    camera_presets: List[str] = field(default_factory=lambda: ["Wide", "Table", "Whiteboard"])  # the three slot names
 
 
 @dataclass
@@ -272,6 +274,7 @@ class Config:
                 "device": self.video.device,
                 "resolution": self.video.resolution,
                 "framerate": self.video.framerate,
+                "ptz_travel_seconds": self.video.ptz_travel_seconds,
             },
             "display": {
                 "backend": self.display.backend,
@@ -290,6 +293,7 @@ class Config:
                 "host": self.control.host,
                 "port": self.control.port,
                 "screensaver": self.control.screensaver,
+                "camera_presets": list(self.control.camera_presets),
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

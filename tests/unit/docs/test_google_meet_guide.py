@@ -48,3 +48,9 @@ def test_meet_guide_quotes_the_real_commands_and_names():
 
 def test_meet_guide_uses_the_shared_renderer():
     assert "from render_guide import render" in (GUIDE / "build.py").read_text(encoding="utf-8")
+
+
+def test_meet_guide_says_the_check_also_prints_the_devices_the_browser_sees():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert "Devices the browser sees" in html
+    assert "microphones, speakers and cameras" in html

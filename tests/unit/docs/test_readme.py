@@ -41,6 +41,16 @@ def test_readme_names_the_setup_pieces():
         "screensaver",
         ":8080/tv",
         "TV when idle",
+        "install-kiosk.sh --url",
+        "?keyboard=1",
+        "Start Crystal Meet",
+        "audio.output_device",
+        "ptz_travel_seconds",
+        "camera_presets",
+        "/api/audio/volume",
+        "Find the stops",
+        "also becomes PipeWire's default sink",
+        "reads the same key as a PyAudio device id",
     ):
         assert needle in text, needle
 

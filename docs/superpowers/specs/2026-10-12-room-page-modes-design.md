@@ -16,7 +16,7 @@ Out: TV control (the next project); the door sign and the TV pages; the dashboar
 ## 3. Decisions
 
 - **One page, switching views.** The page keeps its one status poll and one model. A `data-view` attribute on `<body>` names the visible screen; every screen is a `<section class="view" data-view="...">` in `index.html`, and only the matching one is shown. Views live in the page's memory only: a reload lands on the mode's main screen.
-- **Sized for 1280 by 800.** The kiosk launcher starts Chromium with `--force-device-scale-factor=1.5`, so the 1920 by 1200 Forzola panel lays the page out at 1280 by 800 with buttons about 11 mm tall. Every screen fits that viewport with no page scrolling; only the bookings list and the upcoming list scroll, inside their own boxes. The non-scrolling layout applies from 1024 by 700 up; smaller viewports (a 2 times scale, a phone) use the scrolling layout. Within it, a screen that cannot fit (a very long refusal in a short window) scrolls under the top bar instead of being cut off.
+- **Sized for 1280 by 800.** The kiosk launcher starts Chromium with `--force-device-scale-factor=1.5`, so the 1920 by 1200 Forzola panel lays the page out at 1280 by 800 with buttons about 11 mm tall. Every screen fits that viewport with no page scrolling; only the bookings list and the upcoming list scroll, inside their own boxes. The non-scrolling layout applies from 1024 by 700 up; smaller viewports (a 2 times scale, a phone) use the scrolling layout. Within the non-scrolling layout, a screen that cannot fit (a very long refusal in a short window) scrolls under the top bar instead of being cut off.
 - **Mode follows the agent.** Meeting mode whenever `meeting.state` is `joining`, `in_lobby`, `connected` or `leaving` (the same four states the page and the server already use); idle mode otherwise. Entering a mode lands on its main screen; sub-screens never carry over.
 - **Names people see:** Options, Camera framing, Screensaver (no longer "TV when idle"), Camera, Upcoming meetings, Back.
 - **The camera preview follows the Camera framing screen.** On while that screen is shown in idle mode, off the moment it is left. The Camera screen in a meeting never asks for a preview.
@@ -30,7 +30,7 @@ Out: TV control (the next project); the door sign and the TV pages; the dashboar
 
 Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAME"]` shows it and hides the others (`.view { display: none } body[data-view="idle"] .view[data-view="idle"] { display: grid }`, one rule per screen). Existing element ids are kept so the current tests and the TV preview keep working; new ids are listed here.
 
-**Top bar** (shared by every screen, outside the views): logo, `#room-name`, `#room-location` (hidden when empty), `#clock`, and `#offline-note` ("Can't reach the room") whenever the page cannot reach the room, so every screen says so. In idle mode it also shows `#open-options` ("Options"); in meeting mode `#meeting-state` (Joining, In the lobby, In a meeting, Leaving), `#meeting-elapsed` ("12 min") and `#next-warning` (hidden unless the next booking starts within ten minutes: "Next: 2:00 PM Design review"). Ids appear once in the page.
+**Top bar** (shared by every screen, outside the views): logo, `#room-name`, `#room-location` (hidden when empty), `#clock`, and `#offline-note` ("Can't reach the room") whenever the page cannot reach the room, so every screen says so. In idle mode it also shows `#open-options` ("Options"); in meeting mode `#meeting-state` (Joining, In the lobby, In a meeting, Leaving), `#meeting-elapsed` (`m:ss` from the page's `elapsedSince`, for example "12:04", and `h:mm:ss` from an hour; shown while the call is connected) and `#next-warning` (hidden unless the next booking starts within ten minutes: "Next: 2:00 PM Design review"). Ids appear once in the page.
 
 **`idle`** (main screen of idle mode)
 - Status card as today (`#kicker`, `#headline`, `#detail`, `#message`, `#actions`); in idle mode `#actions` holds Join when a booking is current, or Dismiss after a failed join.
@@ -53,7 +53,7 @@ Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAM
 
 **`meeting`** (main screen of meeting mode)
 - `#meeting-message` for a refusal or error (the idle status card keeps `#message`).
-- Controls row (`#meeting-actions`): Mute / Unmute, Turn camera off / on, Leave (with the existing confirm step: the button becomes "Leave?" for a few seconds).
+- Controls row (`#meeting-actions`): Mute / Unmute, Turn camera off / on, Leave (with the existing confirm step: the button becomes "Tap again to leave" for a few seconds); while the call is still joining, the row holds Cancel.
 - Sound row: `#sound-note`, `#sound-panel` with `#sound-device`, `#volume-slider`, `#quieter`, `#volume-level`, `#louder`, `#speaker-mute` (unchanged ids).
 - Sub-screen row: `#open-camera-live` ("Camera") and `#open-upcoming` ("Upcoming meetings"). The TV project adds "TV".
 
@@ -69,7 +69,8 @@ Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAM
 - Navigation buttons set the view; Back buttons return to the screen named in the table above. `camera` belongs to whichever mode showed it, so its Back goes to `options` or `meeting` accordingly.
 - Idle return: in idle mode a timer starts whenever the view is not `idle`; any `pointerdown` on the page restarts it; after ten minutes it sets the view to `idle`. This replaces the Camera panel's own ten-minute close; the preview's background renewal continues to count as nobody's action.
 - The preview: `previewWanted()` is true when the view is `camera`, the mode is idle, the camera is available and no meeting is in progress; leaving the view, a mode change or the idle return all send `preview off` once (through the existing background path when the page, not a person, leaves the screen). The 30 s renewal is unchanged.
-- `#next-warning` and the upcoming list use the events the page already polls every 30 s; "within ten minutes" is measured against the page's clock.
+- Leaving the camera view, by Back or on its own (the idle return, a meeting beginning), resets the Save switch and the Set up panel: the next person to open the screen never finds Save armed.
+- `#next-warning` and the upcoming list use the events the page already polls every 30 s; "within ten minutes" is measured against the page's clock. In meeting mode both leave out the booking whose title equals the current meeting's title: the booking the room joined from its window has not started yet, and must not show as "next" to the call that is in it (a meeting joined by link has no title and leaves nothing out).
 
 ### 4.3 Location
 
@@ -82,7 +83,7 @@ Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAM
 ### 4.5 Files
 
 - `src/croom/control/static/index.html`: the six `view` sections; three script tags in order: `app.js`, `devices.js`, `keyboard.js`.
-- `src/croom/control/static/app.js`: the model, the polls, `mode()`, the view switch, the idle return timer, the idle and meeting screens, bookings and the upcoming list, the screensaver picker. It publishes `window.croomPage = { model, el, api, post, render, onRender, view, setView, mode, IN_MEETING }` for the other two files, where `onRender(fn)` registers a function `render()` calls after its own work.
+- `src/croom/control/static/app.js`: the model, the polls, `mode()`, the view switch, the idle return timer, the idle and meeting screens, bookings and the upcoming list, the screensaver picker. It publishes `window.croomPage = { el, model, api, post, act, button, render, refreshStatus, deviceEpoch, IN_MEETING, view, setView, mode, cameraMode, onViewChange, onRender }` for the other two files, where `onRender(fn)` registers a function `render()` calls after its own work (a function that registers after the first status has been answered is called with it at once) and `onViewChange(fn)` registers a function called after every view change with the new view's name and whether the page changed it on its own.
 - `src/croom/control/static/devices.js`: today's Sound and Camera panel code and the preview, moved out of `app.js` with as few changes as the view switch needs (`previewWanted`, the Back targets, the hidden Set up in meeting mode). It registers its rendering through `onRender`.
 - `src/croom/control/static/keyboard.js`: today's keyboard IIFE, moved; it refuses to open unless the view is `idle`.
 - `src/croom/control/static/style.css`: the view rules, the per-screen grids for 1280 by 800, the two-column camera layout, the large navigation buttons (at least 64 px tall), `.keyboard-open .schedule { display: none }`.
@@ -92,7 +93,7 @@ Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAM
 ## 5. Testing
 
 Page tests in real Chromium at 1280 by 800 through `PageServer` and the existing stubs (`tests/unit/control/test_page.py`, with the Sound/Camera tests moved to a `test_page_devices.py` if the file grows past what one reader holds):
-- Every screen fits: for each view, `document.documentElement.scrollHeight <= clientHeight` at 1280 by 800, including the camera screen with the Set up flow open and the idle screen with eight bookings (the box scrolls, the page does not).
+- Every screen fits: for each view at 1280 by 800, both the document and `main` have `scrollHeight <= clientHeight` (the `fits()` helper checks the two: `main` may scroll as a last resort on small viewports, which a check of the document alone would not see), including the camera screen with the Set up flow open and the idle screen with eight bookings (the box scrolls, the page does not).
 - Navigation: Options, Camera framing, Back, Screensaver, Back; the camera's Back goes to `options` in idle and to `meeting` in a meeting.
 - Mode switch: the stub meeting joins, the page lands on `meeting` from wherever it was; it leaves, the page lands on `idle`; a sub-screen open at the switch is dropped.
 - Preview: on when the camera screen is shown in idle, off on Back, off on the idle return, never requested in a meeting; the stub records the sequence.

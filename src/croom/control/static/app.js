@@ -16,6 +16,7 @@
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
+  let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
 
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
@@ -34,6 +35,7 @@
   let confirmTimer = null;
   let lastEventsKey = null;
   let lastPickerKey = null;
+  let lastUpcomingKey = null;
   const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
@@ -162,6 +164,61 @@
     return { open: now >= start - JOIN_WINDOW_MS && now < end, opensAt: new Date(start - JOIN_WINDOW_MS), past: now >= end };
   }
 
+  const WARN_BEFORE_MS = 10 * 60 * 1000;
+  const STATE_LABELS = { joining: "Joining", in_lobby: "In the lobby", connected: "In a meeting", leaving: "Leaving" };
+
+  function upcoming() {
+    const now = Date.now();
+    return model.events.filter((ev) => new Date(ev.start_time).getTime() > now);
+  }
+
+  // The top bar in meeting mode: what the call is doing, for how long, and a warning when the next booking is close.
+  function renderMeetingBar(m) {
+    const inMeeting = mode() === "meeting";
+    el("meeting-state").hidden = !inMeeting;
+    el("meeting-elapsed").hidden = !(inMeeting && m.state === "connected" && m.joined_at);
+    el("meeting-state").textContent = STATE_LABELS[m.state] || "";
+    el("meeting-elapsed").textContent = m.joined_at ? elapsedSince(m.joined_at) : "";
+    const next = upcoming()[0];
+    const soon = inMeeting && next && new Date(next.start_time).getTime() - Date.now() <= WARN_BEFORE_MS;
+    el("next-warning").hidden = !soon;
+    el("next-warning").textContent = soon ? "Next: " + fmtTime(new Date(next.start_time)) + " " + next.title : "";
+  }
+
+  // One booking's row, for the Today list and the Upcoming list alike, so the two cannot drift: its time, its title and,
+  // when it has a link, the platform. The Today list passes its Join button as withJoin; the Upcoming list passes none.
+  function eventItem(ev, withJoin) {
+    const li = document.createElement("li");
+    li.className = "event";
+    const time = document.createElement("time");
+    time.dateTime = ev.start_time;
+    time.textContent = fmtTime(new Date(ev.start_time));
+    const text = document.createElement("div");
+    const title = document.createElement("p");
+    title.className = "title";
+    title.textContent = ev.title;
+    text.append(title);
+    if (ev.joinable) {
+      const platform = document.createElement("p");
+      platform.className = "platform";
+      platform.textContent = platformName(ev.meeting_platform);
+      text.append(platform);
+    }
+    li.append(time, text);
+    if (withJoin) li.append(withJoin);
+    return li;
+  }
+
+  function renderUpcoming() {
+    // Rebuilt only when what a row shows changes, so the list keeps its scroll position while the page polls.
+    const items = upcoming();
+    const key = JSON.stringify(items.map((ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform]));
+    if (key === lastUpcomingKey) return;
+    lastUpcomingKey = key;
+    el("upcoming-empty").hidden = items.length > 0;
+    el("upcoming-list").replaceChildren(...items.map((ev) => eventItem(ev)));
+  }
+
   function render() {
     const body = document.body;
     el("message").textContent = model.error;
@@ -186,13 +243,20 @@
 
     el("offline-note").hidden = true;
     const s = model.status;
+    const m = s.meeting;
+    const cal = s.calendar;
     if (viewMode(view()) !== mode()) applyView(MAIN_SCREEN[mode()], true);   // a meeting began or ended: land on that mode's screen
+    if (m.state !== lastMeetingState) {
+      // A join that failed while someone was on Options: the "Couldn't join" card is on the idle screen.
+      if (m.state === "error") applyView("idle", true);
+      lastMeetingState = m.state;
+    }
+    renderMeetingBar(m);
+    renderUpcoming();
     el("open-options").hidden = mode() !== "idle";
     el("room-name").textContent = s.room.name;
     el("room-location").textContent = s.room.location;
     el("room-location").hidden = !s.room.location;
-    const m = s.meeting;
-    const cal = s.calendar;
     const label = m.title || (m.platform ? platformName(m.platform) + " meeting" : "the meeting");
 
     let specs = [];
@@ -306,26 +370,10 @@
     note.textContent = "";
     for (const ev of model.events) {
       const window = joinWindow(ev);
-      const li = document.createElement("li");
-      li.className = "event" + (window.past ? " past" : "") + (cal.current && cal.current.id === ev.id ? " now" : "");
-      const time = document.createElement("time");
-      time.dateTime = ev.start_time;
-      time.textContent = fmtTime(new Date(ev.start_time));
-      const text = document.createElement("div");
-      const title = document.createElement("p");
-      title.className = "title";
-      title.textContent = ev.title;
-      text.append(title);
-      if (ev.joinable) {
-        const platform = document.createElement("p");
-        platform.className = "platform";
-        platform.textContent = platformName(ev.meeting_platform);
-        text.append(platform);
-      }
-      li.append(time, text);
-      if (ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error")) {
-        li.append(button("Join", "primary", () => joinEvent(ev.id)));
-      }
+      const canJoin = ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error");
+      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id)) : null);
+      li.classList.toggle("past", window.past);
+      li.classList.toggle("now", Boolean(cal.current && cal.current.id === ev.id));
       list.append(li);
     }
   }
@@ -334,6 +382,7 @@
     el("clock").textContent = fmtTime(new Date());
     if (model.status && model.status.meeting.state === "connected") {
       el("detail").textContent = meetingDetail(model.status.meeting);
+      if (model.status.meeting.joined_at) el("meeting-elapsed").textContent = elapsedSince(model.status.meeting.joined_at);
     }
   }
 

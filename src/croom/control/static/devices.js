@@ -95,7 +95,7 @@
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
     const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.position_known,
-      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, presetSaveMode, setupOpen, model.busy, deviceNotes.camera]);
+      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, presetSaveMode, setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
     lastCameraKey = key;
     const panel = el("camera-panel");
@@ -111,9 +111,10 @@
     el("camera-home").disabled = camera.busy || !camera.home_saved;
     const ready = camera.home_saved;
     el("preset-row").hidden = !ready;
-    el("preset-save-mode").hidden = !ready;
-    el("setup-link").hidden = !ready;
-    el("camera-setup").hidden = ready && !setupOpen;
+    const setupAllowed = P.cameraMode() === "idle";   // during a meeting: recall and nudge only
+    el("preset-save-mode").hidden = !ready || !setupAllowed;
+    el("setup-link").hidden = !ready || !setupAllowed;
+    el("camera-setup").hidden = !setupAllowed || (ready && !setupOpen);
     el("save-home").disabled = !camera.position_known || camera.busy;
     el("find-stops").disabled = camera.busy;
     el("preset-save-mode").setAttribute("aria-pressed", presetSaveMode ? "true" : "false");
@@ -127,7 +128,8 @@
   }
 
   function presetAction(slot) {
-    const action = presetSaveMode ? "save" : "recall";
+    // Save belongs to Set up, which a meeting hides: a Save left on before the meeting must not turn a recall into one.
+    const action = presetSaveMode && P.cameraMode() === "idle" ? "save" : "recall";
     presetSaveMode = false;
     lastCameraKey = null;
     deviceCall("camera", "/api/camera/presets/" + slot, { action: action }, { long: action === "recall" });

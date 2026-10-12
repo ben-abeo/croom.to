@@ -18,6 +18,7 @@ import pytest
 
 from croom.control.service import ControlService
 from croom.devices.errors import Interrupted, NotReady
+from croom.meeting.providers.base import MeetingState
 from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -1239,4 +1240,152 @@ def test_the_section_labels_and_quiet_buttons_keep_their_colour_when_the_status_
         assert colour(page, ".sound-section .kicker") == periwinkle and colour(page, ".camera-section .kicker") == periwinkle
         assert colour(page, "#louder") == white and colour(page, "#screen-picker button") == white
         assert colour(page, "#kicker") == dark_blue and colour(page, "#actions button") == dark_blue
+        page.close()
+
+
+# --- the meeting screen's content (spec 2026-10-12, sections 4.1 and 4.2) ---
+
+def test_the_meeting_screen_shows_the_state_the_time_and_what_is_next(browser):
+    skip_if_day_ends_within(2)                                 # the service lists today's bookings only; the last starts in 90 minutes
+    bookings = [event("e1", "Design review", 8), event("e2", "Sales call", 90)]   # the first starts in 8 minutes
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)   # the first booking is inside its ten minutes
+        join_by_id(page)
+        assert page.locator("#meeting-state").inner_text() == "In a meeting"
+        page.wait_for_function("/^\\d+:\\d\\d$/.test(document.getElementById('meeting-elapsed').innerText)", timeout=5000)
+        warning = page.locator("#next-warning")
+        assert warning.is_visible() and warning.inner_text().startswith("Next: ") and "Design review" in warning.inner_text()
+        assert page.locator("#open-options").is_hidden()
+        page.click("#open-upcoming")
+        assert page.evaluate("document.body.dataset.view") == "upcoming"
+        titles = page.locator("#upcoming-list .title").all_inner_texts()
+        assert titles == ["Design review", "Sales call"]
+        assert page.locator("#upcoming-empty").is_hidden()
+        page.click("#back-from-upcoming")
+        assert page.evaluate("document.body.dataset.view") == "meeting"
+        page.close()
+
+
+def test_upcoming_says_so_when_nothing_else_is_booked(browser):
+    with PageServer(calendar_events=[event("e0", "Earlier", -60)]) as server:   # already started: not upcoming
+        page = open_page(browser, server)
+        join_by_id(page)
+        assert page.locator("#next-warning").is_hidden()
+        page.click("#open-upcoming")
+        assert page.locator("#upcoming-list .event").count() == 0 and page.locator("#upcoming-empty").is_visible()
+        page.close()
+
+
+def test_the_camera_during_a_meeting_recalls_and_nudges_but_never_sets_up(browser):
+    with PageServer(devices=StubDevices(camera=StubCamera(home_saved=False, position_known=False))) as server:   # no home yet: Set up is on the screen
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#find-stops")
+        page.wait_for_function("!document.getElementById('save-home').disabled", timeout=5000)
+        page.click("#save-home")
+        page.wait_for_function("document.querySelectorAll('#preset-row button').length === 3", timeout=5000)
+        page.click("#back-from-camera")
+        page.click("#back-from-options")
+        join_by_id(page)
+        asked = preview_requests(page)
+        page.click("#open-camera-live")
+        assert page.locator("#preset-row button").count() == 3
+        assert page.locator("#preset-save-mode").is_hidden() and page.locator("#setup-link").is_hidden() and page.locator("#camera-setup").is_hidden()
+        page.click("#preset-row button[data-slot='1']")
+        page.wait_for_function("document.body.dataset.view === 'camera'", timeout=5000)
+        page.wait_for_timeout(300)
+        assert asked == []                                     # no preview during a meeting
+        hold(page, "#arrow-pad button[data-pan='1']")
+        assert server.devices.camera.moves[-2:] == [(1, 0), (0, 0)]
+        page.close()
+
+
+def test_a_save_left_on_in_idle_does_not_turn_a_recall_into_a_save_in_a_meeting(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#preset-save-mode")                        # Save is on, and the screen is left without a preset tapped
+        page.click("#back-from-camera")
+        page.click("#back-from-options")
+        join_by_id(page)
+        page.click("#open-camera-live")
+        assert page.locator("#preset-save-mode").is_hidden()   # nobody can see it or undo it from here
+        page.click("#preset-row button[data-slot='1']")
+        page.wait_for_timeout(300)
+        assert server.devices.camera.recalls == [1] and server.devices.camera.saves == []   # a recall, not an overwrite of the preset
+        page.close()
+
+
+def test_a_meeting_that_ends_under_a_held_arrow_still_stops_the_camera(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.click("#open-camera-live")
+        press(page, "#arrow-pad button[data-pan='1']")
+        page.wait_for_timeout(200)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        page.wait_for_timeout(300)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        assert server.devices.camera.moves[-1] == (0, 0)       # the pad vanished under the finger; the stop still went out
+        page.close()
+
+
+def test_a_failed_join_brings_the_page_back_to_the_idle_screen(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        server.meeting.fail_next_join = True
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/1"}', headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=8000)
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        assert page.locator("#kicker").inner_text().upper() == "COULDN'T JOIN"
+        page.close()
+
+
+def test_the_failed_join_card_lets_the_page_go_on_to_other_screens(browser):
+    """The landing on the idle screen happens once, when the state turns to error: with the card still up, a tap on
+    Options stays on Options through the polls that follow."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        server.meeting.fail_next_join = True
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/1"}', headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'error' && document.body.dataset.view === 'idle'", timeout=8000)
+        page.click("#open-options")
+        page.wait_for_timeout(2600)                            # a whole poll and more
+        assert page.evaluate("document.body.dataset.view") == "options" and page.evaluate("document.body.dataset.state") == "error"
+        page.close()
+
+
+def test_the_top_bar_names_each_state_of_the_call(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        assert page.locator("#meeting-state").is_hidden() and page.locator("#meeting-elapsed").is_hidden()   # nothing of a call in the idle bar
+        for state, words, timed in ((MeetingState.JOINING, "Joining", False), (MeetingState.IN_LOBBY, "In the lobby", False),
+                                    (MeetingState.CONNECTED, "In a meeting", True), (MeetingState.LEAVING, "Leaving", False)):
+            server.meeting.set_state(state)
+            page.wait_for_function(f"document.getElementById('meeting-state').innerText === '{words}'", timeout=5000)
+            assert page.evaluate("document.body.dataset.view") == "meeting" and page.locator("#meeting-state").is_visible()
+            assert page.locator("#meeting-elapsed").is_visible() == timed   # only while connected, though a leaving call still has its join time
+        server.meeting.set_state(MeetingState.IDLE)
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
+        assert page.locator("#meeting-state").is_hidden() and page.locator("#meeting-elapsed").is_hidden()
+        page.close()
+
+
+@pytest.mark.parametrize("minutes, close", [(45, False), (8, True)])
+def test_the_next_booking_warning_is_for_a_call_and_only_when_it_is_close(browser, minutes, close):
+    skip_if_day_ends_within(1.5)                               # the booking is today's only: 45 minutes away at most
+    with PageServer(calendar_events=[event("e1", "Design review", minutes)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function(f"document.body.dataset.state === '{'soon' if close else 'free'}'", timeout=5000)
+        assert page.locator("#next-warning").is_hidden()         # idle: the status card says it, the bar does not
+        server.meeting.set_state(MeetingState.JOINING)           # any state of a call
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.locator("#next-warning").is_visible() == close
         page.close()

@@ -34,6 +34,7 @@ class StubMeeting:
         self.callbacks = []
         self.fail_with = None
         self.fail_before_joining = None
+        self.fail_next_join = False
 
     def get_available_platforms(self):
         return list(self._platforms)
@@ -50,6 +51,16 @@ class StubMeeting:
         self.joins.append((url, display_name))
         if self.fail_before_joining is not None:
             raise self.fail_before_joining
+        if self.fail_next_join:
+            # Refused at once, before any "joining" shows: the error state and its reason, as a provider reports them.
+            self.fail_next_join = False
+            failure = RuntimeError("Meet refused the room")
+            self.current_meeting = MeetingInfo(
+                platform=detect_platform(url) or "unknown", meeting_id="failed",
+                meeting_url=url, error_message=str(failure),
+            )
+            self.set_state(MeetingState.ERROR)
+            raise failure
         self.set_state(MeetingState.JOINING)
         await asyncio.sleep(0)
         if self.fail_with is not None:

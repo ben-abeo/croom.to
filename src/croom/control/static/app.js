@@ -124,9 +124,10 @@
   }
 
   function setActions(specs, containerId, keyHolder) {
-    // Replace the buttons only when their labels or availability change, so a
-    // click in progress is never lost to a re-render (the timer ticks every second).
-    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy]));
+    // Replace the buttons only when their labels, availability or target change, so a click in progress is never
+    // lost to a re-render (the timer ticks every second), and a Join never acts on a booking it no longer shows (two
+    // bookings back to back both say "Join now").
+    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null]));
     if (key === keyHolder.key) return;
     keyHolder.key = key;
     el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
@@ -168,6 +169,7 @@
 
     if (model.offline || !model.status) {
       body.dataset.state = "offline";
+      el("offline-note").hidden = !model.offline;   // in the top bar, so every screen says it (not while still loading)
       el("kicker").textContent = "Not connected";
       el("headline").textContent = "Can't reach the room";
       el("detail").textContent = "Check that Crystal Meet is running on the room's device, then this page will reconnect on its own.";
@@ -182,6 +184,7 @@
     document.querySelector(".sound-section").hidden = false;
     document.querySelector(".camera-section").hidden = false;
 
+    el("offline-note").hidden = true;
     const s = model.status;
     if (viewMode(view()) !== mode()) applyView(MAIN_SCREEN[mode()], true);   // a meeting began or ended: land on that mode's screen
     el("open-options").hidden = mode() !== "idle";
@@ -255,7 +258,7 @@
       el("kicker").textContent = "Happening now";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
-      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id) }] : [];
+      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id), target: current.id }] : [];
     }
 
     if (next) {
@@ -273,7 +276,7 @@
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
       if (!next.joinable) return [];
-      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open }];
+      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
     }
 
     body.dataset.state = "free";

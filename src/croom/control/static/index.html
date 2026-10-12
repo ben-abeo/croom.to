@@ -17,6 +17,7 @@
     </div>
   </div>
   <div class="top-right">
+    <p id="offline-note" class="offline-note" hidden>Can't reach the room</p>
     <p id="next-warning" class="next-warning" hidden></p>
     <p id="meeting-state" class="meeting-state" hidden></p>
     <p id="meeting-elapsed" class="meeting-elapsed" hidden></p>
@@ -134,7 +135,7 @@
 
   <section class="view" data-view="upcoming">
     <button type="button" id="back-from-upcoming" class="button quiet back">Back</button>
-    <section class="schedule">
+    <section class="upcoming-box">
       <p class="kicker">Upcoming meetings</p>
       <ul id="upcoming-list" class="events"></ul>
       <p id="upcoming-empty" class="note" hidden>No more meetings today</p>

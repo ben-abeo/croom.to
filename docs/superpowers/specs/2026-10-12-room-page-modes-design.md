@@ -16,7 +16,7 @@ Out: TV control (the next project); the door sign and the TV pages; the dashboar
 ## 3. Decisions
 
 - **One page, switching views.** The page keeps its one status poll and one model. A `data-view` attribute on `<body>` names the visible screen; every screen is a `<section class="view" data-view="...">` in `index.html`, and only the matching one is shown. Views live in the page's memory only: a reload lands on the mode's main screen.
-- **Sized for 1280 by 800.** The kiosk launcher starts Chromium with `--force-device-scale-factor=1.5`, so the 1920 by 1200 Forzola panel lays the page out at 1280 by 800 with buttons about 11 mm tall. Every screen fits that viewport with no page scrolling; only the bookings list and the upcoming list scroll, inside their own boxes. The layout still fits a 2 times scale (960 by 600) and a phone still works.
+- **Sized for 1280 by 800.** The kiosk launcher starts Chromium with `--force-device-scale-factor=1.5`, so the 1920 by 1200 Forzola panel lays the page out at 1280 by 800 with buttons about 11 mm tall. Every screen fits that viewport with no page scrolling; only the bookings list and the upcoming list scroll, inside their own boxes. The non-scrolling layout applies from 1024 by 700 up; smaller viewports (a 2 times scale, a phone) use the scrolling layout. Within it, a screen that cannot fit (a very long refusal in a short window) scrolls under the top bar instead of being cut off.
 - **Mode follows the agent.** Meeting mode whenever `meeting.state` is `joining`, `in_lobby`, `connected` or `leaving` (the same four states the page and the server already use); idle mode otherwise. Entering a mode lands on its main screen; sub-screens never carry over.
 - **Names people see:** Options, Camera framing, Screensaver (no longer "TV when idle"), Camera, Upcoming meetings, Back.
 - **The camera preview follows the Camera framing screen.** On while that screen is shown in idle mode, off the moment it is left. The Camera screen in a meeting never asks for a preview.
@@ -30,7 +30,7 @@ Out: TV control (the next project); the door sign and the TV pages; the dashboar
 
 Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAME"]` shows it and hides the others (`.view { display: none } body[data-view="idle"] .view[data-view="idle"] { display: grid }`, one rule per screen). Existing element ids are kept so the current tests and the TV preview keep working; new ids are listed here.
 
-**Top bar** (shared by every screen, outside the views): logo, `#room-name`, `#room-location` (hidden when empty), `#clock`. In idle mode it also shows `#open-options` ("Options"); in meeting mode `#meeting-state` (Joining, In the lobby, In a meeting, Leaving), `#meeting-elapsed` ("12 min") and `#next-warning` (hidden unless the next booking starts within ten minutes: "Next: 2:00 PM Design review"). Ids appear once in the page.
+**Top bar** (shared by every screen, outside the views): logo, `#room-name`, `#room-location` (hidden when empty), `#clock`, and `#offline-note` ("Can't reach the room") whenever the page cannot reach the room, so every screen says so. In idle mode it also shows `#open-options` ("Options"); in meeting mode `#meeting-state` (Joining, In the lobby, In a meeting, Leaving), `#meeting-elapsed` ("12 min") and `#next-warning` (hidden unless the next booking starts within ten minutes: "Next: 2:00 PM Design review"). Ids appear once in the page.
 
 **`idle`** (main screen of idle mode)
 - Status card as today (`#kicker`, `#headline`, `#detail`, `#message`, `#actions`); in idle mode `#actions` holds Join when a booking is current, or Dismiss after a failed join.
@@ -43,7 +43,7 @@ Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAM
 
 **`camera`** (used by both modes)
 - `#back-from-camera` ("Back", to `options` in idle mode, to `meeting` in meeting mode).
-- `#camera-note` and `#camera-status`; the controls in two columns: left `#arrow-pad` (unchanged) and the zoom buttons; right `#camera-home`, `#preset-row`, `#preset-save-mode`, `#setup-link`, `#camera-setup` with `#find-stops` and `#save-home` (all unchanged).
+- `#camera-note` and `#camera-status`; the controls in two columns: left `#arrow-pad` with `#camera-home` at its centre, and the zoom buttons; right `#preset-row`, `#preset-save-mode`, `#setup-link`, `#camera-setup` with `#find-stops` and `#save-home` (all unchanged).
 - In meeting mode `#preset-save-mode`, `#setup-link` and `#camera-setup` are hidden: recall and nudge only. The `<details id="camera-panel">` disappears; `#camera-panel` becomes the plain container of these controls.
 - "Camera unavailable" shows `#camera-note` and hides the controls, as today.
 

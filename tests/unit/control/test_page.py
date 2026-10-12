@@ -112,8 +112,9 @@ def open_screensaver_screen(page):
 
 
 def fits(page):
-    """True when nothing on the page needs the page itself to scroll (the bookings box may scroll inside)."""
-    return page.evaluate("document.documentElement.scrollHeight <= document.documentElement.clientHeight")
+    """True when nothing needs to scroll but the bookings box: not the page, and not the screen under the top bar."""
+    return page.evaluate("""() => { const d = document.documentElement, m = document.querySelector('main');
+        return d.scrollHeight <= d.clientHeight && m.scrollHeight <= m.clientHeight; }""")
 
 
 def test_join_by_id_mute_and_leave_flow(browser):
@@ -146,6 +147,26 @@ def test_in_meeting_controls_are_not_rebuilt_while_the_timer_ticks(browser):
         assert page.evaluate("document.querySelector('#meeting-actions button') === window.__firstButton"), \
             "the action buttons were replaced while nothing about them changed"
         assert page.locator("#detail").inner_text() != before, "the elapsed time should keep ticking"
+        page.close()
+
+
+def test_join_now_joins_the_booking_it_shows_when_one_follows_another(browser):
+    """Back to back: the first booking ends as the second starts, and both say "Join now". Once the page shows the
+    second, its button must join the second, not keep the first's."""
+    skip_if_day_ends_within(1)
+    now = datetime.now().astimezone()
+    began = min(2, (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 60)   # today only
+    hand_over = 8 / 60                                                       # the first ends eight seconds from now
+    first = event("b1", "First booking", -began, duration=began + hand_over, url="https://zoom.us/j/11111111111")
+    second = event("b2", "Second booking", hand_over, duration=30, url="https://zoom.us/j/22222222222")
+    with PageServer(calendar_events=[first, second]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.getElementById('headline').innerText.startsWith('First booking')", timeout=5000)
+        page.wait_for_function("document.getElementById('headline').innerText.startsWith('Second booking')", timeout=12000)
+        page.click("#actions button:has-text('Join now')")
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert server.meeting.joins[-1][0].endswith("22222222222")
         page.close()
 
 
@@ -545,9 +566,57 @@ def test_a_short_day_keeps_each_booking_at_its_own_height(browser):
         page.close()
 
 
+def test_offline_says_so_on_every_screen_and_clears_when_the_room_answers(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        note = page.locator("#offline-note")
+        assert note.is_hidden()
+        page.route("**/api/status", lambda route: route.abort())
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=8000)
+        assert page.evaluate("document.body.dataset.view") == "meeting"      # offline keeps the screen
+        assert note.is_visible() and note.inner_text() == "Can't reach the room"
+        page.click("#open-camera-live")
+        assert page.evaluate("document.body.dataset.view") == "camera" and note.is_visible()
+        page.click("#back-from-camera")
+        assert page.evaluate("document.body.dataset.view") == "meeting" and note.is_visible()
+        page.unroute("**/api/status")
+        page.wait_for_function("document.getElementById('offline-note').hidden", timeout=8000)
+        assert page.locator("#meeting-actions button:has-text('Mute')").is_visible()   # and the controls are back
+        page.close()
+
+
+def test_a_long_title_and_a_refusal_leave_the_link_box_on_the_kiosk_screen(browser):
+    title = "Quarterly planning review with the regional leadership team and the product owners of every office"
+    with PageServer(calendar_events=[event("e1", title, 5)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)   # Starting soon, with Join now
+        page.fill("#link-input", "not a meeting link")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.getElementById('message').innerText === 'Unsupported meeting link'", timeout=5000)
+        assert fits(page)
+        form = page.locator("#link-form").bounding_box()
+        assert form["y"] >= 0 and form["y"] + form["height"] <= 800
+        page.close()
+
+
+def test_a_screen_that_cannot_fit_scrolls_under_the_top_bar_instead_of_being_cut_off(browser):
+    """A last resort that real text never needs at 1280 by 800: an endless refusal on the idle card."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.evaluate("(t) => { window.croomPage.model.error = t; window.croomPage.render(); }", "A refusal that will not end. " * 50)
+        assert not fits(page)                                                # the screen is too long for the kiosk
+        assert page.evaluate("document.documentElement.scrollHeight <= document.documentElement.clientHeight")   # the page stays put
+        page.locator("#link-form").scroll_into_view_if_needed()
+        form = page.locator("#link-form").bounding_box()
+        assert form["y"] >= 0 and form["y"] + form["height"] <= 800          # and the link box can still be reached
+        page.close()
+
+
 def test_every_idle_screen_fits_the_kiosk_without_scrolling(browser):
-    skip_if_day_ends_within(4.5)                                             # the service lists today's bookings only
-    bookings = [event(f"e{i}", f"Booking {i}", 20 + 30 * i) for i in range(8)]
+    skip_if_day_ends_within(1.5)                                             # the service lists today's bookings only
+    bookings = [event(f"e{i}", f"Booking {i}", 20 + 5 * i) for i in range(8)]
     with PageServer(calendar_events=bookings) as server:
         page = open_page(browser, server)
         page.wait_for_function("document.querySelectorAll('#events .event').length === 8", timeout=5000)
@@ -557,8 +626,10 @@ def test_every_idle_screen_fits_the_kiosk_without_scrolling(browser):
         page.click("#open-options")
         assert fits(page), "the options screen scrolls"
         page.click("#open-camera-setup")
-        page.click("#setup-link") if page.locator("#setup-link").is_visible() else None
-        assert fits(page), "the camera screen scrolls"
+        assert page.locator("#setup-link").is_visible()                      # a home is saved: Set up is a link
+        page.click("#setup-link")
+        assert page.locator("#camera-setup").is_visible()
+        assert fits(page), "the camera screen scrolls with Set up open"
         page.click("#back-from-camera")
         page.click("#open-screensaver")
         assert fits(page), "the screensaver screen scrolls"

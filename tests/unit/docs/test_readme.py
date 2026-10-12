@@ -40,7 +40,7 @@ def test_readme_names_the_setup_pieces():
         ".venv/bin/pytest",
         "screensaver",
         ":8080/tv",
-        "TV when idle",
+        "**Options**, then **Screensaver**",
         "install-kiosk.sh --url",
         "?keyboard=1",
         "Start Crystal Meet",
@@ -62,3 +62,10 @@ def test_readme_links_every_spec_and_plan():
         assert files, folder
         for path in files:
             assert path.relative_to(REPO).as_posix() in text, path.name
+
+
+def test_readme_describes_the_room_page_in_two_modes():
+    text = README.read_text(encoding="utf-8")
+    for needle in ("Options", "Screensaver", "Upcoming meetings", "meeting screen", "1280 by 800", "REPLACE_WITH_LOCATION"):
+        assert needle in text, needle
+    assert "TV when idle" not in text

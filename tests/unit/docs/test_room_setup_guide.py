@@ -57,7 +57,7 @@ def test_guide_sends_the_reader_to_the_meet_guide_for_the_sign_in():
 
 def test_guide_describes_the_tv_screensaver():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
-    assert "screensaver" in html and "TV when idle" in html
+    assert "screensaver" in html and "Screensaver" in html
     assert "leave it open" not in html  # nobody touches the TV's browser any more
 
 
@@ -75,7 +75,7 @@ def test_guide_sets_up_the_camera_and_the_sound():
     # what the page shows while the camera moves, and in place of a panel whose device is missing
     assert "Moving…" in html and "No controllable camera found" in html and "No speaker found" in html
     assert "audio.output_device: HDMI" in html
-    assert "the panel closes after ten minutes without a tap" in html   # the Camera panel does not keep the TV on the camera
+    assert "returns to the idle screen after ten minutes" in html   # the Camera framing screen does not keep the TV on the camera
 
 
 def test_guide_says_what_to_do_when_the_browser_cannot_see_the_meetup():
@@ -83,3 +83,10 @@ def test_guide_says_what_to_do_when_the_browser_cannot_see_the_meetup():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "wpctl status" in html and "the browser cannot reach PipeWire" in html
     assert "libpulse0" in html and "the installer adds it" in html and "the desktop user" in html
+
+
+def test_guide_describes_the_screens_and_the_options_button():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    for needle in ("Options", "Camera framing", "Screensaver", "Upcoming meetings", "meeting screen", "ten minutes", "Back"):
+        assert needle in html, needle
+    assert "TV when idle" not in html

@@ -6,7 +6,9 @@ one Google service account shared with all three room calendars.
 Each `room-N.yaml` is a complete agent config with four things to replace
 before installing it on that room's device:
 
-- `room.name` and `room.location`: what people call the room.
+- `room.name` and `room.location`: what people call the room and where it is. The
+  location is optional: leave the placeholder or delete the line and the pages
+  show the room's name alone.
 - `dashboard.url`: the dashboard's address on port 3001, which is the dashboard
   Pi's reserved address, for example `http://10.0.0.50:3001`. The guide "Set up
   the Crystal Meet dashboard" installs it and reserves the address.

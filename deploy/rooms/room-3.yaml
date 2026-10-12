@@ -1,5 +1,5 @@
 # Crystal Meet room device: Room 3
-# Replace the four REPLACE values, then install with:
+# Replace the three REPLACE values (the location is optional), then install with:
 #   sudo bash installer/install.sh --config room-3.yaml --credentials google-service-account.json --zoom-credentials zoom-credentials.json
 version: 2
 

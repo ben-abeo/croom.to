@@ -13,9 +13,9 @@ the command, the service units and the folders under `/etc` and `/opt`.
 | Piece | Where it runs | What it does |
 |---|---|---|
 | Room device, the `croom` agent | A Raspberry Pi behind the TV, one per room, with no keyboard or mouse | Owns the one browser page on the TV: the screensaver between meetings, the meeting when Join is pressed. Reads the room's Google Calendar, serves the room page, the door sign and the TV page, reports to the dashboard. |
-| Room page `http://<device>:8080/` | Any browser on the office network: a tablet on the table, or a Raspberry Pi with the touch display set up by `installer/install-kiosk.sh --url http://<device>:8080/` | Today's bookings, Join now, Mute, Turn camera off, Leave, a box to paste a Zoom or Meet link, and its own on-screen keyboard (toggled beside the box; opens on its own when the page is loaded with `?keyboard=1`, as the kiosk Pi does). Sound (the room speaker's level and mute) and Camera (hold-to-move, zoom, Home, three presets) panels, with a live camera preview on the TV while framing between meetings. |
+| Room page `http://<device>:8080/` | Any browser on the office network: a tablet on the table, or a Raspberry Pi with the touch display set up by `installer/install-kiosk.sh --url http://<device>:8080/` | An idle screen (today's bookings, Join now, a box to paste a Zoom or Meet link with its own on-screen keyboard, and an **Options** button for **Camera framing** and the **Screensaver**) and a meeting screen that appears on its own during a call (Mute, Turn camera off, Leave, the room's volume, **Camera** for presets and nudges, **Upcoming meetings**). Every screen fits the table Pi's 10.1-inch display without scrolling (the kiosk runs Chromium at 1.5 times scale, 1280 by 800); an options screen left alone returns to the idle screen after ten minutes. |
 | Door sign `http://<device>:8080/sign` | A small screen by the door, PoE or Wi-Fi | Green when free, amber ten minutes before a booking, red while in use or booked. |
-| TV page `http://<device>:8080/tv` | The room's TV, in the device's own browser | The screensaver between meetings: Information (name, status, next booking, clock), Quiet, Brand, or the bouncing Crystal PM logo. Chosen under **TV when idle** on the room page and remembered. |
+| TV page `http://<device>:8080/tv` | The room's TV, in the device's own browser | The screensaver between meetings: Information (name, status, next booking, clock), Quiet, Brand, or the bouncing Crystal PM logo. Chosen on the room page under **Options**, then **Screensaver**, and remembered; while someone frames the camera (**Options**, then **Camera framing**) it shows the camera instead. |
 | Dashboard, `src/croom-dashboard` | A fourth Raspberry Pi (or any 64-bit Docker host) on the office network, from `deploy/dashboard/` | Fleet overview, device status, enrollment tokens on the Provisioning page. |
 
 Neither screen is cabled to the Pi: each only needs a browser, power and the
@@ -48,7 +48,7 @@ The commands the guides walk through, for reference:
 
 ```bash
 git clone https://github.com/ben-abeo/croom.to.git && cd croom.to
-cp deploy/rooms/room-1.yaml ~/room.yaml            # then edit the four REPLACE values
+cp deploy/rooms/room-1.yaml ~/room.yaml            # then edit the three REPLACE values, and the location if the room has one
 sudo bash installer/install.sh --config ~/room.yaml --credentials ~/google-service-account.json --zoom-credentials ~/zoom-credentials.json
 sudo systemctl start croom
 /opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
@@ -158,6 +158,7 @@ the plan holds the how, step by step with the code.
 | Google Meet as a signed-in room: the persistent profile, `croom --sign-in-meet`, pre-join camera and microphone, the Meet guide | [spec](docs/superpowers/specs/2026-10-07-google-meet-room-account-design.md) | [plan](docs/superpowers/plans/2026-10-07-google-meet-room-account.md) |
 | The TV screensaver and the one page on the TV: `TvDisplay` owns the browser, providers borrow its page, the `/tv` page with four styles, `/api/screensaver`, the picker on the room page | [spec](docs/superpowers/specs/2026-10-07-tv-screensaver-and-one-page-design.md) | [plan](docs/superpowers/plans/2026-10-07-tv-screensaver-and-one-page.md) |
 | Sound and camera from the room page: volume through PipeWire, MeetUp framing with timed presets, the idle camera preview on the TV | [spec](docs/superpowers/specs/2026-10-08-sound-and-camera-controls-design.md) | [plan](docs/superpowers/plans/2026-10-08-sound-and-camera-controls.md) |
+| The room page in two modes: an idle screen and a meeting screen behind one view switch, Options with Camera framing and Screensaver, Back on every sub-screen, the ten-minute return to the idle screen, the kiosk at 1.5 times scale, a placeholder location counted as none | [spec](docs/superpowers/specs/2026-10-12-room-page-modes-design.md) | [plan](docs/superpowers/plans/2026-10-12-room-page-modes.md) |
 
 Decisions worth knowing before changing things:
 
@@ -172,6 +173,7 @@ Decisions worth knowing before changing things:
 - Google Meet refuses guests that arrive through an automated browser, so each room joins Meet signed in as its own Workspace user from a persistent browser profile (`meeting.google_profile_dir`); the browser is never disguised. `croom --sign-in-meet` does the one-time sign-in on the room's screen.
 - Zoom is joined through Zoom's Meeting SDK, never by driving the public web client, which blocks automated guests. Meetings on your own account need only the SDK app's signature; meetings hosted elsewhere need Zoom's review of the SDK app (it may stay unlisted; its production credentials are the approved ones) plus the room's Zoom user and its ZAK, fetched with the Server-to-Server credential.
 - The MeetUp reports no pan or tilt position, so presets are timed moves from a home found against the end stops: Set up on the room page is **Find the stops**, nudge to the view, **Save as Home**, then save the presets. The camera homes at service start once a home is saved, on Home, and before a recall that finds its position unknown; the position is tracked in seconds of travel and recalls move only the difference, so Home and a recall take seconds and the page says Moving… meanwhile. Volume goes through PipeWire's own tools (`pw-dump`, `wpctl`), never through the upstream audio service.
+- The room page is two modes, not one column: the idle screen shows how to join and what is booked, the meeting screen shows the call's controls; everything else is a screen behind Options or a button, with Back, so the table screen never scrolls. A room config that still has `location: "REPLACE_WITH_LOCATION"` shows the room's name alone.
 
 Known limitations, mostly inherited from upstream:
 

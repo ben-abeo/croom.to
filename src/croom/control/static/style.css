@@ -73,7 +73,8 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 .upcoming-box { display: flex; flex-direction: column; width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
 .view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="upcoming"] { grid-template-rows: auto 1fr; justify-items: start; }
-.view[data-view="meeting"] { grid-template-rows: auto auto auto 1fr; }
+.view[data-view="meeting"] { grid-template-rows: auto auto auto auto 1fr; }   /* the line, the refusal when there is one, the buttons, Sound, the menu */
+#meeting-detail { margin: 0; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }

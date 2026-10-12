@@ -173,6 +173,25 @@
     return (m.title ? m.title + ", " : "") + platformName(m.platform) + (m.joined_at ? ", " + elapsedSince(m.joined_at) : "");
   }
 
+  // The meeting screen's first line: which meeting the room is in, and why it may be waiting. The idle status card says
+  // the same things (#headline, #detail) but is hidden in meeting mode. The elapsed time is the top bar's, so it is not here.
+  function meetingLine(m, label) {
+    if (m.state === "connected") return m.title && m.platform ? m.title + ", " + platformName(m.platform) : label;
+    if (m.state === "joining") return "Joining " + label + "\nThe room's screen is connecting.";
+    if (m.state === "in_lobby") return "Waiting for the host to let the room in.";
+    if (m.state === "leaving") return "Leaving";
+    return "";
+  }
+
+  // A meeting began or ended: land on the new mode's main screen. What the last action said (a refusal on one mode's
+  // screen is not news on the other's) and a Leave still waiting for its second tap belong to the mode that is over.
+  function landOnMode() {
+    model.error = "";
+    model.confirmLeave = false;
+    clearTimeout(confirmTimer);
+    applyView(MAIN_SCREEN[mode()], true);
+  }
+
   function joinWindow(ev) {
     const start = new Date(ev.start_time).getTime();
     const end = new Date(ev.end_time).getTime();
@@ -243,6 +262,7 @@
 
   function render() {
     const body = document.body;
+    if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
     el("message").textContent = model.error;
     el("meeting-message").textContent = model.error;   // the meeting screen's own line for a refusal or an error
 
@@ -267,7 +287,6 @@
     const s = model.status;
     const m = s.meeting;
     const cal = s.calendar;
-    if (viewMode(view()) !== mode()) applyView(MAIN_SCREEN[mode()], true);   // a meeting began or ended: land on that mode's screen
     if (m.state !== lastMeetingState) {
       // A join that failed while someone was on Options: the "Couldn't join" card is on the idle screen.
       if (m.state === "error" && view() !== "idle") applyView("idle", true);
@@ -280,6 +299,7 @@
     el("room-location").textContent = s.room.location;
     el("room-location").hidden = !s.room.location;
     const label = m.title || (m.platform ? platformName(m.platform) + " meeting" : "the meeting");
+    el("meeting-detail").textContent = meetingLine(m, label);
 
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {

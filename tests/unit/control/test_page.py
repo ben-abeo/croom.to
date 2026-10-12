@@ -125,7 +125,8 @@ def test_join_by_id_mute_and_leave_flow(browser):
         page.on("pageerror", lambda e: errors.append(str(e)))
         assert page.locator("#headline").inner_text().startswith("Free until")
         join_by_id(page)
-        assert page.locator("#headline").inner_text() == "In a meeting"
+        assert page.locator("#meeting-state").inner_text() == "In a meeting"      # in the top bar: the idle card's #headline is hidden in a meeting
+        assert page.locator("#meeting-detail").is_visible() and page.locator("#meeting-detail").inner_text() == "Zoom meeting"   # a link has no title: the platform names the call
         assert page.locator(".link").is_hidden()
         page.click("#meeting-actions button:has-text('Mute')")
         page.wait_for_selector("#meeting-actions button:has-text('Unmute')", timeout=5000)
@@ -735,11 +736,23 @@ def test_every_idle_screen_fits_the_kiosk_without_scrolling(browser):
 
 def test_every_meeting_screen_fits_the_kiosk_without_scrolling(browser):
     skip_if_day_ends_within(1.5)                                             # the service lists today's bookings only; the last starts in 55 minutes
-    bookings = [event(f"e{i}", f"Booking {i}", 20 + 5 * i) for i in range(8)]
+    title = "Quarterly planning review with the regional leadership team and the product owners of every office"
+    assert len(title) == 98                                                  # as long as a booking's title gets
+    bookings = [event("e-long", title, 8)] + [event(f"e{i}", f"Booking {i}", 20 + 5 * i) for i in range(8)]
     with PageServer(calendar_events=bookings) as server:
-        page = open_page(browser, server)
-        join_by_id(page)
-        assert fits(page), "the meeting screen scrolls"
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)   # the long-titled booking is inside its ten minutes
+        page.click("#actions button:has-text('Join now')")                   # this booking, so the call carries its title
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-detail").inner_text() == f"{title}, Zoom"
+        assert fits(page), "the meeting screen scrolls with a 98-character title"
+        for state, words in ((MeetingState.JOINING, "Joining"), (MeetingState.IN_LOBBY, "In the lobby")):   # the first line is longest while the call joins
+            server.meeting.set_state(state)
+            page.wait_for_function(f"document.getElementById('meeting-state').innerText === '{words}'", timeout=5000)
+            assert fits(page), f"the meeting screen scrolls while {words.lower()} with a 98-character title"
+        server.meeting.set_state(MeetingState.CONNECTED)
+        page.wait_for_function("document.getElementById('meeting-state').innerText === 'In a meeting'", timeout=5000)
         page.click("#open-camera-live")
         assert fits(page), "the meeting's camera screen scrolls"
         page.click("#back-from-camera")
@@ -1778,4 +1791,92 @@ def test_a_booking_whose_platform_changes_is_redrawn_in_both_lists(browser):
         swapped.append(True)
         page.clock.run_for(30000)                              # the bookings are polled every 30 seconds
         page.wait_for_function(f"{platforms} === 'Teams,Teams'", timeout=5000)
+        page.close()
+
+
+# --- the meeting screen says which meeting, and why the room waits (final fix pass, spec 2026-10-12 section 4.1) ---
+
+def test_the_meeting_screen_names_the_meeting_and_says_why_the_room_waits(browser):
+    """The idle status card says which meeting and why the room waits, but it is hidden in a meeting: the meeting
+    screen carries the same facts in #meeting-detail, whatever the call is doing."""
+    skip_if_day_ends_within(1)                                 # the booking starts in 5 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 5)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.click("#actions button:has-text('Join now')")      # this booking, not a link: the call has its title
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        detail = page.locator("#meeting-detail")
+        assert detail.is_visible() and detail.inner_text() == "Design review, Zoom"   # the title and the platform; the elapsed time is the bar's
+        for state, bar, words in ((MeetingState.JOINING, "Joining", "Joining Design review\nThe room's screen is connecting."),
+                                  (MeetingState.IN_LOBBY, "In the lobby", "Waiting for the host to let the room in."),
+                                  (MeetingState.LEAVING, "Leaving", "Leaving"),
+                                  (MeetingState.CONNECTED, "In a meeting", "Design review, Zoom")):
+            server.meeting.set_state(state)
+            page.wait_for_function(f"document.getElementById('meeting-state').innerText === '{bar}'", timeout=5000)
+            assert detail.is_visible() and detail.inner_text() == words, state
+        page.close()
+
+
+def test_a_call_joined_by_link_is_named_by_its_platform_while_it_joins(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        server.meeting.set_state(MeetingState.JOINING)
+        page.wait_for_function("document.getElementById('meeting-state').innerText === 'Joining'", timeout=5000)
+        assert page.locator("#meeting-detail").inner_text() == "Joining Zoom meeting\nThe room's screen is connecting."
+        page.close()
+
+
+# --- what a mode change leaves behind: the last action's error and a Leave waiting for its second tap ---
+
+JSON = {"Content-Type": "application/json"}
+
+
+def test_a_refused_idle_action_does_not_follow_the_page_into_the_meeting_screen(browser):
+    """model.error is the last action's answer, and it is written to both screens' lines: a call that begins from
+    elsewhere must not open on "Unsupported meeting link"."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.fill("#link-input", "not a meeting link")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.getElementById('message').innerText === 'Unsupported meeting link'", timeout=5000)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)
+        assert page.evaluate("document.getElementById('meeting-message').textContent") == ""
+        assert page.locator("#meeting-message").is_hidden()
+        page.close()
+
+
+def test_a_refused_meeting_action_does_not_follow_the_page_back_to_the_idle_screen(browser):
+    refusal = "The call did not answer the request to change the microphone."
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.route("**/api/meeting/mute", lambda route: route.fulfill(status=409, json={"error": refusal}))
+        page.click("#meeting-actions button:has-text('Mute')")
+        page.wait_for_function("document.getElementById('meeting-message').innerText.length > 0", timeout=5000)
+        assert page.locator("#meeting-message").inner_text() == refusal
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        assert page.evaluate("document.getElementById('message').textContent") == ""
+        assert page.locator("#message").is_hidden()
+        page.close()
+
+
+def test_a_leave_waiting_for_its_second_tap_does_not_outlive_the_call(browser):
+    """The confirm step lasts five seconds and the call can end inside them: the next call's Leave must not arrive
+    already asking "Tap again to leave". The clock is stopped, so the five seconds cannot run out by themselves."""
+    with PageServer() as server:
+        base = f"http://127.0.0.1:{server.port}"
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.click("#meeting-actions button:has-text('Leave')")
+        assert page.locator("#meeting-actions button.danger").inner_text() == "Tap again to leave"
+        # With the clock stopped no poll comes by itself: each wait asks for the status again until the page shows what it expects.
+        page.request.post(base + "/api/meeting/leave", data="{}", headers=JSON)        # the call ends from elsewhere ...
+        page.wait_for_function("window.croomPage.refreshStatus().then(() => document.body.dataset.view === 'idle')", timeout=5000)
+        page.request.post(base + "/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)   # ... and another begins
+        page.wait_for_function("window.croomPage.refreshStatus().then(() => document.body.dataset.state === 'meeting')", timeout=5000)
+        assert page.locator("#meeting-actions button.danger").inner_text() == "Leave"
         page.close()

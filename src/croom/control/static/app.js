@@ -25,8 +25,11 @@
   function applyView(name, automatic) {
     if (name === "camera") cameraMode = mode();
     document.body.dataset.view = name;
+    // Every view change, an automatic one too, starts or clears the wait. Before the hooks: a hook may start a timer of
+    // its own (the preview's 30 s renewal), and when the two fall due together they run in the order they were set, so
+    // the return goes first and the hook that ends the preview clears the renewal before it is sent.
+    armIdleReturn();
     for (const fn of viewHooks) fn(name, Boolean(automatic));
-    armIdleReturn();   // every view change, an automatic one too, starts or clears the wait
   }
   function setView(name, automatic) {
     if (view() === name) return;

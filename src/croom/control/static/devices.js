@@ -200,7 +200,16 @@
   }
   const setPreview = (on, options) => deviceCall("camera", "/api/camera/preview", { on: on }, options);
   let previewing = false;
+  let onCameraView = false;
   P.onViewChange((name, automatic) => {
+    if (onCameraView && name !== "camera") {
+      // Leaving the camera view, by Back or on its own, puts Save and Set up away: a Save left on is never still armed
+      // for the next person to open the screen.
+      presetSaveMode = false;
+      setupOpen = false;
+      lastCameraKey = null;   // the panel is drawn again from the model
+    }
+    onCameraView = name === "camera";
     if (previewing) {
       clearInterval(previewTimer);
       previewTimer = null;

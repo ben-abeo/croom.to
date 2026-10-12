@@ -1274,12 +1274,10 @@ def test_an_idle_screen_returns_to_the_idle_screen_after_ten_minutes_and_ends_th
         page.clock.fast_forward(90_000)                                       # past ten minutes without a tap
         page.wait_for_timeout(300)
         assert page.evaluate("document.body.dataset.view") == "idle"
-        # The renewal that fell due in the same jump fired once, ahead of the return (its timer is the older), and
-        # then came the off call: once, and the camera's preview is off.
-        assert asked == [True] * 5 + [False] and server.devices.camera.preview_on is False
+        assert asked == [True] * 4 + [False] and server.devices.camera.preview_on is False   # the renewal due in the same jump never went out: the return is the older timer
         page.clock.run_for(60_000)
         page.wait_for_timeout(300)
-        assert asked == [True] * 5 + [False]                                  # no renewal after the return
+        assert asked == [True] * 4 + [False]                                  # no renewal after the return
         page.close()
 
 
@@ -1503,6 +1501,26 @@ def test_a_save_left_on_in_idle_does_not_turn_a_recall_into_a_save_in_a_meeting(
         page.close()
 
 
+def test_leaving_the_camera_screen_puts_save_and_set_up_away(browser):
+    """A Save left on, or Set up left open, is not the next person's: Camera framing opened again finds both off, and
+    a tap on a preset recalls it."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#preset-save-mode")                        # Save is on ...
+        page.click("#setup-link")                              # ... and Set up is open, and the screen is left
+        assert page.locator("#preset-save-mode").get_attribute("aria-pressed") == "true" and page.locator("#camera-setup").is_visible()
+        page.click("#back-from-camera")
+        page.click("#open-camera-setup")
+        page.wait_for_function("document.body.dataset.view === 'camera'", timeout=5000)
+        assert page.locator("#preset-save-mode").get_attribute("aria-pressed") == "false" and page.locator("#preset-save-mode").inner_text() == "Save"
+        assert page.locator("#camera-setup").is_hidden() and page.locator("#setup-link").is_visible()
+        page.click("#preset-row button[data-slot='1']")
+        page.wait_for_timeout(300)
+        assert server.devices.camera.recalls == [1] and server.devices.camera.saves == []   # a recall, not an overwrite of the preset
+        page.close()
+
+
 def test_a_meeting_that_ends_under_a_held_arrow_still_stops_the_camera(browser):
     with PageServer() as server:
         page = open_page(browser, server)
@@ -1641,14 +1659,15 @@ def test_a_long_unbroken_title_in_the_warning_wraps_inside_the_top_bar(browser):
 
 
 @pytest.mark.parametrize("width, height", [(390, 844), (1280, 800)])
-def test_a_long_next_booking_title_gets_room_on_a_phone_and_leaves_the_kiosk_bar_alone(browser, width, height):
-    """overflow-wrap: anywhere lets a flex item shrink to one letter. On a phone the right side of the bar wraps and the
-    pill takes its own row (a pill of 200 px or more, a bar under 260 px); on the kiosk the bar stays one row, with the
-    pill beside the clock."""
+@pytest.mark.parametrize("room_name, room_location", [("Lab", "2nd floor"), ("Room 2", "2nd floor, by the kitchen")])   # the second is the deploy templates' own example
+def test_a_long_next_booking_title_gets_room_on_a_phone_and_leaves_the_kiosk_bar_alone(browser, width, height, room_name, room_location):
+    """overflow-wrap: anywhere lets a flex item shrink to one letter. On a phone the warning takes a row of its own, the
+    width of the bar, under the name: a pill of 200 px or more and a bar under 260 px whatever the room is called. On
+    the kiosk the bar stays one row, with the pill beside the clock."""
     skip_if_day_ends_within(1)                                 # the booking starts in 8 minutes, and the service lists today's only
     title = "Quarterly planning review with the regional leadership teams"
     assert len(title) == 60
-    with PageServer(calendar_events=[event("e1", title, 8)]) as server:
+    with PageServer(calendar_events=[event("e1", title, 8)], room_name=room_name, room_location=room_location) as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)

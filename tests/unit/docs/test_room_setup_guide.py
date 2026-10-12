@@ -67,7 +67,7 @@ def test_guide_sets_up_the_table_pi_and_names_the_desktop_icons():
     assert "Room controls" in html and "Start Crystal Meet" in html
     assert "on-screen keyboard" in html
     # the scale lives in the kiosk command, and nothing relaunches the browser: a table Pi set up before needs both steps again
-    assert "run the install-kiosk command again on the table Pi and reboot it so the new scale takes effect" in html
+    assert "pull the repository on the table Pi too, run the install-kiosk command again and reboot it so the new scale takes effect" in html
 
 
 def test_guide_sets_up_the_camera_and_the_sound():

@@ -31,7 +31,7 @@ Follow the five guides in this order:
 2. [Set up a Crystal Meet room](docs/guides/crystal-meet-room-setup.pdf): prepare
    the Pi, create the room on the dashboard, install with the room's config,
    first run, point the table screen and the door sign at the device.
-   For a Raspberry Pi table screen, clone the repository on it and run `sudo bash installer/install-kiosk.sh --url http://<device>:8080/`: the room page opens full screen at every login and a Room controls icon on its desktop reopens it. After updating Crystal Meet, run the install-kiosk command again on the table Pi and reboot it so the new scale takes effect (the 1.5 times scale is part of the command that script writes, and nothing relaunches the browser). The TV Pi gets a Start Crystal Meet icon on its desktop (over VNC) that starts the service if it ever stops.
+   For a Raspberry Pi table screen, clone the repository on it and run `sudo bash installer/install-kiosk.sh --url http://<device>:8080/`: the room page opens full screen at every login and a Room controls icon on its desktop reopens it. After updating Crystal Meet, pull the repository on the table Pi too, run the install-kiosk command again and reboot it so the new scale takes effect (the 1.5 times scale is part of the command that script writes, and nothing relaunches the browser). The TV Pi gets a Start Crystal Meet icon on its desktop (over VNC) that starts the service if it ever stops.
 3. [Connect Crystal Meet rooms to Google Calendar](docs/guides/crystal-meet-google-calendar.pdf):
    room resources in Google Workspace, one service account and key, share each
    room calendar with it, put the key and the calendar address on the device.

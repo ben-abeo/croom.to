@@ -42,7 +42,7 @@ def test_readme_names_the_setup_pieces():
         ":8080/tv",
         "**Options**, then **Screensaver**",
         "install-kiosk.sh --url",
-        "run the install-kiosk command again on the table Pi and reboot it so the new scale takes effect",
+        "pull the repository on the table Pi too, run the install-kiosk command again and reboot it so the new scale takes effect",
         "?keyboard=1",
         "Start Crystal Meet",
         "audio.output_device",

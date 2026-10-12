@@ -95,7 +95,7 @@ The room joined at [TO CONFIRM: date, time and time zone].
   Upload the video where Zoom can open it without signing in, and fill in the link and join time in test-plan.md sections 8 and 9 and in replies 2 and 6.
 - [ ] **Reviewer access**: decide which of options A, B and C to offer, then fill in or delete their [TO CONFIRM] items in test-plan.md section 9 and reply 2. For C, publish one room's page behind a password for the review only, and withdraw it afterwards.
 - [ ] **Test plan**: fill in the review contact, plan date and room, export it to PDF, and attach it to the reply and the submission.
-- [ ] **Technical Design › Security**: update answer 3 with the wording in `listing.md`. The credentials file belongs to the service user with mode 600; it is not "root-only". The architecture diagram (`architecture.png` and `.pdf`) still says "root-only": change that word in `render_diagram.py` and re-render it before uploading it again.
+- [ ] **Technical Design › Security**: update answer 3 with the wording in `listing.md`. The credentials file belongs to the service user with mode 600; it is not "root-only". Upload the re-rendered architecture diagram (`architecture.png` or `.pdf`) again: it now has the same wording and the no-store note.
 - [ ] **Publish page**: under test credentials, replace "none" with "No end-user login; see the test plan, section 9 (video, live session)".
 - [ ] **Reply and resubmit**: reply to the reviewers' email with the six answers, then resubmit from the Publish page.
 

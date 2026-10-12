@@ -73,7 +73,8 @@ for _ in \$(seq 1 60); do
     sleep 2
 done
 BROWSER=\$(command -v chromium || command -v chromium-browser)
-exec "\$BROWSER" --kiosk --noerrdialogs --disable-infobars --disable-session-crashed-bubble \\
+# 1.5x scale: the 1920x1200 touch panel lays the page out at 1280x800, buttons about 11 mm tall.
+exec "\$BROWSER" --kiosk --force-device-scale-factor=1.5 --noerrdialogs --disable-infobars --disable-session-crashed-bubble \\
     --hide-crash-restore-bubble --check-for-update-interval=31536000 --password-store=basic \\
     --overscroll-history-navigation=0 --disable-pinch "\$URL"
 KIOSK_COMMAND

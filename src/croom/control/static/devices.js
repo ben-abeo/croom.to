@@ -12,7 +12,6 @@
   const IN_MEETING = P.IN_MEETING;
 
   const SLIDE_OFF_PX = 16;   // how far outside a pressed pad button a finger may drift before that counts as letting go
-  const PANEL_IDLE_MS = 10 * 60 * 1000;   // the Camera panel closes itself after this long without a camera action
   let lastSoundKey = null;
   let lastCameraKey = null;
   let presetSaveMode = false;
@@ -27,7 +26,6 @@
   // user last got nor writes one, and a refusal of it is not shown or scrolled to.
   const INTERRUPTED = "the camera move was interrupted";
   const deviceNotes = { audio: "", camera: "" };
-  let closingOnIdle = false;  // the next close of the Camera panel is the idle timer's, not a person's
   let lastCameraAction = 0;   // when this page last opened the Camera panel or asked the camera for something itself
 
   async function deviceCall(kind, path, body, options) {
@@ -191,38 +189,32 @@
     holdToMove(b, () => deviceCall("camera", "/api/camera/zoom", { step: Number(b.dataset.zoom) }), 400, null);
   }
 
-  // The idle preview on the TV: asked for while the panel is open and no meeting runs, renewed every 30 s. The renewal
-  // keeps running while the panel is open, so it also picks the preview up again when a meeting ends or the camera returns.
-  // The table's kiosk never reloads and nobody closes panels, so the renewal alone would keep the TV on the camera for
-  // good: after PANEL_IDLE_MS without a camera action from this page the panel closes itself, and closing it (below)
-  // turns the preview off and stops the renewal.
+  // The idle preview on the TV follows the Camera framing screen (spec 2026-10-12, section 4.2): asked for while the
+  // camera view is shown in idle mode and no meeting runs, renewed every 30 s, and turned off once when the page
+  // leaves that view: by Back, or on its own when a meeting begins, which is nobody's action (a background call: no
+  // note, no scroll if it fails). The camera view opened from a meeting never asks for it.
   function previewWanted() {
     const s = model.status;
-    return Boolean(el("camera-panel").open && s && s.camera && s.camera.available && !IN_MEETING.includes(s.meeting.state));
+    return Boolean(P.view() === "camera" && P.cameraMode() === "idle" && s && s.camera && s.camera.available && !IN_MEETING.includes(s.meeting.state));
   }
   const setPreview = (on, options) => deviceCall("camera", "/api/camera/preview", { on: on }, options);
-  el("camera-panel").addEventListener("toggle", () => {
-    clearInterval(previewTimer);
-    previewTimer = null;
-    if (!el("camera-panel").open) {
-      const quiet = closingOnIdle;   // an automatic close is nobody's action: no note, no scroll if it fails
-      closingOnIdle = false;
-      setPreview(false, quiet ? { background: true } : undefined);
-      return;
+  let previewing = false;
+  P.onViewChange((name, automatic) => {
+    if (previewing) {
+      clearInterval(previewTimer);
+      previewTimer = null;
+      previewing = false;
+      setPreview(false, automatic ? { background: true } : undefined);   // the page left the screen on its own: nobody's action
     }
-    lastCameraAction = Date.now();   // opening the panel counts, also in a meeting, where it asks for no preview
-    if (previewWanted()) setPreview(true);
-    previewTimer = setInterval(() => {
-      if (Date.now() - lastCameraAction > PANEL_IDLE_MS) {
-        closingOnIdle = true;
-        el("camera-panel").open = false;   // the toggle handler sends preview off and clears this timer
-        return;
-      }
-      if (previewWanted()) setPreview(true, { background: true });
-    }, 30000);
+    if (name === "camera" && P.cameraMode() === "idle") {
+      previewing = true;
+      lastCameraAction = Date.now();
+      if (previewWanted()) setPreview(true);
+      previewTimer = setInterval(() => { if (previewWanted()) setPreview(true, { background: true }); }, 30000);
+    }
   });
   window.addEventListener("pagehide", () => {
-    if (!el("camera-panel").open) return;
+    if (!previewing) return;
     fetch("/api/camera/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: false }), keepalive: true }).catch(() => {});
   });
 

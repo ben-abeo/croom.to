@@ -6,12 +6,32 @@
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
+  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera view
+  // belongs to whichever mode showed it, so its Back returns there.
+  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting" };
+  const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
   const el = (id) => document.getElementById(id);
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null };
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
+  const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
+  let cameraMode = "idle";  // the mode that opened the camera view
+
+  const view = () => document.body.dataset.view;
+  const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
+  const viewMode = (name) => (name === "camera" ? cameraMode : VIEW_MODES[name]);
+
+  function applyView(name, automatic) {
+    if (name === "camera") cameraMode = mode();
+    document.body.dataset.view = name;
+    for (const fn of viewHooks) fn(name, Boolean(automatic));
+  }
+  function setView(name, automatic) {
+    if (view() === name) return;
+    applyView(name, automatic);
+    render();
+  }
   let confirmTimer = null;
-  let lastActionsKey = null;
   let lastEventsKey = null;
   let lastPickerKey = null;
   const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
@@ -103,14 +123,16 @@
     return b;
   }
 
-  function setActions(specs) {
+  function setActions(specs, containerId, keyHolder) {
     // Replace the buttons only when their labels or availability change, so a
     // click in progress is never lost to a re-render (the timer ticks every second).
     const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy]));
-    if (key === lastActionsKey) return;
-    lastActionsKey = key;
-    el("actions").replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
+    if (key === keyHolder.key) return;
+    keyHolder.key = key;
+    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
   }
+  const idleActionsKey = { key: null };
+  const meetingActionsKey = { key: null };
 
   function leaveSpec() {
     if (model.confirmLeave) {
@@ -142,13 +164,15 @@
   function render() {
     const body = document.body;
     el("message").textContent = model.error;
+    el("meeting-message").textContent = model.error;   // the meeting screen's own line for a refusal or an error
 
     if (model.offline || !model.status) {
       body.dataset.state = "offline";
       el("kicker").textContent = "Not connected";
       el("headline").textContent = "Can't reach the room";
       el("detail").textContent = "Check that Crystal Meet is running on the room's device, then this page will reconnect on its own.";
-      setActions([]);
+      setActions([], "actions", idleActionsKey);
+      setActions([], "meeting-actions", meetingActionsKey);
       document.querySelector(".screen-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;
@@ -159,14 +183,14 @@
     document.querySelector(".camera-section").hidden = false;
 
     const s = model.status;
+    if (viewMode(view()) !== mode()) applyView(MAIN_SCREEN[mode()], true);   // a meeting began or ended: land on that mode's screen
+    el("open-options").hidden = mode() !== "idle";
     el("room-name").textContent = s.room.name;
     el("room-location").textContent = s.room.location;
     el("room-location").hidden = !s.room.location;
     const m = s.meeting;
     const cal = s.calendar;
     const label = m.title || (m.platform ? platformName(m.platform) + " meeting" : "the meeting");
-    // A join is refused while a meeting is in progress, so do not offer the link form then.
-    document.querySelector(".link").hidden = IN_MEETING.includes(m.state);
 
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
@@ -194,7 +218,13 @@
     } else {
       specs = renderIdle(cal);
     }
-    setActions(specs);
+    if (mode() === "meeting") {
+      setActions(specs, "meeting-actions", meetingActionsKey);
+      setActions([], "actions", idleActionsKey);
+    } else {
+      setActions(specs, "actions", idleActionsKey);
+      setActions([], "meeting-actions", meetingActionsKey);
+    }
 
     renderEvents(cal);
     renderPicker();
@@ -312,9 +342,21 @@
     joinLink(value).then(() => { if (!model.error) input.value = ""; });
   });
 
+  el("open-options").addEventListener("click", () => setView("options"));
+  el("back-from-options").addEventListener("click", () => setView("idle"));
+  el("open-camera-setup").addEventListener("click", () => setView("camera"));
+  el("open-screensaver").addEventListener("click", () => setView("screensaver"));
+  el("back-from-screensaver").addEventListener("click", () => setView("options"));
+  el("back-from-camera").addEventListener("click", () => setView(cameraMode === "meeting" ? "meeting" : "options"));
+  el("open-camera-live").addEventListener("click", () => setView("camera"));
+  el("open-upcoming").addEventListener("click", () => setView("upcoming"));
+  el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
+
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING,
+    view: view, setView: setView, mode: mode, cameraMode: () => cameraMode,
+    onViewChange: (fn) => viewHooks.push(fn),
     // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
     // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.
     onRender: (fn) => { renderHooks.push(fn); if (model.status && !model.offline) fn(model.status); },

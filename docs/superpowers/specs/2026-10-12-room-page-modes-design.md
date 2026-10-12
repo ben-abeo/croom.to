@@ -81,7 +81,7 @@ Each screen is a `<section class="view" data-view="NAME">`; `body[data-view="NAM
 
 ### 4.5 Files
 
-- `src/croom/control/static/index.html`: the seven `view` sections; three script tags in order: `app.js`, `devices.js`, `keyboard.js`.
+- `src/croom/control/static/index.html`: the six `view` sections; three script tags in order: `app.js`, `devices.js`, `keyboard.js`.
 - `src/croom/control/static/app.js`: the model, the polls, `mode()`, the view switch, the idle return timer, the idle and meeting screens, bookings and the upcoming list, the screensaver picker. It publishes `window.croomPage = { model, el, api, post, render, onRender, view, setView, mode, IN_MEETING }` for the other two files, where `onRender(fn)` registers a function `render()` calls after its own work.
 - `src/croom/control/static/devices.js`: today's Sound and Camera panel code and the preview, moved out of `app.js` with as few changes as the view switch needs (`previewWanted`, the Back targets, the hidden Set up in meeting mode). It registers its rendering through `onRender`.
 - `src/croom/control/static/keyboard.js`: today's keyboard IIFE, moved; it refuses to open unless the view is `idle`.

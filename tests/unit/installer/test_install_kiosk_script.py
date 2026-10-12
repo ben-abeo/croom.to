@@ -46,6 +46,7 @@ def test_kiosk_command_opens_the_room_page_full_screen_with_the_keyboard_flag(tm
     text = command.read_text()
     assert os.access(command, os.X_OK)
     assert "--kiosk" in text and "http://pimeet-3.local:8080/?keyboard=1" in text
+    assert "--force-device-scale-factor=1.5" in text   # the 1920x1200 touch panel lays the page out at 1280x800
     assert "--disable-session-crashed-bubble" in text and "--hide-crash-restore-bubble" in text
     assert "pgrep" in text  # already open: do nothing
     assert "curl" in text   # waits for the room page before opening the browser

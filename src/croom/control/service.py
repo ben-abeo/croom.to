@@ -11,7 +11,7 @@ import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -59,6 +59,21 @@ def normalize_link(value: str) -> str:
     if url and "://" not in url:
         return "https://" + url
     return url
+
+
+@web.middleware
+async def _static_no_cache(
+    request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
+) -> web.StreamResponse:
+    """
+    Serve every /static/ file with Cache-Control: no-cache, as the pages are: the browser keeps its copy but asks
+    before using it (a 304 when nothing changed), so a kiosk with a cached script never runs it next to a newer
+    page that expects something else.
+    """
+    response = await handler(request)
+    if request.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
 
 
 class ControlService(Service):
@@ -142,7 +157,7 @@ class ControlService(Service):
     def create_app(self) -> web.Application:
         """The aiohttp application; tests drive it without a listener."""
         _register_font_types()
-        app = web.Application(client_max_size=MAX_BODY_BYTES)
+        app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[_static_no_cache])
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/sign", self._handle_sign)
         app.router.add_get("/tv", self._handle_tv)

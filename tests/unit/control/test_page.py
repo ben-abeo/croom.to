@@ -18,7 +18,8 @@ import pytest
 
 from croom.control.service import ControlService
 from croom.devices.errors import Interrupted, NotReady
-from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event
+from croom.meeting.providers.base import MeetingState
+from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -26,9 +27,10 @@ playwright = pytest.importorskip("playwright.sync_api")
 class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
-    def __init__(self, calendar_events=(), room_name="Lab", calendar_connected=True, port=0, devices=None):
+    def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None):
         self.events = list(calendar_events)
         self.room_name = room_name
+        self.room_location = room_location
         self.calendar_connected = calendar_connected
         self.port_arg = port
         self.devices = devices if devices is not None else StubDevices()
@@ -50,7 +52,7 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting()
         service = ControlService(
-            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": "2nd floor",
+            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
                     "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")},
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
             devices=self.devices,
@@ -97,6 +99,25 @@ def join_by_id(page):
     page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
 
 
+def open_camera_screen(page):
+    """Idle mode: Options, then Camera framing. Waits until the camera view is up."""
+    page.click("#open-options")
+    page.click("#open-camera-setup")
+    page.wait_for_function("document.body.dataset.view === 'camera'", timeout=5000)
+
+
+def open_screensaver_screen(page):
+    page.click("#open-options")
+    page.click("#open-screensaver")
+    page.wait_for_function("document.body.dataset.view === 'screensaver'", timeout=5000)
+
+
+def fits(page):
+    """True when nothing needs to scroll but the bookings box: not the page, and not the screen under the top bar."""
+    return page.evaluate("""() => { const d = document.documentElement, m = document.querySelector('main');
+        return d.scrollHeight <= d.clientHeight && m.scrollHeight <= m.clientHeight; }""")
+
+
 def test_join_by_id_mute_and_leave_flow(browser):
     with PageServer(calendar_events=[event("e1", "Design review", 25)]) as server:
         page = open_page(browser, server)
@@ -104,12 +125,13 @@ def test_join_by_id_mute_and_leave_flow(browser):
         page.on("pageerror", lambda e: errors.append(str(e)))
         assert page.locator("#headline").inner_text().startswith("Free until")
         join_by_id(page)
-        assert page.locator("#headline").inner_text() == "In a meeting"
+        assert page.locator("#meeting-state").inner_text() == "In a meeting"      # in the top bar: the idle card's #headline is hidden in a meeting
+        assert page.locator("#meeting-detail").is_visible() and page.locator("#meeting-detail").inner_text() == "Zoom meeting"   # a link has no title: the platform names the call
         assert page.locator(".link").is_hidden()
-        page.click("#actions button:has-text('Mute')")
-        page.wait_for_selector("#actions button:has-text('Unmute')", timeout=5000)
-        page.click("#actions button:has-text('Leave')")
-        page.click("#actions button:has-text('Tap again to leave')")
+        page.click("#meeting-actions button:has-text('Mute')")
+        page.wait_for_selector("#meeting-actions button:has-text('Unmute')", timeout=5000)
+        page.click("#meeting-actions button:has-text('Leave')")
+        page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert server.meeting.leaves == 1
         assert errors == []
@@ -120,12 +142,33 @@ def test_in_meeting_controls_are_not_rebuilt_while_the_timer_ticks(browser):
     with PageServer() as server:
         page = open_page(browser, server)
         join_by_id(page)
-        page.evaluate("window.__firstButton = document.querySelector('#actions button')")
+        page.evaluate("window.__firstButton = document.querySelector('#meeting-actions button')")
+        assert page.evaluate("window.__firstButton !== null")
         before = page.locator("#detail").inner_text()
         page.wait_for_timeout(2600)
-        assert page.evaluate("document.querySelector('#actions button') === window.__firstButton"), \
+        assert page.evaluate("document.querySelector('#meeting-actions button') === window.__firstButton"), \
             "the action buttons were replaced while nothing about them changed"
         assert page.locator("#detail").inner_text() != before, "the elapsed time should keep ticking"
+        page.close()
+
+
+def test_join_now_joins_the_booking_it_shows_when_one_follows_another(browser):
+    """Back to back: the first booking ends as the second starts, and both say "Join now". Once the page shows the
+    second, its button must join the second, not keep the first's."""
+    skip_if_day_ends_within(1)
+    now = datetime.now().astimezone()
+    began = min(2, (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 60)   # today only
+    hand_over = 8 / 60                                                       # the first ends eight seconds from now
+    first = event("b1", "First booking", -began, duration=began + hand_over, url="https://zoom.us/j/11111111111")
+    second = event("b2", "Second booking", hand_over, duration=30, url="https://zoom.us/j/22222222222")
+    with PageServer(calendar_events=[first, second]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.getElementById('headline').innerText.startsWith('First booking')", timeout=5000)
+        page.wait_for_function("document.getElementById('headline').innerText.startsWith('Second booking')", timeout=12000)
+        page.click("#actions button:has-text('Join now')")
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert server.meeting.joins[-1][0].endswith("22222222222")
         page.close()
 
 
@@ -198,6 +241,40 @@ def test_door_sign_hides_the_schedule_without_a_calendar(browser):
         page.close()
 
 
+def test_the_location_line_disappears_when_the_room_has_none(browser):
+    with PageServer(room_location="") as server:
+        page = open_page(browser, server)
+        assert page.locator("#room-location").is_hidden()
+        assert page.locator("#room-location").evaluate("el => getComputedStyle(el).display") == "none"   # an empty paragraph is already "hidden" to Playwright
+        assert page.locator("#room-name").inner_text() == "Lab"
+        page.close()
+    with PageServer() as server:
+        page = open_page(browser, server)
+        assert page.locator("#room-location").is_visible() and page.locator("#room-location").inner_text() == "2nd floor"
+        page.close()
+
+
+def test_the_door_sign_hides_the_location_line_when_the_room_has_none(browser):
+    with PageServer(room_location="") as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#room-location").is_hidden()
+        assert page.locator("#room-location").evaluate("el => getComputedStyle(el).display") == "none"
+        page.close()
+
+
+def test_the_door_sign_shows_the_location_line_when_the_room_has_one(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#room-location").is_visible()
+        assert page.locator("#room-location").inner_text() == "2nd floor"
+        assert page.locator("#room-name").inner_text() == "Lab"
+        page.close()
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -220,6 +297,7 @@ def test_door_sign_goes_offline_and_recovers(browser):
 def test_the_screen_picker_posts_the_style_and_marks_the_current_one(browser):
     with PageServer() as server:
         page = open_page(browser, server)
+        open_screensaver_screen(page)
         picker = page.locator("#screen-picker")
         assert picker.is_visible()
         assert picker.locator("button[aria-pressed='true']").inner_text() == "Information"
@@ -306,6 +384,57 @@ def test_the_page_keyboard_fits_a_phone_width(browser):
         page.close()
 
 
+def test_the_page_keyboard_keeps_the_field_above_the_keys_on_the_kiosk(browser):
+    """The kiosk's screen does not scroll, but the keys cover its lower half: with the tall card of a booking that
+    starts soon, the field must still come up above them, and the screen must fit again once they are gone."""
+    skip_if_day_ends_within(1)                                 # the booking starts in 5 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review with a title long enough for two lines", 5)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/?keyboard=1", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.click("#link-input")
+        assert page.locator("#keyboard").is_visible()
+        box, keyboard = page.locator("#link-input").bounding_box(), page.locator("#keyboard").bounding_box()
+        assert box["y"] >= 0 and box["y"] + box["height"] <= keyboard["y"]
+        tap(page, "hide")
+        assert fits(page) and page.evaluate("window.scrollY") == 0
+        page.close()
+
+
+def test_the_keyboard_opens_on_the_idle_screen_only_and_hides_when_a_meeting_starts(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_selector("#keyboard:not([hidden])", timeout=5000)
+        assert page.locator(".schedule").is_hidden()                           # the bookings make room for the keys
+        assert page.locator("#link-input").is_visible()
+        tap(page, "symbols", *"98765432100")
+        tap(page, "join")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.locator("#keyboard").is_hidden() and not page.evaluate("document.body.classList.contains('keyboard-open')")
+        page.click("#meeting-actions button:has-text('Leave')")
+        page.click("#meeting-actions button:has-text('Tap again to leave')")
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
+        assert page.locator(".schedule").is_visible()
+        # A call that starts from elsewhere while the keys are up: the Join key is not what closes them this time, and
+        # the hidden field's blur is not either (a browser need not report it), so only the view change is left to do it.
+        page.click("#link-input")
+        page.wait_for_selector("#keyboard:not([hidden])", timeout=5000)
+        page.evaluate("window.addEventListener('focusout', (e) => e.stopImmediatePropagation(), true)")
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
+                          headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)
+        assert page.locator("#keyboard").is_hidden() and not page.evaluate("document.body.classList.contains('keyboard-open')")
+        page.click("#meeting-actions button:has-text('Leave')")
+        page.click("#meeting-actions button:has-text('Tap again to leave')")
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
+        page.click("#open-options")
+        page.evaluate("document.getElementById('keyboard-toggle').click()")   # out of sight on Options: a finger cannot reach the toggle, a script can
+        assert page.locator("#keyboard").is_hidden()                          # nothing to type into on Options
+        assert not page.evaluate("document.body.classList.contains('keyboard-open')")
+        page.close()
+
+
 # --- the Sound and Camera panels (spec 2026-10-08 sound and camera, section 4.6) ---
 
 from tests.unit.control.test_service import StubCamera, StubVolume  # noqa: E402
@@ -339,6 +468,7 @@ def page_on_a_stopped_clock(browser, server, width=1280, height=800):
 def test_sound_panel_shows_the_speaker_and_changes_the_level(browser):
     with PageServer() as server:
         page = open_page(browser, server)
+        join_by_id(page)
         assert "MeetUp" in page.locator("#sound-device").inner_text()
         assert page.locator("#volume-level").inner_text() == "40"
         page.click("#louder")
@@ -356,7 +486,7 @@ def test_sound_panel_shows_the_speaker_and_changes_the_level(browser):
 def test_holding_an_arrow_sends_start_and_stop(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         hold(page, "#arrow-pad button[data-pan='1'][data-tilt='0']", ms=900)
         page.wait_for_timeout(300)
         moves = server.devices.camera.moves
@@ -368,7 +498,7 @@ def test_holding_an_arrow_sends_start_and_stop(browser):
 def test_zoom_home_and_presets(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#zoom-in")
         page.wait_for_function("document.getElementById('camera-status').innerText.includes('125')", timeout=5000)
         page.click("#camera-home")
@@ -385,7 +515,7 @@ def test_zoom_home_and_presets(browser):
 def test_the_setup_flow_until_a_home_is_saved(browser):
     with PageServer(devices=StubDevices(camera=StubCamera(home_saved=False, position_known=False, saved=()))) as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         assert page.locator("#preset-row").is_hidden() and page.locator("#camera-home").is_disabled()
         assert page.locator("#save-home").is_disabled()
         page.click("#find-stops")
@@ -402,18 +532,22 @@ def test_the_setup_flow_until_a_home_is_saved(browser):
 def test_panels_hide_with_a_note_when_the_devices_are_missing(browser):
     with PageServer(devices=StubDevices(volume=StubVolume(available=False), camera=StubCamera(available=False))) as server:
         page = open_page(browser, server)
-        assert page.locator("#sound-panel").is_hidden() and page.locator("#sound-note").inner_text() == "No speaker found"
+        open_camera_screen(page)
         assert page.locator("#camera-panel").is_hidden() and page.locator("#camera-note").inner_text() == "No controllable camera found"
+        page.click("#back-from-camera")
+        page.click("#back-from-options")
+        join_by_id(page)
+        assert page.locator("#sound-panel").is_hidden() and page.locator("#sound-note").inner_text() == "No speaker found"
         page.close()
 
 
 def test_opening_the_camera_panel_while_idle_asks_for_the_preview(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.wait_for_timeout(300)
         assert server.devices.camera.previews == [True]
-        page.click("#camera-panel summary")
+        page.click("#back-from-camera")
         page.wait_for_timeout(300)
         assert server.devices.camera.previews == [True, False]
         page.close()
@@ -424,8 +558,232 @@ def test_the_panels_fit_a_phone_width(browser):
         page = browser.new_page(viewport={"width": 390, "height": 844})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        page.close()
+
+
+def test_options_leads_to_camera_framing_and_screensaver_and_back(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        assert page.locator("#open-options").is_visible()
+        page.click("#open-options")
+        assert page.evaluate("document.body.dataset.view") == "options"
+        assert page.locator("#link-form").is_hidden()                       # the idle screen is gone
+        page.click("#open-camera-setup")
+        assert page.evaluate("document.body.dataset.view") == "camera"
+        assert page.locator("#arrow-pad").is_visible()
+        page.click("#back-from-camera")
+        assert page.evaluate("document.body.dataset.view") == "options"
+        page.click("#open-screensaver")
+        assert page.evaluate("document.body.dataset.view") == "screensaver"
+        assert page.locator("#screen-picker button").count() == 4
+        page.click("#back-from-screensaver")
+        page.click("#back-from-options")
+        assert page.evaluate("document.body.dataset.view") == "idle" and page.locator("#link-form").is_visible()
+        page.close()
+
+
+def test_the_page_switches_to_the_meeting_screen_and_back_on_its_own(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")                                          # on a sub-screen when the meeting starts
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
+                          headers={"Content-Type": "application/json"})      # a join from another screen, or the calendar
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)
+        assert page.locator("#meeting-actions button:has-text('Mute')").is_visible()
+        assert page.locator("#open-options").is_hidden()
+        page.click("#open-camera-live")
+        assert page.evaluate("document.body.dataset.view") == "camera"
+        page.click("#back-from-camera")
+        assert page.evaluate("document.body.dataset.view") == "meeting"      # Back from the camera returns to the mode's screen
+        page.click("#meeting-actions button:has-text('Leave')")
+        page.click("#meeting-actions button:has-text('Tap again to leave')")
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
+        assert page.locator("#link-form").is_visible() and page.locator("#open-options").is_visible()
+        page.close()
+
+
+def test_a_short_day_keeps_each_booking_at_its_own_height(browser):
+    with PageServer(calendar_events=[event("e1", "Design review", 25)]) as server:
+        page = open_page(browser, server)
+        page.wait_for_function("document.querySelectorAll('#events .event').length === 1", timeout=5000)
+        row, box = page.locator("#events .event").bounding_box(), page.locator("#events").bounding_box()
+        assert row["height"] < 120 < box["height"]                           # a row, not the whole bookings box
+        page.close()
+
+
+def test_a_booking_in_progress_keeps_its_row_inside_the_today_list(browser):
+    """The row of the booking in progress carries the class "now", which once also placed the status card in the idle
+    grid: the row left its list. It must stay in the list's one column with the other rows, and the card in the grid's
+    first cell, beside the bookings and above the link box."""
+    skip_if_day_ends_within(1)                                               # the others start in 20 and 35 minutes, and the service lists today's only
+    now = datetime.now().astimezone()
+    into_the_day = (now - now.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds() / 60
+    bookings = [event("b1", "Standup", -min(5, into_the_day), duration=30),  # begun a few minutes ago, never before today's midnight; has a link
+                event("b2", "Design review", 20), event("b3", "Retro", 35)]
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon' && document.querySelectorAll('#events .event').length === 3", timeout=5000)
+        assert page.locator("#kicker").inner_text().upper() == "HAPPENING NOW"
+        assert page.locator("#events .event.now").count() == 1 and "Standup" in page.locator("#events .event.now").inner_text()
+        box = page.locator("#events").bounding_box()
+        rows = [page.locator("#events .event").nth(i).bounding_box() for i in range(3)]
+        assert rows[0]["y"] < rows[1]["y"] < rows[2]["y"], rows              # in the order of the day: the one in progress stays first
+        for row in rows:                                                     # every row, the one in progress too, is inside the list, in the same column
+            assert box["x"] - 0.5 <= row["x"] and row["x"] + row["width"] <= box["x"] + box["width"] + 0.5, rows
+            assert box["y"] - 0.5 <= row["y"] and row["y"] + row["height"] <= box["y"] + box["height"] + 0.5, rows
+            assert abs(row["x"] - rows[0]["x"]) < 1 and abs(row["width"] - rows[0]["width"]) < 1, rows
+        view = page.locator(".view[data-view='idle']").bounding_box()
+        card, link, schedule = (page.locator(selector).bounding_box() for selector in (".status-card", ".link", ".schedule"))
+        assert abs(card["x"] - view["x"]) < 1 and abs(card["y"] - view["y"]) < 1       # still the first cell of the idle grid
+        assert card["x"] + card["width"] <= schedule["x"] and card["y"] + card["height"] <= link["y"] + 1   # beside the bookings, above the link box
+        page.close()
+
+
+def test_offline_says_so_on_every_screen_and_clears_when_the_room_answers(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        note = page.locator("#offline-note")
+        assert note.is_hidden()
+        page.route("**/api/status", lambda route: route.abort())
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=8000)
+        assert page.evaluate("document.body.dataset.view") == "meeting"      # offline keeps the screen
+        assert note.is_visible() and note.inner_text() == "Can't reach the room"
+        page.click("#open-camera-live")
+        assert page.evaluate("document.body.dataset.view") == "camera" and note.is_visible()
+        page.click("#back-from-camera")
+        assert page.evaluate("document.body.dataset.view") == "meeting" and note.is_visible()
+        page.unroute("**/api/status")
+        page.wait_for_function("document.getElementById('offline-note').hidden", timeout=8000)
+        assert page.locator("#meeting-actions button:has-text('Mute')").is_visible()   # and the controls are back
+        page.close()
+
+
+def test_going_offline_on_the_camera_screen_keeps_back_working_and_releases_the_preview(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        asked = preview_requests(page)
+        open_camera_screen(page)
+        page.wait_for_timeout(300)
+        assert asked == [True]
+        page.route("**/api/status", lambda route: route.abort())
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=8000)
+        assert page.locator("#offline-note").is_visible()                      # the top bar says so on the camera screen too
+        assert page.locator("#back-from-camera").is_enabled()
+        page.click("#back-from-camera")
+        assert page.evaluate("document.body.dataset.view") == "options"
+        page.wait_for_timeout(300)
+        assert asked == [True, False]                                          # the off call went out, even if it could not be answered
+        page.click("#back-from-options")
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        page.close()
+
+
+def test_a_long_title_and_a_refusal_leave_the_link_box_on_the_kiosk_screen(browser):
+    title = "Quarterly planning review with the regional leadership team and the product owners of every office"
+    skip_if_day_ends_within(1)                                               # the booking starts in 5 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", title, 5)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)   # Starting soon, with Join now
+        page.fill("#link-input", "not a meeting link")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.getElementById('message').innerText === 'Unsupported meeting link'", timeout=5000)
+        assert fits(page)
+        form = page.locator("#link-form").bounding_box()
+        assert form["y"] >= 0 and form["y"] + form["height"] <= 800
+        page.close()
+
+
+def test_a_screen_that_cannot_fit_scrolls_under_the_top_bar_instead_of_being_cut_off(browser):
+    """A last resort that real text never needs at 1280 by 800: an endless refusal on the idle card."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.evaluate("(t) => { window.croomPage.model.error = t; window.croomPage.render(); }", "A refusal that will not end. " * 50)
+        assert not fits(page)                                                # the screen is too long for the kiosk
+        assert page.evaluate("document.documentElement.scrollHeight <= document.documentElement.clientHeight")   # the page stays put
+        page.locator("#link-form").scroll_into_view_if_needed()
+        form = page.locator("#link-form").bounding_box()
+        assert form["y"] >= 0 and form["y"] + form["height"] <= 800          # and the link box can still be reached
+        page.close()
+
+
+def test_every_idle_screen_fits_the_kiosk_without_scrolling(browser):
+    skip_if_day_ends_within(1.5)                                             # the service lists today's bookings only
+    bookings = [event(f"e{i}", f"Booking {i}", 20 + 5 * i) for i in range(8)]
+    with PageServer(calendar_events=bookings) as server:
+        page = open_page(browser, server)
+        page.wait_for_function("document.querySelectorAll('#events .event').length === 8", timeout=5000)
+        assert fits(page), "the idle screen scrolls with eight bookings"
+        assert page.evaluate("const b = document.querySelector('#events'); b.scrollHeight > b.clientHeight")   # the box scrolls instead
+        assert page.locator("#link-form").is_visible()
+        page.click("#open-options")
+        assert fits(page), "the options screen scrolls"
+        page.click("#open-camera-setup")
+        assert page.locator("#setup-link").is_visible()                      # a home is saved: Set up is a link
+        page.click("#setup-link")
+        assert page.locator("#camera-setup").is_visible()
+        assert fits(page), "the camera screen scrolls with Set up open"
+        page.click("#back-from-camera")
+        page.click("#open-screensaver")
+        assert fits(page), "the screensaver screen scrolls"
+        page.close()
+
+
+def test_every_meeting_screen_fits_the_kiosk_without_scrolling(browser):
+    skip_if_day_ends_within(1.5)                                             # the service lists today's bookings only; the last starts in 55 minutes
+    title = "Quarterly planning review with the regional leadership team and the product owners of every office"
+    assert len(title) == 98                                                  # as long as a booking's title gets
+    bookings = [event("e-long", title, 8)] + [event(f"e{i}", f"Booking {i}", 20 + 5 * i) for i in range(8)]
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)   # the long-titled booking is inside its ten minutes
+        page.click("#actions button:has-text('Join now')")                   # this booking, so the call carries its title
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-detail").inner_text() == f"{title}, Zoom"
+        assert fits(page), "the meeting screen scrolls with a 98-character title"
+        for state, words in ((MeetingState.JOINING, "Joining"), (MeetingState.IN_LOBBY, "In the lobby")):   # the first line is longest while the call joins
+            server.meeting.set_state(state)
+            page.wait_for_function(f"document.getElementById('meeting-state').innerText === '{words}'", timeout=5000)
+            assert fits(page), f"the meeting screen scrolls while {words.lower()} with a 98-character title"
+        server.meeting.set_state(MeetingState.CONNECTED)
+        page.wait_for_function("document.getElementById('meeting-state').innerText === 'In a meeting'", timeout=5000)
+        page.click("#open-camera-live")
+        assert fits(page), "the meeting's camera screen scrolls"
+        page.click("#back-from-camera")
+        page.click("#open-upcoming")
+        page.wait_for_function("document.querySelectorAll('#upcoming-list .event').length === 8", timeout=5000)
+        assert fits(page), "the upcoming screen scrolls"
+        assert page.evaluate("const b = document.querySelector('#upcoming-list'); b.scrollHeight > b.clientHeight")   # the list scrolls instead
+        page.close()
+
+
+def test_a_long_refusal_on_the_meeting_screen_stays_above_the_meeting_buttons(browser):
+    """#meeting-message is a grid item: its height must follow its text. With an explicit minimum (the idle card's
+    .message has one), the row shrinks under a long refusal in the shortest kiosk window and the text runs over the buttons."""
+    refusal = "The call did not answer the request to change the microphone. Wait a moment and try again, or leave the meeting and join it one more time by the link."
+    assert len(refusal) == 150
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 700})   # the shortest window that still gets the fixed screen
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        join_by_id(page)
+        page.route("**/api/meeting/mute", lambda route: route.fulfill(status=409, json={"error": refusal}))
+        page.click("#meeting-actions button:has-text('Mute')")
+        page.wait_for_function("document.getElementById('meeting-message').innerText.length === 150", timeout=5000)
+        placed = page.evaluate("""() => {
+            const message = document.getElementById('meeting-message'), range = document.createRange();
+            range.selectNodeContents(message);
+            return { text: range.getBoundingClientRect().bottom, box: message.getBoundingClientRect().bottom,
+                     holds: message.scrollHeight <= message.clientHeight, actions: document.getElementById('meeting-actions').getBoundingClientRect().top };
+        }""")
+        assert placed["box"] <= placed["actions"], "the message's box runs into the buttons"
+        assert placed["holds"] and placed["text"] <= placed["actions"], "the refusal's text runs over the buttons"
         page.close()
 
 
@@ -494,7 +852,7 @@ class PreviewRefusingCamera(StubCamera):
 def test_a_refused_camera_command_shows_its_reason_and_the_next_one_clears_it(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#preset-row button[data-slot='3']")                       # nothing is saved there
         page.wait_for_function("document.getElementById('camera-note').innerText === 'nothing saved in this slot'", timeout=5000)
         assert "saved" not in page.locator("#preset-row button[data-slot='3']").get_attribute("class").split()
@@ -507,7 +865,7 @@ def test_a_refused_camera_command_shows_its_reason_and_the_next_one_clears_it(br
 def test_a_failed_preset_save_is_not_marked_saved(browser):
     with PageServer(devices=StubDevices(camera=UnwritableCamera())) as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#preset-save-mode")
         page.click("#preset-row button[data-slot='3']")
         page.wait_for_function("document.getElementById('camera-note').innerText.includes('disk full')", timeout=5000)
@@ -524,7 +882,7 @@ def test_a_long_refusal_does_not_overflow_a_phone(browser):
         page = browser.new_page(viewport={"width": 390, "height": 844})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#preset-save-mode")
         page.click("#preset-row button[data-slot='3']")
         page.wait_for_function("document.getElementById('camera-note').innerText.includes('File name too long')", timeout=5000)
@@ -534,23 +892,42 @@ def test_a_long_refusal_does_not_overflow_a_phone(browser):
 
 def test_a_refusal_comes_into_view_beside_the_controls_that_caused_it(browser):
     with PageServer() as server:
-        page = browser.new_page(viewport={"width": 1024, "height": 600})      # the table's touch screen
+        page = browser.new_page(viewport={"width": 1024, "height": 600})      # smaller than the kiosk's 1280 by 800
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        page.click("#camera-panel summary")
-        page.evaluate("document.getElementById('preset-row').scrollIntoView({block: 'center'})")
-        assert page.locator("#camera-panel summary").bounding_box()["y"] < 0   # the panel's top, where the note will appear, is above the fold
+        open_camera_screen(page)
         page.click("#preset-row button[data-slot='3']")                       # nothing is saved there
         page.wait_for_function("document.getElementById('camera-note').innerText !== ''", timeout=5000)
-        note, preset = page.locator("#camera-note").bounding_box(), page.locator("#preset-row button[data-slot='3']").bounding_box()
-        assert note["y"] >= 0 and preset["y"] + preset["height"] <= 600       # the reason is on screen, and so is the button
+        box = page.locator("#camera-note").bounding_box()
+        assert box["y"] >= 0 and box["y"] + box["height"] <= 600             # the reason is in view on the camera screen
+        preset = page.locator("#preset-row button[data-slot='3']").bounding_box()
+        assert preset["y"] + preset["height"] <= 600                          # and so is the button that caused it
+        page.close()
+
+
+def test_a_refusal_comes_into_view_for_a_phone_scrolled_down_to_the_controls(browser):
+    """The note sits above the controls. No screen starts scrolled any more, so nothing else pins the scroll in
+    devices.js: a phone that has scrolled down to the presets must be shown why its tap did nothing. A phone 560 px
+    tall, because at 844 the whole camera screen is all but in view and the note never leaves it."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 390, "height": 560})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        open_camera_screen(page)
+        page.evaluate("window.scrollTo(0, document.documentElement.scrollHeight)")
+        assert page.evaluate("window.scrollY") > 0
+        assert page.locator(".camera-section .kicker").bounding_box()["y"] < 0   # the top of the screen, where the note will be, is out of sight
+        page.click("#preset-row button[data-slot='3']")                       # nothing is saved there
+        page.wait_for_function("document.getElementById('camera-note').innerText === 'nothing saved in this slot'", timeout=5000)
+        box = page.locator("#camera-note").bounding_box()
+        assert box["y"] >= -1 and box["y"] + box["height"] <= 560             # and the page has scrolled back up to it (a pixel of rounding)
         page.close()
 
 
 def test_a_failed_save_as_home_keeps_set_up_open(browser):
     with PageServer(devices=StubDevices(camera=UnwritableCamera())) as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#setup-link")
         page.click("#save-home")
         page.wait_for_function("document.getElementById('camera-note').innerText.includes('disk full')", timeout=5000)
@@ -561,6 +938,7 @@ def test_a_failed_save_as_home_keeps_set_up_open(browser):
 def test_a_refused_volume_change_shows_its_reason_and_the_slider_goes_back(browser):
     with PageServer(devices=StubDevices(volume=BusySpeaker())) as server:
         page = open_page(browser, server)
+        join_by_id(page)
         for level in (70, 80):                                     # the second refusal says the same words: the slider must still go back
             with page.expect_response("**/api/audio/volume"):
                 page.locator("#volume-slider").evaluate(f"el => {{ el.value = {level}; el.dispatchEvent(new Event('change', {{bubbles: true}})); }}")
@@ -573,7 +951,7 @@ def test_a_refused_volume_change_shows_its_reason_and_the_slider_goes_back(brows
 def test_a_long_move_cut_short_by_a_newer_tap_says_nothing(browser):
     with PageServer(devices=StubDevices(camera=InterruptedCamera())) as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         with page.expect_response("**/api/camera/home") as answered:
             page.click("#camera-home")
         assert answered.value.status == 409
@@ -586,7 +964,7 @@ def test_a_busy_camera_says_moving_and_locks_the_arrows(browser):
     camera = SlowHomeCamera()
     with PageServer(devices=StubDevices(camera=camera)) as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#preset-row button[data-slot='3']")                       # refused: nothing is saved there
         page.wait_for_function("document.getElementById('camera-note').innerText !== ''", timeout=5000)
         page.click("#camera-home")
@@ -604,6 +982,7 @@ def test_a_busy_camera_says_moving_and_locks_the_arrows(browser):
 def test_the_answer_updates_the_page_without_waiting_for_the_poll(browser):
     with PageServer() as server:
         page = open_page(browser, server)
+        join_by_id(page)                                           # Sound is on the meeting screen
         snapshot = page.evaluate("fetch('/api/status').then((r) => r.text())")
         page.route("**/api/status", lambda route: route.fulfill(body=snapshot, content_type="application/json"))   # polls can no longer help
         page.click("#louder")
@@ -614,6 +993,7 @@ def test_the_answer_updates_the_page_without_waiting_for_the_poll(browser):
 def test_a_poll_already_on_its_way_does_not_undo_the_answer(browser):
     with PageServer() as server:
         page = open_page(browser, server)
+        join_by_id(page)                                           # Sound is on the meeting screen
         page.evaluate("""() => {
             const real = window.fetch;
             window.fetch = (url, init) => String(url).endsWith('/api/status')
@@ -634,7 +1014,7 @@ def test_a_poll_already_on_its_way_does_not_undo_the_answer(browser):
 def test_the_panel_buttons_are_not_rebuilt_while_nothing_changes(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.evaluate("window.__keep = [document.querySelector('#preset-row button'), document.getElementById('zoom-in'), document.getElementById('louder')]")
         page.wait_for_timeout(2600)                                # a whole poll and more
         assert page.evaluate("""document.querySelector('#preset-row button') === window.__keep[0]
@@ -645,7 +1025,7 @@ def test_the_panel_buttons_are_not_rebuilt_while_nothing_changes(browser):
 def test_holding_a_zoom_button_repeats_until_it_is_released(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         hold(page, "#zoom-in", ms=1000)
         page.wait_for_timeout(300)
         zooms = server.devices.camera.zooms
@@ -659,7 +1039,7 @@ def test_holding_a_zoom_button_repeats_until_it_is_released(browser):
 def test_sliding_off_an_arrow_stops_the_camera_like_lifting_the_finger(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         camera = server.devices.camera
         arrow = "#arrow-pad button[data-pan='1'][data-tilt='0']"
         page.evaluate("(sel) => { window.__lost = 0; document.querySelector(sel).addEventListener('lostpointercapture', () => window.__lost++); }", arrow)
@@ -689,7 +1069,7 @@ def test_sliding_off_an_arrow_stops_the_camera_like_lifting_the_finger(browser):
 def test_sliding_off_a_zoom_button_ends_its_repeat(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         camera = server.devices.camera
         box = press(page, "#zoom-in")
         page.wait_for_timeout(100)
@@ -710,7 +1090,7 @@ def test_an_arrow_held_while_the_camera_goes_busy_stops_repeating_and_a_late_lif
     with PageServer() as server:
         camera = server.devices.camera
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         press(page, "#arrow-pad button[data-pan='1'][data-tilt='0']")
         page.wait_for_timeout(100)
         camera.busy = True                                         # a Home or a preset from another screen
@@ -728,7 +1108,7 @@ def test_lifting_an_arrow_right_after_the_camera_went_busy_sends_no_stop(browser
     with PageServer() as server:
         camera = server.devices.camera
         page = page_on_a_stopped_clock(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         press(page, "#arrow-pad button[data-pan='1'][data-tilt='0']")
         page.wait_for_timeout(100)
         camera.busy = True                                         # a Home or a preset from another screen
@@ -747,8 +1127,38 @@ def test_the_panels_degrade_without_a_devices_service(browser):
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        assert page.locator("#sound-panel").is_hidden() and page.locator("#sound-note").inner_text() == "No speaker found"
+        open_camera_screen(page)
         assert page.locator("#camera-panel").is_hidden() and page.locator("#camera-note").inner_text() == "No controllable camera found"
+        page.click("#back-from-camera")
+        page.click("#back-from-options")
+        join_by_id(page)
+        assert page.locator("#sound-panel").is_hidden() and page.locator("#sound-note").inner_text() == "No speaker found"
+        assert errors == []
+        page.close()
+
+
+def test_the_panels_are_drawn_even_when_their_script_arrives_after_the_first_poll(browser):
+    """On a slow link the first poll can be answered before devices.js has run: it is given that status as it registers."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        held = []
+        page.route("**/static/devices.js", lambda route: held.append(route))      # the request stalls until the test lets it go
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="commit")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)   # app.js has polled and rendered
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)
+        assert len(held) == 1
+        drawn = "[!document.getElementById('sound-panel').hidden, !document.getElementById('camera-panel').hidden]"
+        assert page.evaluate(drawn) == [False, False]                             # nobody was there to draw them
+        held[0].continue_()
+        page.wait_for_load_state("load")
+        # No waiting for the next poll, two seconds away: the panels were drawn as the script registered.
+        assert page.evaluate(drawn) == [True, True]
+        assert page.locator("#volume-level").inner_text() == "40"
         assert errors == []
         page.close()
 
@@ -756,7 +1166,7 @@ def test_the_panels_degrade_without_a_devices_service(browser):
 def test_save_and_the_set_up_link_wait_for_a_saved_home(browser):
     with PageServer(devices=StubDevices(camera=StubCamera(home_saved=False, position_known=False, saved=()))) as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         assert page.locator("#preset-save-mode").is_hidden() and page.locator("#setup-link").is_hidden()
         assert page.locator("#camera-setup").is_visible()          # Set up is what the panel offers until then
         page.close()
@@ -786,7 +1196,7 @@ def test_the_preview_is_renewed_every_30_seconds_but_not_in_a_meeting(browser):
         base = f"http://127.0.0.1:{server.port}"
         page = page_on_a_stopped_clock(browser, server)
         asked = preview_requests(page)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.wait_for_timeout(300)
         assert asked == [True]
         page.clock.run_for(30000)
@@ -797,11 +1207,12 @@ def test_the_preview_is_renewed_every_30_seconds_but_not_in_a_meeting(browser):
         run_until_the_page_shows(page, "meeting")
         page.clock.run_for(60000)
         page.wait_for_timeout(300)
-        assert asked == [True, True]                               # nothing asked for while the TV is in a meeting
+        assert asked == [True, True, False]                        # the page left the camera screen: off, once; then
+                                                                   # nothing asked for while the TV is in a meeting
         page.close()
 
 
-def test_a_panel_opened_in_a_meeting_asks_for_the_preview_once_the_room_is_idle(browser):
+def test_the_camera_screen_opened_in_a_meeting_asks_for_no_preview_and_closes_when_the_room_is_idle(browser):
     with PageServer() as server:
         base = f"http://127.0.0.1:{server.port}"
         page = page_on_a_stopped_clock(browser, server)
@@ -809,21 +1220,25 @@ def test_a_panel_opened_in_a_meeting_asks_for_the_preview_once_the_room_is_idle(
         page.request.post(base + "/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
         run_until_the_page_shows(page, "meeting")
-        page.click("#camera-panel summary")
+        page.click("#open-camera-live")
         page.wait_for_timeout(300)
         assert asked == []                                         # the TV shows the meeting: no preview to ask for
         page.request.post(base + "/api/meeting/leave", data="{}", headers={"Content-Type": "application/json"})
         run_until_the_page_shows(page, "free")
+        assert page.evaluate("document.body.dataset.view") == "idle"   # the meeting's camera screen does not carry over
         page.clock.run_for(30000)
         page.wait_for_timeout(300)
-        assert asked == [True]                                     # the panel is still open: the next renewal asks
+        assert asked == []                                         # and nothing renews behind it
+        open_camera_screen(page)                                   # Camera framing in the idle room asks at once
+        page.wait_for_timeout(300)
+        assert asked == [True]
         page.close()
 
 
 def test_a_preview_renewal_that_works_does_not_clear_the_users_last_refusal(browser):
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server, width=1024, height=600)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#preset-row button[data-slot='3']")                       # the user's own refusal: nothing is saved there
         page.wait_for_function("document.getElementById('camera-note').innerText === 'nothing saved in this slot'", timeout=5000)
         page.clock.run_for(30000)                                             # the renewal goes out and the camera accepts it
@@ -837,7 +1252,7 @@ def test_a_preview_renewal_updates_the_page_from_its_answer(browser):
     camera = ZoomingOnRenewalCamera()
     with PageServer(devices=StubDevices(camera=camera)) as server:
         page = page_on_a_stopped_clock(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.wait_for_timeout(300)
         assert camera.previews == [True] and "Zoom 100" in page.locator("#camera-status").inner_text()
         held = []
@@ -853,11 +1268,15 @@ def test_a_refused_preview_renewal_writes_no_note_and_does_not_scroll_the_page(b
     camera = PreviewRefusingCamera()
     with PageServer(devices=StubDevices(camera=camera)) as server:
         page = page_on_a_stopped_clock(browser, server, width=1024, height=600)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.click("#preset-row button[data-slot='3']")
         page.wait_for_function("document.getElementById('camera-note').innerText === 'nothing saved in this slot'", timeout=5000)
-        page.evaluate("document.getElementById('preset-row').scrollIntoView({block: 'center'})")
-        assert page.locator("#camera-note").bounding_box()["y"] < 0           # the user's note is above the fold
+        # The camera screen fits without scrolling, so the note cannot be put above the fold: count scroll requests.
+        page.evaluate("""() => {
+            window.__scrolls = 0;
+            const real = Element.prototype.scrollIntoView;
+            Element.prototype.scrollIntoView = function (...args) { window.__scrolls += 1; return real.apply(this, args); };
+        }""")
         scrolled_to = page.evaluate("window.scrollY")
         asked = preview_requests(page)
         camera.refusing = True                                                # a meeting has just started: the page's status is behind
@@ -865,14 +1284,14 @@ def test_a_refused_preview_renewal_writes_no_note_and_does_not_scroll_the_page(b
         page.wait_for_timeout(300)
         assert asked == [True] and camera.previews == [True]                  # the renewal went out and was refused
         assert page.locator("#camera-note").inner_text() == "nothing saved in this slot"
-        assert page.evaluate("window.scrollY") == scrolled_to
+        assert page.evaluate("window.scrollY") == scrolled_to and page.evaluate("window.__scrolls") == 0
         page.close()
 
 
 def test_a_zoom_hold_does_not_hold_back_the_speakers_status(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.evaluate("""() => {
             const real = window.fetch;
             window.fetch = (url, init) => String(url).endsWith('/api/status')
@@ -886,71 +1305,141 @@ def test_a_zoom_hold_does_not_hold_back_the_speakers_status(browser):
         page.close()
 
 
-PANEL_OPEN = "document.getElementById('camera-panel').open"
+PANEL_OPEN = "document.body.dataset.view === 'camera'"
 
 
-def test_the_camera_panel_closes_itself_after_ten_minutes_without_a_camera_action(browser):
-    """The table Pi's kiosk never reloads and nobody closes panels: without this, the renewal keeps the TV on the
-    live camera for good. Long stretches are fast-forwarded, as an untouched screen lives through them: each timer
-    that falls due fires once, at the end. The renewals skipped that way change nothing, because a renewal is never
-    a camera action."""
+# --- the idle return: a screen other than the idle screen returns to it after ten minutes without a tap (spec 2026-10-12, sections 3 and 4.2) ---
+
+def test_an_idle_screen_returns_to_the_idle_screen_after_ten_minutes_and_ends_the_preview(browser):
+    """The kiosk never reloads and nobody presses Back: without this, a room left on Camera framing keeps the TV on
+    the camera for good. Each timer that falls due during a fast-forward fires once, at the end."""
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server)
         asked = preview_requests(page)
-        page.click("#camera-panel summary")
+        page.click("#open-options")
+        page.click("#open-camera-setup")
         page.wait_for_timeout(300)
-        page.clock.run_for(60_000)                                            # renewed every 30 s ...
-        page.clock.fast_forward(8 * 60_000)                                   # ... and still at nine minutes
+        assert asked == [True]
+        page.clock.run_for(60_000)
+        page.clock.fast_forward(8 * 60_000)                                   # nine minutes: still there, still renewing
         page.wait_for_timeout(300)
-        assert page.evaluate(PANEL_OPEN) is True and asked == [True] * 4
-        page.clock.fast_forward(90_000)                                       # past ten minutes without a camera action
+        assert page.evaluate("document.body.dataset.view") == "camera" and asked == [True] * 4
+        page.clock.fast_forward(90_000)                                       # past ten minutes without a tap
         page.wait_for_timeout(300)
-        assert page.evaluate(PANEL_OPEN) is False and asked == [True] * 4 + [False]   # closed, which turned the preview off
-        assert server.devices.camera.previews[-1] is False and server.devices.camera.preview_on is False
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        assert asked == [True] * 4 + [False] and server.devices.camera.preview_on is False   # the renewal due in the same jump never went out: the return is the older timer
         page.clock.run_for(60_000)
         page.wait_for_timeout(300)
-        assert asked == [True] * 4 + [False]                                  # and no renewal after that
+        assert asked == [True] * 4 + [False]                                  # no renewal after the return
         page.close()
 
 
-def test_an_automatic_close_during_an_outage_leaves_no_note(browser):
-    """The automatic close is nobody's action: when the agent cannot be reached at that moment, the page must not
-    show "Failed to fetch" above a panel nobody touched."""
+def test_a_tap_keeps_an_idle_screen_another_ten_minutes(browser):
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server)
-        page.click("#camera-panel summary")
-        page.wait_for_timeout(300)
-        page.route("**/api/camera/preview", lambda route: route.abort())
+        page.click("#open-options")
+        page.clock.fast_forward(9 * 60_000)
+        page.wait_for_timeout(200)
+        page.click("#open-screensaver")                                       # a tap at nine minutes
+        page.clock.fast_forward(9 * 60_000)
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.body.dataset.view") == "screensaver"   # eighteen minutes in, still here
+        page.clock.fast_forward(90_000)
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        page.close()
+
+
+def test_a_screen_opened_with_one_tap_and_left_alone_returns_too(browser):
+    """The tap that opens a screen lands while the idle screen is still up, so the wait for the new screen starts with
+    the view change, not with the tap."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        page.click("#open-options")
         page.clock.fast_forward(11 * 60_000)
-        page.wait_for_timeout(300)
-        assert page.evaluate(PANEL_OPEN) is False
-        note = page.evaluate("() => document.querySelector('#camera-note').textContent.trim()")
-        assert "fetch" not in note.lower() and "failed" not in note.lower()
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.body.dataset.view") == "idle"
         page.close()
 
 
-def test_a_camera_action_keeps_the_camera_panel_open_another_ten_minutes(browser):
+def test_a_tap_that_goes_nowhere_keeps_an_idle_screen_another_ten_minutes_too(browser):
+    """A tap on a navigation button restarts the wait through the view change. A camera nudge changes no screen:
+    only the page's own pointerdown listener can see it."""
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.wait_for_timeout(300)
         page.clock.fast_forward(9 * 60_000)
         hold(page, "#arrow-pad button[data-pan='1'][data-tilt='0']", ms=100)  # a nudge at nine minutes
         page.wait_for_timeout(300)
         assert server.devices.camera.moves == [(1, 0), (0, 0)]
-        page.clock.fast_forward(9 * 60_000)                                   # eighteen minutes open, nine since the nudge
+        page.clock.fast_forward(9 * 60_000)                                   # eighteen minutes in, nine since the nudge
         page.wait_for_timeout(300)
-        assert page.evaluate(PANEL_OPEN) is True
+        assert page.evaluate("document.body.dataset.view") == "camera"
         page.clock.fast_forward(90_000)                                       # ten and a half since the nudge
         page.wait_for_timeout(300)
-        assert page.evaluate(PANEL_OPEN) is False and server.devices.camera.previews[-1] is False
+        assert page.evaluate("document.body.dataset.view") == "idle" and server.devices.camera.previews[-1] is False
+        page.close()
+
+
+def test_a_meeting_screen_never_returns_on_its_own(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.click("#open-upcoming")
+        page.clock.fast_forward(30 * 60_000)
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.body.dataset.view") == "upcoming"
+        page.close()
+
+
+def test_a_call_that_starts_under_an_open_sub_screen_leaves_no_wait_behind(browser):
+    """Options is open, so the wait is running, when a call starts from elsewhere: the page lands on the meeting screen,
+    and the wait that was running must not fire ten minutes into the call. A stale wait would never show the idle screen
+    (the page lands on the meeting screen again at once), but it would pull a person off the Upcoming screen."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        page.click("#open-options")
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
+                          headers={"Content-Type": "application/json"})
+        run_until_the_page_shows(page, "meeting")
+        assert page.evaluate("document.body.dataset.view") == "meeting"
+        page.click("#open-upcoming")
+        page.clock.fast_forward(11 * 60_000)
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.body.dataset.view") == "upcoming"
+        page.close()
+
+
+@pytest.mark.parametrize("leaves", ["a meeting begins", "ten minutes pass"])
+def test_an_automatic_close_during_an_outage_leaves_no_note(browser, leaves):
+    """The page leaving the camera screen on its own is nobody's action: when the agent cannot be reached at that
+    moment, the page must not show "Failed to fetch" on a screen nobody touched. A meeting beginning and the idle
+    return are the two ways the page leaves on its own; both go through the same automatic path."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_camera_screen(page)
+        page.wait_for_timeout(300)
+        asked = preview_requests(page)
+        page.route("**/api/camera/preview", lambda route: route.abort())
+        if leaves == "a meeting begins":
+            page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}',
+                              headers={"Content-Type": "application/json"})
+            run_until_the_page_shows(page, "meeting")
+        else:
+            page.clock.fast_forward(11 * 60_000)
+        page.wait_for_timeout(300)
+        assert page.evaluate(PANEL_OPEN) is False                             # left on its own
+        assert asked[-1:] == [False] and asked.count(False) == 1              # and the one off call failed
+        note = page.evaluate("() => document.querySelector('#camera-note').textContent.trim()")
+        assert "fetch" not in note.lower() and "failed" not in note.lower()
         page.close()
 
 
 def test_closing_the_page_with_the_camera_panel_open_turns_the_preview_off(browser):
     with PageServer() as server:
         page = open_page(browser, server)
-        page.click("#camera-panel summary")
+        open_camera_screen(page)
         page.wait_for_timeout(300)
         assert server.devices.camera.previews == [True]
         page.goto("about:blank")                                              # the page goes away with the panel still open
@@ -984,4 +1473,410 @@ def test_the_section_labels_and_quiet_buttons_keep_their_colour_when_the_status_
         assert colour(page, ".sound-section .kicker") == periwinkle and colour(page, ".camera-section .kicker") == periwinkle
         assert colour(page, "#louder") == white and colour(page, "#screen-picker button") == white
         assert colour(page, "#kicker") == dark_blue and colour(page, "#actions button") == dark_blue
+        page.close()
+
+
+# --- the meeting screen's content (spec 2026-10-12, sections 4.1 and 4.2) ---
+
+def test_the_meeting_screen_shows_the_state_the_time_and_what_is_next(browser):
+    skip_if_day_ends_within(2)                                 # the service lists today's bookings only; the last starts in 90 minutes
+    bookings = [event("e1", "Design review", 8), event("e2", "Sales call", 90)]   # the first starts in 8 minutes
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)   # the first booking is inside its ten minutes
+        join_by_id(page)
+        assert page.locator("#meeting-state").inner_text() == "In a meeting"
+        page.wait_for_function("/^\\d+:\\d\\d$/.test(document.getElementById('meeting-elapsed').innerText)", timeout=5000)
+        warning = page.locator("#next-warning")
+        assert warning.is_visible() and warning.inner_text().startswith("Next: ") and "Design review" in warning.inner_text()
+        assert page.locator("#open-options").is_hidden()
+        page.click("#open-upcoming")
+        assert page.evaluate("document.body.dataset.view") == "upcoming"
+        titles = page.locator("#upcoming-list .title").all_inner_texts()
+        assert titles == ["Design review", "Sales call"]
+        assert page.locator("#upcoming-empty").is_hidden()
+        page.click("#back-from-upcoming")
+        assert page.evaluate("document.body.dataset.view") == "meeting"
+        page.close()
+
+
+def test_upcoming_says_so_when_nothing_else_is_booked(browser):
+    with PageServer(calendar_events=[event("e0", "Earlier", -60)]) as server:   # already started: not upcoming
+        page = open_page(browser, server)
+        join_by_id(page)
+        assert page.locator("#next-warning").is_hidden()
+        page.click("#open-upcoming")
+        assert page.locator("#upcoming-list .event").count() == 0 and page.locator("#upcoming-empty").is_visible()
+        assert page.locator("#upcoming-empty").inner_text() == "No more meetings today"
+        page.close()
+
+
+def test_the_camera_during_a_meeting_recalls_and_nudges_but_never_sets_up(browser):
+    with PageServer(devices=StubDevices(camera=StubCamera(home_saved=False, position_known=False))) as server:   # no home yet: Set up is on the screen
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#find-stops")
+        page.wait_for_function("!document.getElementById('save-home').disabled", timeout=5000)
+        page.click("#save-home")
+        page.wait_for_function("document.querySelectorAll('#preset-row button').length === 3", timeout=5000)
+        page.click("#back-from-camera")
+        page.click("#back-from-options")
+        join_by_id(page)
+        asked = preview_requests(page)
+        page.click("#open-camera-live")
+        assert page.locator("#preset-row button").count() == 3
+        assert page.locator("#preset-save-mode").is_hidden() and page.locator("#setup-link").is_hidden() and page.locator("#camera-setup").is_hidden()
+        page.click("#preset-row button[data-slot='1']")
+        page.wait_for_function("document.body.dataset.view === 'camera'", timeout=5000)
+        page.wait_for_timeout(300)
+        assert asked == []                                     # no preview during a meeting
+        assert server.devices.camera.recalls == [1] and server.devices.camera.saves == []   # the tap recalled the preset and saved nothing
+        hold(page, "#arrow-pad button[data-pan='1']")
+        page.wait_for_timeout(300)                             # the stop is a request still on its way when the release returns
+        assert server.devices.camera.moves[-2:] == [(1, 0), (0, 0)]
+        page.close()
+
+
+def test_a_save_left_on_in_idle_does_not_turn_a_recall_into_a_save_in_a_meeting(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#preset-save-mode")                        # Save is on, and the screen is left without a preset tapped
+        page.click("#back-from-camera")
+        page.click("#back-from-options")
+        join_by_id(page)
+        page.click("#open-camera-live")
+        assert page.locator("#preset-save-mode").is_hidden()   # nobody can see it or undo it from here
+        page.click("#preset-row button[data-slot='1']")
+        page.wait_for_timeout(300)
+        assert server.devices.camera.recalls == [1] and server.devices.camera.saves == []   # a recall, not an overwrite of the preset
+        page.close()
+
+
+def test_leaving_the_camera_screen_puts_save_and_set_up_away(browser):
+    """A Save left on, or Set up left open, is not the next person's: Camera framing opened again finds both off, and
+    a tap on a preset recalls it."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#preset-save-mode")                        # Save is on ...
+        page.click("#setup-link")                              # ... and Set up is open, and the screen is left
+        assert page.locator("#preset-save-mode").get_attribute("aria-pressed") == "true" and page.locator("#camera-setup").is_visible()
+        page.click("#back-from-camera")
+        page.click("#open-camera-setup")
+        page.wait_for_function("document.body.dataset.view === 'camera'", timeout=5000)
+        assert page.locator("#preset-save-mode").get_attribute("aria-pressed") == "false" and page.locator("#preset-save-mode").inner_text() == "Save"
+        assert page.locator("#camera-setup").is_hidden() and page.locator("#setup-link").is_visible()
+        page.click("#preset-row button[data-slot='1']")
+        page.wait_for_timeout(300)
+        assert server.devices.camera.recalls == [1] and server.devices.camera.saves == []   # a recall, not an overwrite of the preset
+        page.close()
+
+
+def test_a_meeting_that_ends_under_a_held_arrow_still_stops_the_camera(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.click("#open-camera-live")
+        press(page, "#arrow-pad button[data-pan='1']")
+        page.wait_for_timeout(200)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        page.wait_for_timeout(300)
+        page.mouse.up()
+        page.wait_for_timeout(300)
+        assert server.devices.camera.moves[-1] == (0, 0)       # the pad vanished under the finger; the stop still went out
+        page.close()
+
+
+def test_a_failed_join_brings_the_page_back_to_the_idle_screen(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        server.meeting.fail_next_join = True
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/1"}', headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=8000)
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        assert page.locator("#kicker").inner_text().upper() == "COULDN'T JOIN"
+        page.close()
+
+
+def test_the_failed_join_card_lets_the_page_go_on_to_other_screens(browser):
+    """The landing on the idle screen happens once, when the state turns to error: with the card still up, a tap on
+    Options stays on Options through the polls that follow."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        server.meeting.fail_next_join = True
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/1"}', headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.state === 'error' && document.body.dataset.view === 'idle'", timeout=8000)
+        page.click("#open-options")
+        page.wait_for_timeout(2600)                            # a whole poll and more
+        assert page.evaluate("document.body.dataset.view") == "options" and page.evaluate("document.body.dataset.state") == "error"
+        page.close()
+
+
+def test_the_top_bar_names_each_state_of_the_call(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        assert page.locator("#meeting-state").is_hidden() and page.locator("#meeting-elapsed").is_hidden()   # nothing of a call in the idle bar
+        for state, words, timed in ((MeetingState.JOINING, "Joining", False), (MeetingState.IN_LOBBY, "In the lobby", False),
+                                    (MeetingState.CONNECTED, "In a meeting", True), (MeetingState.LEAVING, "Leaving", False)):
+            server.meeting.set_state(state)
+            page.wait_for_function(f"document.getElementById('meeting-state').innerText === '{words}'", timeout=5000)
+            assert page.evaluate("document.body.dataset.view") == "meeting" and page.locator("#meeting-state").is_visible()
+            assert page.locator("#meeting-elapsed").is_visible() == timed   # only while connected, though a leaving call still has its join time
+        server.meeting.set_state(MeetingState.IDLE)
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
+        assert page.locator("#meeting-state").is_hidden() and page.locator("#meeting-elapsed").is_hidden()
+        page.close()
+
+
+@pytest.mark.parametrize("minutes, close", [(45, False), (8, True)])
+def test_the_next_booking_warning_is_for_a_call_and_only_when_it_is_close(browser, minutes, close):
+    skip_if_day_ends_within(1.5)                               # the booking is today's only: 45 minutes away at most
+    with PageServer(calendar_events=[event("e1", "Design review", minutes)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function(f"document.body.dataset.state === '{'soon' if close else 'free'}'", timeout=5000)
+        assert page.locator("#next-warning").is_hidden()         # idle: the status card says it, the bar does not
+        server.meeting.set_state(MeetingState.JOINING)           # any state of a call
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.locator("#next-warning").is_visible() == close
+        page.close()
+
+
+# --- what the meeting screen's refactor rebuilt, and the meeting you are in ---
+
+def test_a_booking_reads_the_same_in_the_today_list_and_the_upcoming_list(browser):
+    """One builder makes both rows: the Today row, less its Join button, is the Upcoming row."""
+    skip_if_day_ends_within(1.5)                               # the last booking starts in 40 minutes, and the service lists today's only
+    bookings = [event("e1", "Design review", 8), event("e2", "Board lunch", 40, url=None)]   # one with a link, one without
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.querySelectorAll('#events .event').length === 2 && document.querySelectorAll('#upcoming-list .event').length === 2", timeout=5000)
+        rows = page.evaluate("""() => {
+            const read = (li) => {
+                const bare = li.cloneNode(true);
+                bare.querySelectorAll('button').forEach((b) => b.remove());
+                const platform = li.querySelector('.platform');
+                return { html: bare.outerHTML, time: li.querySelector('time').textContent, title: li.querySelector('.title').textContent, platform: platform && platform.textContent };
+            };
+            return { today: [...document.querySelectorAll('#events .event')].map(read), upcoming: [...document.querySelectorAll('#upcoming-list .event')].map(read) };
+        }""")
+        assert rows["today"] == rows["upcoming"]
+        assert [row["title"] for row in rows["upcoming"]] == ["Design review", "Board lunch"]
+        assert [row["platform"] for row in rows["upcoming"]] == ["Zoom", None]      # the platform line is there when the booking has a link
+        assert page.locator("#events .event button").count() == 1                   # Join is Today's own, on the booking inside its window
+        assert page.locator("#upcoming-list button").count() == 0
+        page.close()
+
+
+def test_the_elapsed_time_in_the_top_bar_moves_between_status_polls(browser):
+    """The once-a-second timer moves the time; a status poll every two seconds alone would skip a value."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("/^\\d+:\\d\\d$/.test(document.getElementById('meeting-elapsed').innerText)", timeout=5000)
+        held = []
+        page.route("**/api/status", lambda route: held.append(route))             # no answer from here on, so nothing is drawn again ...
+        page.route("**/api/calendar/events", lambda route: held.append(route))    # ... and only the timer can move the time
+        for _ in range(50):
+            if held:
+                break
+            page.wait_for_timeout(100)                         # a poll has come and been held: every earlier one was answered
+        assert held
+        before = page.locator("#meeting-elapsed").inner_text()
+        page.wait_for_timeout(2200)                            # two ticks at least
+        assert page.locator("#meeting-elapsed").inner_text() != before
+        for route in held:
+            route.continue_()
+        page.close()
+
+
+def test_a_long_unbroken_title_in_the_warning_wraps_inside_the_top_bar(browser):
+    skip_if_day_ends_within(1)                                 # the booking starts in 8 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Q" * 100, 8)]) as server:   # a title with no space or hyphen to break at
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        join_by_id(page)                                       # by link: the booking is still the next one
+        page.wait_for_function("!document.getElementById('next-warning').hidden", timeout=5000)
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        clock = page.locator("#clock").bounding_box()
+        assert clock["x"] >= 0 and clock["x"] + clock["width"] <= 1280      # the clock is still on the bar
+        assert fits(page)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(390, 844), (1280, 800)])
+@pytest.mark.parametrize("room_name, room_location", [("Lab", "2nd floor"), ("Room 2", "2nd floor, by the kitchen")])   # the second is the deploy templates' own example
+def test_a_long_next_booking_title_gets_room_on_a_phone_and_leaves_the_kiosk_bar_alone(browser, width, height, room_name, room_location):
+    """overflow-wrap: anywhere lets a flex item shrink to one letter. On a phone the warning takes a row of its own, the
+    width of the bar, under the name: a pill of 200 px or more and a bar under 260 px whatever the room is called. On
+    the kiosk the bar stays one row, with the pill beside the clock."""
+    skip_if_day_ends_within(1)                                 # the booking starts in 8 minutes, and the service lists today's only
+    title = "Quarterly planning review with the regional leadership teams"
+    assert len(title) == 60
+    with PageServer(calendar_events=[event("e1", title, 8)], room_name=room_name, room_location=room_location) as server:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        join_by_id(page)                                       # by link: the booking is still the next one
+        page.wait_for_function("!document.getElementById('next-warning').hidden", timeout=5000)
+        pill, bar, clock = (page.locator(s).bounding_box() for s in ("#next-warning", ".top", "#clock"))
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        assert clock["x"] >= 0 and clock["x"] + clock["width"] <= width     # the clock is still on the bar
+        if width < 1024:
+            assert pill["width"] >= 200, f"the pill is {pill['width']:.0f} px wide"
+            assert bar["height"] < 260, f"the top bar is {bar['height']:.0f} px tall"
+        else:
+            assert bar["height"] < 150, f"the kiosk's bar is {bar['height']:.0f} px tall"
+            assert pill["y"] < clock["y"] + clock["height"] and clock["y"] < pill["y"] + pill["height"]   # one row: the pill beside the clock
+        page.close()
+
+
+def test_a_phone_bar_without_a_warning_keeps_its_one_row(browser):
+    """The wrap is for the warning: on the idle bar the clock and Options still share a row beside the name."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        clock, options = page.locator("#clock").bounding_box(), page.locator("#open-options").bounding_box()
+        assert clock["y"] < options["y"] + options["height"] and options["y"] < clock["y"] + clock["height"]
+        page.close()
+
+
+def test_the_meeting_you_are_in_is_not_next(browser):
+    """Joined from its window, a booking has not started yet: the bar and the Upcoming list leave it out, and
+    the list goes on showing a later one."""
+    skip_if_day_ends_within(2)                                 # the last booking starts in 90 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 8), event("e2", "Sales call", 90)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.click("#actions button:has-text('Join now')")    # this booking, not a link
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-state").inner_text() == "In a meeting"
+        assert page.locator("#next-warning").is_hidden()       # eight minutes away, but it is the meeting we are in
+        page.click("#open-upcoming")
+        assert page.locator("#upcoming-list .title").all_inner_texts() == ["Sales call"]
+        assert page.locator("#upcoming-empty").is_hidden()
+        page.click("#back-from-upcoming")
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers={"Content-Type": "application/json"})
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        assert page.locator("#upcoming-list .title").all_text_contents() == ["Design review", "Sales call"]   # a booking again once the call is over
+        page.close()
+
+
+def test_a_booking_whose_platform_changes_is_redrawn_in_both_lists(browser):
+    """An organiser swaps the link on a booking: at the next poll its rows say so, in the Today list and in the Upcoming list."""
+    skip_if_day_ends_within(1.5)                               # the booking starts in 40 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        swapped = []
+
+        def answer(route):
+            data = route.fetch().json()
+            if swapped:
+                for booking in data["events"]:
+                    booking["meeting_platform"] = "teams"
+            route.fulfill(json=data)
+
+        page.route("**/api/calendar/events", answer)
+        platforms = "[...document.querySelectorAll('#events .platform, #upcoming-list .platform')].map((p) => p.textContent).join()"
+        assert page.evaluate(platforms) == "Zoom,Zoom"
+        swapped.append(True)
+        page.clock.run_for(30000)                              # the bookings are polled every 30 seconds
+        page.wait_for_function(f"{platforms} === 'Teams,Teams'", timeout=5000)
+        page.close()
+
+
+# --- the meeting screen says which meeting, and why the room waits (final fix pass, spec 2026-10-12 section 4.1) ---
+
+def test_the_meeting_screen_names_the_meeting_and_says_why_the_room_waits(browser):
+    """The idle status card says which meeting and why the room waits, but it is hidden in a meeting: the meeting
+    screen carries the same facts in #meeting-detail, whatever the call is doing."""
+    skip_if_day_ends_within(1)                                 # the booking starts in 5 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 5)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.click("#actions button:has-text('Join now')")      # this booking, not a link: the call has its title
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        detail = page.locator("#meeting-detail")
+        assert detail.is_visible() and detail.inner_text() == "Design review, Zoom"   # the title and the platform; the elapsed time is the bar's
+        for state, bar, words in ((MeetingState.JOINING, "Joining", "Joining Design review\nThe room's screen is connecting."),
+                                  (MeetingState.IN_LOBBY, "In the lobby", "Waiting for the host to let the room in."),
+                                  (MeetingState.LEAVING, "Leaving", "Leaving"),
+                                  (MeetingState.CONNECTED, "In a meeting", "Design review, Zoom")):
+            server.meeting.set_state(state)
+            page.wait_for_function(f"document.getElementById('meeting-state').innerText === '{bar}'", timeout=5000)
+            assert detail.is_visible() and detail.inner_text() == words, state
+        page.close()
+
+
+def test_a_call_joined_by_link_is_named_by_its_platform_while_it_joins(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        server.meeting.set_state(MeetingState.JOINING)
+        page.wait_for_function("document.getElementById('meeting-state').innerText === 'Joining'", timeout=5000)
+        assert page.locator("#meeting-detail").inner_text() == "Joining Zoom meeting\nThe room's screen is connecting."
+        page.close()
+
+
+# --- what a mode change leaves behind: the last action's error and a Leave waiting for its second tap ---
+
+JSON = {"Content-Type": "application/json"}
+
+
+def test_a_refused_idle_action_does_not_follow_the_page_into_the_meeting_screen(browser):
+    """model.error is the last action's answer, and it is written to both screens' lines: a call that begins from
+    elsewhere must not open on "Unsupported meeting link"."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.fill("#link-input", "not a meeting link")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.getElementById('message').innerText === 'Unsupported meeting link'", timeout=5000)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)
+        assert page.evaluate("document.getElementById('meeting-message').textContent") == ""
+        assert page.locator("#meeting-message").is_hidden()
+        page.close()
+
+
+def test_a_refused_meeting_action_does_not_follow_the_page_back_to_the_idle_screen(browser):
+    refusal = "The call did not answer the request to change the microphone."
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.route("**/api/meeting/mute", lambda route: route.fulfill(status=409, json={"error": refusal}))
+        page.click("#meeting-actions button:has-text('Mute')")
+        page.wait_for_function("document.getElementById('meeting-message').innerText.length > 0", timeout=5000)
+        assert page.locator("#meeting-message").inner_text() == refusal
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        assert page.evaluate("document.getElementById('message').textContent") == ""
+        assert page.locator("#message").is_hidden()
+        page.close()
+
+
+def test_a_leave_waiting_for_its_second_tap_does_not_outlive_the_call(browser):
+    """The confirm step lasts five seconds and the call can end inside them: the next call's Leave must not arrive
+    already asking "Tap again to leave". The clock is stopped, so the five seconds cannot run out by themselves."""
+    with PageServer() as server:
+        base = f"http://127.0.0.1:{server.port}"
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.click("#meeting-actions button:has-text('Leave')")
+        assert page.locator("#meeting-actions button.danger").inner_text() == "Tap again to leave"
+        # With the clock stopped no poll comes by itself: each wait asks for the status again until the page shows what it expects.
+        page.request.post(base + "/api/meeting/leave", data="{}", headers=JSON)        # the call ends from elsewhere ...
+        page.wait_for_function("window.croomPage.refreshStatus().then(() => document.body.dataset.view === 'idle')", timeout=5000)
+        page.request.post(base + "/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)   # ... and another begins
+        page.wait_for_function("window.croomPage.refreshStatus().then(() => document.body.dataset.state === 'meeting')", timeout=5000)
+        assert page.locator("#meeting-actions button.danger").inner_text() == "Leave"
         page.close()

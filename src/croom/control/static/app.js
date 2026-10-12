@@ -5,20 +5,53 @@
   const STATUS_EVERY_MS = 2000;
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
-  const SLIDE_OFF_PX = 16;   // how far outside a pressed pad button a finger may drift before that counts as letting go
-  const PANEL_IDLE_MS = 10 * 60 * 1000;   // the Camera panel closes itself after this long without a camera action
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
+  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera view
+  // belongs to whichever mode showed it, so its Back returns there.
+  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting" };
+  const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
   const el = (id) => document.getElementById(id);
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null };
+  const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
+  const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
+  let cameraMode = "idle";  // the mode that opened the camera view
+  let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
+
+  const view = () => document.body.dataset.view;
+  const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
+  const viewMode = (name) => (name === "camera" ? cameraMode : VIEW_MODES[name]);
+
+  function applyView(name, automatic) {
+    if (name === "camera") cameraMode = mode();
+    document.body.dataset.view = name;
+    // Every view change, an automatic one too, starts or clears the wait. Before the hooks: a hook may start a timer of
+    // its own (the preview's 30 s renewal), and when the two fall due together they run in the order they were set, so
+    // the return goes first and the hook that ends the preview clears the renewal before it is sent.
+    armIdleReturn();
+    for (const fn of viewHooks) fn(name, Boolean(automatic));
+  }
+  function setView(name, automatic) {
+    if (view() === name) return;
+    applyView(name, automatic);
+    render();
+  }
+
+  // Idle mode returns to the idle screen on its own: the kiosk never reloads and nobody presses Back, so a room left on
+  // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns.
+  const IDLE_RETURN_MS = 10 * 60 * 1000;
+  let idleReturnTimer = null;
+  function armIdleReturn() {
+    clearTimeout(idleReturnTimer);
+    idleReturnTimer = null;
+    if (mode() === "idle" && view() !== "idle") idleReturnTimer = setTimeout(() => setView("idle", true), IDLE_RETURN_MS);
+  }
+  document.addEventListener("pointerdown", armIdleReturn, true);
+
   let confirmTimer = null;
-  let lastActionsKey = null;
   let lastEventsKey = null;
   let lastPickerKey = null;
-  let lastSoundKey = null;
-  let lastCameraKey = null;
-  let presetSaveMode = false;
-  let setupOpen = false;
+  let lastUpcomingKey = null;
   const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
@@ -108,14 +141,17 @@
     return b;
   }
 
-  function setActions(specs) {
-    // Replace the buttons only when their labels or availability change, so a
-    // click in progress is never lost to a re-render (the timer ticks every second).
-    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy]));
-    if (key === lastActionsKey) return;
-    lastActionsKey = key;
-    el("actions").replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
+  function setActions(specs, containerId, keyHolder) {
+    // Replace the buttons only when their labels, availability or target change, so a click in progress is never
+    // lost to a re-render (the timer ticks every second), and a Join never acts on a booking it no longer shows (two
+    // bookings back to back both say "Join now").
+    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null]));
+    if (key === keyHolder.key) return;
+    keyHolder.key = key;
+    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
   }
+  const idleActionsKey = { key: null };
+  const meetingActionsKey = { key: null };
 
   function leaveSpec() {
     if (model.confirmLeave) {
@@ -137,6 +173,25 @@
     return (m.title ? m.title + ", " : "") + platformName(m.platform) + (m.joined_at ? ", " + elapsedSince(m.joined_at) : "");
   }
 
+  // The meeting screen's first line: which meeting the room is in, and why it may be waiting. The idle status card says
+  // the same things (#headline, #detail) but is hidden in meeting mode. The elapsed time is the top bar's, so it is not here.
+  function meetingLine(m, label) {
+    if (m.state === "connected") return m.title && m.platform ? m.title + ", " + platformName(m.platform) : label;
+    if (m.state === "joining") return "Joining " + label + "\nThe room's screen is connecting.";
+    if (m.state === "in_lobby") return "Waiting for the host to let the room in.";
+    if (m.state === "leaving") return "Leaving";
+    return "";
+  }
+
+  // A meeting began or ended: land on the new mode's main screen. What the last action said (a refusal on one mode's
+  // screen is not news on the other's) and a Leave still waiting for its second tap belong to the mode that is over.
+  function landOnMode() {
+    model.error = "";
+    model.confirmLeave = false;
+    clearTimeout(confirmTimer);
+    applyView(MAIN_SCREEN[mode()], true);
+  }
+
   function joinWindow(ev) {
     const start = new Date(ev.start_time).getTime();
     const end = new Date(ev.end_time).getTime();
@@ -144,16 +199,81 @@
     return { open: now >= start - JOIN_WINDOW_MS && now < end, opensAt: new Date(start - JOIN_WINDOW_MS), past: now >= end };
   }
 
+  const WARN_BEFORE_MS = 10 * 60 * 1000;
+  const STATE_LABELS = { joining: "Joining", in_lobby: "In the lobby", connected: "In a meeting", leaving: "Leaving" };
+
+  // What is still to come today. In meeting mode the booking the room joined from its window has not started yet, and
+  // must not show as "next" to the call that is in it: the status carries that meeting's title, so a booking with the
+  // same title is left out. A meeting joined by link has no title and leaves nothing out.
+  function upcoming() {
+    const now = Date.now();
+    const title = mode() === "meeting" ? model.status.meeting.title : "";
+    return model.events.filter((ev) => new Date(ev.start_time).getTime() > now && !(title && ev.title === title));
+  }
+
+  const rowFields = (ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform];   // what eventItem reads: the key of either list covers it
+
+  // The top bar in meeting mode: what the call is doing, for how long, and a warning when the next booking is close.
+  function renderMeetingBar(m) {
+    const inMeeting = mode() === "meeting";
+    el("meeting-state").hidden = !inMeeting;
+    el("meeting-elapsed").hidden = !(inMeeting && m.state === "connected" && m.joined_at);
+    el("meeting-state").textContent = STATE_LABELS[m.state] || "";
+    el("meeting-elapsed").textContent = m.joined_at ? elapsedSince(m.joined_at) : "";
+    const next = upcoming()[0];
+    const soon = inMeeting && next && new Date(next.start_time).getTime() - Date.now() <= WARN_BEFORE_MS;
+    el("next-warning").hidden = !soon;
+    el("next-warning").textContent = soon ? "Next: " + fmtTime(new Date(next.start_time)) + " " + next.title : "";
+  }
+
+  // One booking's row, for the Today list and the Upcoming list alike, so the two cannot drift: its time, its title and,
+  // when it has a link, the platform. The Today list passes its Join button as withJoin; the Upcoming list passes none.
+  function eventItem(ev, withJoin) {
+    const li = document.createElement("li");
+    li.className = "event";
+    const time = document.createElement("time");
+    time.dateTime = ev.start_time;
+    time.textContent = fmtTime(new Date(ev.start_time));
+    const text = document.createElement("div");
+    const title = document.createElement("p");
+    title.className = "title";
+    title.textContent = ev.title;
+    text.append(title);
+    if (ev.joinable) {
+      const platform = document.createElement("p");
+      platform.className = "platform";
+      platform.textContent = platformName(ev.meeting_platform);
+      text.append(platform);
+    }
+    li.append(time, text);
+    if (withJoin) li.append(withJoin);
+    return li;
+  }
+
+  function renderUpcoming() {
+    // Rebuilt only when what a row shows changes, so the list keeps its scroll position while the page polls.
+    const items = upcoming();
+    const key = JSON.stringify(items.map(rowFields));
+    if (key === lastUpcomingKey) return;
+    lastUpcomingKey = key;
+    el("upcoming-empty").hidden = items.length > 0;
+    el("upcoming-list").replaceChildren(...items.map((ev) => eventItem(ev)));
+  }
+
   function render() {
     const body = document.body;
+    if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
     el("message").textContent = model.error;
+    el("meeting-message").textContent = model.error;   // the meeting screen's own line for a refusal or an error
 
     if (model.offline || !model.status) {
       body.dataset.state = "offline";
+      el("offline-note").hidden = !model.offline;   // in the top bar, so every screen says it (not while still loading)
       el("kicker").textContent = "Not connected";
       el("headline").textContent = "Can't reach the room";
       el("detail").textContent = "Check that Crystal Meet is running on the room's device, then this page will reconnect on its own.";
-      setActions([]);
+      setActions([], "actions", idleActionsKey);
+      setActions([], "meeting-actions", meetingActionsKey);
       document.querySelector(".screen-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;
@@ -163,14 +283,23 @@
     document.querySelector(".sound-section").hidden = false;
     document.querySelector(".camera-section").hidden = false;
 
+    el("offline-note").hidden = true;
     const s = model.status;
-    el("room-name").textContent = s.room.name;
-    el("room-location").textContent = s.room.location;
     const m = s.meeting;
     const cal = s.calendar;
+    if (m.state !== lastMeetingState) {
+      // A join that failed while someone was on Options: the "Couldn't join" card is on the idle screen.
+      if (m.state === "error" && view() !== "idle") applyView("idle", true);
+      lastMeetingState = m.state;
+    }
+    renderMeetingBar(m);
+    renderUpcoming();
+    el("open-options").hidden = mode() !== "idle";
+    el("room-name").textContent = s.room.name;
+    el("room-location").textContent = s.room.location;
+    el("room-location").hidden = !s.room.location;
     const label = m.title || (m.platform ? platformName(m.platform) + " meeting" : "the meeting");
-    // A join is refused while a meeting is in progress, so do not offer the link form then.
-    document.querySelector(".link").hidden = IN_MEETING.includes(m.state);
+    el("meeting-detail").textContent = meetingLine(m, label);
 
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
@@ -198,12 +327,17 @@
     } else {
       specs = renderIdle(cal);
     }
-    setActions(specs);
+    if (mode() === "meeting") {
+      setActions(specs, "meeting-actions", meetingActionsKey);
+      setActions([], "actions", idleActionsKey);
+    } else {
+      setActions(specs, "actions", idleActionsKey);
+      setActions([], "meeting-actions", meetingActionsKey);
+    }
 
     renderEvents(cal);
     renderPicker();
-    renderSound(s.audio);
-    renderCamera(s.camera);
+    for (const fn of renderHooks) fn(s);
   }
 
   function renderPicker() {
@@ -230,7 +364,7 @@
       el("kicker").textContent = "Happening now";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
-      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id) }] : [];
+      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id), target: current.id }] : [];
     }
 
     if (next) {
@@ -248,7 +382,7 @@
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
       if (!next.joinable) return [];
-      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open }];
+      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
     }
 
     body.dataset.state = "free";
@@ -263,7 +397,7 @@
     const note = el("calendar-note");
     const meetingState = model.status ? model.status.meeting.state : "idle";
     const key = JSON.stringify([cal.connected, cal.current && cal.current.id, meetingState, model.busy,
-      model.events.map((ev) => [ev.id, ev.title, ev.start_time, ev.joinable, joinWindow(ev).open, joinWindow(ev).past])]);
+      model.events.map((ev) => [...rowFields(ev), joinWindow(ev).open, joinWindow(ev).past])]);
     if (key === lastEventsKey) return;
     lastEventsKey = key;
     list.replaceChildren();
@@ -278,26 +412,10 @@
     note.textContent = "";
     for (const ev of model.events) {
       const window = joinWindow(ev);
-      const li = document.createElement("li");
-      li.className = "event" + (window.past ? " past" : "") + (cal.current && cal.current.id === ev.id ? " now" : "");
-      const time = document.createElement("time");
-      time.dateTime = ev.start_time;
-      time.textContent = fmtTime(new Date(ev.start_time));
-      const text = document.createElement("div");
-      const title = document.createElement("p");
-      title.className = "title";
-      title.textContent = ev.title;
-      text.append(title);
-      if (ev.joinable) {
-        const platform = document.createElement("p");
-        platform.className = "platform";
-        platform.textContent = platformName(ev.meeting_platform);
-        text.append(platform);
-      }
-      li.append(time, text);
-      if (ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error")) {
-        li.append(button("Join", "primary", () => joinEvent(ev.id)));
-      }
+      const canJoin = ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error");
+      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id)) : null);
+      li.classList.toggle("past", window.past);
+      li.classList.toggle("now", Boolean(cal.current && cal.current.id === ev.id));
       list.append(li);
     }
   }
@@ -306,6 +424,7 @@
     el("clock").textContent = fmtTime(new Date());
     if (model.status && model.status.meeting.state === "connected") {
       el("detail").textContent = meetingDetail(model.status.meeting);
+      if (model.status.meeting.joined_at) el("meeting-elapsed").textContent = elapsedSince(model.status.meeting.joined_at);
     }
   }
 
@@ -317,321 +436,25 @@
     joinLink(value).then(() => { if (!model.error) input.value = ""; });
   });
 
-  // The page's own keyboard, for screens without one: the table Pi's kiosk browser opens
-  // the page with ?keyboard=1 and it appears when the link field is tapped; the button
-  // beside the field toggles it on any device. Keys never take the focus from the field.
-  const keyboard = (function () {
-    const LETTERS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
-    const SYMBOLS = ["1234567890", "-/:.?=&_%#", "@~+,;!*()'"];
-    const kiosk = new URLSearchParams(window.location.search).get("keyboard") === "1";
-    const box = el("keyboard");
-    const input = el("link-input");
-    const toggle = el("keyboard-toggle");
-    let layer = "letters", shift = false, open = false;
+  el("open-options").addEventListener("click", () => setView("options"));
+  el("back-from-options").addEventListener("click", () => setView("idle"));
+  el("open-camera-setup").addEventListener("click", () => setView("camera"));
+  el("open-screensaver").addEventListener("click", () => setView("screensaver"));
+  el("back-from-screensaver").addEventListener("click", () => setView("options"));
+  el("back-from-camera").addEventListener("click", () => setView(cameraMode === "meeting" ? "meeting" : "options"));
+  el("open-camera-live").addEventListener("click", () => setView("camera"));
+  el("open-upcoming").addEventListener("click", () => setView("upcoming"));
+  el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
 
-    function keyButton(key, label, className) {
-      const b = document.createElement("button");
-      b.type = "button";
-      b.className = "key" + (className ? " " + className : "");
-      b.dataset.key = key;
-      b.textContent = label;
-      b.addEventListener("pointerdown", (e) => e.preventDefault());
-      b.addEventListener("click", () => press(key));
-      return b;
-    }
-
-    function row(...keys) {
-      const r = document.createElement("div");
-      r.className = "row";
-      r.append(...keys);
-      return r;
-    }
-
-    function chars(text) {
-      return [...text].map((c) => keyButton(c, layer === "letters" && shift ? c.toUpperCase() : c));
-    }
-
-    function render() {
-      const rows = [];
-      if (layer === "letters") {
-        rows.push(row(...chars(LETTERS[0])));
-        rows.push(row(...chars(LETTERS[1])));
-        rows.push(row(keyButton("shift", "Shift", "wide" + (shift ? " active" : "")), ...chars(LETTERS[2]), keyButton("backspace", "\u232B", "wide")));
-        rows.push(row(keyButton("symbols", "123", "wide"), ...chars(".-/"), keyButton("space", "Space", "space"),
-                      keyButton("join", "Join", "join"), keyButton("hide", "Hide", "wide")));
-      } else {
-        rows.push(row(...chars(SYMBOLS[0])));
-        rows.push(row(...chars(SYMBOLS[1])));
-        rows.push(row(...chars(SYMBOLS[2]), keyButton("backspace", "\u232B", "wide")));
-        rows.push(row(keyButton("letters", "abc", "wide"), keyButton("space", "Space", "space"),
-                      keyButton("join", "Join", "join"), keyButton("hide", "Hide", "wide")));
-      }
-      box.replaceChildren(...rows);
-    }
-
-    function edit(text, backspace) {
-      const start = input.selectionStart === null ? input.value.length : input.selectionStart;
-      const end = input.selectionEnd === null ? start : input.selectionEnd;
-      if (backspace) {
-        input.setRangeText("", start === end ? Math.max(0, start - 1) : start, end, "end");
-      } else {
-        input.setRangeText(text, start, end, "end");
-      }
-      input.dispatchEvent(new Event("input", { bubbles: true }));
-      input.focus();
-    }
-
-    function press(key) {
-      if (key === "shift") { shift = !shift; render(); return; }
-      if (key === "symbols") { layer = "symbols"; shift = false; render(); return; }
-      if (key === "letters") { layer = "letters"; render(); return; }
-      if (key === "hide") { hide(); return; }
-      if (key === "join") { hide(); el("link-form").requestSubmit(); return; }
-      if (key === "backspace") { edit("", true); return; }
-      if (key === "space") { edit(" "); return; }
-      edit(shift ? key.toUpperCase() : key);
-      if (shift) { shift = false; render(); }
-    }
-
-    function show() {
-      if (open) return;
-      open = true;
-      render();
-      box.hidden = false;
-      document.body.classList.add("keyboard-open");
-      toggle.setAttribute("aria-pressed", "true");
-      input.scrollIntoView({ block: "center" });
-    }
-
-    function hide() {
-      if (!open) return;
-      open = false;
-      box.hidden = true;
-      document.body.classList.remove("keyboard-open");
-      toggle.setAttribute("aria-pressed", "false");
-    }
-
-    input.addEventListener("focus", () => { if (kiosk) show(); });
-    input.addEventListener("focusout", (e) => {
-      if (e.relatedTarget && (box.contains(e.relatedTarget) || e.relatedTarget === toggle)) return;
-      hide();
-    });
-    toggle.addEventListener("pointerdown", (e) => e.preventDefault());
-    toggle.addEventListener("click", () => {
-      if (open) { hide(); return; }
-      show();
-      input.focus();
-    });
-    return { show: show, hide: hide };
-  })();
-
-  // --- Sound and Camera: the commands behind both panels (spec 2026-10-08, section 4.6) ---
-  // A success answers with the device's own block, which replaces the model's at once (no waiting for the next poll).
-  // Any refusal (a non-2xx) puts its reason in that panel's note and leaves the model as it was. A long move that a
-  // newer command cut short answers 409 "interrupted": the newer tap is the normal cause, so that says nothing at all.
-  // options.long: Home, a preset recall and Find the stops run for seconds inside the request. options.background: a
-  // call the page makes on its own (the preview's renewal): its answer is applied, but it neither clears the note the
-  // user last got nor writes one, and a refusal of it is not shown or scrolled to.
-  const INTERRUPTED = "the camera move was interrupted";
-  const deviceNotes = { audio: "", camera: "" };
-  let closingOnIdle = false;  // the next close of the Camera panel is the idle timer's, not a person's
-  let lastCameraAction = 0;   // when this page last opened the Camera panel or asked the camera for something itself
-
-  async function deviceCall(kind, path, body, options) {
-    const long = Boolean(options && options.long);
-    const background = Boolean(options && options.background);
-    if (kind === "camera" && !background) lastCameraAction = Date.now();   // the preview's own renewal is not a person
-    if (long) {
-      // Home, a preset recall and Find the stops run for seconds inside the request: ask the status for the camera's
-      // "busy" now, so "Moving..." shows without waiting for the poll's turn.
-      deviceNotes[kind] = "";
-      render();
-      setTimeout(refreshStatus, 300);
-    }
-    let block;
-    try {
-      block = await post(path, body);
-    } catch (e) {
-      if (!background && e.message !== INTERRUPTED) {
-        deviceNotes[kind] = e.message;
-        if (kind === "audio") lastSoundKey = null; else lastCameraKey = null;   // drawn again from the model: a slider the finger moved goes back
-        render();
-        // The note sits above its panel: if the controls have scrolled it out of sight, bring it back, and no further.
-        el(kind === "audio" ? "sound-note" : "camera-note").scrollIntoView({ block: "nearest" });
-      }
-      return false;
-    }
-    if (!background) deviceNotes[kind] = "";
-    if (model.status) model.status[kind] = block;
-    deviceEpoch[kind] += 1;
-    render();
-    return true;
-  }
-
-  // --- Sound ---
-  function renderSound(audio) {
-    const key = JSON.stringify([audio && audio.available, audio && audio.device, audio && audio.level, audio && audio.muted, deviceNotes.audio]);
-    if (key === lastSoundKey) return;
-    lastSoundKey = key;
-    const panel = el("sound-panel");
-    if (!audio || !audio.available) {
-      panel.hidden = true;
-      el("sound-note").textContent = "No speaker found";
-      return;
-    }
-    panel.hidden = false;
-    el("sound-note").textContent = deviceNotes.audio;
-    el("sound-device").textContent = audio.device;
-    el("volume-slider").value = audio.level;
-    el("volume-level").textContent = String(audio.level);
-    el("speaker-mute").setAttribute("aria-pressed", audio.muted ? "true" : "false");
-    el("speaker-mute").textContent = audio.muted ? "Unmute speaker" : "Mute speaker";
-  }
-
-  const setVolume = (body) => deviceCall("audio", "/api/audio/volume", body);
-  el("volume-slider").addEventListener("change", (e) => setVolume({ level: Number(e.target.value) }));
-  el("quieter").addEventListener("click", () => setVolume({ step: -5 }));
-  el("louder").addEventListener("click", () => setVolume({ step: 5 }));
-  el("speaker-mute").addEventListener("click", () => {
-    const muted = el("speaker-mute").getAttribute("aria-pressed") === "true";
-    setVolume({ muted: !muted });
-  });
-
-  // --- Camera ---
-  let previewTimer = null;
-
-  function renderCamera(camera) {
-    // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
-    // model.busy is in the key because button() reads it.
-    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.position_known,
-      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, presetSaveMode, setupOpen, model.busy, deviceNotes.camera]);
-    if (key === lastCameraKey) return;
-    lastCameraKey = key;
-    const panel = el("camera-panel");
-    if (!camera || !camera.available) {
-      panel.hidden = true;
-      el("camera-note").textContent = "No controllable camera found";
-      return;
-    }
-    panel.hidden = false;
-    el("camera-note").textContent = deviceNotes.camera;
-    el("camera-status").textContent = camera.busy ? "Moving\u2026" : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
-    for (const b of document.querySelectorAll("#arrow-pad .pad")) b.disabled = camera.busy;
-    el("camera-home").disabled = camera.busy || !camera.home_saved;
-    const ready = camera.home_saved;
-    el("preset-row").hidden = !ready;
-    el("preset-save-mode").hidden = !ready;
-    el("setup-link").hidden = !ready;
-    el("camera-setup").hidden = ready && !setupOpen;
-    el("save-home").disabled = !camera.position_known || camera.busy;
-    el("find-stops").disabled = camera.busy;
-    el("preset-save-mode").setAttribute("aria-pressed", presetSaveMode ? "true" : "false");
-    el("preset-save-mode").textContent = presetSaveMode ? "Tap a preset to save it here" : "Save";
-    el("preset-row").replaceChildren(...camera.presets.map((p) => {
-      const b = button(p.name, p.saved ? "quiet saved" : "quiet", () => presetAction(p.slot), camera.busy);
-      b.dataset.slot = String(p.slot);
-      if (!p.saved && !presetSaveMode) b.title = "Nothing saved yet";
-      return b;
-    }));
-  }
-
-  function presetAction(slot) {
-    const action = presetSaveMode ? "save" : "recall";
-    presetSaveMode = false;
-    lastCameraKey = null;
-    deviceCall("camera", "/api/camera/presets/" + slot, { action: action }, { long: action === "recall" });
-  }
-
-  el("preset-save-mode").addEventListener("click", () => { presetSaveMode = !presetSaveMode; lastCameraKey = null; render(); });
-  el("setup-link").addEventListener("click", () => { setupOpen = !setupOpen; lastCameraKey = null; render(); });
-  el("find-stops").addEventListener("click", () => deviceCall("camera", "/api/camera/setup", { action: "find_stops" }, { long: true }));
-  el("save-home").addEventListener("click", () => {
-    deviceCall("camera", "/api/camera/setup", { action: "save_home" }).then((saved) => {
-      if (saved) { setupOpen = false; render(); }   // Set up closes only once the home is really saved
-    });
-  });
-  el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, { long: true }));
-
-  // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
-  // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so
-  // that a lift is always seen, and a move more than SLIDE_OFF_PX outside the button's box (a finger resting on the
-  // edge jitters) ends the hold the same way a lift does.
-  function holdToMove(buttonEl, start, repeatMs, stop) {
-    let timer = null;
-    const release = () => {
-      if (timer === null) return;
-      clearInterval(timer);
-      timer = null;
-      // A pad that has gone disabled (a Home or a preset from another screen made the camera busy) sends no stop: it
-      // would cut that long move short.
-      if (stop && !buttonEl.disabled) stop();
-    };
-    buttonEl.addEventListener("pointerdown", (e) => {
-      e.preventDefault();
-      if (buttonEl.disabled || timer !== null) return;
-      buttonEl.setPointerCapture(e.pointerId);
-      start();
-      timer = setInterval(() => {
-        // The camera went busy under the finger (a Home or a preset from another screen): stop repeating, and do not
-        // send the stop either, which would cut that move short.
-        if (buttonEl.disabled) { clearInterval(timer); timer = null; return; }
-        start();
-      }, repeatMs);
-    });
-    for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) buttonEl.addEventListener(type, release);
-    buttonEl.addEventListener("pointermove", (e) => {
-      if (timer === null) return;   // no hold: nothing to end, and the rest of a press that already ended is ignored
-      const box = buttonEl.getBoundingClientRect();
-      const slack = SLIDE_OFF_PX;
-      if (e.clientX >= box.left - slack && e.clientX <= box.right + slack && e.clientY >= box.top - slack && e.clientY <= box.bottom + slack) return;
-      release();
-      if (buttonEl.hasPointerCapture(e.pointerId)) buttonEl.releasePointerCapture(e.pointerId);
-    });
-    buttonEl.addEventListener("contextmenu", (e) => e.preventDefault());   // a long press on a touch screen must not open a menu
-  }
-  const moveCamera = (pan, tilt) => deviceCall("camera", "/api/camera/move", { pan: pan, tilt: tilt });
-  for (const b of document.querySelectorAll("#arrow-pad [data-pan]")) {
-    const pan = Number(b.dataset.pan), tilt = Number(b.dataset.tilt);
-    holdToMove(b, () => moveCamera(pan, tilt), 750, () => moveCamera(0, 0));
-  }
-  for (const b of document.querySelectorAll("[data-zoom]")) {
-    holdToMove(b, () => deviceCall("camera", "/api/camera/zoom", { step: Number(b.dataset.zoom) }), 400, null);
-  }
-
-  // The idle preview on the TV: asked for while the panel is open and no meeting runs, renewed every 30 s. The renewal
-  // keeps running while the panel is open, so it also picks the preview up again when a meeting ends or the camera returns.
-  // The table's kiosk never reloads and nobody closes panels, so the renewal alone would keep the TV on the camera for
-  // good: after PANEL_IDLE_MS without a camera action from this page the panel closes itself, and closing it (below)
-  // turns the preview off and stops the renewal.
-  function previewWanted() {
-    const s = model.status;
-    return Boolean(el("camera-panel").open && s && s.camera && s.camera.available && !IN_MEETING.includes(s.meeting.state));
-  }
-  const setPreview = (on, options) => deviceCall("camera", "/api/camera/preview", { on: on }, options);
-  el("camera-panel").addEventListener("toggle", () => {
-    clearInterval(previewTimer);
-    previewTimer = null;
-    if (!el("camera-panel").open) {
-      const quiet = closingOnIdle;   // an automatic close is nobody's action: no note, no scroll if it fails
-      closingOnIdle = false;
-      setPreview(false, quiet ? { background: true } : undefined);
-      return;
-    }
-    lastCameraAction = Date.now();   // opening the panel counts, also in a meeting, where it asks for no preview
-    if (previewWanted()) setPreview(true);
-    previewTimer = setInterval(() => {
-      if (Date.now() - lastCameraAction > PANEL_IDLE_MS) {
-        closingOnIdle = true;
-        el("camera-panel").open = false;   // the toggle handler sends preview off and clears this timer
-        return;
-      }
-      if (previewWanted()) setPreview(true, { background: true });
-    }, 30000);
-  });
-  window.addEventListener("pagehide", () => {
-    if (!el("camera-panel").open) return;
-    fetch("/api/camera/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: false }), keepalive: true }).catch(() => {});
-  });
+  window.croomPage = {
+    el: el, model: model, api: api, post: post, act: act, button: button, render: render,
+    refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING,
+    view: view, setView: setView, mode: mode, cameraMode: () => cameraMode,
+    onViewChange: (fn) => viewHooks.push(fn),
+    // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
+    // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.
+    onRender: (fn) => { renderHooks.push(fn); if (model.status && !model.offline) fn(model.status); },
+  };
 
   tick();
   setInterval(tick, 1000);

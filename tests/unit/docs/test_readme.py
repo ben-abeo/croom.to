@@ -40,8 +40,9 @@ def test_readme_names_the_setup_pieces():
         ".venv/bin/pytest",
         "screensaver",
         ":8080/tv",
-        "TV when idle",
+        "**Options**, then **Screensaver**",
         "install-kiosk.sh --url",
+        "pull the repository on the table Pi too, run the install-kiosk command again and reboot it so the new scale takes effect",
         "?keyboard=1",
         "Start Crystal Meet",
         "audio.output_device",
@@ -62,3 +63,26 @@ def test_readme_links_every_spec_and_plan():
         assert files, folder
         for path in files:
             assert path.relative_to(REPO).as_posix() in text, path.name
+
+
+def test_readme_describes_the_room_page_in_two_modes():
+    text = README.read_text(encoding="utf-8")
+    for needle in ("Options", "Screensaver", "Upcoming meetings", "meeting screen", "1280 by 800", "REPLACE_WITH_LOCATION"):
+        assert needle in text, needle
+    assert "TV when idle" not in text
+    # the page does not scroll; the bookings boxes do, inside themselves
+    assert "without the page scrolling" in text and "scroll inside themselves" in text
+    assert "without scrolling" not in text and "never scrolls" not in text
+    # the Sound and Camera panels became the meeting screen's Sound row and the Camera screens
+    assert "the meeting screen's Sound row" in text and "the Camera screens" in text
+    assert "Sound panel" not in text and "Camera panel" not in text and "Camera panels" not in text
+
+
+def test_the_rooms_readme_counts_what_to_replace_as_the_room_templates_do():
+    """Each template's header says three REPLACE values and an optional location; the folder's README says the same."""
+    readme = " ".join((REPO / "deploy" / "rooms" / "README.md").read_text(encoding="utf-8").split())   # the file is wrapped at 80 columns
+    assert "three values to replace" in readme and "an optional location" in readme
+    assert "four things" not in readme
+    for n in (1, 2, 3):
+        header = (REPO / "deploy" / "rooms" / f"room-{n}.yaml").read_text(encoding="utf-8").splitlines()[1]
+        assert "three REPLACE values" in header and "location is optional" in header, header

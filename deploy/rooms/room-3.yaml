@@ -1,10 +1,11 @@
 # Crystal Meet room device: Room 3
-# Replace the four REPLACE values, then install with:
+# Replace the three REPLACE values (the location is optional), then install with:
 #   sudo bash installer/install.sh --config room-3.yaml --credentials google-service-account.json --zoom-credentials zoom-credentials.json
 version: 2
 
 room:
   name: "Room 3"
+  # What people call the place, e.g. "2nd floor, by the kitchen". Leave the placeholder or delete the line to show the room's name alone.
   location: "REPLACE_WITH_LOCATION"
   timezone: "America/Chicago"
 

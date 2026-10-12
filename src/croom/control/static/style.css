@@ -29,7 +29,7 @@
   --warn-bar: #E8A013;
   --radius: 12px;
   --radius-sm: 8px;
-  --gutter: clamp(20px, 4vw, 56px);
+  --gutter: clamp(16px, 2.5vw, 32px);
   --font: "Lexend", "Segoe UI", Arial, sans-serif;
 }
 
@@ -45,41 +45,58 @@ body {
   line-height: 1.45;
 }
 
-.screen {
-  min-height: 100%;
-  padding: var(--gutter);
-  display: grid;
-  gap: clamp(24px, 3.5vh, 40px);
-  grid-template-areas: "top" "now" "link" "sound" "camera" "screen" "schedule";
-  align-content: start;
+/* Screens (spec 2026-10-12): one view at a time. The top bar is shared; main holds every screen and shows the one
+   named by body[data-view]. The rules here are the scrolling layout every viewport starts from; the viewport blocks
+   at the end of this file add the fixed screen (from 1024 by 700 up) and the phone's single column. */
+body { display: flex; flex-direction: column; height: auto; min-height: 100vh; }
+.top { flex: 0 0 auto; padding: var(--gutter) var(--gutter) 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.top-right { display: flex; align-items: center; gap: 20px; }
+.screen { position: relative; flex: 1 1 auto; padding: clamp(16px, 2.5vh, 24px) var(--gutter) var(--gutter); }   /* the containing block of the visually hidden labels, so they scroll with the screen */
+.view { display: none; gap: clamp(16px, 2.5vh, 24px); align-content: start; }
+body[data-view="idle"] .view[data-view="idle"],
+body[data-view="options"] .view[data-view="options"],
+body[data-view="camera"] .view[data-view="camera"],
+body[data-view="screensaver"] .view[data-view="screensaver"],
+body[data-view="meeting"] .view[data-view="meeting"],
+body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
+.view[data-view="idle"] {
+  grid-template-columns: 3fr 2fr;
+  grid-template-rows: auto auto 1fr;
+  grid-template-areas: "now schedule" "link schedule" ". schedule";
+  column-gap: clamp(32px, 4vw, 72px);
 }
-@media (min-width: 1024px) {
-  .screen {
-    grid-template-columns: 3fr 2fr;
-    grid-template-areas:
-      "top top"
-      "now schedule"
-      "link schedule"
-      "sound schedule"
-      "camera schedule"
-      "screen schedule";
-    column-gap: clamp(40px, 5vw, 96px);
-  }
-}
-.top { grid-area: top; display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
-.now { grid-area: now; }
-.schedule { grid-area: schedule; }
+/* The status card only. The Today list's row for the booking in progress carries the class "now" too (.event.now, below),
+   and a bare .now rule sent that row to a column of its own in the list's grid, out of its place among the bookings. */
+.view[data-view="idle"] > .status-card { grid-area: now; }
 .link { grid-area: link; }
-.screen-section { grid-area: screen; }
+.schedule { grid-area: schedule; display: flex; flex-direction: column; }
+.upcoming-box { display: flex; flex-direction: column; width: 100%; }
+.schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
+.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="upcoming"] { grid-template-rows: auto 1fr; justify-items: start; }
+.view[data-view="meeting"] { grid-template-rows: auto auto auto auto 1fr; }   /* the line, the refusal when there is one, the buttons, Sound, the menu */
+#meeting-detail { margin: 0; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines */
+/* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
+.button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
+.button.nav { min-height: 64px; }
+.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }
+.button.menu-item { min-height: 160px; font-size: 1.4rem; }
+.meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
+#meeting-message { min-height: auto; }   /* a grid item: .message's explicit minimum would let its row shrink under a long refusal */
+.meeting-state { margin: 0; font-weight: 600; }
+.meeting-elapsed { margin: 0; color: var(--periwinkle-300); font-variant-numeric: tabular-nums; }
+.next-warning, .offline-note { margin: 0; padding: 8px 14px; border-radius: var(--radius-sm); background: var(--warn-fill); color: var(--ink-900); font-weight: 600; }
+.next-warning { max-width: 40ch; overflow-wrap: anywhere; }   /* a long title wraps inside the pill; one with no break in it cannot push the clock off the bar */
+.meeting-state[hidden], .meeting-elapsed[hidden], .next-warning[hidden], .offline-note[hidden], .nav[hidden] { display: none; }
 
 .brand { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
-.logo { width: clamp(120px, 12vw, 160px); height: auto; display: block; }
+.logo { width: clamp(96px, 9vw, 120px); height: auto; display: block; }
 h1 { margin: 0; font-size: clamp(1.3rem, 2.2vw, 2rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
 .location { margin: 2px 0 0; color: var(--periwinkle-300); }
+.location[hidden] { display: none; }   /* defensive: .location sets no display today; this keeps the hidden attribute winning if one is added above */
 
 .clock {
   margin: 0;
-  font-size: clamp(2.2rem, 6vw, 5.2rem);
+  font-size: clamp(1.8rem, 3.5vw, 3rem);
   font-weight: 400;
   line-height: 1;
   letter-spacing: -0.02em;
@@ -99,7 +116,7 @@ h1 { margin: 0; font-size: clamp(1.3rem, 2.2vw, 2rem); font-weight: 600; line-he
 /* Status card: the one element that changes with the room's state. */
 .status-card {
   border-radius: var(--radius);
-  padding: clamp(20px, 3vw, 36px);
+  padding: clamp(18px, 2.5vw, 28px);
   background: var(--surface-800);
   color: #fff;
   transition: background-color 400ms ease, color 400ms ease;
@@ -107,7 +124,7 @@ h1 { margin: 0; font-size: clamp(1.3rem, 2.2vw, 2rem); font-weight: 600; line-he
 @media (prefers-reduced-motion: reduce) { .status-card { transition: none; } }
 .headline {
   margin: 0;
-  font-size: clamp(1.7rem, 4.4vw, 3.8rem);
+  font-size: clamp(1.5rem, 3.4vw, 2.6rem);
   font-weight: 600;
   line-height: 1.1;
   letter-spacing: -0.015em;
@@ -133,6 +150,7 @@ body[data-state="error"] .status-card {
 body[data-state="error"] .status-card .kicker { color: var(--blue-700); }
 body[data-state="error"] .detail { color: var(--ink-900); }
 body[data-state="error"] .message { color: #A3260F; }
+body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the page's pale red would not read on it */
 
 /* Buttons */
 .button {
@@ -151,13 +169,13 @@ body[data-state="error"] .message { color: #A3260F; }
 .button:hover { background: var(--blue-700); }
 .button.quiet { background: transparent; border-color: var(--periwinkle-300); color: inherit; }
 .button.quiet:hover { background: rgba(255, 255, 255, 0.08); }
-.button.danger { background: var(--surface-900); border-color: var(--periwinkle-300); }
+.button.danger { background: var(--surface-900); border-color: var(--warn-bar); }
 .button:disabled { opacity: 0.45; cursor: default; }
 .button:focus-visible, input:focus-visible { outline: 3px solid var(--periwinkle-300); outline-offset: 2px; }
 body[data-state="soon"] .button.primary { background: var(--blue-600); color: #fff; }
 body[data-state="meeting"] .button { background: transparent; border-color: rgba(255, 255, 255, 0.7); color: #fff; }
 body[data-state="meeting"] .button:hover { background: rgba(255, 255, 255, 0.12); }
-body[data-state="meeting"] .button.danger { background: var(--surface-900); border-color: var(--periwinkle-300); }
+body[data-state="meeting"] .button.danger { background: var(--surface-900); border-color: var(--warn-bar); }
 /* Scoped to the card: the page's other quiet buttons (the screensaver picker, Sound, Camera) stay on the dark page
    in every state, where dark blue text would be unreadable. */
 body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-700); color: var(--blue-700); }
@@ -216,10 +234,15 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
 .keyboard .key.join { flex: 2 1 0; background: var(--blue-600); }
 .keyboard .key.active { background: var(--blue-700); }
 .keyboard .key:active { background: var(--blue-700); }
+/* The link box stays above the keys because the page makes room under them (the padding) and may grow into it (height:
+   auto): the field scrolls up above the keys however tall the status card is. Hiding the Today box moves nothing above
+   or beside the link box; it only keeps the keys from covering the lower half of a list. */
 body.keyboard-open .screen { padding-bottom: 290px; }
+body.keyboard-open { height: auto; min-height: 100vh; }
+body.keyboard-open .schedule { display: none; }
 @media (max-width: 480px) { .keyboard .key { min-height: 44px; font-size: 0.95rem; } .keyboard .key.wide { font-size: 0.8rem; } }
 
-/* TV when idle: the screensaver picker; the chosen style stays filled in every room state. */
+/* Screensaver: the picker; the chosen style stays filled in every room state. */
 .picker { display: flex; flex-wrap: wrap; gap: 10px; }
 .picker .button { min-height: 48px; padding: 0 18px; }
 .picker .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
@@ -230,17 +253,15 @@ body.keyboard-open .screen { padding-bottom: 290px; }
 }
 
 /* Sound and Camera panels (spec 2026-10-08). */
-.sound-section { grid-area: sound; }
-.camera-section { grid-area: camera; }
 .device { margin: 0 0 10px; color: var(--periwinkle-300); overflow-wrap: anywhere; }
 .sound-section .note, .camera-section .note { overflow-wrap: anywhere; }   /* a refusal can quote a long file path */
 .sound input[type="range"] { width: 100%; max-width: 520px; height: 44px; accent-color: var(--blue-600); }
 .sound-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 8px; }
 .level { min-width: 3ch; text-align: center; font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
-.camera summary { list-style: none; display: inline-flex; align-items: center; cursor: pointer; }
-.camera summary::-webkit-details-marker { display: none; }
-.camera[open] summary { background: var(--blue-600); border-color: var(--blue-600); }
-.camera-grid { display: flex; flex-wrap: wrap; gap: 24px; align-items: center; margin-top: 14px; }
+.camera-grid { display: grid; grid-template-columns: auto 1fr; gap: 40px; align-items: start; margin-top: 14px; }
+.camera-left { display: flex; gap: 24px; align-items: center; }
+.camera-right { display: flex; flex-direction: column; align-items: flex-start; }
+.camera-right .presets { margin-top: 0; }
 .arrow-pad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 8px; }
 .arrow-pad .pad { min-height: 64px; padding: 0; font-size: 1.3rem; touch-action: none; user-select: none; -webkit-user-select: none; }
 .zoom-buttons { display: flex; flex-direction: column; gap: 10px; }
@@ -254,3 +275,35 @@ body.keyboard-open .screen { padding-bottom: 290px; }
 .link-button[hidden] { display: none; }   /* likewise */
 .setup { margin-top: 12px; }
 .setup-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+
+/* Viewport layouts (spec 2026-10-12, section 3). Last in the file, so they override the rules above. */
+@media (min-width: 1024px) and (min-height: 700px) {
+  /* The fixed screen (the kiosk lays out at 1280 by 800): no page scrolling; only the bookings and the upcoming list
+     scroll, inside their boxes. Below 1024 by 700 (a 2 times scale, a phone, a short window) the page scrolls instead
+     of cutting a screen off. */
+  body { height: 100vh; overflow: hidden; }
+  /* A last resort, not a layout: a screen that does not fit (a long refusal, a short wide window) scrolls under the
+     top bar instead of being cut off. At 1280 by 800 nothing does, which the fit tests check. */
+  .screen { min-height: 0; overflow-y: auto; }
+  .view { height: 100%; min-height: 0; }
+  .schedule, .upcoming-box { min-height: 0; }
+  .schedule .events, .upcoming-box .events { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
+  /* A title can run to a hundred characters: three lines of headline at most, so the link box stays on the screen.
+     The full title is in the Today list, and in the detail line when the booking is the next one. */
+  .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+}
+@media (max-width: 1023px) {
+  /* A phone: one column. */
+  .view[data-view="idle"] { grid-template-columns: 1fr; grid-template-rows: auto; grid-template-areas: "now" "link" "schedule"; }
+  .menu { grid-template-columns: 1fr; }
+  .camera-grid { grid-template-columns: 1fr; gap: 24px; }   /* the pad, then the presets: two columns need about 800 px */
+  .camera-left { flex-wrap: wrap; }
+  /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, so its width is not left to what a
+     shared row has spare. While it shows, the right side of the bar drops under the name onto a line of its own, the
+     width of the bar, and the warning takes a row of that line: the full width of the bar up to a screen about 430 px
+     wide, and above that its own cap of 40ch (about 400 px), whatever the room is called. A bar without the warning
+     keeps its one row; the kiosk's bar is not touched. */
+  .top:has(.next-warning:not([hidden])) { flex-wrap: wrap; row-gap: 12px; }
+  .top:has(.next-warning:not([hidden])) .top-right { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
+  .top:has(.next-warning:not([hidden])) .next-warning { flex: 1 1 100%; }
+}

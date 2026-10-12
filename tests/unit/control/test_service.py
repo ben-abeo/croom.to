@@ -34,6 +34,7 @@ class StubMeeting:
         self.callbacks = []
         self.fail_with = None
         self.fail_before_joining = None
+        self.fail_next_join = False
 
     def get_available_platforms(self):
         return list(self._platforms)
@@ -50,6 +51,16 @@ class StubMeeting:
         self.joins.append((url, display_name))
         if self.fail_before_joining is not None:
             raise self.fail_before_joining
+        if self.fail_next_join:
+            # Refused at once, before any "joining" shows: the error state and its reason, as a provider reports them.
+            self.fail_next_join = False
+            failure = RuntimeError("Meet refused the room")
+            self.current_meeting = MeetingInfo(
+                platform=detect_platform(url) or "unknown", meeting_id="failed",
+                meeting_url=url, error_message=str(failure),
+            )
+            self.set_state(MeetingState.ERROR)
+            raise failure
         self.set_state(MeetingState.JOINING)
         await asyncio.sleep(0)
         if self.fail_with is not None:
@@ -614,6 +625,23 @@ class TestPage:
         assert (await client.get("/static/app.js")).status == 200
         assert (await client.get("/static/style.css")).status == 200
 
+    async def test_static_files_are_never_served_stale(self, client_factory):
+        """index.html is no-cache; a kiosk holding an old app.js next to a new index.html would break, so every static
+        file is: the browser keeps its copy and asks before using it."""
+        from croom.control.service import STATIC_DIR
+        client = await client_factory(make_service())
+        names = sorted(p.relative_to(STATIC_DIR).as_posix() for p in STATIC_DIR.rglob("*") if p.is_file())
+        assert {"app.js", "devices.js", "keyboard.js", "style.css"} <= set(names)
+        for name in names:
+            resp = await client.get("/static/" + name)
+            assert resp.status == 200, name
+            assert resp.headers["Cache-Control"] == "no-cache", name
+        # Asking again is a revalidation: the answer to a copy that is still good says no-cache too.
+        first = await client.get("/static/app.js")
+        again = await client.get("/static/app.js", headers={"If-None-Match": first.headers["ETag"]})
+        assert again.status == 304
+        assert again.headers["Cache-Control"] == "no-cache"
+
     async def test_missing_assets_explain_themselves(self, client_factory, tmp_path):
         client = await client_factory(make_service(static_dir=str(tmp_path)))
         resp = await client.get("/")
@@ -638,9 +666,13 @@ class TestPage:
             assert resp.headers["Content-Type"].startswith(content_type), (path, resp.headers["Content-Type"])
 
     def test_page_has_no_external_references(self):
+        """Every page, stylesheet and script the service serves, found by looking, so a new file cannot be missed."""
         from croom.control.service import STATIC_DIR
-        for name in ("index.html", "style.css", "app.js", "sign.html", "sign.css", "sign.js"):
-            text = (STATIC_DIR / name).read_text(encoding="utf-8")
+        files = sorted(p for p in STATIC_DIR.rglob("*") if p.suffix in (".html", ".css", ".js"))
+        assert {"index.html", "app.js", "style.css"} <= {p.name for p in files}   # the glob is looking at the right folder
+        for path in files:
+            name = path.relative_to(STATIC_DIR).as_posix()
+            text = path.read_text(encoding="utf-8")
             assert "http://" not in text and "https://" not in text and "//fonts." not in text, name
             assert "Croom" not in text, name
 

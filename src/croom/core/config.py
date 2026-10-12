@@ -34,12 +34,24 @@ def _writable_dir(path: Path) -> bool:
 
 
 
+PLACEHOLDER_PREFIX = "REPLACE_WITH_"
+
+
+def without_placeholder(value: Any) -> str:
+    """A config text, with blanks and the installer's REPLACE_WITH_... placeholder treated as unset."""
+    text = str(value if value is not None else "").strip()
+    return "" if text.startswith(PLACEHOLDER_PREFIX) else text
+
+
 @dataclass
 class RoomConfig:
     """Room-specific configuration."""
     name: str = "Conference Room"
-    location: str = ""
+    location: str = ""   # what people call the place; "" shows the room's name alone
     timezone: str = "UTC"
+
+    def __post_init__(self):
+        self.location = without_placeholder(self.location)
 
 
 @dataclass

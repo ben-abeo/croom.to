@@ -24,6 +24,7 @@ from croom.core.config import (
     load_config,
     get_config_path,
     CONFIG_PATHS,
+    without_placeholder,
 )
 
 
@@ -339,3 +340,30 @@ class TestRoomDeviceConfig:
         assert again.audio.output_device == "HDMI"
         assert again.video.device == "/dev/video2" and again.video.ptz_travel_seconds == 6.5
         assert again.control.camera_presets == ["Room", "Desk", "Board"]
+
+
+class TestRoomLocationPlaceholder:
+    """The room templates ship location: "REPLACE_WITH_LOCATION"; a room that never set it shows its name alone."""
+
+    def test_the_installer_placeholder_counts_as_no_location(self):
+        assert RoomConfig(location="REPLACE_WITH_LOCATION").location == ""
+
+    def test_blanks_count_as_no_location(self):
+        assert RoomConfig(location="   ").location == ""
+
+    def test_a_real_location_is_kept_and_trimmed(self):
+        assert RoomConfig(location=" 2nd floor ").location == "2nd floor"
+
+    def test_a_padded_placeholder_counts_as_no_location(self):
+        """The spaces go first, then the prefix is looked for: a placeholder someone padded is still a placeholder."""
+        assert RoomConfig(location="  REPLACE_WITH_ANYTHING ").location == ""
+        assert without_placeholder("  REPLACE_WITH_ANYTHING ") == ""
+
+    def test_from_dict_and_to_dict_carry_the_blank(self):
+        config = Config.from_dict({"room": {"name": "Room 1", "location": "REPLACE_WITH_LOCATION"}})
+        assert config.room.location == ""
+        assert config.to_dict()["room"]["location"] == ""
+
+    def test_without_placeholder_handles_none_and_numbers(self):
+        assert without_placeholder(None) == ""
+        assert without_placeholder(3) == "3"

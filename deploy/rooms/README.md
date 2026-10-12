@@ -3,8 +3,10 @@
 One device per conference room, one config per device, one shared dashboard,
 one Google service account shared with all three room calendars.
 
-Each `room-N.yaml` is a complete agent config with four things to replace
-before installing it on that room's device:
+Each `room-N.yaml` is a complete agent config with three values to replace
+before installing it on that room's device (`dashboard.url`,
+`dashboard.enrollment_token` and `calendar.google_calendar_id`), and an optional
+location:
 
 - `room.name` and `room.location`: what people call the room and where it is. The
   location is optional: leave the placeholder or delete the line and the pages

@@ -66,6 +66,8 @@ def test_guide_sets_up_the_table_pi_and_names_the_desktop_icons():
     assert "install-kiosk.sh --url" in html
     assert "Room controls" in html and "Start Crystal Meet" in html
     assert "on-screen keyboard" in html
+    # the scale lives in the kiosk command, and nothing relaunches the browser: a table Pi set up before needs both steps again
+    assert "run the install-kiosk command again on the table Pi and reboot it so the new scale takes effect" in html
 
 
 def test_guide_sets_up_the_camera_and_the_sound():
@@ -87,6 +89,20 @@ def test_guide_says_what_to_do_when_the_browser_cannot_see_the_meetup():
 
 def test_guide_describes_the_screens_and_the_options_button():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
-    for needle in ("Options", "Camera framing", "Screensaver", "Upcoming meetings", "meeting screen", "ten minutes", "Back"):
+    # "meeting screen" is the table's screen during a call; the TV is "the room's TV". The exact phrases keep the needle from
+    # being satisfied by a sentence that means the TV.
+    for needle in ("Options", "Camera framing", "Screensaver", "Upcoming meetings", "the page switches to the meeting screen",
+                   "the page shows the meeting screen on its own", "ten minutes", "Back", "The room's TV needs no keyboard or mouse"):
         assert needle in html, needle
+    assert "room's meeting screen" not in html
     assert "TV when idle" not in html
+
+
+def test_guide_lets_step_four_flow_across_pages_so_its_tip_is_not_left_alone():
+    """Step 4 is longer than the room left on its page. Kept whole it sat on a page of its own and its Tip fell onto the
+    next page, alone (7 pages); allowed to break between bullets it runs on from page 3 and ends with its Tip on page 4 (6 pages)."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    assert re.search(r'<section class="block flow">\s*<div class="step"><span class="badge">4</span>', html)
+    assert ".block.flow { break-inside: auto; }" in html
+    assert re.search(r"\.step \{[^}]*break-after: avoid;", html)    # a step's heading stays with its first bullet
+    assert re.search(r"\bli \{[^}]*break-inside: avoid;", html)     # and no bullet is split

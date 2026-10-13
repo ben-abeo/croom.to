@@ -82,7 +82,7 @@
     if (key === "symbols") { layers.set(field(), "symbols"); shift = false; render(); return; }
     if (key === "letters") { layers.set(field(), "letters"); render(); return; }
     if (key === "hide") { hide(); return; }
-    if (key === "join") { hide(); el("link-form").requestSubmit(); return; }
+    if (key === "join") { hide(); P.submitForm(el("link-form")); return; }
     if (key === "backspace") { edit("", true); return; }
     if (key === "space") { edit(" "); return; }
     edit(shift ? key.toUpperCase() : key);

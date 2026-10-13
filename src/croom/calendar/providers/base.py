@@ -11,6 +11,7 @@ from typing import Optional, Dict, Any, List
 from enum import Enum
 import html
 import re
+from urllib.parse import parse_qs, urlparse
 
 
 class MeetingPlatform(Enum):
@@ -36,6 +37,9 @@ class CalendarEvent:
     meeting_url: Optional[str] = None
     meeting_platform: MeetingPlatform = MeetingPlatform.UNKNOWN
     meeting_id: Optional[str] = None
+    # The passcode written in the invitation, for a Zoom link that carries none of its own. It is not in
+    # to_dict(): a passcode must stay off every page and API that lists events.
+    meeting_passcode: Optional[str] = None
 
     # Event metadata
     organizer: str = ""
@@ -159,6 +163,54 @@ def extract_meeting_url(text: str) -> Optional[str]:
         if match:
             return match.group(0).rstrip('.,;:)>\'"')  # a link at the end of a sentence
 
+    return None
+
+
+# The label ("Passcode", "Password"), blanks and an optional colon, then the code: "Passcode: 123456", "Meeting
+# passcode 123456". One character class for the gap keeps matching linear on a long run of blanks.
+PASSCODE_PATTERN = re.compile(r'\bpass(?:code|word)\b[\s:]*([A-Za-z0-9]{4,32})\b', re.IGNORECASE)
+
+
+def extract_meeting_passcode(text: Optional[str]) -> Optional[str]:
+    """
+    Extract the meeting passcode written in an invitation.
+
+    Reads the written forms ("Passcode: 123456", "Password: abc123", "Meeting passcode 123456", "Passcode 123456",
+    in any case). A link's own pwd= is not a written passcode and is never read here.
+
+    Args:
+        text: Text that may hold an invitation (an event's description or location)
+
+    Returns:
+        The first passcode found (4 to 32 letters and digits), or None
+    """
+    if not text:
+        return None
+    match = PASSCODE_PATTERN.search(html.unescape(text))  # descriptions arrive HTML-escaped (&nbsp; after the colon)
+    return match.group(1) if match else None
+
+
+def link_has_passcode(url: Optional[str]) -> bool:
+    """True when a meeting link carries its own passcode (Zoom's pwd=)."""
+    return bool(url) and bool(parse_qs(urlparse(url).query).get("pwd"))
+
+
+def invitation_passcode(
+    meeting_url: Optional[str], meeting_platform: MeetingPlatform, *texts: Optional[str]
+) -> Optional[str]:
+    """
+    The passcode an event's text gives for its meeting link, for the room to join with.
+
+    Only a Zoom link without a pwd of its own needs one: any other platform has none to give, and a link's pwd is
+    the exact value Zoom issued. The texts (location, then description) are read one at a time, so a label at the
+    end of one never borrows the start of the next.
+    """
+    if meeting_platform != MeetingPlatform.ZOOM or not meeting_url or link_has_passcode(meeting_url):
+        return None
+    for text in texts:
+        passcode = extract_meeting_passcode(text)
+        if passcode:
+            return passcode
     return None
 
 

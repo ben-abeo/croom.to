@@ -27,8 +27,9 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY_BYTES = 4096
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
-PASSCODE = re.compile(r"[A-Za-z0-9]{1,32}")
-BAD_PASSCODE = "Passcode must be letters and digits, up to 32"
+# Zoom's own alphabet for a passcode: letters, digits and @ - _ * (Zoom allows 10 of them; this allows 32).
+PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
+BAD_PASSCODE = "Passcode must be letters, digits or @-_*, up to 32"
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
 # Hosts (and their subdomains) a join link may point the room's browser at.
 PLATFORM_HOSTS = {
@@ -68,7 +69,7 @@ def normalize_passcode(value: Any) -> Optional[str]:
     The passcode a join body carries, trimmed; None when it is absent, null or empty.
 
     Raises:
-        ValueError: when it is not a string, or not 1 to 32 letters and digits
+        ValueError: when it is not a string, or not 1 to 32 letters, digits and @ - _ *
     """
     if value is None:
         return None

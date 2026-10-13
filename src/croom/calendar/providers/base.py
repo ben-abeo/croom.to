@@ -166,9 +166,18 @@ def extract_meeting_url(text: str) -> Optional[str]:
     return None
 
 
+# The characters Zoom allows in a passcode: letters, digits and @ - _ *
+PASSCODE_CHAR = r"[A-Za-z0-9@_*-]"
 # The label ("Passcode", "Password"), blanks and an optional colon, then the code: "Passcode: 123456", "Meeting
-# passcode 123456". One character class for the gap keeps matching linear on a long run of blanks.
-PASSCODE_PATTERN = re.compile(r'\bpass(?:code|word)\b[\s:]*([A-Za-z0-9]{4,32})\b', re.IGNORECASE)
+# passcode 123456". The code runs to the first character Zoom does not allow (a lookahead, not \b, since it may end
+# in @ - or *) and holds a letter or a digit, so a masked "******" is not read as one. One character class for the
+# gap keeps matching linear on a long run of blanks.
+PASSCODE_PATTERN = re.compile(
+    r"\bpass(?:code|word)\b[\s:]*"
+    rf"(?=(?:{PASSCODE_CHAR}){{0,31}}[A-Za-z0-9])"
+    rf"({PASSCODE_CHAR}{{4,32}})(?!{PASSCODE_CHAR})",
+    re.IGNORECASE,
+)
 
 
 def extract_meeting_passcode(text: Optional[str]) -> Optional[str]:
@@ -182,7 +191,7 @@ def extract_meeting_passcode(text: Optional[str]) -> Optional[str]:
         text: Text that may hold an invitation (an event's description or location)
 
     Returns:
-        The first passcode found (4 to 32 letters and digits), or None
+        The first passcode found (4 to 32 letters, digits and @ - _ *), or None
     """
     if not text:
         return None

@@ -49,6 +49,11 @@ class TestExtractMeetingPasscode:
         ("meeting PassWord:123456", "123456"),
         ("Passcode:   123456", "123456"),
         ("Passcode: AbCd1234", "AbCd1234"),
+        ("Passcode: a-b_c*9@", "a-b_c*9@"),                    # the characters Zoom allows besides letters and digits
+        ("Meeting passcode: a-b_c*9@ (case sensitive)", "a-b_c*9@"),
+        ("Passcode: 940104.", "940104"),                        # a sentence's full stop is not part of it
+        ("Passcode: 940104 and more", "940104"),                # a space ends it
+        ("Passcode: 940104/ext", "940104"),                     # so does a slash
     ])
     def test_the_forms_zoom_and_people_write(self, text, expected):
         assert extract_meeting_passcode(text) == expected
@@ -66,7 +71,12 @@ class TestExtractMeetingPasscode:
         "Meeting ID: 559 000 0559",
         "Passcode: 123",                                     # shorter than 4
         "Passcode: " + "1" * 33,                             # longer than 32
-        "Passcode: ******",
+        "Passcode: ******",                                  # a masked passcode is not one
+        "Passcode: ______",
+        "Passcode: ----",
+        "Passcode: 12 3456",                                 # a space ends it after 2 characters
+        "Passcode: 12/3456",                                 # so does a slash
+        "Passcode: 12.3456",
         "Passcode:",
         "",
         None,
@@ -77,11 +87,13 @@ class TestExtractMeetingPasscode:
     def test_the_longest_passcode_is_32_characters(self):
         assert extract_meeting_passcode("Passcode: " + "a1" * 16) == "a1" * 16
 
-    def test_a_long_run_of_blanks_after_the_label_is_read_in_linear_time(self):
-        # Invitations come from outside the room: a label followed by blanks must not make parsing crawl.
+    def test_long_runs_after_the_label_are_read_in_linear_time(self):
+        # Invitations come from outside the room: a label followed by a long run must not make parsing crawl.
         started = time.perf_counter()
         assert extract_meeting_passcode("Passcode" + " " * 30000) is None
         assert extract_meeting_passcode("Passcode:" + " \t" * 15000 + "940104") == "940104"
+        assert extract_meeting_passcode("Passcode: " + "*" * 30000) is None
+        assert extract_meeting_passcode("Passcode: " + "a-" * 15000) is None
         assert time.perf_counter() - started < 1.0
 
 

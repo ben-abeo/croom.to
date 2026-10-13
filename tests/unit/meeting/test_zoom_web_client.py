@@ -152,3 +152,6 @@ async def test_the_web_client_is_sent_no_pwd_without_a_passcode():
 async def test_the_passcode_is_encoded_in_the_web_clients_address():
     url = await web_client_url("https://zoom.us/j/98765432100", passcode="a b&c=d")
     assert url == "https://zoom.us/wc/98765432100/join?pwd=a%20b%26c%3Dd"
+    # the characters Zoom allows besides letters and digits: @ and * are encoded, - and _ are not
+    url = await web_client_url("https://zoom.us/j/98765432100", passcode="a-b_c*9@")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=a-b_c%2A9%40"

@@ -779,7 +779,7 @@ class TestJoinPasscode:
     """A passcode for a protected Zoom meeting: from the page's body, or from the booking's own invitation."""
 
     LINK = "https://zoom.us/j/98765432100"
-    WORDS = {"error": "Passcode must be letters and digits, up to 32"}
+    WORDS = {"error": "Passcode must be letters, digits or @-_*, up to 32"}
 
     async def join(self, client_factory, body, events=()):
         meeting = StubMeeting()
@@ -800,8 +800,11 @@ class TestJoinPasscode:
         ("AbC123", "AbC123"),
         ("1", "1"),
         ("9" * 32, "9" * 32),
+        ("a-b_c*9@", "a-b_c*9@"),        # the four characters Zoom allows besides letters and digits
+        ("  a-b_c*9@  ", "a-b_c*9@"),
     ])
-    async def test_the_passcode_is_trimmed_and_may_be_1_to_32_letters_and_digits(self, client_factory, sent, expected):
+    async def test_the_passcode_is_trimmed_and_may_be_1_to_32_of_the_characters_zoom_allows(
+            self, client_factory, sent, expected):
         meeting, _, resp = await self.join(client_factory, {"url": self.LINK, "passcode": sent})
         assert resp.status == 202
         await wait_until(lambda: meeting.joins)
@@ -815,7 +818,8 @@ class TestJoinPasscode:
         assert meeting.joins == [(self.LINK, "Lab", None)]
 
     @pytest.mark.parametrize("passcode", [
-        "12 34", "9" * 33, "12-34", "12.34", "12_34", "1234\n5678", "caf\u00e9", "\u0663\u0664\u0665\u0666",
+        "12 34", "12/34", "12.34", "12&34", "12=34", "12#34", "9" * 33, "a-b_c*9@" + "x" * 25,
+        "1234\n5678", "caf\u00e9", "\u0663\u0664\u0665\u0666",
         5, 0, True, False, 12.5, ["940104"], {"code": "940104"},
     ])
     async def test_a_bad_passcode_is_refused(self, client_factory, passcode):

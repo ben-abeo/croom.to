@@ -67,7 +67,9 @@
   const platformName = (key) => platformNames[key] || key || "";
   // Times read the American way whatever the browser's locale: 12-hour with AM or PM, and the date as "October 13, 2026"
   // (the Pi's Chromium would otherwise follow the system locale and show 24-hour times).
-  const fmtTime = (d) => d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true });
+  // The space before AM or PM is a no-break one: a time never splits across lines (the sign's and the TV's headlines
+  // broke "10:30 AM" as "10:30" / "AM"; Chromium writes a plain or a narrow space there depending on its version).
+  const fmtTime = (d) => d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).replace(/\s+(?=[AP]M$)/, "\u00A0");
   const fmtDate = (d) => d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
   const fmtRange = (a, b) => fmtTime(a) + " to " + fmtTime(b);
   const minutesUntil = (d) => Math.max(0, Math.round((d - Date.now()) / 60000));

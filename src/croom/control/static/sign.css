@@ -80,7 +80,7 @@ h1 { margin: 0; font-size: clamp(1.3rem, 2.6vw, 2.4rem); font-weight: 600; line-
 .detail:empty { display: none; }
 
 .events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.event { display: grid; grid-template-columns: 7ch 1fr; gap: 14px; align-items: baseline; }
+.event { display: grid; grid-template-columns: 8.5ch 1fr; gap: 14px; align-items: baseline; }   /* "10:30 AM" is eight characters */
 .event time { font-variant-numeric: tabular-nums; opacity: 0.85; }
 .event .title { margin: 0; overflow-wrap: anywhere; }
 .note { margin: 6px 0 0; opacity: 0.85; }

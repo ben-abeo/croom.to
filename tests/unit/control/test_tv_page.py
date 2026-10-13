@@ -435,7 +435,7 @@ def test_the_caption_reads_over_a_white_picture(probed_tv):
     assert contrast_over_white(text, backing) >= 4.5
 
 
-TWELVE_HOUR = r"^\d{1,2}:\d{2} [AP]M$"
+TWELVE_HOUR = r"^\d{1,2}:\d{2}\u00a0[AP]M$"   # the no-break space is the pin: a time never splits across lines
 AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
 
 

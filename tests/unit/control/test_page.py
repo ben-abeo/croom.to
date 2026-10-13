@@ -2829,13 +2829,14 @@ def test_a_leave_waiting_for_its_second_tap_does_not_outlive_the_call(browser):
         page.close()
 
 
-TWELVE_HOUR = r"^\d{1,2}:\d{2} [AP]M$"
+TWELVE_HOUR = r"^\d{1,2}:\d{2}\u00a0[AP]M$"   # the no-break space is the pin: a time never splits across lines on the sign or the TV
 AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
 
 
 def test_the_clock_the_date_and_the_booking_times_read_the_american_way_under_a_twenty_four_hour_locale(browser):
     """The Pi's Chromium follows the system locale, which showed 24-hour times; the pages pin the format instead."""
     import re
+    skip_if_day_ends_within(2)                                 # the booking is 90 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 90)]) as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800}, locale="en-GB")
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")

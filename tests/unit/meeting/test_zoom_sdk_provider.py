@@ -308,3 +308,86 @@ class TestDisplay:
             assert provider._test_display.parked
         finally:
             await shutdown(provider)
+
+
+class TestPasscode:
+    """The passcode the join registers: the link's pwd, else the one the room page sent, else none."""
+
+    async def test_the_passcode_argument_is_used_when_the_link_has_no_pwd(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting("https://zoom.us/j/99612060433", passcode="940104")
+            [join] = await join_calls(provider)
+            assert join["meetingNumber"] == "99612060433" and join["passWord"] == "940104"
+        finally:
+            await shutdown(provider)
+
+    async def test_the_links_pwd_wins_over_the_passcode_argument(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting("https://zoom.us/j/99612060433?pwd=abc", passcode="940104")
+            [join] = await join_calls(provider)
+            assert join["passWord"] == "abc"
+        finally:
+            await shutdown(provider)
+
+    @pytest.mark.parametrize("link, passcode", [
+        ("https://zoom.us/j/99612060433", None),
+        ("https://zoom.us/j/99612060433", ""),
+        ("https://zoom.us/j/99612060433?pwd=", None),
+    ])
+    async def test_with_neither_the_passcode_is_empty(self, link, passcode):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(link, passcode=passcode)
+            [join] = await join_calls(provider)
+            assert join["passWord"] == ""
+        finally:
+            await shutdown(provider)
+
+    async def test_a_wrong_passcode_says_so_in_the_error(self):
+        stub = (STUB_JS + "window.ZoomMtg._behaviour.errorFor = '99612060433';"
+                "window.ZoomMtg._behaviour.errorMessage = 'Wrong password';"
+                "window.ZoomMtg._behaviour.errorCode = 3004;")
+        provider = await provider_for(api=FakeApi(), stub=stub)
+        try:
+            with pytest.raises(RuntimeError) as failure:
+                await provider.join_meeting("https://zoom.us/j/99612060433", passcode="000000")
+            assert str(failure.value) == "Zoom needs the meeting passcode (Wrong password (code 3004))"
+            assert "passcode" in provider.current_meeting.error_message
+            assert provider.current_meeting.error_message == str(failure.value)
+            assert provider.state == MeetingState.ERROR
+        finally:
+            await shutdown(provider)
+
+
+class TestPasscodeErrors:
+    """Which of Zoom's error texts name the passcode (the page's event is queued: no browser needed)."""
+
+    async def refusal(self, detail):
+        provider = ZoomSdkProvider(SDK_ONLY)
+        provider._events = asyncio.Queue()
+        provider._events.put_nowait(("error", detail))
+        with pytest.raises(RuntimeError) as failure:
+            await provider._wait_for_connection()
+        return str(failure.value)
+
+    @pytest.mark.parametrize("detail", [
+        "Wrong password (code 3004)",
+        "Meeting passcode wrong (code 3000)",
+        "Passcode required",
+        "The meeting passWord is incorrect",
+        "Join failed (code 3004)",                  # Zoom's wrong-passcode code, whatever the words
+        '{"errorCode":3004} (code 3004)',           # Zoom gave no words at all
+    ])
+    async def test_a_passcode_refusal_is_named(self, detail):
+        assert await self.refusal(detail) == f"Zoom needs the meeting passcode ({detail})"
+
+    @pytest.mark.parametrize("detail, shown", [
+        ("This meeting ID is not valid (code 3712)", "This meeting ID is not valid (code 3712)"),
+        ("Zoom's SDK could not start: Invalid signature (code 3712)", "Zoom's SDK could not start: Invalid signature (code 3712)"),
+        ("Join failed (code 13004)", "Join failed (code 13004)"),
+        ("", "Zoom reported an error"),
+    ])
+    async def test_other_errors_keep_zooms_words(self, detail, shown):
+        assert await self.refusal(detail) == shown

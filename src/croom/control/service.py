@@ -27,6 +27,8 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY_BYTES = 4096
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
+PASSCODE = re.compile(r"[A-Za-z0-9]{1,32}")
+BAD_PASSCODE = "Passcode must be letters and digits, up to 32"
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
 # Hosts (and their subdomains) a join link may point the room's browser at.
 PLATFORM_HOSTS = {
@@ -59,6 +61,25 @@ def normalize_link(value: str) -> str:
     if url and "://" not in url:
         return "https://" + url
     return url
+
+
+def normalize_passcode(value: Any) -> Optional[str]:
+    """
+    The passcode a join body carries, trimmed; None when it is absent, null or empty.
+
+    Raises:
+        ValueError: when it is not a string, or not 1 to 32 letters and digits
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(BAD_PASSCODE)
+    passcode = value.strip()
+    if not passcode:
+        return None
+    if not PASSCODE.fullmatch(passcode):
+        raise ValueError(BAD_PASSCODE)
+    return passcode
 
 
 @web.middleware
@@ -605,6 +626,10 @@ class ControlService(Service):
         data = await self._read_object(request)
         if data is None:
             return self._error_response("Send a JSON object with url or event_id", 400)
+        try:
+            passcode = normalize_passcode(data.get("passcode"))
+        except ValueError as e:
+            return self._error_response(str(e), 400)
         title = ""
         url = str(data.get("url") or "").strip()
         event_id = str(data.get("event_id") or "").strip()
@@ -616,6 +641,7 @@ class ControlService(Service):
                 return self._error_response("That meeting has no video link", 400)
             url = event.meeting_url
             title = event.title
+            passcode = passcode or event.meeting_passcode   # a passcode sent with the join wins over the booking's own
         if not url:
             return self._error_response("Meeting link required", 400)
         url = normalize_link(url)
@@ -625,12 +651,12 @@ class ControlService(Service):
             return self._error_response("A meeting is already in progress", 409)
         self._last_error = None
         self._title = title
-        self._task = asyncio.create_task(self._run_join(url))
+        self._task = asyncio.create_task(self._run_join(url, passcode))
         return web.json_response({"state": "joining", "url": url}, status=202)
 
-    async def _run_join(self, url: str) -> None:
+    async def _run_join(self, url: str, passcode: Optional[str] = None) -> None:
         try:
-            await self._meeting.join_meeting(url, display_name=self._room_name)
+            await self._meeting.join_meeting(url, display_name=self._room_name, passcode=passcode)
         except asyncio.CancelledError:
             raise
         except Exception as e:

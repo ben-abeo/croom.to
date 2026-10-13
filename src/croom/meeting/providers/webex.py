@@ -168,9 +168,10 @@ class WebexProvider(MeetingProvider):
         meeting_url: str,
         display_name: str = "Conference Room",
         camera_on: bool = True,
-        mic_on: bool = True
+        mic_on: bool = True,
+        passcode: Optional[str] = None
     ) -> MeetingInfo:
-        """Join a Webex meeting via web client."""
+        """Join a Webex meeting via web client. A passcode is accepted and ignored: Webex takes its password from the link."""
         if not self._page:
             raise RuntimeError("Provider not initialized")
 

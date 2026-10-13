@@ -160,7 +160,8 @@ class MeetingProvider(ABC):
         meeting_url: str,
         display_name: str = "Conference Room",
         camera_on: bool = True,
-        mic_on: bool = True
+        mic_on: bool = True,
+        passcode: Optional[str] = None
     ) -> MeetingInfo:
         """
         Join a meeting.
@@ -170,6 +171,8 @@ class MeetingProvider(ABC):
             display_name: Name to display in meeting
             camera_on: Start with camera enabled
             mic_on: Start with microphone enabled
+            passcode: The meeting's passcode, when it has one that its link does not carry;
+                only Zoom uses it, and a link's own pwd wins
 
         Returns:
             MeetingInfo with connection details

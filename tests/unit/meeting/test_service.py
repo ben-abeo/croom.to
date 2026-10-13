@@ -3,12 +3,16 @@ Tests for croom.meeting.service module.
 """
 
 import asyncio
+import inspect
 from unittest.mock import MagicMock, AsyncMock, patch
 from datetime import datetime, timedelta
 
 import pytest
 
-from croom.meeting.providers.base import MeetingState, MeetingInfo
+from croom.core.config import Config
+from croom.meeting.providers import get_all_providers
+from croom.meeting.providers.base import MeetingProvider, MeetingState, MeetingInfo
+from croom.meeting.providers.zoom_sdk import ZoomSdkProvider
 from croom.meeting.service import MeetingService
 
 
@@ -150,3 +154,57 @@ class TestMeetingProviders:
         provider_cls = get_provider("google_meet")
         # May return None if not configured, just verify no exception
         assert provider_cls is None or callable(provider_cls)
+
+
+class RecordingProvider:
+    """Stands in for the provider a link picks: remembers what the service asked it to join."""
+
+    def __init__(self):
+        self.state = MeetingState.IDLE
+        self.joins = []
+
+    def add_state_callback(self, callback):
+        pass
+
+    async def join_meeting(self, meeting_url, display_name="Conference Room", camera_on=True, mic_on=True,
+                           passcode=None):
+        self.joins.append({"url": meeting_url, "display_name": display_name, "camera_on": camera_on,
+                           "mic_on": mic_on, "passcode": passcode})
+        return MeetingInfo(platform="zoom", meeting_id="98765432100", meeting_url=meeting_url)
+
+
+class TestJoinMeeting:
+    """What the service hands the provider it picks for a link."""
+
+    def service_with_zoom(self):
+        service = MeetingService(Config())
+        provider = RecordingProvider()
+        service._providers["zoom"] = provider
+        return service, provider
+
+    async def test_the_passcode_reaches_the_provider(self):
+        service, provider = self.service_with_zoom()
+        await service.join_meeting("https://zoom.us/j/98765432100", passcode="940104")
+        assert [join["passcode"] for join in provider.joins] == ["940104"]
+
+    async def test_without_a_passcode_the_provider_is_given_none(self):
+        service, provider = self.service_with_zoom()
+        await service.join_meeting("https://zoom.us/j/98765432100?pwd=abc")
+        assert provider.joins[0]["passcode"] is None
+        assert provider.joins[0]["url"] == "https://zoom.us/j/98765432100?pwd=abc"
+
+    async def test_the_arguments_keep_their_positional_order_and_the_passcode_comes_last(self):
+        service, provider = self.service_with_zoom()
+        await service.join_meeting("https://zoom.us/j/98765432100", "Lab", False, True, "940104")
+        assert provider.joins == [{"url": "https://zoom.us/j/98765432100", "display_name": "Lab",
+                                   "camera_on": False, "mic_on": True, "passcode": "940104"}]
+
+
+@pytest.mark.parametrize(
+    "provider", [MeetingProvider, *get_all_providers().values(), ZoomSdkProvider], ids=lambda cls: cls.__name__
+)
+def test_every_provider_takes_the_passcode_after_the_existing_arguments(provider):
+    """MeetingService passes passcode to whichever provider a link picks, so none may lack the parameter."""
+    parameters = inspect.signature(provider.join_meeting).parameters
+    assert list(parameters) == ["self", "meeting_url", "display_name", "camera_on", "mic_on", "passcode"]
+    assert parameters["passcode"].default is None

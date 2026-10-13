@@ -47,8 +47,8 @@ class StubMeeting:
         for callback in self.callbacks:
             callback(state)
 
-    async def join_meeting(self, url, display_name=None, camera_on=None, mic_on=None):
-        self.joins.append((url, display_name))
+    async def join_meeting(self, url, display_name=None, camera_on=None, mic_on=None, passcode=None):
+        self.joins.append((url, display_name, passcode))
         if self.fail_before_joining is not None:
             raise self.fail_before_joining
         if self.fail_next_join:
@@ -278,10 +278,10 @@ def real_states():
 
 
 def event(event_id, title, starts_in_minutes, duration=30, url="https://zoom.us/j/98765432100?pwd=abc",
-          platform=MeetingPlatform.ZOOM):
+          platform=MeetingPlatform.ZOOM, meeting_passcode=None):
     start = datetime.now(timezone.utc) + timedelta(minutes=starts_in_minutes)
     return CalendarEvent(id=event_id, title=title, start_time=start, end_time=start + timedelta(minutes=duration),
-                         meeting_url=url, meeting_platform=platform)
+                         meeting_url=url, meeting_platform=platform, meeting_passcode=meeting_passcode)
 
 
 def skip_if_day_ends_within(hours: float) -> None:
@@ -450,7 +450,7 @@ class TestJoin:
         assert resp.status == 202
         assert await resp.json() == {"state": "joining", "url": "https://zoom.us/j/98765432100?pwd=abc"}
         await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
-        assert meeting.joins == [("https://zoom.us/j/98765432100?pwd=abc", "Lab")]
+        assert meeting.joins == [("https://zoom.us/j/98765432100?pwd=abc", "Lab", None)]
         data = await (await client.get("/api/status")).json()
         assert data["meeting"]["state"] == "connected"
         assert data["meeting"]["title"] == ""
@@ -773,6 +773,114 @@ class TestReviewFixes:
         assert (await resp.json())["url"] == expected
         await wait_until(lambda: meeting.joins)
         assert meeting.joins[0][0] == expected
+
+
+class TestJoinPasscode:
+    """A passcode for a protected Zoom meeting: from the page's body, or from the booking's own invitation."""
+
+    LINK = "https://zoom.us/j/98765432100"
+    WORDS = {"error": "Passcode must be letters and digits, up to 32"}
+
+    async def join(self, client_factory, body, events=()):
+        meeting = StubMeeting()
+        calendar = StubCalendar(events=list(events)) if events else None
+        client = await client_factory(make_service(meeting=meeting, calendar=calendar))
+        resp = await client.post("/api/meeting/join", json=body)
+        return meeting, client, resp
+
+    async def test_the_passcode_reaches_the_meeting_service(self, client_factory):
+        meeting, _, resp = await self.join(client_factory, {"url": self.LINK, "passcode": "940104"})
+        assert resp.status == 202
+        assert await resp.json() == {"state": "joining", "url": self.LINK}      # the passcode is never echoed
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins == [(self.LINK, "Lab", "940104")]
+
+    @pytest.mark.parametrize("sent, expected", [
+        ("  940104  ", "940104"),
+        ("AbC123", "AbC123"),
+        ("1", "1"),
+        ("9" * 32, "9" * 32),
+    ])
+    async def test_the_passcode_is_trimmed_and_may_be_1_to_32_letters_and_digits(self, client_factory, sent, expected):
+        meeting, _, resp = await self.join(client_factory, {"url": self.LINK, "passcode": sent})
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins[0][2] == expected
+
+    @pytest.mark.parametrize("extra", [{}, {"passcode": None}, {"passcode": ""}, {"passcode": "   "}])
+    async def test_an_absent_null_or_empty_passcode_means_none(self, client_factory, extra):
+        meeting, _, resp = await self.join(client_factory, {"url": self.LINK, **extra})
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins == [(self.LINK, "Lab", None)]
+
+    @pytest.mark.parametrize("passcode", [
+        "12 34", "9" * 33, "12-34", "12.34", "12_34", "1234\n5678", "caf\u00e9", "\u0663\u0664\u0665\u0666",
+        5, 0, True, False, 12.5, ["940104"], {"code": "940104"},
+    ])
+    async def test_a_bad_passcode_is_refused(self, client_factory, passcode):
+        meeting, _, resp = await self.join(client_factory, {"url": self.LINK, "passcode": passcode})
+        assert resp.status == 400
+        assert await resp.json() == self.WORDS
+        assert meeting.joins == []
+
+    async def test_a_bad_passcode_is_refused_before_the_event_is_looked_up(self, client_factory):
+        meeting, _, resp = await self.join(client_factory, {"event_id": "missing", "passcode": "12 34"})
+        assert resp.status == 400
+        assert await resp.json() == self.WORDS
+        assert meeting.joins == []
+
+    async def test_a_booking_joins_with_its_own_passcode(self, client_factory):
+        booking = event("e1", "Vendor call", starts_in_minutes=5, url=self.LINK, meeting_passcode="940104")
+        meeting, _, resp = await self.join(client_factory, {"event_id": "e1"}, events=[booking])
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins == [(self.LINK, "Lab", "940104")]
+
+    async def test_a_passcode_in_the_body_wins_over_the_bookings(self, client_factory):
+        booking = event("e1", "Vendor call", starts_in_minutes=5, url=self.LINK, meeting_passcode="940104")
+        meeting, _, resp = await self.join(client_factory, {"event_id": "e1", "passcode": " 111222 "}, events=[booking])
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins == [(self.LINK, "Lab", "111222")]
+
+    @pytest.mark.parametrize("extra", [{"passcode": None}, {"passcode": ""}, {"passcode": "  "}])
+    async def test_an_empty_passcode_in_the_body_leaves_the_bookings_in_place(self, client_factory, extra):
+        booking = event("e1", "Vendor call", starts_in_minutes=5, url=self.LINK, meeting_passcode="940104")
+        meeting, _, resp = await self.join(client_factory, {"event_id": "e1", **extra}, events=[booking])
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins[0][2] == "940104"
+
+    async def test_a_booking_without_a_passcode_joins_without_one(self, client_factory):
+        booking = event("e1", "Design review", starts_in_minutes=5)
+        meeting, _, resp = await self.join(client_factory, {"event_id": "e1"}, events=[booking])
+        assert resp.status == 202
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins[0][2] is None
+
+    async def test_a_passcode_refusal_reaches_the_status_in_the_providers_words(self, client_factory):
+        meeting = StubMeeting()
+        meeting.fail_with = RuntimeError("Zoom needs the meeting passcode (Wrong password (code 3004))")
+        client = await client_factory(make_service(meeting=meeting))
+        resp = await client.post("/api/meeting/join", json={"url": self.LINK, "passcode": "000000"})
+        assert resp.status == 202
+        await wait_until(lambda: meeting.state == MeetingState.ERROR)
+        await asyncio.sleep(0.02)
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "error"
+        assert data["meeting"]["error"] == "Zoom needs the meeting passcode (Wrong password (code 3004))"
+
+    async def test_the_passcode_stays_off_the_page(self, client_factory):
+        skip_if_day_ends_within(3)
+        booking = event("e1", "Vendor call", starts_in_minutes=20, url=self.LINK, meeting_passcode="940104")
+        meeting, client, resp = await self.join(client_factory, {"event_id": "e1"}, events=[booking])
+        answer = await resp.text()
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        status = await (await client.get("/api/status")).text()
+        listing = await (await client.get("/api/calendar/events")).text()
+        assert listing and status and answer
+        assert all("940104" not in text for text in (answer, status, listing))
 
 
 class TestScreensaver:

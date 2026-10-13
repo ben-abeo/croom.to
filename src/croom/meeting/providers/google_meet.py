@@ -137,9 +137,10 @@ class GoogleMeetProvider(MeetingProvider):
         meeting_url: str,
         display_name: str = "Conference Room",
         camera_on: bool = True,
-        mic_on: bool = True
+        mic_on: bool = True,
+        passcode: Optional[str] = None
     ) -> MeetingInfo:
-        """Join a Google Meet meeting."""
+        """Join a Google Meet meeting. A passcode is accepted and ignored: only Zoom uses one."""
         if self._display is not None:
             self._page = await self._display.claim()   # nothing parks the page again until the meeting ends
         if not self._page:

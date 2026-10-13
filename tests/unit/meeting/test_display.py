@@ -6,6 +6,10 @@ provider, replaced if it dies (spec 2026-10-07 TV, section 4.3).
 import asyncio
 import logging
 import os
+import socket
+import subprocess
+import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -18,7 +22,14 @@ from croom.meeting.display import TvDisplay  # noqa: E402
 
 TV_HTML = "<title>Crystal Meet TV</title><h1>Screensaver</h1>"
 HEADED = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))   # window chrome is a headed thing
-NO_CHROME = "window.outerHeight === window.innerHeight && window.outerWidth === window.innerWidth"
+NO_CHROME = "window.outerHeight - window.innerHeight < 20 && window.outerWidth - window.innerWidth < 20"   # a plain window has about 87 px
+
+
+def a_dead_pid():
+    """The pid of a process that has run and been reaped."""
+    child = subprocess.Popen(["true"])
+    child.wait()
+    return child.pid
 
 
 class IdleSite:
@@ -220,7 +231,10 @@ async def test_a_guest_browser_in_kiosk_mode_has_no_window_chrome_even_after_its
     site = await IdleSite().start()
     display = TvDisplay(site.url, headless=False)
     try:
-        await display.start()
+        try:
+            await display.start()
+        except Exception as e:  # noqa: BLE001 - a DISPLAY that names nothing
+            pytest.skip(f"no usable display for a headed browser: {e!r}")
         page = await display.page()
         await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
         await page.wait_for_function(NO_CHROME, timeout=5000)
@@ -228,6 +242,123 @@ async def test_a_guest_browser_in_kiosk_mode_has_no_window_chrome_even_after_its
         page = await display.page()
         await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
         await page.wait_for_function(NO_CHROME, timeout=5000)
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+async def test_two_callers_finding_the_page_gone_share_one_restart(monkeypatch, tmp_path):
+    """A double tap, or a tablet and the idle retry, both meeting a dead page: one restart, one browser, the same
+    fresh page for both (a second Chromium on the signed-in profile is refused; a guest would leak one)."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))    # the throwaway folders go here
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        first = await display.page()
+        context = display.context
+        await first.close()
+        a, b = await asyncio.gather(display.page(), display.claim())
+        assert a is b and not a.is_closed() and display.context is not context
+        assert len(list(tmp_path.glob("croom-tv-*"))) == 1       # one browser, one folder
+        await a.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+async def test_a_launch_that_fails_leaves_nothing_behind_and_is_tried_again(monkeypatch, tmp_path):
+    """A launch timeout on a loaded Pi, or X not ready: the driver and the folder go, the call fails, and the
+    display brings the browser back on its own; a call in the meantime tries again instead of refusing."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    display.RETRY_MAX_S = 0.3
+    real_launch, failures = display._launch, {"left": 0}
+
+    async def flaky(folder):
+        if failures["left"]:
+            failures["left"] -= 1
+            raise RuntimeError("Chromium would not start")
+        return await real_launch(folder)
+
+    monkeypatch.setattr(display, "_launch", flaky)
+    try:
+        await display.start()
+        first = await display.page()
+        await first.close()
+        failures["left"] = 1
+        with pytest.raises(RuntimeError, match="would not start"):
+            await display.page()
+        assert display.context is None and display._playwright is None and display.profile_folder is None
+        assert not list(tmp_path.glob("croom-tv-*"))
+        for _ in range(50):                                      # the background retry, 0.3 s after the failure
+            if display.context is not None and display._page is not None and not display._page.is_closed():
+                break
+            await asyncio.sleep(0.1)
+        assert display.context is not None, "the browser did not come back on its own"
+        page = await display.page()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        assert len(list(tmp_path.glob("croom-tv-*"))) == 1
+    finally:
+        await display.stop()
+        await site.stop()
+    assert not list(tmp_path.glob("croom-tv-*"))
+
+
+async def test_stale_throwaway_folders_are_swept_at_start_and_live_ones_kept(monkeypatch, tmp_path):
+    """An agent killed without stop() (SIGKILL, a crash) leaves its folder; the next start removes it, and only it."""
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    long_ago, dead = (time.time() - 600,) * 2, a_dead_pid()
+    stale = tmp_path / f"croom-tv-{dead}-abc"
+    stale.mkdir()
+    (stale / "Default").mkdir()
+    os.utime(stale, long_ago)
+    young = tmp_path / f"croom-tv-{dead}-young"                   # too young to tell: a browser may be starting on it
+    young.mkdir()
+    mine = tmp_path / f"croom-tv-{os.getpid()}-live"             # this agent's own, however old
+    mine.mkdir()
+    os.utime(mine, long_ago)
+    held = tmp_path / f"croom-tv-{dead}-held"                     # a live Chromium holds it
+    held.mkdir()
+    (held / "SingletonLock").symlink_to(f"{socket.gethostname()}-{os.getpid()}")
+    os.utime(held, long_ago)
+    foreign = tmp_path / "croom-tv-oldstyle"                      # not named by us
+    foreign.mkdir()
+    os.utime(foreign, long_ago)
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        assert not stale.exists()
+        assert young.is_dir() and mine.is_dir() and held.is_dir() and foreign.is_dir()
+        own = display.profile_folder
+        assert own.parent == tmp_path and own.name.startswith(f"croom-tv-{os.getpid()}-")
+    finally:
+        await display.stop()
+        await site.stop()
+    assert not own.exists() and young.is_dir() and mine.is_dir() and held.is_dir() and foreign.is_dir()
+
+
+async def test_a_parked_page_that_crashes_brings_a_fresh_browser_on_its_own():
+    """An idle TV does not sit on the desktop until the next Join: the crash handler restarts the browser."""
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        page = await display.page()
+        context = display.context
+        try:
+            await page.goto("chrome://crash")
+        except Exception:  # noqa: BLE001 - the renderer is gone; that is the point
+            pass
+        for _ in range(100):                                     # no call to page() from here
+            if display.context is not context and display._page is not None and not display._page.is_closed():
+                break
+            await asyncio.sleep(0.1)
+        assert display.context is not context, "no fresh browser came on its own"
+        await display._page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        assert display.parked
     finally:
         await display.stop()
         await site.stop()

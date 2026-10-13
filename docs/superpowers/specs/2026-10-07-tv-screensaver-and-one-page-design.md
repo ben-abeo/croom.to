@@ -107,17 +107,29 @@ kiosk: bool = True)` with `from_config(config)`: `idle_url` is
   `--window-size=1920,1080` (the window when kiosk is off), plus `--kiosk` when kiosk is on. Context
   options: camera and microphone permissions, no fixed viewport (the page fills the window, so the
   TV is driven at whatever resolution the Pi outputs, 1080p or 4K alike), no user-agent override.
-- `start()`: starts Playwright; with a profile dir, creates it (mode 700, a clear error
-  naming it when that fails) and launches a persistent context on it; otherwise launches a
-  browser and a context. Takes the context's first page. Then `show_idle()`.
-- `page()` (async): the shared page; if it was closed or crashed, opens a new one and parks
-  it on the idle URL, logging a warning. `context` (property) for tests and for the Zoom SDK
-  provider's test hooks.
+- `start()`: starts Playwright and launches a persistent context, always: on the profile dir
+  when one is configured (created with mode 700, a clear error naming it when that fails),
+  otherwise on a throwaway folder in the temp folder (`croom-tv-<pid>-<random>`, mode 700,
+  removed by `stop()`, so a guest remembers nothing across restarts). Chromium keeps kiosk
+  mode for the window it opens at startup only, and only a persistent context opens one: a
+  `launch()` browser makes its pages through the automation protocol, in plain windows with
+  a tab strip and an address bar whatever the flags say (amended 2026-10-13: that is what
+  the TV Pi showed). Folders left by an agent that died without `stop()` are swept at the
+  next start when their maker is dead, no Chromium holds them and they are over a minute
+  old. Takes the context's first page. Then `show_idle()`. A launch that fails leaves nothing
+  behind; the display stays wanted and the next `page()` tries again.
+- `page()` (async): the shared page; if it was closed or crashed, starts a fresh browser (a
+  replacement page in the old one would open in a plain window once the page's window is
+  gone) and parks its page on the idle URL, logging a warning. One restart at a time: a second
+  caller that finds the page gone waits for the restart and gets the same page. A parked page
+  that crashes brings a fresh browser on its own; a launch that fails is retried in the
+  background every 10 seconds. `context` (property) for tests and for the Zoom SDK provider's
+  test hooks.
 - `show_idle()`: navigates the page to the idle URL with `wait_until="commit"`; a failure
   (the control service not up yet) is retried every 2 seconds for up to 30 seconds in a
   background task, then logged once; never raises.
-- `stop()`: closes the context, the browser when there is one, and Playwright, each guarded
-  by a 5-second timeout like the providers do today.
+- `stop()`: closes the context and Playwright, each guarded by a 5-second timeout like the
+  providers do today, then removes a guest's throwaway folder.
 
 ### 4.4 Providers borrow the page
 
@@ -172,9 +184,12 @@ kiosk: bool = True)` with `from_config(config)`: `idle_url` is
   highlights the chosen one.
 - `tests/unit/meeting/test_display.py` (new, headless): `start()` parks on the idle URL (a
   local replica served by a tiny aiohttp site in the test); `page()` after the page is
-  closed returns a new page parked on idle; `show_idle()` with an unreachable idle URL
-  retries without raising; the persistent-profile launch creates the folder with mode 700;
-  `stop()` leaves no browser.
+  closed returns a fresh browser's page parked on idle, and two callers finding the page
+  gone share one restart; `show_idle()` with an unreachable idle URL retries without
+  raising; the persistent-profile launch creates the folder with mode 700; a guest runs on a
+  throwaway folder that `stop()` removes, and stale ones are swept; a failed launch is tried
+  again at the next `page()`; a headed test (skipped without a display) measures no window
+  chrome on the guest path, before and after the page dies; `stop()` leaves no browser.
 - `tests/unit/meeting/test_zoom_sdk_provider.py`, `test_meet_profile.py`,
   `test_meet_prejoin.py`, `test_zoom_web_client.py`: constructed with a headless display;
   the assertions they make today stay; leaving a meeting lands on the display's idle URL.

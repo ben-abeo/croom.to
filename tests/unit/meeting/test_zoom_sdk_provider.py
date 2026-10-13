@@ -13,7 +13,7 @@ playwright = pytest.importorskip("playwright.async_api")
 
 from croom.core.config import Config  # noqa: E402
 from croom.meeting.providers.base import MeetingState  # noqa: E402
-from croom.meeting.providers.zoom_sdk import ZoomSdkProvider  # noqa: E402
+from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED, ZoomSdkProvider  # noqa: E402
 from croom.meeting.zoom_auth import ZoomAuthError, ZoomCredentials  # noqa: E402
 from tests.unit.meeting.zoom_stub import STUB_JS  # noqa: E402
 
@@ -310,8 +310,13 @@ class TestDisplay:
             await shutdown(provider)
 
 
+WRONG_PASSCODE = ("window.ZoomMtg._behaviour.errorFor = '99612060433';"
+                  "window.ZoomMtg._behaviour.errorMessage = 'Wrong password';"
+                  "window.ZoomMtg._behaviour.errorCode = 3004;")
+
+
 class TestPasscode:
-    """The passcode the join registers: the link's pwd, else the one the room page sent, else none."""
+    """The passcode the join registers: the one given (typed on the room page, or the booking's), else the link's pwd, else none."""
 
     async def test_the_passcode_argument_is_used_when_the_link_has_no_pwd(self):
         provider = await provider_for(api=FakeApi())
@@ -322,12 +327,32 @@ class TestPasscode:
         finally:
             await shutdown(provider)
 
-    async def test_the_links_pwd_wins_over_the_passcode_argument(self):
+    async def test_the_passcode_argument_wins_over_the_links_pwd(self):
+        """A person who types a code after Zoom refused the link's own meant that code."""
         provider = await provider_for(api=FakeApi())
         try:
             await provider.join_meeting("https://zoom.us/j/99612060433?pwd=abc", passcode="940104")
             [join] = await join_calls(provider)
+            assert join["passWord"] == "940104"
+        finally:
+            await shutdown(provider)
+
+    @pytest.mark.parametrize("passcode", [None, ""])
+    async def test_the_links_pwd_is_used_when_no_passcode_is_given(self, passcode):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting("https://zoom.us/j/99612060433?pwd=abc", passcode=passcode)
+            [join] = await join_calls(provider)
             assert join["passWord"] == "abc"
+        finally:
+            await shutdown(provider)
+
+    async def test_a_blank_pwd_in_the_link_is_no_passcode_and_the_one_given_is_used(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting("https://zoom.us/j/99612060433?pwd=", passcode="940104")
+            [join] = await join_calls(provider)
+            assert join["passWord"] == "940104"
         finally:
             await shutdown(provider)
 
@@ -346,18 +371,64 @@ class TestPasscode:
             await shutdown(provider)
 
     async def test_a_wrong_passcode_says_so_in_the_error(self):
-        stub = (STUB_JS + "window.ZoomMtg._behaviour.errorFor = '99612060433';"
-                "window.ZoomMtg._behaviour.errorMessage = 'Wrong password';"
-                "window.ZoomMtg._behaviour.errorCode = 3004;")
-        provider = await provider_for(api=FakeApi(), stub=stub)
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + WRONG_PASSCODE)
         try:
             with pytest.raises(RuntimeError) as failure:
                 await provider.join_meeting("https://zoom.us/j/99612060433", passcode="000000")
             assert str(failure.value) == "Zoom needs the meeting passcode (Wrong password (code 3004))"
+            assert str(failure.value).startswith(PASSCODE_ASKED)
             assert "passcode" in provider.current_meeting.error_message
             assert provider.current_meeting.error_message == str(failure.value)
             assert provider.state == MeetingState.ERROR
         finally:
+            await shutdown(provider)
+
+    async def test_a_join_that_times_out_on_zooms_passcode_complaint_says_so_too(self):
+        """Zoom's join error may never come for a bad passcode: its own modal ("Join parameters: password are invalid!")
+        is then all there is when the wait runs out, and the page's words are read the way the error's are."""
+        stub = (STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;"
+                "window.ZoomMtg._behaviour.pageSays = 'Join parameters: password are invalid!';")
+        provider = await provider_for(api=FakeApi(), stub=stub)
+        provider.CONNECT_TIMEOUT_S = 1
+        try:
+            with pytest.raises(RuntimeError) as failure:
+                await provider.join_meeting("https://zoom.us/j/99612060433", passcode="000000")
+            words = await provider._page_words()
+            assert "Join parameters: password are invalid!" in words
+            assert str(failure.value) == f"{PASSCODE_ASKED} ({words})"
+            assert provider.current_meeting.error_message == str(failure.value)
+            assert provider.state == MeetingState.ERROR
+        finally:
+            await shutdown(provider)
+
+    async def test_a_passcode_refusal_reaches_the_rooms_status_through_the_control_service(self):
+        """The whole chain: the room page's join request, the meeting service, this provider against the stub SDK, and
+        the status the room page reads, which must start with the words the page looks for."""
+        from aiohttp.test_utils import TestClient, TestServer
+
+        from croom.control.service import ControlService
+        from croom.meeting.service import MeetingService
+
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + WRONG_PASSCODE)
+        meeting = MeetingService(Config())
+        meeting._providers["zoom"] = provider
+        client = TestClient(TestServer(ControlService(config={"host": "127.0.0.1", "port": 0, "room_name": "Room 1"},
+                                                      meeting=meeting).create_app()))
+        await client.start_server()
+        try:
+            resp = await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/99612060433", "passcode": "000000"})
+            assert resp.status == 202
+            for _ in range(200):
+                status = await (await client.get("/api/status")).json()
+                if status["meeting"]["state"] == "error":
+                    break
+                await asyncio.sleep(0.05)
+            assert status["meeting"]["state"] == "error"
+            assert status["meeting"]["error"] == f"{PASSCODE_ASKED} (Wrong password (code 3004))"
+            [join] = await join_calls(provider)
+            assert join["passWord"] == "000000"
+        finally:
+            await client.close()
             await shutdown(provider)
 
 

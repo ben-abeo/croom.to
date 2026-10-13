@@ -134,13 +134,21 @@ async def web_client_url(link, **kwargs):
     return page.urls[0]
 
 
-async def test_the_links_pwd_goes_to_the_web_client():
+async def test_a_passcode_given_wins_over_the_links_pwd_at_the_web_client():
     url = await web_client_url("https://zoom.us/j/98765432100?pwd=abc", passcode="940104")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=940104"
+
+
+async def test_the_links_pwd_goes_to_the_web_client_when_no_passcode_is_given():
+    assert await web_client_url("https://zoom.us/j/98765432100?pwd=abc") == "https://zoom.us/wc/98765432100/join?pwd=abc"
+    url = await web_client_url("https://zoom.us/j/98765432100?pwd=abc", passcode="")
     assert url == "https://zoom.us/wc/98765432100/join?pwd=abc"
 
 
 async def test_the_passcode_becomes_the_web_clients_pwd_when_the_link_has_none():
     url = await web_client_url("https://zoom.us/j/98765432100", passcode="940104")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=940104"
+    url = await web_client_url("https://zoom.us/j/98765432100?pwd=", passcode="940104")   # a blank pwd is none
     assert url == "https://zoom.us/wc/98765432100/join?pwd=940104"
 
 

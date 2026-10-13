@@ -171,8 +171,8 @@ class MeetingProvider(ABC):
             display_name: Name to display in meeting
             camera_on: Start with camera enabled
             mic_on: Start with microphone enabled
-            passcode: The meeting's passcode, when it has one that its link does not carry;
-                only Zoom uses it, and a link's own pwd wins
+            passcode: The meeting's passcode, typed on the room page or read from the booking; only Zoom uses it,
+                and it wins over a link's own pwd
 
         Returns:
             MeetingInfo with connection details

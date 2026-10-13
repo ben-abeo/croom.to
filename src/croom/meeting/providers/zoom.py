@@ -122,10 +122,11 @@ class ZoomProvider(MeetingProvider):
         if not meeting_id:
             raise ValueError(f"Invalid Zoom URL: {meeting_url}")
 
-        # The link's pwd is the exact value Zoom issued, so it wins over a passcode typed in or read from the invitation
+        # A passcode given with the join wins over the link's own pwd (a person who types a code after Zoom refused the
+        # link meant that code); without one, the link's pwd
         parsed = urlparse(meeting_url)
         query = parse_qs(parsed.query)
-        password = query.get("pwd", [None])[0] or passcode
+        password = passcode or query.get("pwd", [None])[0]
 
         self._current_meeting = MeetingInfo(
             platform=self.name,

@@ -125,7 +125,7 @@ class MeetingService(Service):
             display_name: Name to display (default: room name)
             camera_on: Start with camera (default: config setting)
             mic_on: Start with mic (default: config setting)
-            passcode: The meeting's passcode, when its link does not carry it (Zoom uses it)
+            passcode: The meeting's passcode (Zoom uses it, over the link's own pwd)
 
         Returns:
             MeetingInfo with connection details

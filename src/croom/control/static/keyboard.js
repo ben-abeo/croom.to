@@ -1,7 +1,8 @@
 // The page's own keyboard, for screens without one (added with the table Pi's kiosk installer, 2026-10-08): the table
-// Pi's kiosk browser opens the page with ?keyboard=1 and the keyboard appears when the link field is tapped; the button
-// beside the field toggles it on any device. Keys never take the focus from the field. The link field is on the idle
-// screen only, so the keyboard opens there only and hides when the view changes (spec 2026-10-12, section 4.1).
+// Pi's kiosk browser opens the page with ?keyboard=1 and the keyboard appears when the link field or the passcode field is
+// tapped; the button beside the link field toggles it on any device. Keys never take the focus from the field, and edit
+// whichever of the two had it last; the passcode field's keys open on the digits. The fields are on the idle screen
+// only, so the keyboard opens there only and hides when the view changes (spec 2026-10-12, section 4.1).
 (function () {
   "use strict";
   const P = window.croomPage;
@@ -9,11 +10,16 @@
 
   const LETTERS = ["qwertyuiop", "asdfghjkl", "zxcvbnm"];
   const SYMBOLS = ["1234567890", "-/:.?=&_%#", "@~+,;!*()'"];
-  const kiosk = new URLSearchParams(window.location.search).get("keyboard") === "1";
+  const kiosk = P.kiosk;
   const box = el("keyboard");
-  const input = el("link-input");
+  const link = el("link-input");
+  const passcode = el("passcode-input");
   const toggle = el("keyboard-toggle");
+  let input = link;   // the field the keys edit: whichever of the two had the focus last
   let layer = "letters", shift = false, open = false;
+
+  // The passcode field hides with the link it was for, and may be the one that had the focus last: the keys go to the link box then.
+  const field = () => (input.hidden ? link : input);
 
   function keyButton(key, label, className) {
     const b = document.createElement("button");
@@ -56,15 +62,16 @@
   }
 
   function edit(text, backspace) {
-    const start = input.selectionStart === null ? input.value.length : input.selectionStart;
-    const end = input.selectionEnd === null ? start : input.selectionEnd;
+    const target = field();
+    const start = target.selectionStart === null ? target.value.length : target.selectionStart;
+    const end = target.selectionEnd === null ? start : target.selectionEnd;
     if (backspace) {
-      input.setRangeText("", start === end ? Math.max(0, start - 1) : start, end, "end");
+      target.setRangeText("", start === end ? Math.max(0, start - 1) : start, end, "end");
     } else {
-      input.setRangeText(text, start, end, "end");
+      target.setRangeText(text, start, end, "end");
     }
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    input.focus();
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+    target.focus();
   }
 
   function press(key) {
@@ -87,7 +94,7 @@
     box.hidden = false;
     document.body.classList.add("keyboard-open");
     toggle.setAttribute("aria-pressed", "true");
-    input.scrollIntoView({ block: "center" });
+    field().scrollIntoView({ block: "center" });
   }
 
   function hide() {
@@ -98,16 +105,26 @@
     toggle.setAttribute("aria-pressed", "false");
   }
 
-  input.addEventListener("focus", () => { if (kiosk) show(); });
-  input.addEventListener("focusout", (e) => {
-    if (e.relatedTarget && (box.contains(e.relatedTarget) || e.relatedTarget === toggle)) return;
-    hide();
-  });
+  // The keys edit this field from now on. A passcode is mostly digits: its keys open on that layer, even when the keyboard is
+  // already up on the letters for the link.
+  function aim(target) {
+    input = target;
+    if (target === passcode) { layer = "symbols"; shift = false; }
+    if (open) render();
+  }
+
+  for (const target of [link, passcode]) {
+    target.addEventListener("focus", () => { aim(target); if (kiosk) show(); });
+    target.addEventListener("focusout", (e) => {
+      if (e.relatedTarget && (box.contains(e.relatedTarget) || e.relatedTarget === toggle)) return;
+      hide();
+    });
+  }
   toggle.addEventListener("pointerdown", (e) => e.preventDefault());
   toggle.addEventListener("click", () => {
     if (open) { hide(); return; }
     show();
-    input.focus();
+    field().focus();
   });
   P.onViewChange((name) => { if (name !== "idle") hide(); });
 })();

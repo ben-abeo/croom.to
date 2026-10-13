@@ -213,6 +213,9 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
   font: inherit;
 }
 .link-form input::placeholder { color: rgba(189, 206, 255, 0.7); }
+/* The passcode field: a row of its own under the link box, its keyboard button and Join (a basis of the whole form cannot
+   share a line with them). Shown only for a Zoom meeting whose link carries no passcode; hidden, it takes no room. */
+.link-form #passcode-input { flex: 1 1 100%; }
 .keyboard-toggle { padding: 0 16px; font-size: 1.4rem; line-height: 1; }
 
 /* The page's own keyboard: fixed to the bottom while open, the page gets room above it. */

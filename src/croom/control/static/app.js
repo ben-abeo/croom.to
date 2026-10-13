@@ -14,12 +14,14 @@
   const el = (id) => document.getElementById(id);
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
-  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "" };
+  // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
+  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "" };
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
   let passcodeCard = false;      // the last render showed the card for a join Zoom refused over the passcode: its landing happens once too
+  let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
   const kiosk = new URLSearchParams(window.location.search).get("keyboard") === "1";   // the table Pi's kiosk browser has no keyboard of its own (keyboard.js)
 
   const view = () => document.body.dataset.view;
@@ -141,12 +143,13 @@
     return /^\d{9,11}$/.test(digits) ? digits : "";
   }
 
-  // A bare meeting ID, or a Zoom link whose query has no pwd=.
+  // A bare meeting ID, or a Zoom link whose query has no pwd=. A link typed without its scheme is read on the page's own:
+  // only its host and its query count.
   function looksLikeZoomWithoutPasscode(text) {
     const value = text.trim();
     if (meetingId(value)) return true;
     let url;
-    try { url = new URL(value.includes("://") ? value : "https://" + value); } catch (e) { return false; }
+    try { url = value.includes("://") ? new URL(value) : new URL("//" + value, location.href); } catch (e) { return false; }
     const host = url.hostname.toLowerCase();
     return ZOOM_DOMAINS.some((domain) => host === domain || host.endsWith("." + domain)) && !url.searchParams.get("pwd");
   }
@@ -156,14 +159,17 @@
     if (!show) passcodeInput.value = "";   // a code typed for one meeting is not for the next
   }
   const syncPasscodeField = () => showPasscodeField(looksLikeZoomWithoutPasscode(linkInput.value));
+  const forgetJoin = () => { model.lastLink = ""; model.lastEvent = ""; };
   linkInput.addEventListener("input", () => {
-    model.lastLink = "";   // the box is the person's own now: the card no longer gives the failed link back
+    forgetJoin();   // the box is the person's own now: the card no longer gives the failed link back, nor joins its booking again
+    restoredLink = "";
     syncPasscodeField();
   });
 
-  // The agent took the join, so both boxes are done with; the link stays in the model for a refusal that is still to come.
-  function joinAccepted(url) {
+  // The agent took the join, so both boxes are done with; what it was stays in the model for a refusal that is still to come.
+  function joinAccepted(url, eventId) {
     model.lastLink = url;
+    model.lastEvent = eventId || "";
     linkInput.value = "";
     showPasscodeField(false);
   }
@@ -174,10 +180,18 @@
   function askForPasscode(m, landing) {
     if (landing && !model.lastLink && !linkInput.value.trim()) model.lastLink = m.url || "";
     if (model.lastLink && !linkInput.value.trim()) {
-      linkInput.value = model.lastLink;
+      linkInput.value = restoredLink = model.lastLink;
       syncPasscodeField();
     }
     if (landing) showPasscodeField(true);
+  }
+
+  // The card has gone (Dismiss, a join that began, or another page): the link it put back goes with it, unless the person has
+  // made the box their own, and the field follows the box again.
+  function passcodeCardGone() {
+    if (restoredLink && linkInput.value === restoredLink) linkInput.value = "";
+    restoredLink = "";
+    syncPasscodeField();
   }
 
   // The kiosk's keys come up on the passcode field. Called once the card is drawn, at the end of render(): the keyboard
@@ -188,9 +202,13 @@
   }
 
   const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
-  const joinLink = (url, passcode) => act(() => post("/api/meeting/join", passcode ? { url: url, passcode: passcode } : { url: url }).then(() => joinAccepted(url)));
-  const joinEvent = (id) => { model.lastLink = ""; return act(() => post("/api/meeting/join", { event_id: id })); };
-  const leave = () => { model.lastLink = ""; return act(() => post("/api/meeting/leave")); };   // Cancel, Dismiss and Leave give the join up
+  const withPasscode = (body, passcode) => (passcode ? Object.assign(body, { passcode: passcode }) : body);
+  const joinLink = (url, passcode) => act(() => post("/api/meeting/join", withPasscode({ url: url }, passcode)).then(() => joinAccepted(url)));
+  const joinEvent = (id) => { forgetJoin(); return act(() => post("/api/meeting/join", { event_id: id }).then(() => { model.lastEvent = id; })); };
+  // Join again on a booking's card: the booking once more, with the typed code (the agent takes it over the booking's own), so
+  // the call keeps the booking's title. The link the card put back stays in the model for the old card a poll may still show.
+  const joinEventAgain = (id, passcode) => act(() => post("/api/meeting/join", withPasscode({ event_id: id }, passcode)).then(() => joinAccepted(model.lastLink, id)));
+  const leave = () => { forgetJoin(); return act(() => post("/api/meeting/leave")); };   // Cancel, Dismiss and Leave give the join up
   const toggle = (kind) => act(() => post("/api/meeting/" + kind));
   const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
 
@@ -355,14 +373,17 @@
     if (m.state !== lastMeetingState) {
       // A join that failed while someone was on Options: the "Couldn't join" card is on the idle screen.
       if (m.state === "error" && view() !== "idle") applyView("idle", true);
-      // The join resolved: it took, is being left, or failed some other way, and its link is spent. Not while it is going on,
-      // nor on "idle" (an accepted join that has not begun yet), nor when Zoom asks for the passcode (the card gives the link
-      // back). Only a change counts: the poll just after a retry may still show the old card, and that is no news.
-      if (m.state === "in_lobby" || m.state === "connected" || m.state === "leaving" || (m.state === "error" && !asking)) model.lastLink = "";
+      // The join resolved: it took, is being left, failed some other way, or was cancelled (from another page: joining, then
+      // idle), and its link is spent. Not while it is going on, nor on "idle" after anything else (an accepted join that has not
+      // begun yet), nor when Zoom asks for the passcode (the card gives the link back). Only a change counts: the poll just
+      // after a retry may still show the old card, and that is no news.
+      const cancelled = m.state === "idle" && lastMeetingState === "joining";
+      if (m.state === "in_lobby" || m.state === "connected" || m.state === "leaving" || (m.state === "error" && !asking) || cancelled) forgetJoin();
       lastMeetingState = m.state;
     }
     const landing = asking && !passcodeCard;
     if (asking) askForPasscode(m, landing);
+    else if (passcodeCard) passcodeCardGone();
     passcodeCard = asking;
     renderMeetingBar(m);
     renderUpcoming();
@@ -504,10 +525,12 @@
 
   el("link-form").addEventListener("submit", (e) => {
     e.preventDefault();
+    const passcode = passcodeInput.hidden ? "" : passcodeInput.value.trim();
+    if (passcodeCard && model.lastEvent) { joinEventAgain(model.lastEvent, passcode); return; }   // a booking's card: the booking again
     const typed = linkInput.value.trim();
     if (!typed) return;
     const url = meetingId(typed) || typed;   // the agent takes an ID as digits only
-    joinLink(url, passcodeInput.hidden ? "" : passcodeInput.value.trim());   // the boxes clear in joinAccepted, once the agent has taken the join
+    joinLink(url, passcode);   // the boxes clear in joinAccepted, once the agent has taken the join
   });
 
   el("open-options").addEventListener("click", () => setView("options"));

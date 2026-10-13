@@ -19,6 +19,7 @@ import pytest
 from croom.control.service import ControlService
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
+from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASKED
 from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -437,7 +438,7 @@ def test_the_keyboard_opens_on_the_idle_screen_only_and_hides_when_a_meeting_sta
 
 # --- a Zoom meeting's passcode: the field under the link box, and the retry when Zoom asks for one ---
 
-PASSCODE_ASKED = "Zoom needs the meeting passcode (Wrong password (code 3004))"   # what the agent says when Zoom refuses a join over the passcode
+PASSCODE_ASKED = f"{ZOOM_PASSCODE_ASKED} (Wrong password (code 3004))"   # what the agent says when Zoom refuses a join over the passcode: its own prefix
 ZOOM_LINK = "https://zoom.us/j/5590000559"                                        # what the service makes of the bare meeting ID 5590000559
 
 
@@ -477,6 +478,11 @@ def test_the_passcode_field_follows_what_the_link_box_holds(browser):
         ("https://meet.google.com/abc-defg-hij", False), ("https://teams.microsoft.com/l/meetup-join/19", False),
         ("https://notzoom.us/j/5590000559", False), ("https://zoom.us.example.com/j/5590000559", False),   # look-alike hosts
         ("not a meeting link", False), ("   ", False), ("", False),
+        ("https://zoom.us/j/5590000559#pwd=abc", True),                       # a pwd in the fragment is not the query's
+        ("HTTPS://ZOOM.US/j/5590000559", True), ("https://ZOOM.US/j/5590000559?pwd=abc", False),   # hosts in capitals
+        ("https://zoom.us/wc/5590000559/join", True), ("https://zoom.us/wc/5590000559/join?pwd=abc", False),   # the web client's links
+        ("abc-defg-hij", False),                                               # a Meet code on its own
+        ("5551234567", True),                                                  # 10 digits are a meeting ID, whatever else they might be
     ]
     with PageServer() as server:
         page = open_page(browser, server)
@@ -610,7 +616,8 @@ def test_a_second_refusal_over_the_passcode_gives_the_link_back_and_asks_again(b
         page.close()
 
 
-@pytest.mark.parametrize("refusal", ["Meet refused the room", "The host changed the meeting passcode", "Zoom did not connect; the page says: Enter the passcode"])
+@pytest.mark.parametrize("refusal", ["Meet refused the room", "The host changed the meeting passcode", "Zoom did not connect; the page says: Enter the passcode",
+                                     f"The room's screen said: {ZOOM_PASSCODE_ASKED} (code 3004)"])   # the words, but not at the start
 def test_any_other_failure_is_the_card_it_always_was(browser, refusal):
     with PageServer() as server:
         server.meeting.fail_before_joining = RuntimeError(refusal)
@@ -623,12 +630,20 @@ def test_any_other_failure_is_the_card_it_always_was(browser, refusal):
         page.close()
 
 
-def test_a_booking_that_needs_a_passcode_gets_the_same_retry_with_its_own_link(browser):
-    """Nothing was typed: the status says which meeting failed, and the box takes its link so Join again has one to send."""
+def test_a_booking_that_needs_a_passcode_gets_the_same_retry_and_stays_the_booking(browser):
+    """Nothing was typed: the status says which meeting failed, and the box shows its link. Join again joins the booking
+    again with the code, so the call keeps its title: the meeting line names it, and the bar does not call it next."""
     skip_if_day_ends_within(1)                                                 # the booking starts in 5 minutes, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 5, url=ZOOM_LINK)]) as server:
         server.meeting.fail_with = RuntimeError(PASSCODE_ASKED)                # a provider that joined, and was refused
         page = browser.new_page(viewport={"width": 1280, "height": 800})
+        bodies = []
+
+        def record(route):
+            bodies.append(route.request.post_data_json)
+            route.continue_()
+
+        page.route("**/api/meeting/join", record)
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
         page.click("#actions button:has-text('Join now')")
@@ -641,6 +656,36 @@ def test_a_booking_that_needs_a_passcode_gets_the_same_retry_with_its_own_link(b
         page.click("#actions button:has-text('Join again')")
         page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
         assert server.meeting.joins[-1] == (ZOOM_LINK, "Lab", "940104")
+        assert bodies == [{"event_id": "e1"}, {"event_id": "e1", "passcode": "940104"}]
+        assert page.locator("#meeting-detail").inner_text() == "Design review, Zoom"
+        assert page.locator("#next-warning").is_hidden()                        # the booking the room is in is not next
+        page.close()
+
+
+def test_a_booking_card_whose_link_the_person_edits_joins_the_link_they_typed(browser):
+    """The box is the person's own once they edit it: Join again sends what it holds, not the booking."""
+    skip_if_day_ends_within(1)                                                 # the booking starts in 5 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 5, url=ZOOM_LINK)]) as server:
+        server.meeting.fail_with = RuntimeError(PASSCODE_ASKED)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        bodies = []
+
+        def record(route):
+            bodies.append(route.request.post_data_json)
+            route.continue_()
+
+        page.route("**/api/meeting/join", record)
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.click("#actions button:has-text('Join now')")
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=8000)
+        server.meeting.fail_with = None
+        page.fill("#link-input", "https://zoom.us/j/33333333333")
+        page.fill("#passcode-input", "940104")
+        page.click("#actions button:has-text('Join again')")
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        assert bodies[-1] == {"url": "https://zoom.us/j/33333333333", "passcode": "940104"}
+        assert server.meeting.joins[-1] == ("https://zoom.us/j/33333333333", "Lab", "940104")
         page.close()
 
 
@@ -701,10 +746,82 @@ def test_giving_a_join_up_lets_go_of_its_link(browser):
         page = open_page(browser, server)
         page.fill("#link-input", "5590000559")
         submit_and_wait_for_the_card(page)
-        assert page.evaluate("window.croomPage.model.lastLink") == "5590000559"
+        assert page.input_value("#link-input") == "5590000559"
         page.click("#actions button:has-text('Dismiss')")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        assert page.evaluate("window.croomPage.model.lastLink") == ""
+        # Another device's join, refused over the passcode before it began: the status names no link, and this page's is given up.
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/22222222222"}', headers=JSON)
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=8000)
+        assert card_buttons(page) == ["Dismiss", "Join again"]
+        assert page.input_value("#link-input") == ""
+        page.close()
+
+
+@pytest.mark.parametrize("dismissed", ["here", "from another page"])
+def test_the_link_the_card_put_back_goes_with_the_card(browser, dismissed):
+    """A link with its own pwd= that Zoom refused over the passcode: the card puts it back in plain view, with the field.
+    When the card goes, the link goes with it and the field follows the empty box."""
+    with PageServer() as server:
+        server.meeting.fail_before_joining = RuntimeError(PASSCODE_ASKED)
+        page = open_page(browser, server)
+        page.fill("#link-input", "https://zoom.us/j/5590000559?pwd=abc")
+        assert page.locator("#passcode-input").is_hidden()
+        submit_and_wait_for_the_card(page)
+        assert page.input_value("#link-input") == "https://zoom.us/j/5590000559?pwd=abc"
+        assert page.locator("#passcode-input").is_visible()
+        if dismissed == "here":
+            page.click("#actions button:has-text('Dismiss')")
+        else:
+            page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        assert page.input_value("#link-input") == ""
+        assert page.locator("#passcode-input").is_hidden()
+        page.close()
+
+
+def test_a_join_cancelled_from_another_page_lets_go_of_its_link(browser):
+    """This page's join began and was cancelled elsewhere (joining, then idle, no error): its link is spent. A later join
+    that Zoom refuses over the passcode puts its own link in the box, not this one."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join = server.meeting.join_meeting
+
+        async def begins(url, display_name=None, camera_on=None, mic_on=None, passcode=None):   # joining, until someone cancels
+            server.meeting.joins.append((url, display_name, passcode))
+            server.meeting.set_state(MeetingState.JOINING)
+
+        server.meeting.join_meeting = begins
+        page.fill("#link-input", "5590000559")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.getElementById('meeting-state').innerText === 'Joining'", timeout=5000)
+        server.meeting.set_state(MeetingState.IDLE)                             # cancelled from another page
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        server.meeting.join_meeting = join
+        server.meeting.fail_with = RuntimeError(PASSCODE_ASKED)                 # another page's join, which Zoom refuses
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/22222222222"}', headers=JSON)
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=8000)
+        assert card_buttons(page) == ["Dismiss", "Join again"]
+        assert page.input_value("#link-input") == "https://zoom.us/j/22222222222"   # the link of the join that failed, from the status
+        page.close()
+
+
+def test_a_poll_after_the_card_has_landed_takes_neither_the_focus_nor_the_field_back(browser):
+    """The card lands once: the field is shown and, on the kiosk, takes the focus. The polls after that leave both to the person."""
+    with PageServer() as server:
+        server.meeting.fail_with = RuntimeError(PASSCODE_ASKED)
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        tap(page, "symbols", *"5590000559", "join")
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=8000)
+        page.wait_for_function("document.activeElement.id === 'passcode-input'", timeout=5000)
+        page.click("#link-input")                                               # the person goes back to the ID
+        page.evaluate("window.croomPage.refreshStatus()")                       # a poll, and the render after it
+        assert page.evaluate("document.activeElement.id") == "link-input"
+        page.fill("#link-input", "https://zoom.us/j/5590000559?pwd=abc")        # a link that brings its own passcode
+        assert page.locator("#passcode-input").is_hidden()
+        page.evaluate("window.croomPage.refreshStatus()")
+        assert page.locator("#passcode-input").is_hidden()
+        assert card_buttons(page) == ["Dismiss", "Join again"]
         page.close()
 
 
@@ -774,9 +891,100 @@ def test_the_page_keyboard_types_into_whichever_field_had_the_focus_last(browser
         assert page.input_value("#link-input") == "zoom.us/j/5590000559"
         page.click("#link-input")                                               # and back: the keys follow the focus
         assert page.locator("#keyboard").is_visible()
+        assert page.locator("#keyboard button[data-key='q']").is_visible()      # on the letters the link was left on, not the passcode's digits
         tap(page, "backspace")
         assert page.input_value("#link-input") == "zoom.us/j/559000055"
         assert page.input_value("#passcode-input") == "940104"
+        page.close()
+
+
+def test_each_field_keeps_its_own_layer(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        assert page.locator("#keyboard button[data-key='q']").is_visible()      # a link opens on the letters
+        tap(page, "symbols", *"5590000559")                                     # and is left on the digits
+        page.click("#passcode-input")
+        tap(page, "letters", "a", "symbols", "1", "letters")                    # the passcode is left on the letters
+        assert page.input_value("#passcode-input") == "a1"
+        page.click("#link-input")
+        assert page.locator("#keyboard button[data-key='9']").is_visible()      # the link's own layer
+        page.click("#passcode-input")
+        assert page.locator("#keyboard button[data-key='q']").is_visible()      # and the passcode's
+        page.close()
+
+
+def keyboard_changes(page):
+    """From now on, count every time the keys are shown or hidden."""
+    page.evaluate("""() => { window.__keyboardChanges = 0;
+        new MutationObserver(() => { window.__keyboardChanges += 1; })
+          .observe(document.getElementById('keyboard'), { attributes: true, attributeFilter: ['hidden'] }); }""")
+
+
+def test_on_the_kiosk_the_keys_stay_up_while_the_person_moves_between_the_fields(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        tap(page, "symbols", *"5590000559")
+        keyboard_changes(page)
+        page.click("#passcode-input")
+        page.click("#link-input")
+        page.click("#passcode-input")
+        assert page.locator("#keyboard").is_visible()
+        assert page.evaluate("window.__keyboardChanges") == 0, "the keys went away and came back between the fields"
+        page.close()
+
+
+def test_off_the_kiosk_the_keys_from_the_button_stay_up_while_the_person_moves_between_the_fields(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)                                       # no ?keyboard=1: a tablet with the keys from the button
+        page.fill("#link-input", "5590000559")
+        page.click("#link-input")
+        page.click("#keyboard-toggle")
+        assert page.locator("#keyboard").is_visible()
+        page.click("#passcode-input")
+        assert page.locator("#keyboard").is_visible()
+        assert page.locator("#keyboard button[data-key='9']").is_visible()      # on the passcode's digits
+        tap(page, "1", "2")
+        assert page.input_value("#passcode-input") == "12" and page.input_value("#link-input") == "5590000559"
+        page.click("#link-input")
+        assert page.locator("#keyboard").is_visible()
+        assert page.locator("#keyboard button[data-key='q']").is_visible()      # and the link's letters
+        page.close()
+
+
+def test_the_keys_go_when_the_passcode_field_loses_the_focus_to_the_page(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        tap(page, "symbols", *"5590000559")
+        page.click("#passcode-input")
+        assert page.locator("#keyboard").is_visible()
+        page.click("#headline")                                                 # a tap anywhere else on the page
+        assert page.locator("#keyboard").is_hidden()
+        page.close()
+
+
+def test_on_the_kiosk_a_tap_on_a_field_that_kept_the_focus_brings_the_keys_back(browser):
+    """After a Join the agent refused, or Hide, the field still has the focus, so a tap on it fires no focus event."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        tap(page, "symbols", *"5590000559")
+        page.click("#passcode-input")
+        tap(page, "9", "space", "4", "join")                                    # a space: the agent refuses the code
+        page.wait_for_function("document.getElementById('message').innerText.startsWith('Passcode must be')", timeout=5000)
+        assert page.locator("#keyboard").is_hidden() and page.evaluate("document.activeElement.id") == "passcode-input"
+        page.click("#passcode-input")                                           # the person taps it to put the code right
+        assert page.locator("#keyboard").is_visible()
+        assert page.locator("#keyboard button[data-key='9']").is_visible()
+        tap(page, "backspace", "backspace", "backspace")
+        assert page.input_value("#passcode-input") == ""
+        page.click("#link-input")
+        tap(page, "hide")
+        assert page.locator("#keyboard").is_hidden() and page.evaluate("document.activeElement.id") == "link-input"
+        page.click("#link-input")
+        assert page.locator("#keyboard").is_visible()
         page.close()
 
 
@@ -807,7 +1015,7 @@ def test_the_page_keyboard_does_not_type_into_a_passcode_field_that_has_gone(bro
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.click("#keyboard-toggle")
         assert page.locator("#keyboard").is_visible()
-        tap(page, *"123")                                                       # the keys are still on the digits the passcode left them on
+        tap(page, *"123")                                                       # on the link box's own layer: the digits it was left on for the ID
         assert page.input_value("#link-input") == "123" and page.input_value("#passcode-input") == ""
         page.close()
 
@@ -852,6 +1060,22 @@ def test_a_kiosk_page_that_opens_on_the_passcode_card_brings_up_the_keys_for_the
         tap(page, *"940104", "join")
         page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
         assert server.meeting.joins[-1] == (ZOOM_LINK, "Lab", "940104")
+        page.close()
+
+
+def test_the_passcode_field_gets_letters_without_capitals_or_corrections(browser):
+    """A passcode may hold letters and @ - _ *, so no number pad; it is case-sensitive, so no capitals or corrections from a
+    phone's keyboard. The kiosk's own keys still open on the digits."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        field = page.locator("#passcode-input")
+        assert field.get_attribute("inputmode") is None
+        assert field.get_attribute("autocapitalize") == "off" and field.get_attribute("autocorrect") == "off"
+        assert field.get_attribute("spellcheck") == "false" and field.get_attribute("type") == "text"
+        page.click("#link-input")
+        tap(page, "symbols", *"5590000559")
+        page.click("#passcode-input")
+        assert page.locator("#keyboard button[data-key='9']").is_visible()
         page.close()
 
 

@@ -146,7 +146,7 @@ Bookings in the next 7 days:
 <section class="block">
 <div class="step"><span class="badge">5</span><h2>Book a test meeting</h2></div>
 <ul>
-  <li><strong>Create the booking.</strong> In Google Calendar, make an event a few minutes from now, add the room under <span class="ui">Rooms</span>, and add a video link: a Google Meet, the Zoom add-on, or a pasted Zoom invitation link with its passcode. Save it.</li>
+  <li><strong>Create the booking.</strong> In Google Calendar, make an event a few minutes from now, add the room under <span class="ui">Rooms</span>, and add a video link: a Google Meet, the Zoom add-on, or a pasted Zoom invitation link. A Zoom meeting's passcode can be in the link, in the invitation text pasted into the event ("Passcode: 123456"), or typed in the <span class="ui">Passcode</span> field the room page shows when Zoom asks for it. Save it.</li>
   <li><strong>Watch the room.</strong> Within a minute the room page lists it under <span class="ui">Today</span> and the door sign shows it as next. Ten minutes before the start the sign turns amber and the room page shows <span class="ui">Join now</span>.</li>
   <li><strong>Join and leave.</strong> Press <span class="ui">Join now</span>; the TV joins the link. Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>.</li>
 </ul>
@@ -166,7 +166,7 @@ Bookings in the next 7 days:
   <div class="card"><h3>The check says "not found or not shared"</h3><p>The address is wrong or step 3 was missed for this room. Copy the resource email again and share the room calendar with the exact service account email. If Google refuses "See all event details", do the sharing setting at the start of step 3 first.</p></div>
   <div class="card"><h3>The check says it could not sign in</h3><p>The file is not a service account JSON key (download a new one from the account's Keys page), the Calendar API is not enabled in that project, or the key was deleted in the Cloud console.</p></div>
   <div class="card"><h3>A booking is missing on the room page</h3><p>The room was not added to the event, the room declined it, or it is more than 7 days away. Cancelled bookings never show. Check the device's clock and time zone if today's bookings look shifted.</p></div>
-  <div class="card"><h3>The booking shows but Join now is missing</h3><p>The event has no video link the device can join. Add a Google Meet, use the Zoom add-on, or paste the full Zoom invitation link including its passcode part.</p></div>
+  <div class="card"><h3>The booking shows but Join now is missing</h3><p>The event has no video link the device can join. Add a Google Meet, use the Zoom add-on, or paste the Zoom invitation link. Its passcode can be in the link, in the invitation text, or typed in the room page's <span class="ui">Passcode</span> field.</p></div>
   <div class="card"><h3>Google says key creation is not allowed</h3><p>The organization policy "Disable service account key creation" is on, which is the default for newer Google Cloud organizations. Turn it off for the Crystal Meet project as described in step 2, then create the key again.</p></div>
   <div class="card"><h3>Bookings show at the wrong time</h3><p>Set the device's time zone in <span class="ui">Preferences › Raspberry Pi Configuration › Localisation</span>, then type <span class="chip">sudo systemctl restart croom</span>.</p></div>
 </div>

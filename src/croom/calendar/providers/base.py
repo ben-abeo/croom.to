@@ -37,9 +37,6 @@ class CalendarEvent:
     meeting_url: Optional[str] = None
     meeting_platform: MeetingPlatform = MeetingPlatform.UNKNOWN
     meeting_id: Optional[str] = None
-    # The passcode written in the invitation, for a Zoom link that carries none of its own. It is not in
-    # to_dict(): a passcode must stay off every page and API that lists events.
-    meeting_passcode: Optional[str] = None
 
     # Event metadata
     organizer: str = ""
@@ -56,6 +53,11 @@ class CalendarEvent:
     # Attendee info
     attendees: List[str] = field(default_factory=list)
     response_status: str = "accepted"  # accepted, declined, tentative, needsAction
+
+    # The passcode written in the invitation, for a Zoom link that carries none of its own (last, so that a positional
+    # construction of the fields above keeps its meaning). to_dict() leaves it out, but still carries the description
+    # and location it was read from: what keeps a passcode off the room page is the control service's EVENT_FIELDS.
+    meeting_passcode: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
@@ -171,12 +173,13 @@ PASSCODE_CHAR = r"[A-Za-z0-9@_*-]"
 # The label ("Passcode", "Password"), blanks and an optional colon, then the code: "Passcode: 123456", "Meeting
 # passcode 123456". The code runs to the first character Zoom does not allow (a lookahead, not \b, since it may end
 # in @ - or *) and holds a letter or a digit, so a masked "******" is not read as one. One character class for the
-# gap keeps matching linear on a long run of blanks.
+# gap keeps matching linear on a long run of blanks. ASCII, since ignoring case alone would also take the Kelvin sign
+# for a k and the long s for an s; the gap alone keeps Unicode's blanks (?u:...), &nbsp; among them.
 PASSCODE_PATTERN = re.compile(
-    r"\bpass(?:code|word)\b[\s:]*"
+    r"\bpass(?:code|word)\b(?u:[\s:])*"
     rf"(?=(?:{PASSCODE_CHAR}){{0,31}}[A-Za-z0-9])"
     rf"({PASSCODE_CHAR}{{4,32}})(?!{PASSCODE_CHAR})",
-    re.IGNORECASE,
+    re.IGNORECASE | re.ASCII,
 )
 
 
@@ -186,6 +189,11 @@ def extract_meeting_passcode(text: Optional[str]) -> Optional[str]:
 
     Reads the written forms ("Passcode: 123456", "Password: abc123", "Meeting passcode 123456", "Passcode 123456",
     in any case). A link's own pwd= is not a written passcode and is never read here.
+
+    Known limits: a label followed by an ordinary word reads the word ("Passcode required" gives "required"); an
+    @ - _ * right after the code is taken as part of it ("Passcode: 940104*" gives "940104*"); HTML tags between the
+    label and the code are not stripped, so "Passcode: <b>940104</b>" gives nothing. A code misread this way fails as
+    any wrong passcode does, and the room page asks for it.
 
     Args:
         text: Text that may hold an invitation (an event's description or location)

@@ -9,7 +9,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from croom.calendar.providers.base import CalendarEvent, MeetingPlatform, extract_meeting_passcode
+from croom.calendar.providers.base import (
+    CalendarEvent, MeetingPlatform, extract_meeting_passcode, invitation_passcode,
+)
 from croom.calendar.providers.microsoft import MicrosoftCalendarProvider
 
 INVITATION = "Join Zoom Meeting https://zoom.us/j/5590000559 Meeting ID: 559 000 0559 Passcode: 940104"
@@ -48,6 +50,8 @@ class TestExtractMeetingPasscode:
         ("PASSCODE: 123456", "123456"),
         ("meeting PassWord:123456", "123456"),
         ("Passcode:   123456", "123456"),
+        ("Passcode:\u00a0\u00a0123456", "123456"),                 # no-break spaces, as an HTML invitation's &nbsp; reads
+        ("Passcode:\u2009123456", "123456"),                       # any blank, a thin space too
         ("Passcode: AbCd1234", "AbCd1234"),
         ("Passcode: a-b_c*9@", "a-b_c*9@"),                    # the characters Zoom allows besides letters and digits
         ("Meeting passcode: a-b_c*9@ (case sensitive)", "a-b_c*9@"),
@@ -84,6 +88,23 @@ class TestExtractMeetingPasscode:
     def test_no_passcode_found(self, text):
         assert extract_meeting_passcode(text) is None
 
+    @pytest.mark.parametrize("text", [
+        "Passcode: \u212a\u212a\u212a\u212a",                       # Kelvin signs, which ignoring case would take for k
+        "Pa\u017f\u017fcode: 940104",                                 # long s, which ignoring case would take for s
+    ])
+    def test_only_ascii_letters_count_though_case_is_ignored(self, text):
+        assert extract_meeting_passcode(text) is None
+
+    @pytest.mark.parametrize("text, read", [
+        ("Passcode required for this meeting", "required"),          # a word after the label is read as the code
+        ("Passcode: 940104*", "940104*"),                            # a trailing @ - _ * is taken as part of the code
+        ("Passcode: <b>940104</b>", None),                           # tags between the label and the code are not stripped
+    ])
+    def test_the_known_limits(self, text, read):
+        """Pinned so a change to any of them is deliberate (the docstring lists them). A misread code ends as any wrong
+        passcode does: Zoom refuses it and the room page asks for the code."""
+        assert extract_meeting_passcode(text) == read
+
     def test_the_longest_passcode_is_32_characters(self):
         assert extract_meeting_passcode("Passcode: " + "a1" * 16) == "a1" * 16
 
@@ -95,6 +116,14 @@ class TestExtractMeetingPasscode:
         assert extract_meeting_passcode("Passcode: " + "*" * 30000) is None
         assert extract_meeting_passcode("Passcode: " + "a-" * 15000) is None
         assert time.perf_counter() - started < 1.0
+
+
+class TestInvitationPasscode:
+    LINK = "https://zoom.us/j/5590000559"
+
+    def test_a_label_at_the_end_of_one_text_never_borrows_the_start_of_the_next(self):
+        assert invitation_passcode(self.LINK, MeetingPlatform.ZOOM, "Room 2, passcode:", "940104 is in the agenda") is None
+        assert invitation_passcode(self.LINK, MeetingPlatform.ZOOM, "Room 2", "Passcode: 940104") == "940104"
 
 
 def graph_event(body="", location="", join_url=None, online_url=None):
@@ -118,6 +147,12 @@ class TestCalendarEvent:
         start = datetime(2026, 9, 25, 9, tzinfo=timezone.utc)
         event = CalendarEvent(id="e1", title="x", start_time=start, end_time=start + timedelta(minutes=30))
         assert event.meeting_passcode is None
+
+    def test_the_passcode_comes_last_so_positional_construction_keeps_its_meaning(self):
+        start = datetime(2026, 9, 25, 9, tzinfo=timezone.utc)
+        event = CalendarEvent("e1", "x", start, start + timedelta(minutes=30), None, MeetingPlatform.UNKNOWN, None,
+                              "ben@crystalpm.com")
+        assert event.organizer == "ben@crystalpm.com" and event.meeting_passcode is None
 
     def test_the_passcode_stays_out_of_the_serialised_event(self):
         start = datetime(2026, 9, 25, 9, tzinfo=timezone.utc)

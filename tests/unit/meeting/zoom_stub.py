@@ -1,14 +1,17 @@
 """
 A stand-in for Zoom's Meeting SDK (window.ZoomMtg) so the page and the provider
 can be driven in the venv's Chromium without reaching Zoom. Behaviour flags:
-window.ZoomMtg._behaviour = {waiting, errorFor, neverConnect, delayMs}.
+window.ZoomMtg._behaviour = {waiting, errorFor, errorCode, errorMessage, neverConnect, delayMs, pageSays}; join fails with
+{errorCode, errorMessage} for the meeting number errorFor, and pageSays is text join puts on the page, as Zoom's own
+dialogs do.
 """
 
 STUB_JS = r"""
 window.__zoomCalls = [];
 window.ZoomMtg = {
   _listeners: {},
-  _behaviour: { waiting: false, errorFor: "999", neverConnect: false, delayMs: 50, endAfterMs: 0,
+  _behaviour: { waiting: false, errorFor: "999", errorCode: 3712, errorMessage: "This meeting ID is not valid",
+                neverConnect: false, delayMs: 50, endAfterMs: 0, pageSays: "",
                 mutedOnEntry: false, videoOffOnEntry: false, silentConnect: false, statusField: "meetingStatus" },
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
   setZoomJSLib(path, av) { window.__zoomCalls.push(["setZoomJSLib", path, av]); },
@@ -25,8 +28,13 @@ window.ZoomMtg = {
     const copy = Object.assign({}, opts); delete copy.success; delete copy.error;
     window.__zoomCalls.push(["join", copy]);
     const b = this._behaviour;
+    if (b.pageSays) {
+      const said = document.createElement("div");
+      said.textContent = b.pageSays;
+      document.body.appendChild(said);
+    }
     if (String(opts.meetingNumber) === b.errorFor) {
-      setTimeout(() => opts.error && opts.error({ errorCode: 3712, errorMessage: "This meeting ID is not valid" }), 10);
+      setTimeout(() => opts.error && opts.error({ errorCode: b.errorCode, errorMessage: b.errorMessage }), 10);
       return;
     }
     if (b.neverConnect) return;

@@ -35,6 +35,8 @@ body {
 }
 .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
 .logo { width: clamp(120px, 10vw, 200px); height: auto; display: block; }
+.when { display: flex; flex-direction: column; align-items: flex-end; }
+.date { margin: 6px 0 0; font-size: clamp(1rem, 1.6vw, 1.6rem); white-space: nowrap; opacity: 0.85; }
 .clock {
   margin: 0;
   font-size: clamp(2.5rem, 6vw, 6rem);
@@ -75,7 +77,7 @@ body[data-state="occupied"] .kicker { color: var(--busy); }
 body[data-state="offline"] .kicker, body[data-state="loading"] .kicker { color: var(--periwinkle-300); }
 
 /* Quiet: the name and the status, nothing that moves. */
-body[data-style="quiet"] .clock, body[data-style="quiet"] .detail, body[data-style="quiet"] .hint { display: none; }
+body[data-style="quiet"] .clock, body[data-style="quiet"] .date, body[data-style="quiet"] .detail, body[data-style="quiet"] .hint { display: none; }
 
 /* Brand: the logo alone. */
 body[data-style="brand"] .top, body[data-style="brand"] .status, body[data-style="brand"] .hint { display: none; }

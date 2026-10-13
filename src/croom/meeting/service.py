@@ -111,7 +111,8 @@ class MeetingService(Service):
         meeting_url: str,
         display_name: Optional[str] = None,
         camera_on: Optional[bool] = None,
-        mic_on: Optional[bool] = None
+        mic_on: Optional[bool] = None,
+        passcode: Optional[str] = None
     ) -> MeetingInfo:
         """
         Join a meeting.
@@ -124,6 +125,7 @@ class MeetingService(Service):
             display_name: Name to display (default: room name)
             camera_on: Start with camera (default: config setting)
             mic_on: Start with mic (default: config setting)
+            passcode: The meeting's passcode (Zoom uses it, over the link's own pwd)
 
         Returns:
             MeetingInfo with connection details
@@ -167,7 +169,8 @@ class MeetingService(Service):
             meeting_url,
             display_name=display_name,
             camera_on=camera_on,
-            mic_on=mic_on
+            mic_on=mic_on,
+            passcode=passcode
         )
 
         return meeting_info

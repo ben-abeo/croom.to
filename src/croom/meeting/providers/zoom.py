@@ -8,7 +8,7 @@ import asyncio
 import logging
 import re
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 from croom.meeting.providers.base import MeetingProvider, MeetingInfo, MeetingState
 
@@ -109,7 +109,8 @@ class ZoomProvider(MeetingProvider):
         meeting_url: str,
         display_name: str = "Conference Room",
         camera_on: bool = True,
-        mic_on: bool = True
+        mic_on: bool = True,
+        passcode: Optional[str] = None
     ) -> MeetingInfo:
         """Join a Zoom meeting via web client."""
         if self._display is not None:
@@ -121,10 +122,11 @@ class ZoomProvider(MeetingProvider):
         if not meeting_id:
             raise ValueError(f"Invalid Zoom URL: {meeting_url}")
 
-        # Parse password if present
+        # A passcode given with the join wins over the link's own pwd (a person who types a code after Zoom refused the
+        # link meant that code); without one, the link's pwd
         parsed = urlparse(meeting_url)
         query = parse_qs(parsed.query)
-        password = query.get("pwd", [None])[0]
+        password = passcode or query.get("pwd", [None])[0]
 
         self._current_meeting = MeetingInfo(
             platform=self.name,
@@ -141,7 +143,7 @@ class ZoomProvider(MeetingProvider):
             # Construct web client URL
             web_url = f"https://zoom.us/wc/{meeting_id}/join"
             if password:
-                web_url += f"?pwd={password}"
+                web_url += f"?pwd={quote(password, safe='')}"
 
             # Navigate to web client
             await self._page.goto(web_url, wait_until="networkidle")

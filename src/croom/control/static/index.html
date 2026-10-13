@@ -21,7 +21,10 @@
     <p id="next-warning" class="next-warning" hidden></p>
     <p id="meeting-state" class="meeting-state" hidden></p>
     <p id="meeting-elapsed" class="meeting-elapsed" hidden></p>
-    <p id="clock" class="clock"></p>
+    <div class="when">
+      <p id="clock" class="clock"></p>
+      <p id="date" class="date"></p>
+    </div>
     <button type="button" id="open-options" class="button quiet nav">Options</button>
   </div>
 </header>
@@ -42,6 +45,8 @@
                placeholder="Paste a meeting link or a Zoom meeting ID">
         <button type="button" id="keyboard-toggle" class="button quiet keyboard-toggle" aria-label="Show keyboard" aria-pressed="false">&#9000;</button>
         <button type="submit" class="button primary">Join</button>
+        <input id="passcode-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
+               placeholder="Passcode, if the meeting has one" aria-label="Meeting passcode" hidden>
       </form>
     </section>
     <section class="schedule">

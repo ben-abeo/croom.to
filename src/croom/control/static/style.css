@@ -51,6 +51,8 @@ body {
 body { display: flex; flex-direction: column; height: auto; min-height: 100vh; }
 .top { flex: 0 0 auto; padding: var(--gutter) var(--gutter) 0; display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
 .top-right { display: flex; align-items: center; gap: 20px; }
+.when { display: flex; flex-direction: column; align-items: flex-end; }
+.date { margin: 2px 0 0; color: var(--periwinkle-300); font-size: 0.95rem; white-space: nowrap; }
 .screen { position: relative; flex: 1 1 auto; padding: clamp(16px, 2.5vh, 24px) var(--gutter) var(--gutter); }   /* the containing block of the visually hidden labels, so they scroll with the screen */
 .view { display: none; gap: clamp(16px, 2.5vh, 24px); align-content: start; }
 body[data-view="idle"] .view[data-view="idle"],
@@ -213,6 +215,9 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
   font: inherit;
 }
 .link-form input::placeholder { color: rgba(189, 206, 255, 0.7); }
+/* The passcode field: a row of its own under the link box, its keyboard button and Join (a basis of the whole form cannot
+   share a line with them). Shown only for a Zoom meeting whose link carries no passcode; hidden, it takes no room. */
+.link-form #passcode-input { flex: 1 1 100%; }
 .keyboard-toggle { padding: 0 16px; font-size: 1.4rem; line-height: 1; }
 
 /* The page's own keyboard: fixed to the bottom while open, the page gets room above it. */

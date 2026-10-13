@@ -199,3 +199,47 @@ class TestReviewFixes:
         [event] = await fetch([item("e8", "Board call",
                                     description="Join here: https://zoom.us/j/12345678901?pwd=abc&amp;uname=Room.")])
         assert event.meeting_url == "https://zoom.us/j/12345678901?pwd=abc&uname=Room"
+
+
+class TestPasscode:
+    """A Zoom link that carries no pwd gets the passcode written in the booking, for the room to join with."""
+
+    INVITATION = "Join Zoom Meeting https://zoom.us/j/5590000559 Meeting ID: 559 000 0559 Passcode: 940104"
+    ZOOM_NO_PWD = {"conferenceSolution": {"name": "Zoom Meeting"},
+                   "entryPoints": [{"entryPointType": "video", "uri": "https://us02web.zoom.us/j/5590000559"}]}
+
+    async def test_typed_zoom_link_without_pwd_takes_the_passcode_from_the_description(self):
+        [event] = await fetch([item("p1", "Vendor call", description=self.INVITATION)])
+        assert event.meeting_url == "https://zoom.us/j/5590000559"
+        assert event.meeting_platform == MeetingPlatform.ZOOM
+        assert event.meeting_passcode == "940104"
+
+    async def test_the_location_counts_too(self):
+        [event] = await fetch([item("p2", "Vendor call", description="Join Zoom: https://zoom.us/j/5590000559",
+                                    location="Passcode: 940104")])
+        assert event.meeting_passcode == "940104"
+
+    async def test_zoom_addon_link_without_pwd_takes_it_too(self):
+        [event] = await fetch([item("p3", "Vendor call", conference=self.ZOOM_NO_PWD, description="Passcode: 940104")])
+        assert event.meeting_url == "https://us02web.zoom.us/j/5590000559"
+        assert event.meeting_passcode == "940104"
+
+    async def test_a_link_with_its_own_pwd_needs_no_passcode(self):
+        [addon, typed] = await fetch([
+            item("p4", "Vendor call", conference=ZOOM_ADDON, description="Passcode: 940104"),
+            item("p5", "Board call", description="Join https://zoom.us/j/12345678901?pwd=xyz Passcode: 940104"),
+        ])
+        assert addon.meeting_passcode is None and typed.meeting_passcode is None
+
+    async def test_other_platforms_never_get_one(self):
+        [meet, teams] = await fetch([
+            item("p6", "Design review", conference=MEET, description="Passcode: 940104"),
+            item("p7", "Board call", description="https://teams.microsoft.com/l/meetup-join/abc Passcode: 940104"),
+        ])
+        assert meet.meeting_platform == MeetingPlatform.GOOGLE_MEET and meet.meeting_passcode is None
+        assert teams.meeting_platform == MeetingPlatform.MICROSOFT_TEAMS and teams.meeting_passcode is None
+
+    async def test_bookings_without_a_passcode_written_have_none(self):
+        events = await fetch([item("p8", "Vendor call", description="Join https://zoom.us/j/5590000559"),
+                              item("p9", "Lunch")])
+        assert [e.meeting_passcode for e in events] == [None, None]

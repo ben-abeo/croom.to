@@ -94,7 +94,7 @@ Preconditions: the check from section 3 ends with "Ready"; the TV shows the room
 
 | # | Action | Expected outcome |
 |---|---|---|
-| 1 | On the room page, type or paste the meeting's invitation link, passcode included (for example `https://zoom.us/j/<meeting ID>?pwd=<passcode>`), into **Join with a link** and press **Join**. A booking on the room's calendar with a Zoom link offers **Join now** instead. | The room page shows "Joining Zoom meeting". Within about 15 seconds the TV shows Zoom's meeting view, full screen, and the room page shows "In a meeting" with "Zoom" and the time since joining. The host's participant list shows **Room 1**. The door sign turns red: "In use". |
+| 1 | On the room page, type or paste the meeting's invitation link, passcode included (for example `https://zoom.us/j/<meeting ID>?pwd=<passcode>`), into **Join with a link** and press **Join**; or type the meeting ID and, in the **Passcode** field that appears under the box, its passcode. A booking on the room's calendar with a Zoom link offers **Join now** instead. | The room page shows "Joining Zoom meeting". Within about 15 seconds the TV shows Zoom's meeting view, full screen, and the room page shows "In a meeting" with "Zoom" and the time since joining. The host's participant list shows **Room 1**. The door sign turns red: "In use". |
 | 2 | (Meeting with a waiting room) The host admits Room 1. | Until the host admits the room, the room page says "Waiting for the host to let the room in." Then it shows "In a meeting". |
 | 3 | Press **Mute**. | The button changes to **Unmute**. The participant list shows Room 1's microphone muted. |
 | 4 | Press **Unmute**. | Room 1's microphone is unmuted. |
@@ -102,7 +102,7 @@ Preconditions: the check from section 3 ends with "Ready"; the TV shows the room
 | 6 | Press **Turn camera on**. | Room 1's video returns. |
 | 7 | Press **Leave**, then **Tap again to leave** within five seconds. | Room 1 leaves the participant list. The TV returns to its idle screen. The room page and the door sign return to the room's status, for example "Room free" and "Available". |
 | 8 | (Alternative to 7) The host ends the meeting for all. | The room returns to idle by itself, as in step 7. |
-| 9 | Error path: paste a link with a wrong passcode and press **Join**. | The room page shows "Couldn't join Zoom meeting" with Zoom's reason and a **Dismiss** button. Nothing joins. |
+| 9 | Error path: paste a link with a wrong passcode and press **Join**. | The room page shows "Couldn't join Zoom meeting" with Zoom's reason and a **Dismiss** button. When the reason is the passcode, it begins "Zoom needs the meeting passcode" and the card also keeps the link, shows the **Passcode** field and offers **Join again**. Nothing joins. |
 
 ## 6. Multi-user flows
 
@@ -116,7 +116,7 @@ Not applicable. The integration has one role, the room device. It has no per-use
 
 ## 8. The reviewer's meeting: 5590000559, passcode 940104
 
-Zoom's reviewer asked for a video of the hardware device joining meeting 5590000559 with the app's Production credentials. The steps below are what Crystal PM's operator does. The device's meeting view hides Zoom's meeting header, so the video shows the meeting ID in two other places: the link typed on the room page, and the meeting information in a second participant's Zoom window.
+Zoom's reviewer asked for a video of the hardware device joining meeting 5590000559 with the app's Production credentials. The steps below are what Crystal PM's operator does. The device's meeting view hides Zoom's meeting header, so the video shows the meeting ID in two other places: the meeting ID typed on the room page, and the meeting information in a second participant's Zoom window.
 
 **Before recording**
 
@@ -128,7 +128,7 @@ Zoom's reviewer asked for a video of the hardware device joining meeting 5590000
 
 1. Show the room: the TV with the room's idle screen, and the touch screen with the room page. Show the output of the check, run on the device (for example over SSH from the laptop): it shows the Production Client ID and no secret.
 2. On the laptop, join meeting **5590000559** with passcode **940104** in the Zoom client. Open the meeting information (the icon at the top left of the meeting window) so that **Meeting ID 559 000 0559** is visible, and open **Participants**.
-3. On the room page, tap **Join with a link** and type `https://zoom.us/j/5590000559?pwd=940104`. The link is needed because a bare meeting ID carries no passcode. Hold the typed link in view, then press **Join**.
+3. On the room page, tap **Join with a link** and type the meeting ID, `5590000559`. A **Passcode** field appears under the box once the ID is typed, because a bare meeting ID carries no passcode; tap it and type `940104`. Hold the typed meeting ID and passcode in view, then press **Join**.
 4. Expected: the room page shows "Joining Zoom meeting", then "In a meeting". The TV shows Zoom's meeting view within about 15 seconds. On the laptop, **Room 1** appears in the participant list of meeting 559 000 0559, and the room's video appears in the gallery.
 5. Press **Mute** and then **Unmute**, and **Turn camera off** and then **Turn camera on**, showing each change on the laptop.
 6. Press **Leave**, then **Tap again to leave**. Show Room 1 leaving the laptop's participant list, and the TV returning to the room's idle screen.
@@ -142,7 +142,7 @@ Video link: [TO CONFIRM]
 
 The people in the room never sign in, so there is no account to hand over. Reviewers can see and drive the integration in one of these ways; Crystal PM confirms which it offers.
 
-- **A. Recorded video** of the room device joining meeting 5590000559 (section 8). The meeting ID is visible in the link typed on the room page and in a second participant's meeting information, and the room is visible in that participant's list. Link: [TO CONFIRM]
+- **A. Recorded video** of the room device joining meeting 5590000559 (section 8). The meeting ID is visible as typed on the room page and in a second participant's meeting information, and the room is visible in that participant's list. Link: [TO CONFIRM]
 - **B. Live session** at a time the reviewer chooses. The reviewer hosts any Zoom meeting, on any account, and sends the invitation link (or reuses 5590000559). Crystal PM's operator joins Room 1 and runs section 5 at the reviewer's direction, including a waiting room and the negative tests of section 4. The reviewer watches the room in their own participant list. Proposed times and contact: [TO CONFIRM]
 - **C. Reviewer access to one room's page.** A password-protected link to Room 1's room page, opened for the review only. The reviewer opens it in a browser, pastes the invitation link of a meeting they host into **Join with a link**, presses **Join**, and then uses **Mute**, **Turn camera off** and **Leave**. They see Room 1 join in their own Zoom client, with the room's camera view. The room page is normally reachable only on Crystal PM's office network; this link is [TO CONFIRM: how it is published, e.g. an authenticated proxy] and is withdrawn after the review. URL: [TO CONFIRM], user name: [TO CONFIRM], password: [TO CONFIRM], available until: [TO CONFIRM]
 

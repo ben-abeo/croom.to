@@ -112,3 +112,54 @@ async def test_joining_claims_the_page_for_the_meeting():
             await provider.join_meeting("https://zoom.us/j/98765432100?pwd=abc")
         assert display.claimed == 1
         await browser.close()
+
+
+class RecordingPage:
+    """A page that remembers where it was sent, then refuses to go on: a join stops right after building its URL."""
+
+    def __init__(self):
+        self.urls = []
+
+    async def goto(self, url, **kwargs):
+        self.urls.append(url)
+        raise RuntimeError("stopped after the first page")
+
+
+async def web_client_url(link, **kwargs):
+    page = RecordingPage()
+    provider = ZoomProvider()
+    provider._page = page
+    with pytest.raises(RuntimeError, match="stopped after the first page"):
+        await provider.join_meeting(link, **kwargs)
+    return page.urls[0]
+
+
+async def test_a_passcode_given_wins_over_the_links_pwd_at_the_web_client():
+    url = await web_client_url("https://zoom.us/j/98765432100?pwd=abc", passcode="940104")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=940104"
+
+
+async def test_the_links_pwd_goes_to_the_web_client_when_no_passcode_is_given():
+    assert await web_client_url("https://zoom.us/j/98765432100?pwd=abc") == "https://zoom.us/wc/98765432100/join?pwd=abc"
+    url = await web_client_url("https://zoom.us/j/98765432100?pwd=abc", passcode="")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=abc"
+
+
+async def test_the_passcode_becomes_the_web_clients_pwd_when_the_link_has_none():
+    url = await web_client_url("https://zoom.us/j/98765432100", passcode="940104")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=940104"
+    url = await web_client_url("https://zoom.us/j/98765432100?pwd=", passcode="940104")   # a blank pwd is none
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=940104"
+
+
+async def test_the_web_client_is_sent_no_pwd_without_a_passcode():
+    assert await web_client_url("https://zoom.us/j/98765432100") == "https://zoom.us/wc/98765432100/join"
+    assert await web_client_url("https://zoom.us/j/98765432100", passcode="") == "https://zoom.us/wc/98765432100/join"
+
+
+async def test_the_passcode_is_encoded_in_the_web_clients_address():
+    url = await web_client_url("https://zoom.us/j/98765432100", passcode="a b&c=d")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=a%20b%26c%3Dd"
+    # the characters Zoom allows besides letters and digits: @ and * are encoded, - and _ are not
+    url = await web_client_url("https://zoom.us/j/98765432100", passcode="a-b_c*9@")
+    assert url == "https://zoom.us/wc/98765432100/join?pwd=a-b_c%2A9%40"

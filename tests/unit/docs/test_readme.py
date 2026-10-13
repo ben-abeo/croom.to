@@ -86,3 +86,19 @@ def test_the_rooms_readme_counts_what_to_replace_as_the_room_templates_do():
     for n in (1, 2, 3):
         header = (REPO / "deploy" / "rooms" / f"room-{n}.yaml").read_text(encoding="utf-8").splitlines()[1]
         assert "three REPLACE values" in header and "location is optional" in header, header
+
+
+def test_readme_says_where_a_zoom_meetings_passcode_comes_from():
+    """The limitation no longer says the passcode must be in the link: it is read from the link or the invitation, or typed."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "A Zoom meeting's passcode is read from the link, from the booking's invitation text, or typed in the **Passcode** field",
+        "that appears on the room page for a bare meeting ID or a link without one",
+        # the retry, in one clause: a join Zoom refused over the passcode keeps its link and offers another go
+        "keeps its link on the \"Couldn't join\" card, with the field and a **Join again** button",
+        "letters, digits and `@ - _ *`, up to 32 characters",
+    ):
+        assert needle in text, needle
+    assert "Zoom links need their passcode in the link" not in text
+    # the Meet half of the bullet stays
+    assert "A failed Meet join logs what Meet showed" in text

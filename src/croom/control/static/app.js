@@ -12,11 +12,17 @@
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
   const el = (id) => document.getElementById(id);
-  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null };
+  // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
+  // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
+  // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
+  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "" };
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
+  let passcodeCard = false;      // the last render showed the card for a join Zoom refused over the passcode: its landing happens once too
+  let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
+  const kiosk = new URLSearchParams(window.location.search).get("keyboard") === "1";   // the table Pi's kiosk browser has no keyboard of its own (keyboard.js)
 
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
@@ -59,7 +65,12 @@
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
-  const fmtTime = (d) => d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  // Times read the American way whatever the browser's locale: 12-hour with AM or PM, and the date as "October 13, 2026"
+  // (the Pi's Chromium would otherwise follow the system locale and show 24-hour times).
+  // The space before AM or PM is a no-break one: a time never splits across lines (the sign's and the TV's headlines
+  // broke "10:30 AM" as "10:30" / "AM"; Chromium writes a plain or a narrow space there depending on its version).
+  const fmtTime = (d) => d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).replace(/\s+(?=[AP]M$)/, "\u00A0");
+  const fmtDate = (d) => d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
   const fmtRange = (a, b) => fmtTime(a) + " to " + fmtTime(b);
   const minutesUntil = (d) => Math.max(0, Math.round((d - Date.now()) / 60000));
   const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
@@ -124,12 +135,108 @@
     await refreshStatus();
   }
 
+  // The passcode field is for a Zoom meeting whose link carries none of its own. The page only decides whether to show the
+  // field: the agent reads the link itself, and a passcode it refuses comes back in its own words, in the card's message.
+  const linkInput = el("link-input");
+  const passcodeInput = el("passcode-input");
+  const ZOOM_DOMAINS = ["zoom.us", "zoomgov.com"];
+  const PASSCODE_ASKED = "Zoom needs the meeting passcode";   // how the agent's reason starts when Zoom refuses a join over the passcode
+
+  // A Zoom meeting ID: 9 to 11 digits, written in groups as an invitation prints it ("559 000 0559") or not. The digits, or "".
+  function meetingId(text) {
+    const digits = text.replace(/\s+/g, "");
+    return /^\d{9,11}$/.test(digits) ? digits : "";
+  }
+
+  // A bare meeting ID, or a Zoom link whose query has no pwd=. A link typed without its scheme is read on the page's own:
+  // only its host and its query count.
+  function looksLikeZoomWithoutPasscode(text) {
+    const value = text.trim();
+    if (meetingId(value)) return true;
+    let url;
+    try { url = value.includes("://") ? new URL(value) : new URL("//" + value, location.href); } catch (e) { return false; }
+    const host = url.hostname.toLowerCase();
+    return ZOOM_DOMAINS.some((domain) => host === domain || host.endsWith("." + domain)) && !url.searchParams.get("pwd");
+  }
+
+  function showPasscodeField(show) {
+    passcodeInput.hidden = !show;
+    if (!show) passcodeInput.value = "";   // a code typed for one meeting is not for the next
+  }
+  const syncPasscodeField = () => showPasscodeField(looksLikeZoomWithoutPasscode(linkInput.value));
+  const forgetJoin = () => { model.lastLink = ""; model.lastEvent = ""; };
+  linkInput.addEventListener("input", () => {
+    forgetJoin();   // the box is the person's own now: the card no longer gives the failed link back, nor joins its booking again
+    restoredLink = "";
+    syncPasscodeField();
+  });
+
+  // The agent took the join, so both boxes are done with; what it was stays in the model for a refusal that is still to come.
+  function joinAccepted(url, eventId) {
+    model.lastLink = url;
+    model.lastEvent = eventId || "";
+    linkInput.value = "";
+    showPasscodeField(false);
+  }
+
+  // The card for a join Zoom refused over the passcode. While it is up the link that failed is in the box (the accepted join
+  // emptied it, and a booking's join never filled it: the status names that link). The first time it shows, the field is there
+  // whatever that link looks like (it may carry a pwd= that has gone stale), unless the person has begun something else in the
+  // box since: a Meet link has no passcode to ask for.
+  function askForPasscode(m, landing) {
+    if (landing && !model.lastLink && !linkInput.value.trim()) model.lastLink = m.url || "";
+    if (model.lastLink && !linkInput.value.trim()) {
+      linkInput.value = restoredLink = model.lastLink;
+      syncPasscodeField();
+    }
+    const value = linkInput.value;
+    if (landing && (!value.trim() || value === restoredLink || looksLikeZoomWithoutPasscode(value))) showPasscodeField(true);
+  }
+
+  // The card has gone (Dismiss, a join that began, or another page): the link it put back goes with it, unless the person has
+  // made the box their own, and the field follows the box again.
+  function passcodeCardGone() {
+    if (restoredLink && linkInput.value === restoredLink) linkInput.value = "";
+    restoredLink = "";
+    syncPasscodeField();
+  }
+
+  // The kiosk's keys come up on the passcode field. Called once the card is drawn, at the end of render(): the keyboard
+  // scrolls the field into view, and the card, taller than the one it replaced, has pushed the field down by then.
+  function focusPasscode() {
+    if (document.activeElement === passcodeInput) passcodeInput.blur();   // the keys hear of a focus, not of one the field already has
+    passcodeInput.focus();
+  }
+
+  // Form.requestSubmit is missing from old iOS Safari: there the page sends the submit event itself (its handler cancels it,
+  // so nothing navigates). Used by the card's Join again here and by the keyboard's Join key.
+  function submitForm(form) {
+    if (typeof form.requestSubmit === "function") form.requestSubmit();
+    else form.dispatchEvent(new Event("submit", { bubbles: true, cancelable: true }));
+  }
+
+  // Join again on the card. Zoom asked for a passcode: with the field there and empty there is nothing new to send, and a
+  // join without one is refused again. The field takes the focus instead (the kiosk's keys come up with it). A field that is
+  // not shown (the link in the box carries its own passcode) has nothing to wait for.
+  function joinAgain() {
+    if (!passcodeInput.hidden && !passcodeInput.value.trim()) { focusPasscode(); return; }
+    submitForm(el("link-form"));
+  }
+
   const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
-  const joinLink = (url) => act(() => post("/api/meeting/join", { url: url }));
-  const joinEvent = (id) => act(() => post("/api/meeting/join", { event_id: id }));
-  const leave = () => act(() => post("/api/meeting/leave"));
+  const withPasscode = (body, passcode) => (passcode ? Object.assign(body, { passcode: passcode }) : body);
+  const joinLink = (url, passcode) => act(() => post("/api/meeting/join", withPasscode({ url: url }, passcode)).then(() => joinAccepted(url)));
+  const joinEvent = (id) => { forgetJoin(); return act(() => post("/api/meeting/join", { event_id: id }).then(() => { model.lastEvent = id; })); };
+  // Join again on a booking's card: the booking once more, with the typed code (the agent takes it over the booking's own), so
+  // the call keeps the booking's title. The link the card put back stays in the model for the old card a poll may still show.
+  const joinEventAgain = (id, passcode) => act(() => post("/api/meeting/join", withPasscode({ event_id: id }, passcode)).then(() => joinAccepted(model.lastLink, id)));
+  const leave = () => { forgetJoin(); return act(() => post("/api/meeting/leave")); };   // Cancel, Dismiss and Leave give the join up
   const toggle = (kind) => act(() => post("/api/meeting/" + kind));
   const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
+
+  // A press on a button leaves the focus where it is. On the kiosk the keys go when the field loses it: the page shrinks, the
+  // button moves from under the finger before it lifts, and the tap is lost.
+  const keepFocus = (b) => b.addEventListener("pointerdown", (e) => e.preventDefault());
 
   function button(label, className, onClick, disabled) {
     const b = document.createElement("button");
@@ -137,6 +244,7 @@
     b.className = "button " + className;
     b.textContent = label;
     b.disabled = Boolean(disabled) || model.busy;
+    keepFocus(b);
     b.addEventListener("click", onClick);
     return b;
   }
@@ -189,6 +297,7 @@
     model.error = "";
     model.confirmLeave = false;
     clearTimeout(confirmTimer);
+    if (mode() === "meeting") { linkInput.value = ""; showPasscodeField(false); }   // the idle screen's boxes were for the call that has begun
     applyView(MAIN_SCREEN[mode()], true);
   }
 
@@ -212,6 +321,14 @@
   }
 
   const rowFields = (ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform];   // what eventItem reads: the key of either list covers it
+
+  // The booking the passcode card is for: the one this page joined, else (a join from another page) the one the status names
+  // by its title. Its row's Join would send the booking alone, without the code typed on the card; Join again is the retry.
+  function cardIsFor(ev) {
+    if (!passcodeCard) return false;
+    const title = model.status.meeting.title;
+    return model.lastEvent ? ev.id === model.lastEvent : Boolean(title) && ev.title === title;
+  }
 
   // The top bar in meeting mode: what the call is doing, for how long, and a warning when the next booking is close.
   function renderMeetingBar(m) {
@@ -287,11 +404,22 @@
     const s = model.status;
     const m = s.meeting;
     const cal = s.calendar;
+    const asking = m.state === "error" && (m.error || "").startsWith(PASSCODE_ASKED);
     if (m.state !== lastMeetingState) {
       // A join that failed while someone was on Options: the "Couldn't join" card is on the idle screen.
       if (m.state === "error" && view() !== "idle") applyView("idle", true);
+      // The join resolved: it took, is being left, failed some other way, or was given up on another page (joining, or the
+      // card for a refusal, then idle), and its link is spent. Not while it is going on, nor on "idle" after anything else (an
+      // accepted join that has not begun yet), nor when Zoom asks for the passcode (the card gives the link back). Only a change
+      // counts: the poll just after a retry may still show the old card, and that is no news.
+      const cancelled = m.state === "idle" && (lastMeetingState === "joining" || lastMeetingState === "error");
+      if (m.state === "in_lobby" || m.state === "connected" || m.state === "leaving" || (m.state === "error" && !asking) || cancelled) forgetJoin();
       lastMeetingState = m.state;
     }
+    const landing = asking && !passcodeCard;
+    if (asking) askForPasscode(m, landing);
+    else if (passcodeCard) passcodeCardGone();
+    passcodeCard = asking;
     renderMeetingBar(m);
     renderUpcoming();
     el("open-options").hidden = mode() !== "idle";
@@ -324,6 +452,7 @@
       el("headline").textContent = "Couldn't join " + label;
       el("detail").textContent = m.error || "The room's screen could not join. Try again, or join from a different link.";
       specs = [{ label: "Dismiss", className: "quiet", onClick: leave }];
+      if (asking) specs.push({ label: "Join again", className: "primary", onClick: joinAgain });
     } else {
       specs = renderIdle(cal);
     }
@@ -338,6 +467,7 @@
     renderEvents(cal);
     renderPicker();
     for (const fn of renderHooks) fn(s);
+    if (landing && kiosk && view() === "idle") focusPasscode();
   }
 
   function renderPicker() {
@@ -397,7 +527,7 @@
     const note = el("calendar-note");
     const meetingState = model.status ? model.status.meeting.state : "idle";
     const key = JSON.stringify([cal.connected, cal.current && cal.current.id, meetingState, model.busy,
-      model.events.map((ev) => [...rowFields(ev), joinWindow(ev).open, joinWindow(ev).past])]);
+      model.events.map((ev) => [...rowFields(ev), joinWindow(ev).open, joinWindow(ev).past, cardIsFor(ev)])]);
     if (key === lastEventsKey) return;
     lastEventsKey = key;
     list.replaceChildren();
@@ -413,7 +543,7 @@
     for (const ev of model.events) {
       const window = joinWindow(ev);
       const canJoin = ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error");
-      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id)) : null);
+      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev)) : null);
       li.classList.toggle("past", window.past);
       li.classList.toggle("now", Boolean(cal.current && cal.current.id === ev.id));
       list.append(li);
@@ -422,6 +552,7 @@
 
   function tick() {
     el("clock").textContent = fmtTime(new Date());
+    el("date").textContent = fmtDate(new Date());
     if (model.status && model.status.meeting.state === "connected") {
       el("detail").textContent = meetingDetail(model.status.meeting);
       if (model.status.meeting.joined_at) el("meeting-elapsed").textContent = elapsedSince(model.status.meeting.joined_at);
@@ -430,11 +561,15 @@
 
   el("link-form").addEventListener("submit", (e) => {
     e.preventDefault();
-    const input = el("link-input");
-    const value = input.value.trim();
-    if (!value) return;
-    joinLink(value).then(() => { if (!model.error) input.value = ""; });
+    const passcode = passcodeInput.hidden ? "" : passcodeInput.value.trim();
+    if (passcodeCard && model.lastEvent) { joinEventAgain(model.lastEvent, passcode); return; }   // a booking's card: the booking again
+    const typed = linkInput.value.trim();
+    if (!typed) return;
+    const url = meetingId(typed) || typed;   // the agent takes an ID as digits only
+    joinLink(url, passcode);   // the boxes clear in joinAccepted, once the agent has taken the join
   });
+
+  keepFocus(el("link-form").querySelector("button[type=submit]"));   // Join, beside the link box
 
   el("open-options").addEventListener("click", () => setView("options"));
   el("back-from-options").addEventListener("click", () => setView("idle"));
@@ -448,8 +583,8 @@
 
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,
-    refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING,
-    view: view, setView: setView, mode: mode, cameraMode: () => cameraMode,
+    refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING, submitForm: submitForm,
+    view: view, setView: setView, mode: mode, cameraMode: () => cameraMode, kiosk: kiosk,
     onViewChange: (fn) => viewHooks.push(fn),
     // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
     // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.

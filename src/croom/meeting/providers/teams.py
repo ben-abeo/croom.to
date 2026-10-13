@@ -140,9 +140,10 @@ class TeamsProvider(MeetingProvider):
         meeting_url: str,
         display_name: str = "Conference Room",
         camera_on: bool = True,
-        mic_on: bool = True
+        mic_on: bool = True,
+        passcode: Optional[str] = None
     ) -> MeetingInfo:
-        """Join a Teams meeting."""
+        """Join a Teams meeting. A passcode is accepted and ignored: only Zoom uses one."""
         if not self._page:
             raise RuntimeError("Provider not initialized")
 

@@ -16,6 +16,7 @@ from croom.calendar.providers.base import (
     MeetingPlatform,
     detect_meeting_platform,
     extract_meeting_url,
+    invitation_passcode,
 )
 
 logger = logging.getLogger(__name__)
@@ -360,6 +361,11 @@ class MicrosoftCalendarProvider(CalendarProvider):
                 end_time=end_time,
                 meeting_url=meeting_url,
                 meeting_platform=meeting_platform,
+                # bodyPreview is Graph's short preview of the body: a passcode deep in a long invitation is not seen
+                meeting_passcode=invitation_passcode(
+                    meeting_url, meeting_platform,
+                    item.get('location', {}).get('displayName', ''), item.get('bodyPreview', ''),
+                ),
                 organizer=organizer,
                 description=item.get('bodyPreview', ''),
                 location=item.get('location', {}).get('displayName', ''),

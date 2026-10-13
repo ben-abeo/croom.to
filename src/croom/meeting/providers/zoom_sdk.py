@@ -8,6 +8,7 @@ hosted by other Zoom accounts can be joined too.
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
@@ -25,12 +26,18 @@ from croom.meeting.zoom_auth import (
 
 logger = logging.getLogger(__name__)
 
+# What Zoom's error carries when the passcode is the problem: its own words, or its wrong-passcode code (3004).
+PASSCODE_REFUSAL = re.compile(r"pass(?:word|code)|\bcode 3004\b", re.IGNORECASE)
+# How the join's error starts when Zoom refused it over the passcode; the room page looks for these words (app.js).
+PASSCODE_ASKED = "Zoom needs the meeting passcode"
+
 
 class ZoomSdkProvider(MeetingProvider):
     """Joins Zoom meetings with Zoom's Meeting SDK in the room's browser."""
 
     SDK_VERSION = SDK_VERSION
     CONNECT_TIMEOUT_S = 90
+    PASSCODE_CHECK_S = 5  # at most this long between two readings of the page's words for Zoom's own passcode complaint
     CONNECT_GRACE_MS = 5000  # after join's success callback, how long the page waits for a status event
     LOBBY_TIMEOUT_S = 300
     LEAVE_TIMEOUT_S = 5
@@ -160,14 +167,18 @@ class ZoomSdkProvider(MeetingProvider):
     # ------------------------------------------------------------------
 
     async def join_meeting(self, meeting_url: str, display_name: str = "Conference Room",
-                           camera_on: bool = True, mic_on: bool = True) -> MeetingInfo:
+                           camera_on: bool = True, mic_on: bool = True,
+                           passcode: Optional[str] = None) -> MeetingInfo:
         if self._display is None:
             raise RuntimeError("Provider not initialized")
         await self._take_page(for_meeting=True)
         meeting_id = self.extract_meeting_id(meeting_url)
         if not meeting_id:
             raise ValueError(f"Invalid Zoom URL: {meeting_url}")
-        passcode = parse_qs(urlparse(meeting_url).query).get("pwd", [""])[0]
+        # A passcode given with the join wins over the link's own pwd: a person who types a code after Zoom refused the
+        # link meant that code. Without one, the link's pwd (a blank pwd is none), else no passcode.
+        link_passcode = parse_qs(urlparse(meeting_url).query).get("pwd", [""])[0]
+        join_passcode = passcode or link_passcode or ""
         await self._cancel_tasks()
         self._join_task = asyncio.current_task()
         self._current_meeting = MeetingInfo(platform=self.name, meeting_id=meeting_id, meeting_url=meeting_url,
@@ -180,7 +191,7 @@ class ZoomSdkProvider(MeetingProvider):
                 zak = await self._api.user_zak(self._credentials.room_user)
             signature = meeting_sdk_signature(self._credentials.sdk_client_id, self._credentials.sdk_client_secret, meeting_id)
             params: Dict[str, Any] = {
-                "meetingNumber": meeting_id, "passWord": passcode, "userName": display_name,
+                "meetingNumber": meeting_id, "passWord": join_passcode, "userName": display_name,
                 "signature": signature, "zak": zak, "micOn": mic_on, "cameraOn": camera_on,
                 "sdkVersion": self.SDK_VERSION, "connectGraceMs": self.CONNECT_GRACE_MS,
             }
@@ -220,10 +231,23 @@ class ZoomSdkProvider(MeetingProvider):
                 if await self._camera_is_on() is not None:
                     logger.warning("Zoom reported no status, but its meeting controls are on screen; treating the join as connected")
                     return
-                raise RuntimeError("Zoom did not connect; the page says: " + await self._page_words())
+                # Zoom may refuse a passcode with a dialog of its own ("Join parameters: password are invalid!") and no
+                # error event: the page's words are read the way an error's are.
+                words = await self._page_words()
+                if PASSCODE_REFUSAL.search(words):
+                    raise RuntimeError(f"{PASSCODE_ASKED} ({words})")
+                raise RuntimeError("Zoom did not connect; the page says: " + words)
             try:
-                state, detail = await asyncio.wait_for(self._events.get(), timeout=remaining)
+                state, detail = await asyncio.wait_for(self._events.get(), timeout=min(remaining, self.PASSCODE_CHECK_S))
             except asyncio.TimeoutError:
+                # Zoom may put a passcode complaint of its own on the page and never send an error event, so the page's
+                # words are read every few seconds, not only when the wait runs out. Not in the waiting room (Zoom took
+                # the passcode to put the room there, and the meeting's title may say "password"), nor at the deadline,
+                # which reads them below.
+                if remaining > self.PASSCODE_CHECK_S and self._state != MeetingState.IN_LOBBY:
+                    words = await self._page_words()
+                    if PASSCODE_REFUSAL.search(words):
+                        raise RuntimeError(f"{PASSCODE_ASKED} ({words})")
                 continue
             if state == "connected":
                 return
@@ -233,9 +257,16 @@ class ZoomSdkProvider(MeetingProvider):
                     logger.info("Waiting in the Zoom waiting room")
                     deadline = time.monotonic() + self.LOBBY_TIMEOUT_S
             elif state == "error":
-                raise RuntimeError(detail or "Zoom reported an error")
+                raise self._join_error(detail)
             elif state == "left":
                 raise RuntimeError("Zoom ended the join before connecting")
+
+    @staticmethod
+    def _join_error(detail: str) -> RuntimeError:
+        """Zoom's reason for refusing the join; one over the passcode is named as such, whatever Zoom's wording."""
+        if detail and PASSCODE_REFUSAL.search(detail):
+            return RuntimeError(f"{PASSCODE_ASKED} ({detail})")
+        return RuntimeError(detail or "Zoom reported an error")
 
     async def _watch_meeting(self) -> None:
         """After connecting: the host ending the meeting, or the SDK reporting an error, returns the room to idle."""

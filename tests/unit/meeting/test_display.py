@@ -5,6 +5,7 @@ provider, replaced if it dies (spec 2026-10-07 TV, section 4.3).
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,8 @@ from croom.core.config import Config  # noqa: E402
 from croom.meeting.display import TvDisplay  # noqa: E402
 
 TV_HTML = "<title>Crystal Meet TV</title><h1>Screensaver</h1>"
+HEADED = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))   # window chrome is a headed thing
+NO_CHROME = "window.outerHeight === window.innerHeight && window.outerWidth === window.innerWidth"
 
 
 class IdleSite:
@@ -60,15 +63,20 @@ async def test_start_parks_the_page_on_the_screensaver():
 
 
 async def test_a_closed_page_is_replaced_and_parked_on_idle():
+    """Chromium keeps kiosk mode for its startup window only, so a replacement page would come up in a plain
+    window: the whole browser starts again, on a fresh throwaway folder."""
     site = await IdleSite().start()
     display = TvDisplay(site.url, headless=True)
     try:
         await display.start()
         first = await display.page()
+        context, folder = display.context, display.profile_folder
         await first.close()
         second = await display.page()
         assert second is not first and not second.is_closed()
         await second.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        assert display.context is not context
+        assert display.profile_folder != folder and not folder.exists() and display.profile_folder.is_dir()
     finally:
         await display.stop()
         await site.stop()
@@ -121,7 +129,7 @@ async def test_a_dead_guest_browser_is_started_again():
     try:
         await display.start()
         first = await display.page()
-        await display._browser.close()                            # Chromium died underneath us
+        await display.context.close()                             # Chromium died underneath us
         page = await display.page()
         assert page is not first and not page.is_closed()
         await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
@@ -184,6 +192,45 @@ async def test_profile_launch_makes_a_private_folder(tmp_path):
         await display.stop()
         await site.stop()
     assert any(profile.iterdir())
+
+
+async def test_a_guest_browser_runs_on_a_throwaway_profile_folder_that_leaves_with_it():
+    """Chromium keeps kiosk mode for its startup window only, and only a persistent context opens one: a guest gets
+    a private folder of its own for as long as the browser runs, and nothing of it survives a stop."""
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        folder = display.profile_folder
+        assert display.profile_dir is None and folder is not None
+        assert folder.name.startswith("croom-tv-") and oct(folder.stat().st_mode & 0o777) == "0o700"
+        page = await display.page()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        assert (folder / "Default").is_dir()                     # Chromium runs on it: the page is its startup window's
+    finally:
+        await display.stop()
+        await site.stop()
+    assert not folder.exists()
+
+
+@pytest.mark.skipif(not HEADED, reason="needs a display: window chrome is a headed thing")
+async def test_a_guest_browser_in_kiosk_mode_has_no_window_chrome_even_after_its_page_dies():
+    """What the TV Pi showed: the guest browser's page came up with a tab strip and an address bar, --kiosk or not,
+    and so would a replacement page after the first one died. Measured as the window's outer size against its inner."""
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=False)
+    try:
+        await display.start()
+        page = await display.page()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        await page.wait_for_function(NO_CHROME, timeout=5000)
+        await page.close()
+        page = await display.page()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        await page.wait_for_function(NO_CHROME, timeout=5000)
+    finally:
+        await display.stop()
+        await site.stop()
 
 
 async def test_unusable_profile_folder_is_a_clear_error(tmp_path):

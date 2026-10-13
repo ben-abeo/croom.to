@@ -2,13 +2,23 @@
 The TV: one browser window, one page, owned here and lent to the meeting
 providers (spec 2026-10-07 TV screensaver, section 4.3). Idle, the page sits on
 the control service's /tv screensaver; a provider claims it for a meeting and
-hands it back through show_idle(). If the page dies, page() replaces it; if
-the whole browser dies, page() starts a new one.
+hands it back through show_idle(). If the page or the browser dies, page()
+starts a new browser.
+
+The browser is always a persistent context, on the signed-in Google profile
+when one is configured and otherwise on a throwaway folder that lives as long
+as the browser: Chromium keeps kiosk mode (--kiosk) for the window it opens at
+startup only, and only a persistent context opens one. A launch() browser
+makes its pages through the automation protocol, in plain windows with a tab
+strip and an address bar whatever the flags say, and so does a page made to
+replace one that died once its window is gone. That is what the TV Pi showed.
 """
 
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
@@ -16,7 +26,7 @@ from urllib.parse import urlsplit
 logger = logging.getLogger(__name__)
 
 try:
-    from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+    from playwright.async_api import BrowserContext, Page, async_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     PLAYWRIGHT_AVAILABLE = False
@@ -51,7 +61,7 @@ class TvDisplay:
         self._headless = headless
         self._kiosk = kiosk
         self._playwright = None
-        self._browser: Optional["Browser"] = None
+        self._throwaway: Optional[Path] = None   # a guest's profile folder, made at start and removed at stop
         self._context: Optional["BrowserContext"] = None
         self._page: Optional["Page"] = None
         self._retry: Optional[asyncio.Task] = None
@@ -78,7 +88,13 @@ class TvDisplay:
 
     @property
     def profile_dir(self) -> Optional[Path]:
+        """The configured, signed-in profile folder; None for a guest."""
         return self._profile_dir
+
+    @property
+    def profile_folder(self) -> Optional[Path]:
+        """The folder the running browser keeps its profile in: the configured one, or a guest's throwaway."""
+        return self._profile_dir if self._profile_dir is not None else self._throwaway
 
     @property
     def context(self) -> Optional["BrowserContext"]:
@@ -96,19 +112,20 @@ class TvDisplay:
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install chromium")
         self._playwright = await async_playwright().start()
+        if self._profile_dir is None:
+            self._throwaway = Path(tempfile.mkdtemp(prefix="croom-tv-"))   # private (0700) from the start
+        folder = self.profile_folder
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.chmod(folder, 0o700)
+        except OSError as e:
+            raise RuntimeError(f"Browser profile folder {folder} is not usable: {e}") from e
+        self._context = await self._playwright.chromium.launch_persistent_context(
+            str(folder), headless=self._headless, args=self.browser_args(), **self.context_options(),
+        )
         if self._profile_dir is not None:
-            try:
-                self._profile_dir.mkdir(parents=True, exist_ok=True)
-                os.chmod(self._profile_dir, 0o700)
-            except OSError as e:
-                raise RuntimeError(f"Browser profile folder {self._profile_dir} is not usable: {e}") from e
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                str(self._profile_dir), headless=self._headless, args=self.browser_args(), **self.context_options(),
-            )
             logger.info(f"TV browser started on the signed-in profile at {self._profile_dir}")
         else:
-            self._browser = await self._playwright.chromium.launch(headless=self._headless, args=self.browser_args())
-            self._context = await self._browser.new_context(**self.context_options())
             logger.info("TV browser started as a guest")
         self._adopt(self._context.pages[0] if self._context.pages else await self._context.new_page())
         await self._show_dark()
@@ -116,14 +133,12 @@ class TvDisplay:
 
     async def stop(self) -> None:
         self._cancel_retry()
-        for attribute in ("_context", "_browser"):
-            closer = getattr(self, attribute)
-            if closer is not None:
-                try:
-                    await asyncio.wait_for(closer.close(), timeout=self.CLOSE_TIMEOUT_S)
-                except Exception as e:  # noqa: BLE001 - a hung browser must not hang the agent
-                    logger.warning(f"TV browser {attribute[1:]} did not close cleanly: {e}")
-                setattr(self, attribute, None)
+        if self._context is not None:
+            try:
+                await asyncio.wait_for(self._context.close(), timeout=self.CLOSE_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 - a hung browser must not hang the agent
+                logger.warning(f"TV browser did not close cleanly: {e}")
+            self._context = None
         self._page = None
         self._parked = False
         if self._playwright is not None:
@@ -132,10 +147,12 @@ class TvDisplay:
             except Exception as e:  # noqa: BLE001
                 logger.warning(f"Playwright did not stop cleanly: {e}")
             self._playwright = None
+        if self._throwaway is not None:
+            shutil.rmtree(self._throwaway, ignore_errors=True)   # a guest leaves nothing behind
+            self._throwaway = None
 
     async def _restart(self) -> None:
-        """The browser itself is gone: start a fresh one on the same settings."""
-        logger.warning("The TV browser is gone; starting a new one")
+        """Start a fresh browser on the same settings (a guest gets a fresh throwaway folder)."""
         await self.stop()
         await self.start()
 
@@ -173,23 +190,16 @@ class TvDisplay:
             return False
 
     async def page(self) -> "Page":
-        """The shared page; a new one, parked on the screensaver, when the old one is gone."""
+        """The shared page; a fresh browser's, parked on the screensaver, when the old one is gone.
+
+        A replacement page in the old browser would open in a plain window once the page's own window is
+        gone (Chromium keeps kiosk mode for its startup window only), so the whole browser starts again."""
         if self._context is None:
             raise RuntimeError("TV display not started")
         if await self._alive():
             return self._page
-        dead = self._page
-        self._page = None
-        if dead is not None and not dead.is_closed():
-            await self._close_quietly(dead)
-        try:
-            page = await self._context.new_page()
-        except Exception:  # noqa: BLE001 - the context or browser is gone
-            await self._restart()
-            return self._page
-        logger.warning("The TV page was closed; opened a new one")
-        self._adopt(page)
-        await self.show_idle()
+        logger.warning("The TV page is gone; starting the browser again")
+        await self._restart()
         return self._page
 
     async def claim(self) -> "Page":

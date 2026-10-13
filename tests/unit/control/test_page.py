@@ -2661,8 +2661,9 @@ def test_a_long_unbroken_title_in_the_warning_wraps_inside_the_top_bar(browser):
 @pytest.mark.parametrize("room_name, room_location", [("Lab", "2nd floor"), ("Room 2", "2nd floor, by the kitchen")])   # the second is the deploy templates' own example
 def test_a_long_next_booking_title_gets_room_on_a_phone_and_leaves_the_kiosk_bar_alone(browser, width, height, room_name, room_location):
     """overflow-wrap: anywhere lets a flex item shrink to one letter. On a phone the warning takes a row of its own, the
-    width of the bar, under the name: a pill of 200 px or more and a bar under 260 px whatever the room is called. On
-    the kiosk the bar stays one row, with the pill beside the clock."""
+    width of the bar, under the name: a pill of 200 px or more and a bar under 290 px whatever the room is called (the
+    date line under the clock is 24 of them; a pill collapsed to a letter a column would make the bar several hundred).
+    On the kiosk the bar stays one row, with the pill beside the clock."""
     skip_if_day_ends_within(1)                                 # the booking starts in 8 minutes, and the service lists today's only
     title = "Quarterly planning review with the regional leadership teams"
     assert len(title) == 60
@@ -2677,7 +2678,7 @@ def test_a_long_next_booking_title_gets_room_on_a_phone_and_leaves_the_kiosk_bar
         assert clock["x"] >= 0 and clock["x"] + clock["width"] <= width     # the clock is still on the bar
         if width < 1024:
             assert pill["width"] >= 200, f"the pill is {pill['width']:.0f} px wide"
-            assert bar["height"] < 260, f"the top bar is {bar['height']:.0f} px tall"
+            assert bar["height"] < 290, f"the top bar is {bar['height']:.0f} px tall"
         else:
             assert bar["height"] < 150, f"the kiosk's bar is {bar['height']:.0f} px tall"
             assert pill["y"] < clock["y"] + clock["height"] and clock["y"] < pill["y"] + pill["height"]   # one row: the pill beside the clock
@@ -2825,4 +2826,34 @@ def test_a_leave_waiting_for_its_second_tap_does_not_outlive_the_call(browser):
         page.request.post(base + "/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)   # ... and another begins
         page.wait_for_function("window.croomPage.refreshStatus().then(() => document.body.dataset.state === 'meeting')", timeout=5000)
         assert page.locator("#meeting-actions button.danger").inner_text() == "Leave"
+        page.close()
+
+
+TWELVE_HOUR = r"^\d{1,2}:\d{2} [AP]M$"
+AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
+
+
+def test_the_clock_the_date_and_the_booking_times_read_the_american_way_under_a_twenty_four_hour_locale(browser):
+    """The Pi's Chromium follows the system locale, which showed 24-hour times; the pages pin the format instead."""
+    import re
+    with PageServer(calendar_events=[event("e1", "Design review", 90)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800}, locale="en-GB")
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
+        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
+        page.wait_for_selector("#events .event time", timeout=5000)
+        assert re.match(TWELVE_HOUR, page.locator("#events .event time").first.inner_text())
+        assert fits(page)
+        page.close()
+
+
+def test_the_door_sign_clock_and_date_read_the_american_way_under_a_twenty_four_hour_locale(browser):
+    import re
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1024, "height": 600}, locale="en-GB")
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
+        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
         page.close()

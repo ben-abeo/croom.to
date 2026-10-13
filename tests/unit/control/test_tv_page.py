@@ -373,9 +373,9 @@ def test_a_failing_camera_is_picked_up_again_while_the_preview_stays_asked_for(p
 
 
 # What each screensaver style shows when idle: the preview takes all of it away and gives all of it back.
-STYLE_PARTS = ["#room-name", "#headline", "#detail", "#clock", "#hint", "#brand-logo", "#bounce-logo"]
+STYLE_PARTS = ["#room-name", "#headline", "#detail", "#clock", "#date", "#hint", "#brand-logo", "#bounce-logo"]
 STYLE_SHOWS = {
-    "info": {"#room-name", "#headline", "#detail", "#clock", "#hint"},
+    "info": {"#room-name", "#headline", "#detail", "#clock", "#date", "#hint"},
     "quiet": {"#room-name", "#headline"},
     "brand": {"#brand-logo"},
     "bounce": {"#bounce-logo"},
@@ -433,3 +433,19 @@ def test_the_caption_reads_over_a_white_picture(probed_tv):
         return [style.color, style.backgroundColor];
     }""")
     assert contrast_over_white(text, backing) >= 4.5
+
+
+TWELVE_HOUR = r"^\d{1,2}:\d{2} [AP]M$"
+AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
+
+
+def test_the_tv_clock_and_date_read_the_american_way_under_a_twenty_four_hour_locale(browser):
+    """The Pi's Chromium follows the system locale, which showed 24-hour times; the pages pin the format instead."""
+    import re
+    with PageServer(room_name="Room 3") as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 720}, locale="en-GB")
+        page.goto(f"http://127.0.0.1:{server.port}/tv", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
+        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
+        page.close()

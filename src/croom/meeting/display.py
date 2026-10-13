@@ -83,6 +83,8 @@ class TvDisplay:
         self._parked = False   # True while the page belongs to the screensaver, False while a provider has it
         self._wanted = False   # True from start() to stop(): page() may start the browser again
         self._lock = asyncio.Lock()   # one start, stop or restart at a time
+        self._started_at = 0.0        # loop time of the last launch, for the back-off after a crash
+        self._tasks: set = set()      # fire-and-forget tasks, held so they are not collected mid-flight
 
     @classmethod
     def from_config(cls, config) -> "TvDisplay":
@@ -157,9 +159,10 @@ class TvDisplay:
             self._playwright = await async_playwright().start()
             self._context = await self._launch(folder)
             self._adopt(self._context.pages[0] if self._context.pages else await self._context.new_page())
-        except Exception:
-            await self._stop()   # the driver and a guest's folder go with the failed launch
+        except BaseException:   # a failed launch, or a caller cancelled while waiting for it
+            await self._stop()   # the driver and a guest's folder go with it
             raise
+        self._started_at = asyncio.get_running_loop().time()
         if self._profile_dir is not None:
             logger.info(f"TV browser started on the signed-in profile at {self._profile_dir}")
         else:
@@ -200,17 +203,23 @@ class TvDisplay:
         too young to tell."""
         now = time.time()
         for folder in Path(tempfile.gettempdir()).glob(f"{THROWAWAY_PREFIX}*"):
-            maker, sep, _ = folder.name[len(THROWAWAY_PREFIX):].partition("-")
-            if not sep or not maker.isdigit():
-                continue   # not one of ours
             try:
-                if (int(maker) == os.getpid() or _alive_pid(int(maker)) or profile_holder(folder) is not None
+                maker, sep, _ = folder.name[len(THROWAWAY_PREFIX):].partition("-")
+                if not sep or not maker.isdecimal() or len(maker) > 8:
+                    continue   # not one of ours
+                pid = int(maker)
+                if (pid == os.getpid() or _alive_pid(pid) or profile_holder(folder) is not None
                         or now - folder.stat().st_mtime < cls.STALE_AFTER_S):
                     continue
-            except OSError:
-                continue
-            shutil.rmtree(folder, ignore_errors=True)
-            logger.info(f"Removed the browser profile folder a dead agent left behind: {folder}")
+                shutil.rmtree(folder)
+                logger.info(f"Removed the browser profile folder a dead agent left behind: {folder}")
+            except Exception as e:  # noqa: BLE001 - a folder that cannot be judged or removed never stops the TV
+                logger.debug(f"Left {folder} alone: {e!r}")
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     # ------------------------------------------------------------------
     # The page
@@ -227,16 +236,24 @@ class TvDisplay:
             logger.warning("The TV page crashed; a fresh browser will replace it")
             self._page = None
             if self._parked:
-                asyncio.ensure_future(self._recover())
-        asyncio.ensure_future(self._close_quietly(page))
+                self._spawn(self._recover())
+        self._spawn(self._close_quietly(page))
 
     async def _recover(self) -> None:
+        """A parked page crashed: a fresh browser now, or after a pause when the last one is itself recent (a
+        screensaver that crashes on every load must not keep a Pi relaunching Chromium)."""
         if not self._wanted or not self._parked:
+            return
+        if self._retry is not None and not self._retry.done():
+            return   # the retry task brings the browser at its next round
+        if asyncio.get_running_loop().time() - self._started_at < self.RETRY_MAX_S:
+            self._retry = asyncio.create_task(self._retry_idle(self.RETRY_MAX_S))
             return
         try:
             await self.page()
-        except Exception as e:  # noqa: BLE001 - the next page() tries again
-            logger.warning(f"The TV browser could not be started again after a crash ({e!r})")
+        except Exception as e:  # noqa: BLE001 - page() has arranged the next try
+            if self._wanted:
+                logger.warning(f"The TV browser could not be started again after a crash ({e!r})")
 
     @staticmethod
     async def _close_quietly(page: "Page") -> None:
@@ -264,7 +281,7 @@ class TvDisplay:
         restart at a time: a second caller that finds the page gone waits for it and gets the same fresh page."""
         if not self._wanted:
             raise RuntimeError("TV display not started")
-        if await self._alive():
+        if not self._lock.locked() and await self._alive():   # a restart hands its page out once it is parked
             return self._page
         async with self._lock:
             if not self._wanted:
@@ -275,9 +292,10 @@ class TvDisplay:
             await self._stop()
             try:
                 await self._start()
-            except Exception:
-                self._retry = asyncio.create_task(self._retry_idle(self.RETRY_MAX_S))   # the TV comes back on its own
-                raise
+            finally:
+                if self._context is None and self._wanted:   # the launch failed, or the caller was cancelled
+                    self._cancel_retry()
+                    self._retry = asyncio.create_task(self._retry_idle(self.RETRY_MAX_S))   # the TV comes back on its own
             return self._page
 
     async def claim(self) -> "Page":

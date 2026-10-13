@@ -5,6 +5,7 @@ The setup guide builds to a multi-page PDF with the venv's Chromium.
 import re
 import subprocess
 import sys
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,18 @@ def test_guide_lets_step_four_flow_across_pages_so_its_tip_is_not_left_alone():
     assert ".block.flow { break-inside: auto; }" in html
     assert re.search(r"\.step \{[^}]*break-after: avoid;", html)    # a step's heading stays with its first bullet
     assert re.search(r"\bli \{[^}]*break-inside: avoid;", html)     # and no bullet is split
+
+
+def test_guide_says_a_passcode_field_appears_for_a_zoom_meeting_id():
+    """The test-call step and the card for a join that never happens name the Passcode field; neither says the passcode must be in the link."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+    for needle in (
+        "A meeting ID, or a Zoom link without its passcode, makes a Passcode field appear under the box",
+        "type the meeting's passcode there before you press Join",
+        "on the table screen, tapping the field opens the on-screen keyboard on its digits",
+        "type the passcode in the Passcode field that appears for a meeting ID or a link without one",
+        "press Join again",
+    ):
+        assert needle in text, needle
+    assert "Zoom needs the passcode inside the link" not in text

@@ -64,7 +64,7 @@ Both now point to pages on our own domain, written for this integration:
 Here is the demo video: [TO CONFIRM: link]. It shows our room device (the touch screen on the table and the room's TV) joining your meeting 5590000559 with passcode 940104, using the app's Production credentials. In order, it shows:
 
 - the device's check command printing the Production Client ID;
-- the meeting's link typed on the room page;
+- the meeting ID typed on the room page, then its passcode in the Passcode field that appears, and Join pressed;
 - Zoom's meeting on the room's TV;
 - the room, named "Room 1", in the participant list of meeting 559 000 0559, seen from a second participant's Zoom window with the meeting ID displayed;
 - then Mute, Turn camera off and Leave.
@@ -89,8 +89,8 @@ The room joined at [TO CONFIRM: date, time and time zone].
 - [ ] **Room devices get the no-store fix**: once this branch is merged into main, update each room device (`sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git && sudo systemctl restart croom`). The device's join page then sends the signature, passcode and ZAK with `Cache-Control: no-store`, which keeps Security answer 3 true.
 - [ ] **Recording room**: put the General App's Production Client ID and Client Secret in `/etc/croom/zoom-credentials.json`, run `sudo systemctl restart croom`, and confirm that the check ends with "Ready" and shows the Production Client ID.
 - [ ] **Record the video** as in `test-plan.md` section 8:
-  - Join by a pasted link at a time when no booking with a video link is in progress in that room. The room page's Today list has a known layout bug while a linked booking is in progress; it is being fixed on another branch.
-  - Show the meeting ID in the typed link and on a second participant's screen, since the TV hides Zoom's meeting header.
+  - Join by typing the meeting ID and the passcode at a time when no booking with a video link is in progress in that room. The room page's Today list has a known layout bug while a linked booking is in progress; it is being fixed on another branch.
+  - Show the meeting ID typed on the room page and on a second participant's screen, since the TV hides Zoom's meeting header.
 
   Upload the video where Zoom can open it without signing in, and fill in the link and join time in test-plan.md sections 8 and 9 and in replies 2 and 6.
 - [ ] **Reviewer access**: decide which of options A, B and C to offer, then fill in or delete their [TO CONFIRM] items in test-plan.md section 9 and reply 2. For C, publish one room's page behind a password for the review only, and withdraw it afterwards.

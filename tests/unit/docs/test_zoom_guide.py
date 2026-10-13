@@ -6,6 +6,7 @@ commands and names, and the setup guide points at it.
 import re
 import subprocess
 import sys
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -56,3 +57,25 @@ def test_setup_guide_points_to_the_zoom_guide():
 
 def test_zoom_guide_uses_the_shared_renderer():
     assert "from render_guide import render" in (GUIDE / "build.py").read_text(encoding="utf-8")
+
+
+def visible_text(html):
+    """The page as a reader sees it: tags dropped, entities decoded, white space collapsed."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+
+
+def test_zoom_guide_says_how_a_meeting_gets_its_passcode():
+    """Step 6 joins by meeting id with the Passcode field, and the passcode card sends the reader to the field or to Join again."""
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        # step 6: the meeting id and the field, and a booking whose link has no passcode
+        "To join with the meeting id instead, type it in the same box: a Passcode field appears under it",
+        "type the meeting's passcode there and press Join",
+        "A booking whose Zoom link has no passcode in it is joined with the one written in its invitation text",
+        # the troubleshooting card: the field, or Join again on the "Couldn't join" card
+        "type the passcode in the Passcode field that appears under the link box for a meeting id or a link without one",
+        "After a \"Couldn't join\" that says \"Zoom needs the meeting passcode\"",
+        "type the passcode there and tap Join again",
+    ):
+        assert needle in text, needle
+    assert "A bare meeting id cannot open a passcode-protected meeting" not in text

@@ -178,7 +178,7 @@ Decisions worth knowing before changing things:
 Known limitations, mostly inherited from upstream:
 
 - Stopping the meeting service can hang while closing the headed Chromium; the service unit's restart covers it.
-- Zoom links need their passcode in the link. A failed Meet join logs what Meet showed and saves a screenshot under `/tmp`; `croom --check-meet URL -c CONFIG` reports the same from a terminal.
+- A Zoom meeting's passcode is read from the link, from the booking's invitation text, or typed in the **Passcode** field that appears on the room page for a bare meeting ID or a link without one; a join that fails because Zoom wanted one keeps its link on the "Couldn't join" card, with the field and a **Join again** button. A passcode may be letters, digits and `@ - _ *`, up to 32 characters. A failed Meet join logs what Meet showed and saves a screenshot under `/tmp`; `croom --check-meet URL -c CONFIG` reports the same from a terminal.
 - `--no-service` is parsed but not honoured; the touch UI (`croom-ui`) and Microsoft 365 are untested in this fork.
 - The browser path and boot-ordering fixes in the installer are verified by tests of the generated unit files, not yet on a Pi.
 - The dashboard speaks plain HTTP on the office network, with no TLS, and has no database migrations; a model change that needs an altered table is a manual `psql` step in production.

@@ -401,6 +401,25 @@ class TestPasscode:
         finally:
             await shutdown(provider)
 
+    async def test_a_passcode_complaint_on_the_page_fails_the_join_while_the_wait_is_still_on(self):
+        """Zoom's modal may come with no error event at all. The wait reads the page's words every few seconds, so the person
+        is asked for the passcode at once, not when the 90 seconds are up."""
+        assert ZoomSdkProvider.PASSCODE_CHECK_S == 5 and ZoomSdkProvider.CONNECT_TIMEOUT_S == 90
+        stub = (STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;"
+                "window.ZoomMtg._behaviour.pageSays = 'Join parameters: password are invalid!';")
+        provider = await provider_for(api=FakeApi(), stub=stub)
+        provider.PASSCODE_CHECK_S = 0.2   # shortened, as the other waits are here; the deadline stays at 90 seconds
+        try:
+            with pytest.raises(RuntimeError) as failure:
+                await asyncio.wait_for(provider.join_meeting("https://zoom.us/j/99612060433", passcode="000000"), timeout=10)
+            words = await provider._page_words()
+            assert "Join parameters: password are invalid!" in words
+            assert str(failure.value) == f"{PASSCODE_ASKED} ({words})"
+            assert provider.current_meeting.error_message == str(failure.value)
+            assert provider.state == MeetingState.ERROR
+        finally:
+            await shutdown(provider)
+
     async def test_a_passcode_refusal_reaches_the_rooms_status_through_the_control_service(self):
         """The whole chain: the room page's join request, the meeting service, this provider against the stub SDK, and
         the status the room page reads, which must start with the words the page looks for."""
@@ -430,6 +449,57 @@ class TestPasscode:
         finally:
             await client.close()
             await shutdown(provider)
+
+
+class WordsPage:
+    """A page that says the same words to _page_words and has no toolbar, or one whose video button says Stop Video."""
+
+    def __init__(self, words, toolbar=False):
+        self.words, self.toolbar = words, toolbar
+
+    async def evaluate(self, script, *args):
+        if args:                                                        # _camera_is_on asks for the video button by its selector
+            return "Stop Video" if self.toolbar else None
+        return self.words
+
+
+class TestPasscodeWordsDuringTheWait:
+    """The wait reads the page's words every PASSCODE_CHECK_S for Zoom's own passcode complaint (no browser: a fake page)."""
+
+    def waiting(self, words, connect_timeout_s=30):
+        provider = ZoomSdkProvider(SDK_ONLY)
+        provider._events = asyncio.Queue()
+        provider._page = WordsPage(words)
+        provider.CONNECT_TIMEOUT_S = connect_timeout_s
+        provider.PASSCODE_CHECK_S = 0.05
+        return provider
+
+    async def test_words_that_are_not_a_complaint_wait_for_the_deadline(self):
+        provider = self.waiting("joining Waiting for something else", connect_timeout_s=0.5)
+        with pytest.raises(RuntimeError) as failure:
+            await provider._wait_for_connection()                      # several readings (every 0.05 s), none of them a complaint
+        assert str(failure.value) == "Zoom did not connect; the page says: joining Waiting for something else"
+
+    async def test_a_complaint_is_read_while_the_wait_runs_on(self):
+        provider = self.waiting("joining Join parameters: password are invalid!")
+        with pytest.raises(RuntimeError) as failure:
+            await asyncio.wait_for(provider._wait_for_connection(), timeout=10)   # 30 s of wait: the failure is not the deadline's
+        assert str(failure.value) == f"{PASSCODE_ASKED} (joining Join parameters: password are invalid!)"
+
+    async def test_the_deadline_still_takes_the_meeting_controls_over_the_words(self):
+        """A meeting whose toolbar is up is connected, whatever its page says: the deadline looks for that first, as it always did."""
+        provider = self.waiting("Join parameters: password are invalid!", connect_timeout_s=0.3)
+        provider._page = WordsPage("Join parameters: password are invalid!", toolbar=True)
+        provider.PASSCODE_CHECK_S = 5                                   # as shipped: the deadline comes before the first reading
+        await provider._wait_for_connection()
+
+    async def test_the_waiting_room_is_not_read_for_a_complaint(self):
+        """Zoom took the passcode to put the room there, and the meeting's title may say "password": the join goes on."""
+        provider = self.waiting("Waiting for the host to let the room in. Password review")
+        provider._events.put_nowait(("waiting", "Waiting for the host to let the room in"))
+        asyncio.get_running_loop().call_later(0.3, provider._events.put_nowait, ("connected", ""))
+        await provider._wait_for_connection()                           # about six readings' worth of waiting, none made
+        assert provider.state == MeetingState.IN_LOBBY
 
 
 class TestPasscodeErrors:

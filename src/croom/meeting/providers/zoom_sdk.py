@@ -37,6 +37,7 @@ class ZoomSdkProvider(MeetingProvider):
 
     SDK_VERSION = SDK_VERSION
     CONNECT_TIMEOUT_S = 90
+    PASSCODE_CHECK_S = 5  # at most this long between two readings of the page's words for Zoom's own passcode complaint
     CONNECT_GRACE_MS = 5000  # after join's success callback, how long the page waits for a status event
     LOBBY_TIMEOUT_S = 300
     LEAVE_TIMEOUT_S = 5
@@ -237,8 +238,16 @@ class ZoomSdkProvider(MeetingProvider):
                     raise RuntimeError(f"{PASSCODE_ASKED} ({words})")
                 raise RuntimeError("Zoom did not connect; the page says: " + words)
             try:
-                state, detail = await asyncio.wait_for(self._events.get(), timeout=remaining)
+                state, detail = await asyncio.wait_for(self._events.get(), timeout=min(remaining, self.PASSCODE_CHECK_S))
             except asyncio.TimeoutError:
+                # Zoom may put a passcode complaint of its own on the page and never send an error event, so the page's
+                # words are read every few seconds, not only when the wait runs out. Not in the waiting room (Zoom took
+                # the passcode to put the room there, and the meeting's title may say "password"), nor at the deadline,
+                # which reads them below.
+                if remaining > self.PASSCODE_CHECK_S and self._state != MeetingState.IN_LOBBY:
+                    words = await self._page_words()
+                    if PASSCODE_REFUSAL.search(words):
+                        raise RuntimeError(f"{PASSCODE_ASKED} ({words})")
                 continue
             if state == "connected":
                 return

@@ -2,21 +2,34 @@
 The TV: one browser window, one page, owned here and lent to the meeting
 providers (spec 2026-10-07 TV screensaver, section 4.3). Idle, the page sits on
 the control service's /tv screensaver; a provider claims it for a meeting and
-hands it back through show_idle(). If the page dies, page() replaces it; if
-the whole browser dies, page() starts a new one.
+hands it back through show_idle(). If the page or the browser dies, page()
+starts a new browser; a parked page that crashes brings one on its own.
+
+The browser is always a persistent context, on the signed-in Google profile
+when one is configured and otherwise on a throwaway folder that lives as long
+as the browser: Chromium keeps kiosk mode (--kiosk) for the window it opens at
+startup only, and only a persistent context opens one. A launch() browser
+makes its pages through the automation protocol, in plain windows with a tab
+strip and an address bar whatever the flags say, and so does a page made to
+replace one that died once its window is gone. That is what the TV Pi showed.
 """
 
 import asyncio
 import logging
 import os
+import shutil
+import tempfile
+import time
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
+from croom.meeting.browser_env import profile_holder
+
 logger = logging.getLogger(__name__)
 
 try:
-    from playwright.async_api import Browser, BrowserContext, Page, async_playwright
+    from playwright.async_api import BrowserContext, Page, async_playwright
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:  # pragma: no cover
     PLAYWRIGHT_AVAILABLE = False
@@ -24,6 +37,17 @@ except ImportError:  # pragma: no cover
 # What the TV shows until the screensaver answers: Crystal PM navy, nothing else.
 DARK_PAGE = "data:text/html,<title>Crystal Meet</title><body style='margin:0;background:%23001636'></body>"
 WILDCARD_HOSTS = ("", "0.0.0.0", "::")
+THROWAWAY_PREFIX = "croom-tv-"   # a guest's profile folder: croom-tv-<pid of the agent>-<random>, in the temp folder
+
+
+def _alive_pid(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True   # alive, owned by someone else
+    return True
 
 
 class TvDisplay:
@@ -44,6 +68,7 @@ class TvDisplay:
     PROBE_TIMEOUT_S = 1.0
     CLOSE_TIMEOUT_S = 5.0
     LIVENESS_TIMEOUT_MS = 2000
+    STALE_AFTER_S = 60.0      # a throwaway folder younger than this may belong to a browser still starting up
 
     def __init__(self, idle_url: str, profile_dir: Optional[str] = None, headless: bool = False, kiosk: bool = True):
         self._idle_url = idle_url
@@ -51,11 +76,15 @@ class TvDisplay:
         self._headless = headless
         self._kiosk = kiosk
         self._playwright = None
-        self._browser: Optional["Browser"] = None
+        self._throwaway: Optional[Path] = None   # a guest's profile folder, made at start and removed at stop
         self._context: Optional["BrowserContext"] = None
         self._page: Optional["Page"] = None
         self._retry: Optional[asyncio.Task] = None
         self._parked = False   # True while the page belongs to the screensaver, False while a provider has it
+        self._wanted = False   # True from start() to stop(): page() may start the browser again
+        self._lock = asyncio.Lock()   # one start, stop or restart at a time
+        self._started_at = 0.0        # loop time of the last launch, for the back-off after a crash
+        self._tasks: set = set()      # fire-and-forget tasks, held so they are not collected mid-flight
 
     @classmethod
     def from_config(cls, config) -> "TvDisplay":
@@ -78,7 +107,13 @@ class TvDisplay:
 
     @property
     def profile_dir(self) -> Optional[Path]:
+        """The configured, signed-in profile folder; None for a guest."""
         return self._profile_dir
+
+    @property
+    def profile_folder(self) -> Optional[Path]:
+        """The folder the running browser keeps its profile in: the configured one, or a guest's throwaway."""
+        return self._profile_dir if self._profile_dir is not None else self._throwaway
 
     @property
     def context(self) -> Optional["BrowserContext"]:
@@ -93,51 +128,98 @@ class TvDisplay:
     # ------------------------------------------------------------------
 
     async def start(self) -> None:
+        async with self._lock:
+            self._wanted = True
+            await self._start()
+
+    async def stop(self) -> None:
+        async with self._lock:
+            self._wanted = False
+            await self._stop()
+
+    async def _start(self) -> None:
+        """Lock held. A launch that fails leaves nothing behind, and the display stays wanted: page() tries again."""
         if not PLAYWRIGHT_AVAILABLE:
             raise RuntimeError("Playwright not installed. Run: pip install playwright && playwright install chromium")
-        self._playwright = await async_playwright().start()
-        if self._profile_dir is not None:
+        folder = self._profile_dir
+        if folder is None:
+            self._sweep_stale_folders()
             try:
-                self._profile_dir.mkdir(parents=True, exist_ok=True)
-                os.chmod(self._profile_dir, 0o700)
+                folder = Path(tempfile.mkdtemp(prefix=f"{THROWAWAY_PREFIX}{os.getpid()}-"))   # private from the start
             except OSError as e:
-                raise RuntimeError(f"Browser profile folder {self._profile_dir} is not usable: {e}") from e
-            self._context = await self._playwright.chromium.launch_persistent_context(
-                str(self._profile_dir), headless=self._headless, args=self.browser_args(), **self.context_options(),
-            )
+                raise RuntimeError(f"No room for a browser profile folder in {tempfile.gettempdir()}: {e}") from e
+            self._throwaway = folder
+        try:
+            folder.mkdir(parents=True, exist_ok=True)
+            os.chmod(folder, 0o700)
+        except OSError as e:
+            await self._stop()
+            raise RuntimeError(f"Browser profile folder {folder} is not usable: {e}") from e
+        try:
+            self._playwright = await async_playwright().start()
+            self._context = await self._launch(folder)
+            self._adopt(self._context.pages[0] if self._context.pages else await self._context.new_page())
+        except BaseException:   # a failed launch, or a caller cancelled while waiting for it
+            await self._stop()   # the driver and a guest's folder go with it
+            raise
+        self._started_at = asyncio.get_running_loop().time()
+        if self._profile_dir is not None:
             logger.info(f"TV browser started on the signed-in profile at {self._profile_dir}")
         else:
-            self._browser = await self._playwright.chromium.launch(headless=self._headless, args=self.browser_args())
-            self._context = await self._browser.new_context(**self.context_options())
-            logger.info("TV browser started as a guest")
-        self._adopt(self._context.pages[0] if self._context.pages else await self._context.new_page())
+            logger.info(f"TV browser started as a guest on {folder}")
         await self._show_dark()
         await self.show_idle()
 
-    async def stop(self) -> None:
+    async def _launch(self, folder: Path) -> "BrowserContext":
+        return await self._playwright.chromium.launch_persistent_context(
+            str(folder), headless=self._headless, args=self.browser_args(), **self.context_options(),
+        )
+
+    async def _stop(self) -> None:
+        """Lock held. Closes whatever is open and removes a guest's folder; a half-started display is fine."""
         self._cancel_retry()
-        for attribute in ("_context", "_browser"):
-            closer = getattr(self, attribute)
-            if closer is not None:
-                try:
-                    await asyncio.wait_for(closer.close(), timeout=self.CLOSE_TIMEOUT_S)
-                except Exception as e:  # noqa: BLE001 - a hung browser must not hang the agent
-                    logger.warning(f"TV browser {attribute[1:]} did not close cleanly: {e}")
-                setattr(self, attribute, None)
+        if self._context is not None:
+            try:
+                await asyncio.wait_for(self._context.close(), timeout=self.CLOSE_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 - a hung browser must not hang the agent
+                logger.warning(f"TV browser did not close cleanly: {e!r}")
+            self._context = None
         self._page = None
         self._parked = False
         if self._playwright is not None:
             try:
                 await asyncio.wait_for(self._playwright.stop(), timeout=self.CLOSE_TIMEOUT_S)
             except Exception as e:  # noqa: BLE001
-                logger.warning(f"Playwright did not stop cleanly: {e}")
+                logger.warning(f"Playwright did not stop cleanly: {e!r}")
             self._playwright = None
+        if self._throwaway is not None:
+            folder, self._throwaway = self._throwaway, None
+            await asyncio.to_thread(shutil.rmtree, folder, ignore_errors=True)   # a guest leaves nothing behind
 
-    async def _restart(self) -> None:
-        """The browser itself is gone: start a fresh one on the same settings."""
-        logger.warning("The TV browser is gone; starting a new one")
-        await self.stop()
-        await self.start()
+    @classmethod
+    def _sweep_stale_folders(cls) -> None:
+        """Throwaway folders an agent left behind by dying without stop() (SIGKILL, a crash). A folder stays
+        while the agent that made it (its pid is in the name) or a Chromium holding it is alive, or while it is
+        too young to tell."""
+        now = time.time()
+        for folder in Path(tempfile.gettempdir()).glob(f"{THROWAWAY_PREFIX}*"):
+            try:
+                maker, sep, _ = folder.name[len(THROWAWAY_PREFIX):].partition("-")
+                if not sep or not maker.isdecimal() or len(maker) > 8:
+                    continue   # not one of ours
+                pid = int(maker)
+                if (pid == os.getpid() or _alive_pid(pid) or profile_holder(folder) is not None
+                        or now - folder.stat().st_mtime < cls.STALE_AFTER_S):
+                    continue
+                shutil.rmtree(folder)
+                logger.info(f"Removed the browser profile folder a dead agent left behind: {folder}")
+            except Exception as e:  # noqa: BLE001 - a folder that cannot be judged or removed never stops the TV
+                logger.debug(f"Left {folder} alone: {e!r}")
+
+    def _spawn(self, coro) -> None:
+        task = asyncio.ensure_future(coro)
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     # ------------------------------------------------------------------
     # The page
@@ -148,11 +230,30 @@ class TvDisplay:
         page.on("crash", self._on_crash)
 
     def _on_crash(self, page: "Page") -> None:
-        """Chromium's renderer died ("Aw, Snap!"): forget the page so the next page() replaces it."""
+        """Chromium's renderer died ("Aw, Snap!"): forget the page, so the next page() brings a fresh browser;
+        a parked page does not wait for that call."""
         if page is self._page:
-            logger.warning("The TV page crashed; it will be replaced")
+            logger.warning("The TV page crashed; a fresh browser will replace it")
             self._page = None
-        asyncio.ensure_future(self._close_quietly(page))
+            if self._parked:
+                self._spawn(self._recover())
+        self._spawn(self._close_quietly(page))
+
+    async def _recover(self) -> None:
+        """A parked page crashed: a fresh browser now, or after a pause when the last one is itself recent (a
+        screensaver that crashes on every load must not keep a Pi relaunching Chromium)."""
+        if not self._wanted or not self._parked:
+            return
+        if self._retry is not None and not self._retry.done():
+            return   # the retry task brings the browser at its next round
+        if asyncio.get_running_loop().time() - self._started_at < self.RETRY_MAX_S:
+            self._retry = asyncio.create_task(self._retry_idle(self.RETRY_MAX_S))
+            return
+        try:
+            await self.page()
+        except Exception as e:  # noqa: BLE001 - page() has arranged the next try
+            if self._wanted:
+                logger.warning(f"The TV browser could not be started again after a crash ({e!r})")
 
     @staticmethod
     async def _close_quietly(page: "Page") -> None:
@@ -169,28 +270,33 @@ class TvDisplay:
             await asyncio.wait_for(self._page.evaluate("1"), timeout=self.LIVENESS_TIMEOUT_MS / 1000)
             return True
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"The TV page does not answer ({e}); it will be replaced")
+            logger.warning(f"The TV page does not answer ({e!r}); a fresh browser will replace it")
             return False
 
     async def page(self) -> "Page":
-        """The shared page; a new one, parked on the screensaver, when the old one is gone."""
-        if self._context is None:
+        """The shared page; a fresh browser's, parked on the screensaver, when the old one is gone.
+
+        A replacement page in the old browser would open in a plain window once the page's own window is
+        gone (Chromium keeps kiosk mode for its startup window only), so the whole browser starts again. One
+        restart at a time: a second caller that finds the page gone waits for it and gets the same fresh page."""
+        if not self._wanted:
             raise RuntimeError("TV display not started")
-        if await self._alive():
+        if not self._lock.locked() and await self._alive():   # a restart hands its page out once it is parked
             return self._page
-        dead = self._page
-        self._page = None
-        if dead is not None and not dead.is_closed():
-            await self._close_quietly(dead)
-        try:
-            page = await self._context.new_page()
-        except Exception:  # noqa: BLE001 - the context or browser is gone
-            await self._restart()
+        async with self._lock:
+            if not self._wanted:
+                raise RuntimeError("TV display not started")
+            if await self._alive():
+                return self._page
+            logger.warning("The TV page is gone; starting the browser again")
+            await self._stop()
+            try:
+                await self._start()
+            finally:
+                if self._context is None and self._wanted:   # the launch failed, or the caller was cancelled
+                    self._cancel_retry()
+                    self._retry = asyncio.create_task(self._retry_idle(self.RETRY_MAX_S))   # the TV comes back on its own
             return self._page
-        logger.warning("The TV page was closed; opened a new one")
-        self._adopt(page)
-        await self.show_idle()
-        return self._page
 
     async def claim(self) -> "Page":
         """The page for a meeting: nothing parks it again until show_idle() is called."""
@@ -248,18 +354,22 @@ class TvDisplay:
             logger.debug(f"Screensaver not reachable yet at {self._idle_url}: {e}")
             return False
 
-    async def _retry_idle(self) -> None:
-        """Keep trying for as long as the page is parked; one warning when it takes long."""
+    async def _retry_idle(self, delay: Optional[float] = None) -> None:
+        """Keep trying for as long as the page is parked or the browser is down; one warning when it takes long."""
         started = asyncio.get_running_loop().time()
-        delay = self.RETRY_EVERY_S
+        delay = delay or self.RETRY_EVERY_S
         warned = False
-        while self._parked:
+        while self._wanted and (self._parked or self._context is None):
             await asyncio.sleep(delay)
-            if not self._parked:
-                return
+            if not self._wanted or (self._context is not None and not self._parked):
+                return   # stopped, or a provider has the page
             if self._page is None or self._page.is_closed():
-                await self.page()   # replaces the page and parks it (or restarts the browser)
-                return
+                try:
+                    await self.page()   # a fresh browser, parked on the screensaver by its own start ...
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(f"The TV browser could not be started again ({e!r}); "
+                                   f"trying again in {self.RETRY_MAX_S:.0f} s")
+                return   # ... or, when its launch failed, page() has arranged the next try
             if await self._try_idle():
                 return
             if not warned and asyncio.get_running_loop().time() - started >= self.RETRY_WARN_AFTER_S:

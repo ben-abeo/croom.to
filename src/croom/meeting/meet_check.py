@@ -74,7 +74,7 @@ async def check_meet(url: str, out: TextIO = sys.stdout, screenshot: Optional[Pa
         print(f"Opening {url} from the browser profile at {profile}, the way a signed-in room would", file=out)
         print(f"Profile: {profile}", file=out)
     else:
-        print(f"Opening {url} as a guest, the way the room does", file=out)
+        print(f"Opening {url} as a guest, the way a room without a signed-in profile does", file=out)
     async with async_playwright() as p:
         if profile is not None:
             profile.mkdir(parents=True, exist_ok=True)

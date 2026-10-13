@@ -472,6 +472,17 @@ class TestJoin:
         await wait_until(lambda: meeting.joins)
         assert meeting.joins[0][0] == "https://zoom.us/j/98765432100"
 
+    @pytest.mark.parametrize("typed", ["559 000 0559", "559\u00a0000\u00a00559", "  559 000 0559  ", "5590 000 559"])
+    async def test_a_zoom_meeting_id_written_in_groups_becomes_a_link(self, client_factory, typed):
+        """Invitations print the ID in groups ("559 000 0559"), with spaces or no-break spaces between them."""
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        resp = await client.post("/api/meeting/join", json={"url": typed})
+        assert resp.status == 202
+        assert (await resp.json())["url"] == "https://zoom.us/j/5590000559"
+        await wait_until(lambda: meeting.joins)
+        assert meeting.joins[0][0] == "https://zoom.us/j/5590000559"
+
     async def test_join_by_event_uses_its_link_and_title(self, client_factory):
         meeting = StubMeeting()
         calendar = StubCalendar(events=[event("e1", "Design review", starts_in_minutes=5)])

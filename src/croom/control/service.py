@@ -27,6 +27,7 @@ logger = logging.getLogger(__name__)
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY_BYTES = 4096
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
+ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invitations print it: spaces, no-break spaces
 # Zoom's own alphabet for a passcode: letters, digits and @ - _ * (Zoom allows 10 of them; this allows 32).
 PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
 BAD_PASSCODE = "Passcode must be letters, digits or @-_*, up to 32"
@@ -55,10 +56,14 @@ def _register_font_types() -> None:
 
 
 def normalize_link(value: str) -> str:
-    """Trim, turn a bare Zoom meeting id into a link, and add https:// when no scheme is given."""
+    """
+    Trim, turn a bare Zoom meeting id into a link, and add https:// when no scheme is given. The id may be written in
+    groups, as invitations print it ("559 000 0559"): the blanks between them go.
+    """
     url = value.strip()
-    if ZOOM_MEETING_ID.match(url):
-        return f"https://zoom.us/j/{url}"
+    digits = ID_GROUP_GAPS.sub("", url)
+    if ZOOM_MEETING_ID.match(digits):
+        return f"https://zoom.us/j/{digits}"
     if url and "://" not in url:
         return "https://" + url
     return url

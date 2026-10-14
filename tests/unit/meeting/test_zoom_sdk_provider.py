@@ -7,13 +7,14 @@ errors, the ZAK path, mute, camera, leave, and joining again.
 import asyncio
 import json
 import logging
+import time
 
 import pytest
 
 playwright = pytest.importorskip("playwright.async_api")
 
-from croom.core.config import Config  # noqa: E402
-from croom.meeting.providers.base import MeetingControlError, MeetingState  # noqa: E402
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config  # noqa: E402
+from croom.meeting.providers.base import DialogPolicy, MeetingControlError, MeetingInfo, MeetingState, controls_from  # noqa: E402
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED, ZoomSdkProvider  # noqa: E402
 from croom.meeting.zoom_auth import ZoomAuthError, ZoomCredentials  # noqa: E402
 from tests.unit.meeting.zoom_stub import STUB_JS  # noqa: E402
@@ -850,3 +851,971 @@ class TestPasscodeErrors:
     ])
     async def test_other_errors_keep_zooms_words(self, detail, shown):
         assert await self.refusal(detail) == shown
+
+
+# ---- The meeting as a model for the table: the controls, and the policy for the dialogs Zoom draws (spec 2026-10-13, sections 3 and 5) ----
+# Pure: no browser.
+
+
+def test_controls_from_a_participant_reading_hides_host_items_and_absent_buttons():
+    reading = {"me": {"muted": True}, "role": "participant", "buttons": {"camera": {"on": False}, "captions": {"on": True}},
+               "participants": [], "recording": False}
+    c = controls_from(reading, ["Thumbs Up"])
+    assert c["mute"] == {"available": True, "on": False} and c["camera"] == {"available": True, "on": False}
+    assert c["raise_hand"] == {"available": False} and c["captions"] == {"available": True, "on": True}
+    assert c["reactions"] == {"available": False, "choices": ["Thumbs Up"]}
+    assert c["layout"] == {"available": False, "choices": ["speaker", "gallery"]} and c["hide_self"] == {"available": False}
+    assert c["pin"] == {"available": False} and c["leave"] == {"available": True}
+    assert c["host"]["role"] == "participant" and c["host"]["record"] == {"available": False, "on": False} and c["host"]["end"]["available"] is False
+    assert not [name for name, item in c["host"].items() if name != "role" and item["available"]]
+
+
+def test_controls_from_a_host_reading_offers_the_host_items_and_the_waiting_list():
+    reading = {"me": {"muted": False}, "role": "host", "buttons": {}, "recording": True, "locked": False,
+               "participants": [{"id": 5, "name": "Guest", "waiting": True}, {"id": 6, "name": "Ann", "waiting": False}]}
+    c = controls_from(reading, [])
+    assert c["host"]["record"] == {"available": True, "on": True} and c["host"]["end"]["available"] is True
+    assert c["host"]["lock"] == {"available": True, "on": False}
+    assert c["host"]["waiting_room"] == {"available": True, "waiting": [{"id": 5, "name": "Guest"}]}
+    assert controls_from(dict(reading, role="co-host"), [])["host"]["end"]["available"] is False
+
+
+def test_a_co_host_has_the_host_items_but_not_the_end_for_everyone():
+    c = controls_from({"role": "co-host", "locked": True, "participants": []}, [])
+    assert c["host"]["role"] == "co-host" and c["host"]["lock"] == {"available": True, "on": True}
+    assert [name for name, item in c["host"].items() if name != "role" and item["available"]] == [
+        "mute_all", "ask_unmute", "record", "lock", "waiting_room", "mute_one", "remove"]
+
+
+def test_controls_from_passes_on_what_the_page_says_of_the_view_and_of_a_camera_it_cannot_use():
+    reading = {"me": {"muted": False}, "buttons": {"camera": {"on": None, "usable": False}, "layout": {"value": "gallery"}, "hide_self": {"on": True}}}
+    c = controls_from(reading, [])
+    assert c["layout"] == {"available": True, "value": "gallery", "choices": ["speaker", "gallery"]}
+    assert c["hide_self"] == {"available": True, "on": True}
+    assert c["camera"] == {"available": True, "on": None, "usable": False}
+
+
+def test_controls_from_an_empty_reading_offers_only_what_needs_no_button():
+    """The mute control reads the reading's mute only: a reading that does not say is read as live here, and the provider, which knows
+    what Zoom last said, puts that in the reading before it asks (test_the_mute_control_agrees_with_the_status_when_zoom_has_not_said)."""
+    c = controls_from({}, DEFAULT_REACTIONS)
+    assert c["mute"] == {"available": True, "on": True} and c["leave"] == {"available": True}
+    assert [name for name in ("camera", "raise_hand", "reactions", "captions", "layout", "hide_self", "pin") if c[name]["available"]] == []
+    assert c["host"]["role"] == "participant" and c["host"]["waiting_room"] == {"available": False, "waiting": []}
+
+
+def test_the_reactions_offered_are_the_configured_names_and_the_openers_presence_is_the_availability():
+    names = ["Thumbs Up", "Clap", "Heart"]
+    assert controls_from({"buttons": {"reactions": {}}}, names)["reactions"] == {"available": True, "choices": names}
+    # When the page says what the picker holds, the configured names it has are offered, in the configured order, however Zoom spells them.
+    held = {"buttons": {"reactions": {"choices": ["clap", "Thumbs_Up", "Tada"]}}}
+    assert controls_from(held, names)["reactions"] == {"available": True, "choices": ["Thumbs Up", "Clap"]}
+    # Nothing to offer is nothing to show: the room's config may list none, or none of them be in the picker.
+    assert controls_from({"buttons": {"reactions": {}}}, [])["reactions"] == {"available": False, "choices": []}
+    assert controls_from({"buttons": {"reactions": {"choices": ["Tada"]}}}, ["Clap"])["reactions"] == {"available": False, "choices": []}
+
+
+def test_the_mute_control_says_whether_the_microphone_is_live():
+    assert controls_from({"me": {"muted": False}}, [])["mute"] == {"available": True, "on": True}
+    assert controls_from({"me": {"muted": True}}, [])["mute"] == {"available": True, "on": False}
+
+
+def test_the_policy_acknowledges_only_one_button_notices_on_the_list():
+    policy = DialogPolicy(["is being transcribed", "AI Companion"])
+    assert policy.decide({"title": "", "text": "This meeting is being transcribed and Zoom AI is on.", "buttons": ["OK"]}) == "acknowledge"
+    assert policy.decide({"title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]}) == "ask"
+    assert policy.decide({"title": "Breakout rooms", "text": "Join Room 1?", "buttons": ["Join"]}) == "ask"
+    assert DialogPolicy(["is being transcribed"], ask_everything=True).decide({"text": "This meeting is being transcribed.", "buttons": ["OK"]}) == "ask"
+    assert policy.disclosure({"text": "This meeting is being transcribed and Zoom AI is on. Anyone with access may share it.", "buttons": ["OK"]}) == "This meeting is being transcribed and Zoom AI is on."
+    assert policy.disclosure({"text": "You have been muted by the host", "buttons": ["OK"]}) == ""
+
+
+def test_the_consent_dialog_waits_for_a_tap_though_the_default_list_names_it():
+    """The same words with a choice to make are not a notice: with two buttons, whatever the list says, the table is asked."""
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    consent = {"title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]}
+    assert policy.decide(consent) == "ask"
+    assert policy.decide(dict(consent, buttons=["Got it"])) == "acknowledge"
+    assert policy.decide(dict(consent, buttons=[])) == "ask"
+
+
+def test_the_list_is_matched_in_the_title_or_the_text_whatever_the_case():
+    policy = DialogPolicy(["Is Being Recorded", "ai companion"])
+    assert policy.decide({"title": "THIS MEETING IS BEING RECORDED", "text": "", "buttons": ["OK"]}) == "acknowledge"
+    assert policy.decide({"title": "", "text": "AI Companion is on.", "buttons": ["OK"]}) == "acknowledge"
+    assert policy.decide({"text": "Welcome to the meeting.", "buttons": ["OK"]}) == "ask"
+    assert policy.decide({"buttons": ["OK"]}) == "ask"
+
+
+def test_a_blank_phrase_or_a_bare_word_never_makes_every_dialog_a_notice():
+    """A list the admin left a blank line in matches nothing for it (a blank phrase is in every text), and a bare word is one phrase, not
+    its letters (each of which is in nearly every text)."""
+    for acknowledge in (["", "   ", None], "is being recorded", [], None):
+        policy = DialogPolicy(acknowledge)
+        assert policy.decide({"text": "Join Room 1?", "buttons": ["Join"]}) == "ask", acknowledge
+    assert DialogPolicy("is being recorded").decide({"text": "This meeting is being recorded.", "buttons": ["OK"]}) == "acknowledge"
+
+
+def test_the_policy_presses_the_last_button_which_zoom_draws_as_the_affirmative_one():
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    assert policy.answer({"buttons": ["OK"]}) == "OK"
+    assert policy.answer({"buttons": ["Leave Meeting", "Got it"]}) == "Got it"
+    assert policy.answer({"buttons": []}) == ""
+
+
+def test_the_disclosure_is_the_first_sentence_of_the_words_else_of_the_title():
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    assert policy.disclosure({"title": "Recording in progress", "text": "This meeting is being recorded. Your host may share it.", "buttons": ["OK"]}) == "This meeting is being recorded."
+    assert policy.disclosure({"title": "This meeting is being recorded", "text": "", "buttons": ["OK"]}) == "This meeting is being recorded."
+    assert policy.disclosure({"title": "", "text": "  ", "buttons": ["OK"]}) == ""
+    assert policy.disclosure({}) == ""
+
+
+@pytest.mark.parametrize("words", ["Your microphone has been muted by the host.", "You have been muted by the host", "The host unmuted you: you have been unmuted"])
+def test_a_notice_about_the_rooms_own_mute_has_no_disclosure_line(words):
+    """The room's mute shows on the Mute button, which is read from Zoom: the line under the title is for what the meeting records."""
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).disclosure({"text": words, "buttons": ["OK"]}) == ""
+
+
+# ---- The provider's model, its controls and its dialogs, against the stub page (spec 2026-10-13, sections 3 to 5) ----
+
+
+async def eventually(check, seconds=3.0):
+    """The provider follows the page by events: wait, briefly, for `check` to come true, and say whether it did."""
+    end = time.monotonic() + seconds
+    while True:
+        if check():
+            return True
+        if time.monotonic() >= end:
+            return False
+        await asyncio.sleep(0.05)
+
+
+async def dialog_presses(provider, at_least=0, seconds=4.0):
+    """What the dialogs' buttons were pressed for, as the stub logs a press its button took: [["dialog", title, label], ...], once there
+    are `at_least` of them (the provider answers a notice a moment after it hears of it)."""
+    end = time.monotonic() + seconds
+    while True:
+        found = [c for c in await provider._page.evaluate("window.__zoomCalls") if c[0] == "dialog"]
+        if len(found) >= at_least or time.monotonic() >= end:
+            return found
+        await asyncio.sleep(0.05)
+
+
+async def settle_background(provider):
+    """Wait for what the provider has started on its own (answering a dialog, reading the meeting again) to be done."""
+    while provider._background:
+        await asyncio.gather(*list(provider._background), return_exceptions=True)
+
+
+# The meeting as the page reads it (meeting.js readMeeting), for the tests that have no browser behind the provider.
+READING = {"me": {"muted": False, "videoOn": True}, "role": "participant", "participants": [], "count": 0, "recording": False, "locked": False,
+           "buttons": {"layout": {"value": "gallery"}, "hide_self": {"on": True}}}
+
+
+class FakePage:
+    """A page with no browser behind it: it answers the provider's reads and controls with `reading`, presses dialogs' buttons as it is told
+    to (or refuses to), and logs what it was asked and when."""
+
+    def __init__(self, reading=None, press_failure=None, control_reading=None):
+        self.reading = dict(READING) if reading is None else reading
+        self.control_reading = self.reading if control_reading is None else control_reading     # what a control comes back with
+        self.press_failure = press_failure
+        self.asked, self.pressed = [], []
+
+    async def evaluate(self, script, arg=None):
+        if "answerDialog" in script:
+            self.pressed.append((time.monotonic(), arg[0], arg[1]))
+            if self.press_failure:
+                raise RuntimeError(f"Page.evaluate: Error: {self.press_failure}\n    at answerNow (http://127.0.0.1/static/meeting.js:1:1)")
+            return True
+        if "crystalMeet.control" in script:
+            self.asked.append(arg)
+            return self.control_reading
+        if "readMeeting" in script:
+            return self.reading
+        raise AssertionError(f"unexpected page call: {script}")
+
+
+def in_a_meeting(page):
+    """A provider that is in a meeting with nothing behind it but the page it is given: its model, its events and its policy, no browser."""
+    provider = ZoomSdkProvider(SDK_ONLY)
+    provider._page = page
+    provider._events = asyncio.Queue()
+    provider._current_meeting = MeetingInfo(platform="zoom", meeting_id="1", meeting_url=LINK)
+    provider._state = MeetingState.CONNECTED
+    return provider
+
+
+class NoDisplay:
+    async def show_idle(self):
+        pass
+
+
+def queued(events):
+    """What is waiting in the provider's queue of the page's events, in order."""
+    found = []
+    while not events.empty():
+        found.append(events.get_nowait())
+    return found
+
+
+class TestControlsAndDialogs:
+    async def test_the_status_model_fills_after_join_and_follows_events(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';")
+        try:
+            info = await provider.join_meeting(LINK)
+            assert info.controls["host"]["role"] == "host" and info.controls["captions"] == {"available": True, "on": False}
+            assert info.people["count"] == 3 and info.people["list"][2]["name"] == "Raj Patel"
+            assert info.recording is False and info.locked is False
+            await provider._page.evaluate("window.ZoomMtg._setAttendee(16777218, {bRaiseHand: false})")
+            assert await eventually(lambda: info.people["list"][2]["hand"] is False)
+            await provider._page.evaluate("window.ZoomMtg._setRecording(true)")
+            assert await eventually(lambda: info.recording and info.controls["host"]["record"] == {"available": True, "on": True})
+        finally:
+            await shutdown(provider)
+
+    async def test_events_before_connected_are_ignored_and_the_model_fills_after(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.delayMs = 400;")
+        try:
+            info = await provider.join_meeting(LINK)                       # dialog scans and syncs may fire during the wait
+            assert provider.state == MeetingState.CONNECTED and info.controls["mute"]["available"] is True
+        finally:
+            await shutdown(provider)
+
+    async def test_the_status_carries_the_model_under_its_names(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            sent = provider.get_status()["meeting"]
+            assert sent["controls"]["raise_hand"] == {"available": True, "on": False} and sent["people"]["count"] == 3
+            assert sent["chat"] == {"unread": 0, "messages": []} and sent["notice"] == "" and sent["dialog"] is None
+            assert sent["recording"] is False and sent["locked"] is False and sent["is_muted"] is False
+            json.dumps(sent)                                                                  # it goes out as JSON
+            assert sent["controls"] is info.controls
+        finally:
+            await shutdown(provider)
+
+    async def test_control_presses_and_reports_and_a_missing_button_says_so(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            state = await provider.control("raise_hand")
+            assert state["raise_hand"]["on"] is True and info.controls["raise_hand"]["on"] is True
+            state = await provider.control("layout", "gallery")
+            assert state["layout"]["value"] == "gallery"
+            await provider.control("reactions", "Clap")
+            assert ["reaction", "clap"] in await provider._page.evaluate("window.__zoomCalls")
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("reactions", "Unicorn")
+            assert str(failure.value) == "Zoom offers no Unicorn here" and provider.state == MeetingState.CONNECTED
+            state = await provider.control("captions")
+            assert state["captions"]["on"] is True and info.controls["captions"]["on"] is True
+            state = await provider.control("hide_self")
+            assert state["hide_self"]["on"] is True
+        finally:
+            await shutdown(provider)
+
+    async def test_a_control_whose_button_is_not_on_the_screen_says_so_in_the_pages_words(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;")
+        try:
+            info = await provider.join_meeting(LINK)
+            assert info.controls["captions"] == {"available": False} and info.controls["reactions"]["available"] is False
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("captions")
+            assert str(failure.value) == "Zoom's captions button is not on the screen yet; try again in a moment"
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_host_call_refused_by_zoom_answers_in_words(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("host.mute_all")
+            assert str(failure.value) == "Current user is neither host nor cohost (code 1)" and provider.state == MeetingState.CONNECTED
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("no_such_control")
+            assert str(failure.value) == "Unknown control no_such_control"
+        finally:
+            await shutdown(provider)
+
+    async def test_a_host_carries_out_the_host_controls_and_the_model_follows(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';")
+        try:
+            info = await provider.join_meeting(LINK)
+            assert info.controls["host"]["lock"] == {"available": True, "on": False}
+            state = await provider.control("host.lock")
+            assert state["host"]["lock"]["on"] is True and info.locked is True
+            await provider.control("host.record")
+            assert info.recording is True and info.controls["host"]["record"]["on"] is True
+            await provider.control("host.mute_one", "16777217")                  # Ann Lee, by the id Zoom lists her by
+            assert info.people["list"][1]["name"] == "Ann Lee" and info.people["list"][1]["muted"] is True
+        finally:
+            await shutdown(provider)
+
+    async def test_a_control_takes_longer_than_a_read_may_and_says_so_when_the_page_never_answers(self):
+        assert ZoomSdkProvider.CONTROL_TIMEOUT_S >= 30 > ZoomSdkProvider.PAGE_CALL_TIMEOUT_S      # Zoom's calls take 12 s each, one at a time
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';")
+        provider.CONTROL_TIMEOUT_S = 0.5
+        try:
+            await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { window.ZoomMtg.muteAll = () => {}; }")        # Zoom never calls back
+            with pytest.raises(MeetingControlError) as failure:
+                await asyncio.wait_for(provider.control("host.mute_all"), timeout=5)
+            assert str(failure.value) == "Could not carry out host.mute_all: the meeting page did not answer within 0.5 seconds"
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_mute_and_camera_keep_their_own_paths_and_the_model_follows(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            state = await provider.control("mute")
+            assert info.is_muted is True and state["mute"] == {"available": True, "on": False} and await mute_calls(provider) == [True]
+            state = await provider.control("camera")
+            assert info.is_camera_on is False and state["camera"] == {"available": True, "on": False}
+            assert await provider._page.evaluate("window.__videoClicks") == 1
+            assert info.controls["camera"]["on"] is False
+        finally:
+            await shutdown(provider)
+
+    async def test_the_mute_and_camera_controls_are_the_toggles_the_join_and_the_reconnect_rules_are_made_for(self):
+        provider = in_a_meeting(object())               # a page that is never asked: the toggles below stand for the page's calls
+        asked = []
+
+        async def toggle_mute():
+            asked.append("mute")
+            return True
+
+        async def toggle_camera():
+            asked.append("camera")
+            return True
+
+        async def read():
+            asked.append("read")
+            return {}
+
+        provider.toggle_mute, provider.toggle_camera, provider._read_state_from_zoom = toggle_mute, toggle_camera, read
+        await provider.control("mute")
+        await provider.control("camera")
+        assert asked == ["mute", "camera", "read"]       # the camera's switch is read back (the mute's toggle reads for itself)
+
+    async def test_leaving_is_a_control_too(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            assert await provider.control("leave") == {}
+            assert provider.state == MeetingState.IDLE and provider.current_meeting is None
+        finally:
+            await shutdown(provider)
+
+    async def test_controls_need_a_meeting(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            with pytest.raises(RuntimeError, match="Not in a meeting"):
+                await provider.control("raise_hand")
+        finally:
+            await shutdown(provider)
+
+    async def test_an_acknowledged_dialog_is_pressed_once_and_disclosed(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being transcribed and Zoom AI is on. Anyone with access to the transcript may view or share it with others.', ['OK'])")
+            assert await eventually(lambda: info.notice)
+            assert info.notice == "This meeting is being transcribed and Zoom AI is on."
+            assert await dialog_presses(provider, at_least=1) == [["dialog", "", "OK"]]
+            assert info.dialog is None
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being recorded.', ['OK'])")
+            assert await eventually(lambda: "recorded" in info.notice)
+            assert info.notice == "This meeting is being transcribed and Zoom AI is on. This meeting is being recorded."
+            assert [c[1:] for c in await dialog_presses(provider, at_least=2)] == [["", "OK"], ["", "OK"]]      # a second after the first: one answer a second
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being recorded.', ['OK'])")      # the same words again: pressed, said once
+            assert len(await dialog_presses(provider, at_least=3)) == 3 and info.notice.count("This meeting is being recorded.") == 1
+            await asyncio.sleep(0.3)
+            assert len(await dialog_presses(provider)) == 3 and info.dialog is None
+        finally:
+            await shutdown(provider)
+
+    async def test_a_dialog_with_a_choice_waits_on_the_table_and_a_tap_answers_it(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded.', ['Leave Meeting', 'Got it'])")
+            assert await eventually(lambda: info.dialog)
+            assert info.dialog["buttons"] == ["Leave Meeting", "Got it"] and info.dialog["title"] == "Recording consent"      # in the client's order: the affirmative last
+            assert info.dialog["text"] == "This meeting is being recorded." and info.notice == ""
+            await asyncio.sleep(0.3)
+            assert await dialog_presses(provider) == []                                  # nothing is pressed until a person taps
+            assert await provider.control("dialog", {"id": info.dialog["id"], "button": "Got it"}) == {"dialog": None}
+            assert info.dialog is None
+            assert ["dialog", "Recording consent", "Got it"] in await provider._page.evaluate("window.__zoomCalls")
+            assert await eventually(lambda: not provider._dialogs and not provider._on_screen)      # the page's own word that it closed changes nothing more
+            assert info.dialog is None
+        finally:
+            await shutdown(provider)
+
+    async def test_a_second_dialog_waits_behind_the_first_and_shows_when_the_first_is_answered(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Unmute?', 'The host would like you to unmute.', ['Stay muted', 'Unmute'])")
+            assert await eventually(lambda: info.dialog)
+            first = dict(info.dialog)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Breakout rooms', 'Join Room 1?', ['Not now', 'Join'])")
+            assert await eventually(lambda: len(provider._dialogs) == 2)
+            assert info.dialog == first                                                  # the oldest is the one on show: the second does not hide it
+            assert await provider.control("dialog", {"id": first["id"], "button": "Stay muted"}) == {"dialog": info.dialog}
+            assert info.dialog["title"] == "Breakout rooms" and info.dialog["id"] != first["id"]
+            await provider.control("dialog", {"id": info.dialog["id"], "button": "Not now"})
+            assert info.dialog is None
+        finally:
+            await shutdown(provider)
+
+    async def test_a_dialog_that_goes_away_clears_and_the_state_is_read_again(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            reads = []
+            read = provider._read_state_from_zoom
+
+            async def counting():
+                reads.append(1)
+                return await read()
+
+            provider._read_state_from_zoom = counting
+            sid = await provider._page.evaluate("window.ZoomMtg._showDialog('Unmute?', 'The host would like you to unmute.', ['Stay muted', 'Unmute'])")
+            assert await eventually(lambda: info.dialog)
+            reads.clear()
+            await provider._page.evaluate(f"window.ZoomMtg._closeDialog('{sid}')")
+            assert await eventually(lambda: info.dialog is None)
+            assert await eventually(lambda: reads)                                      # the host may have muted the room with that dialog
+        finally:
+            await shutdown(provider)
+
+    async def test_ask_everything_makes_a_notice_wait(self):
+        provider = await provider_for(api=FakeApi())
+        provider.dialog_policy = DialogPolicy(DEFAULT_ACKNOWLEDGE, ask_everything=True)
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being transcribed.', ['OK'])")
+            assert await eventually(lambda: info.dialog)
+            assert info.dialog["buttons"] == ["OK"] and info.notice == ""
+            await asyncio.sleep(0.3)
+            assert await dialog_presses(provider) == []
+        finally:
+            await shutdown(provider)
+
+    async def test_a_tap_zoom_does_not_take_says_why_and_the_dialog_stays_for_another_try(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.dialogStays = true;")
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Unmute?', 'The host would like you to unmute.', ['Stay muted', 'Unmute'])")
+            assert await eventually(lambda: info.dialog)
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("dialog", {"id": info.dialog["id"], "button": "Unmute"})
+            assert str(failure.value) == "Zoom's dialog did not close when Unmute was pressed; try again in a moment"
+            assert info.dialog is not None and info.dialog["title"] == "Unmute?" and provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_button_that_is_not_ready_says_so_and_a_button_the_dialog_lacks_does_too(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Breakout rooms', 'Join Room 1?', ['Not now', {label: 'Join', disabled: true}])")
+            assert await eventually(lambda: info.dialog)
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("dialog", {"id": info.dialog["id"], "button": "Join"})
+            assert str(failure.value) == "The dialog's Join button is not ready yet; try again in a moment"
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("dialog", {"id": info.dialog["id"], "button": "Maybe"})
+            assert str(failure.value) == "The dialog has no button called Maybe"
+            assert info.dialog is not None and await dialog_presses(provider) == []
+        finally:
+            await shutdown(provider)
+
+    async def test_a_second_tap_on_a_dialog_just_answered_is_done_not_an_error(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded.', ['Leave Meeting', 'Got it'])")
+            assert await eventually(lambda: info.dialog)
+            tap = {"id": info.dialog["id"], "button": "Got it"}
+            both = await asyncio.gather(provider.control("dialog", tap), provider.control("dialog", tap), return_exceptions=True)
+            assert both == [{"dialog": None}, {"dialog": None}]                          # the page finds the second one's dialog gone
+            assert len(await dialog_presses(provider)) == 1
+        finally:
+            await shutdown(provider)
+
+    async def test_a_tap_on_a_dialog_nobody_answered_that_is_gone_says_so(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("dialog", {"id": 99, "button": "OK"})
+            assert str(failure.value) == "That dialog is no longer on the screen"
+            for body in (None, {"id": 1}, {"button": "OK"}, {"id": "one", "button": "OK"}, "OK"):
+                with pytest.raises(MeetingControlError) as failure:
+                    await provider.control("dialog", body)
+                assert str(failure.value) == "Say which dialog and which button", body
+        finally:
+            await shutdown(provider)
+
+    async def test_chat_is_kept_with_an_unread_count_the_table_can_clear(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._chat('Ann Lee', 'Can you hear us?')")
+            assert await eventually(lambda: info.chat["messages"])
+            [message] = info.chat["messages"]
+            assert (message["from"], message["text"]) == ("Ann Lee", "Can you hear us?") and message["at"].endswith("Z")
+            assert info.chat["unread"] == 1
+            assert await provider.control("chat.seen") == {"chat": info.chat}
+            assert info.chat["unread"] == 0 and len(info.chat["messages"]) == 1
+            for i in range(25):
+                await provider._page.evaluate(f"window.ZoomMtg._chat('Raj', 'm{i}')")
+            assert await eventually(lambda: len(info.chat["messages"]) == 20 and info.chat["messages"][-1]["text"] == "m24", seconds=5)
+            assert len(info.chat["messages"]) == 20 and info.chat["unread"] == 25
+            assert info.chat["messages"][0]["text"] == "m5"                               # the last twenty, oldest first
+            await provider._page.evaluate("window.ZoomMtg._chatFile('Ann Lee', 'agenda.pdf')")
+            assert await eventually(lambda: info.chat["messages"][-1]["text"] == "agenda.pdf")      # a file is its name
+        finally:
+            await shutdown(provider)
+
+    async def test_a_new_meeting_starts_clean_whatever_the_last_one_left(self):
+        provider = await provider_for(api=FakeApi())
+        provider.ANSWER_SPACING_S = 0.2
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being recorded.', ['OK'])")      # the page's first dialog: its id is 1
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Unmute?', 'The host would like you to unmute.', ['Stay muted', 'Unmute'])")
+            await provider._page.evaluate("window.ZoomMtg._chat('Ann Lee', 'hello')")
+            assert await eventually(lambda: info.dialog and info.notice and info.chat["messages"])
+            assert await eventually(lambda: len(provider._background) == 0 and len(provider._dialogs) == 1)
+            await provider.leave_meeting()
+            info = await provider.join_meeting(LINK)
+            assert info.dialog is None and info.notice == "" and info.chat == {"unread": 0, "messages": []}
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being recorded.', ['OK'])")      # the new page numbers its dialogs from 1 again
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Breakout rooms', 'Join Room 1?', ['Not now', 'Join'])")   # so this is 2, as the last meeting's waiting one was
+            assert await eventually(lambda: info.notice and info.dialog)
+            assert info.dialog["title"] == "Breakout rooms"
+            assert await dialog_presses(provider, at_least=1) == [["dialog", "", "OK"]]
+        finally:
+            await shutdown(provider)
+
+    async def test_the_view_and_self_view_start_from_what_the_client_has(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._layout = 'gallery'; window.ZoomMtg._selfHidden = true;")
+        try:
+            info = await provider.join_meeting(LINK)
+            assert await eventually(lambda: info.controls["layout"]["value"] == "gallery" and info.controls["hide_self"]["on"] is True)
+            assert [p[0] for p in await provider._page.evaluate("window.__presses")] == ["stub-view", "stub-view"]       # looked at once, nothing picked
+            assert await provider._page.evaluate("[window.ZoomMtg._layout, window.ZoomMtg._selfHidden]") == ["gallery", True]
+            await provider._page.evaluate("window.ZoomMtg._setAttendee(16777218, {bRaiseHand: false})")
+            assert await eventually(lambda: info.people["list"][2]["hand"] is False)
+            await asyncio.sleep(0.3)
+            assert len(await provider._page.evaluate("window.__presses")) == 2                                            # and not again
+        finally:
+            await shutdown(provider)
+
+    async def test_the_view_waits_for_a_dialog_that_was_open_when_the_room_came_in(self):
+        """The page says a dialog as soon as it is drawn, and the provider's watcher takes what it said after the join's reads: the View
+        menu is not opened over a dialog the client already has on the screen, but when it is gone."""
+        stub = (STUB_JS + "window.ZoomMtg._behaviour.videoOffOnEntry = true; window.ZoomMtg._behaviour.videoStartsAfterMs = 1000;"
+                "const join = window.ZoomMtg.join; window.ZoomMtg.join = function (o) { join.call(this, o); setTimeout(() => "
+                "window.ZoomMtg._showDialog('Unmute?', 'The host would like you to unmute.', ['Stay muted', 'Unmute']), 100); };")
+        provider = await provider_for(api=FakeApi(), stub=stub)
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True)                     # the camera's switch is waited for: a second, the dialog comes within it
+            assert info.is_camera_on is True and await eventually(lambda: info.dialog)
+            await asyncio.sleep(0.5)
+
+            async def view_presses():
+                return [p for p in await provider._page.evaluate("window.__presses") if p[0] == "stub-view"]
+
+            assert await view_presses() == []                                            # nothing has opened the menu over the dialog
+            await provider.control("dialog", {"id": info.dialog["id"], "button": "Stay muted"})
+            for _ in range(60):
+                if len(await view_presses()) == 2:
+                    break
+                await asyncio.sleep(0.05)
+            assert len(await view_presses()) == 2                                        # and now it has, once: opened and closed
+        finally:
+            await shutdown(provider)
+
+    async def test_ending_the_meeting_for_everyone_is_done_when_the_meeting_is_over(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';")
+        try:
+            info = await provider.join_meeting(LINK)
+            assert info.controls["host"]["end"]["available"] is True
+            assert await provider.control("host.end") == {}
+            assert provider.state == MeetingState.IDLE and provider.current_meeting is None
+            assert provider._page.url == "about:blank"
+        finally:
+            await shutdown(provider)
+
+    async def test_a_refused_end_for_everyone_is_in_words_and_the_meeting_goes_on(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'co-host';")
+        try:
+            info = await provider.join_meeting(LINK)
+            assert info.controls["host"]["end"]["available"] is False                    # the host's alone: and Zoom refuses a co-host
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("host.end")
+            assert str(failure.value) == "Zoom refused endMeeting (code 3003)" and provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_from_config_takes_the_dialog_policy_and_the_reactions(self, tmp_path):
+        path = tmp_path / "zoom-credentials.json"
+        path.write_text(json.dumps({"sdk_client_id": "a", "sdk_client_secret": "b"}))
+        config = Config()
+        config.meeting.zoom_credentials_path = str(path)
+        provider = ZoomSdkProvider.from_config(config)
+        assert provider.dialog_policy.acknowledge == [p.lower() for p in DEFAULT_ACKNOWLEDGE] and provider.dialog_policy.ask_everything is False
+        assert provider.reactions == DEFAULT_REACTIONS
+        config.meeting.dialogs.acknowledge, config.meeting.dialogs.ask_everything = ["Is Being Recorded"], True
+        config.meeting.controls.reactions = ["Clap"]
+        provider = ZoomSdkProvider.from_config(config)
+        assert provider.dialog_policy.acknowledge == ["is being recorded"] and provider.dialog_policy.ask_everything is True
+        assert provider.reactions == ["Clap"]
+
+
+def test_the_base_provider_offers_no_controls():
+    from croom.meeting.providers.zoom import ZoomProvider
+
+    async def ask():
+        await ZoomProvider().control("raise_hand")
+
+    with pytest.raises(MeetingControlError) as failure:
+        asyncio.run(ask())
+    assert str(failure.value) == "Not available in this meeting"
+
+
+class HostEndPage:
+    """The page of a room whose host ends the meeting for everyone, as it goes in the real client: the page says the meeting is over, and the
+    call it was asked for is answered, or cut off by the navigation that follows, or fails after the meeting is gone; or Zoom refuses it."""
+
+    def __init__(self, provider, how):
+        self.provider, self.how = provider, how
+
+    async def evaluate(self, script, arg=None):
+        assert "crystalMeet.control" in script and arg == ["host.end", None], (script, arg)
+        if self.how == "refused":
+            raise playwright.Error("Page.evaluate: Error: Zoom refused endMeeting (code 3003)\n    at sdk (http://127.0.0.1/static/meeting.js:1:1)")
+        if self.how != "answered, no event":
+            self.provider._on_page_event("left", "")
+        if self.how in ("answered", "answered, no event"):
+            return {}
+        if self.how == "cut off":
+            raise playwright.Error("Page.evaluate: Execution context was destroyed, most likely because of a navigation")
+        for _ in range(200):                                      # "gone first": it fails once the room has gone back to idle
+            if self.provider.state == MeetingState.IDLE:
+                break
+            await asyncio.sleep(0.01)
+        raise playwright.Error("Page.evaluate: Target page, context or browser has been closed")
+
+
+class TestTheModelAndTheDialogsWithoutABrowser:
+    def test_the_mute_control_agrees_with_the_status_when_zoom_has_not_said(self):
+        provider = in_a_meeting(None)
+        info = provider.current_meeting
+        provider._muted = True                       # this join's own start: the room should be muted, and Zoom has not listed it yet
+        provider._take_state(dict(READING, me={"muted": None, "videoOn": None}, buttons={}))
+        assert info.is_muted is True and info.controls["mute"] == {"available": True, "on": False}
+        provider._take_state(dict(READING, me={"muted": False, "videoOn": True}, buttons={}))
+        assert info.is_muted is False and info.controls["mute"] == {"available": True, "on": True}
+
+    async def test_a_controls_answer_is_taken_into_the_model_it_returns(self):
+        """The page answers a control with the meeting as it is afterwards: that is what the table is told, without waiting for the page's own
+        event to say the same."""
+        before = dict(READING, buttons={"raise_hand": {"on": False}})
+        after = dict(READING, buttons={"raise_hand": {"on": True}}, me=dict(READING["me"], raisedHand=True))
+        page = FakePage(reading=before, control_reading=after)
+        provider = in_a_meeting(page)
+        provider._take_state(before)
+        assert provider.current_meeting.controls["raise_hand"]["on"] is False
+        state = await provider.control("raise_hand")
+        assert page.asked == [["raise_hand", None]] and state["raise_hand"] == {"available": True, "on": True}
+        assert provider.current_meeting.controls["raise_hand"]["on"] is True and state is provider.current_meeting.controls
+
+    def test_the_roster_is_listed_at_most_fifty_long_and_counted_whole(self):
+        provider = in_a_meeting(None)
+        crowd = [{"id": 100 + i, "name": f"Person {i}", "me": False} for i in range(60)]
+        provider._take_state(dict(READING, participants=crowd, count=60, buttons={}))
+        people = provider.current_meeting.people
+        assert people["count"] == 60 and len(people["list"]) == 50 and people["list"][0]["name"] == "Person 0"
+
+    def test_a_reading_of_the_current_user_alone_changes_only_what_it_says(self):
+        provider = in_a_meeting(None)
+        info = provider.current_meeting
+        provider._take_state(dict(READING, participants=[{"id": 1, "name": "Ann", "me": False}], count=1, buttons={}, recording=True, locked=True))
+        provider._take_state({"muted": True, "videoOn": False})                      # the page's first form of a reading: the user's own fields only
+        assert info.is_muted is True and info.is_camera_on is False and info.controls["mute"]["on"] is False
+        assert info.people["count"] == 1 and info.recording is True and info.locked is True
+        provider._take_state(None)
+        provider._take_state("not a reading")
+        assert info.is_muted is True and info.people["count"] == 1
+
+    async def test_acknowledgments_are_one_at_a_time_and_a_second_apart(self):
+        assert ZoomSdkProvider.ANSWER_SPACING_S == 1
+        page = FakePage()
+        provider = in_a_meeting(page)
+        provider.ANSWER_SPACING_S = 0.3                # shortened, as the other waits are here
+        for i in (1, 2, 3):
+            provider._on_dialog({"id": i, "title": "", "text": f"This meeting is being transcribed ({i}).", "buttons": ["OK"]})
+        assert page.pressed == []
+        await settle_background(provider)
+        assert [(i, label) for _, i, label in page.pressed] == [(1, "OK"), (2, "OK"), (3, "OK")]
+        gaps = [b[0] - a[0] for a, b in zip(page.pressed, page.pressed[1:], strict=False)]
+        assert all(gap >= 0.28 for gap in gaps), gaps
+
+    async def test_leaving_or_shutting_down_cancels_what_the_provider_started_on_its_own(self):
+        provider = in_a_meeting(FakePage())
+        waiting = provider._spawn(asyncio.sleep(60))                          # an answer to a dialog that waits for its turn, say
+        await asyncio.sleep(0)
+        await provider._cancel_tasks()
+        assert waiting.cancelled() and provider._background == set()
+
+    async def test_a_step_the_provider_took_on_its_own_that_fails_is_a_warning_not_a_lost_exception(self, caplog):
+        async def fails():
+            raise ValueError("a bug")
+
+        provider = in_a_meeting(FakePage())
+        provider._spawn(fails())
+        await settle_background(provider)
+        await asyncio.sleep(0)
+        assert [r.levelno for r in caplog.records if "a bug" in r.getMessage()] == [logging.WARNING]
+        assert provider._background == set()
+
+    async def test_a_dialog_the_page_says_twice_is_answered_once(self):
+        page = FakePage()
+        provider = in_a_meeting(page)
+        info = provider.current_meeting
+        notice = {"id": 4, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]}
+        provider._on_dialog(notice)
+        provider._on_dialog(dict(notice))
+        await settle_background(provider)
+        assert [(i, label) for _, i, label in page.pressed] == [(4, "OK")] and info.notice == "This meeting is being transcribed."
+        waiting = {"id": 5, "title": "Unmute?", "text": "The host would like you to unmute.", "buttons": ["Stay muted", "Unmute"]}
+        provider._on_dialog(waiting)
+        provider._on_dialog(dict(waiting))
+        assert info.dialog["id"] == 5 and len(provider._dialogs) == 1
+
+    async def test_a_dialog_is_never_answered_twice_even_when_the_first_press_failed(self):
+        page = FakePage(press_failure="The dialog's OK button is not ready yet; try again in a moment")
+        provider = in_a_meeting(page)
+        notice = {"id": 4, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]}
+        provider._on_dialog(notice)
+        await settle_background(provider)
+        provider._on_dialog_closed({"id": 4})
+        await settle_background(provider)
+        provider._on_dialog(dict(notice))                                               # the page says it again, once it has closed
+        await settle_background(provider)
+        assert [(i, label) for _, i, label in page.pressed] == [(4, "OK")]
+
+    async def test_the_reactions_the_table_offers_are_the_ones_in_the_config(self):
+        provider = in_a_meeting(None)
+        provider.reactions = ["Clap", "Tada"]
+        provider._take_state(dict(READING, buttons={"reactions": {}}))
+        assert provider.current_meeting.controls["reactions"] == {"available": True, "choices": ["Clap", "Tada"]}
+
+    async def test_a_notice_about_the_rooms_own_mute_is_pressed_and_has_no_line(self):
+        page = FakePage()
+        provider = in_a_meeting(page)
+        provider._on_dialog({"id": 6, "title": "", "text": "Your microphone has been muted by the host.", "buttons": ["OK"]})
+        await settle_background(provider)
+        assert [(i, label) for _, i, label in page.pressed] == [(6, "OK")]
+        assert provider.current_meeting.notice == "" and provider.current_meeting.dialog is None
+
+    async def test_an_acknowledgment_the_page_refuses_is_a_debug_line_and_the_notice_stays(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="croom.meeting.providers.zoom_sdk")
+        page = FakePage(press_failure="The dialog's OK button is not ready yet; try again in a moment")
+        provider = in_a_meeting(page)
+        provider._on_dialog({"id": 7, "title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]})
+        await settle_background(provider)
+        assert provider.current_meeting.notice == "This meeting is being recorded." and provider.current_meeting.dialog is None
+        said = [r for r in caplog.records if "not ready yet" in r.getMessage()]
+        assert [r.levelno for r in said] == [logging.DEBUG]
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [r.getMessage() for r in caplog.records]
+
+    async def test_every_dialog_is_a_line_in_the_journal_with_its_words_and_buttons(self, caplog):
+        caplog.set_level(logging.INFO, logger="croom.meeting.providers.zoom_sdk")
+        provider = in_a_meeting(FakePage())
+        provider._on_dialog({"id": 8, "title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]})
+        provider._on_dialog({"id": 9, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
+        await settle_background(provider)
+        lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "Zoom dialog" in r.getMessage()]
+        assert len(lines) == 2 and "Recording consent" in lines[0] and "Leave Meeting" in lines[0] and "Got it" in lines[0]
+        assert "This meeting is being transcribed." in lines[1] and "'OK'" in lines[1]
+
+    async def test_an_event_the_provider_cannot_read_is_dropped_and_the_watcher_goes_on(self):
+        provider = in_a_meeting(FakePage())
+        provider._display = NoDisplay()
+        info = provider.current_meeting
+        for event in [("state", "not json"), ("dialog", "{}"), ("dialog", "[1]"), ("dialog-closed", "null"), ("chat", "[]"), ("chat", "7"),
+                      ("chat", json.dumps({"from": "Ann", "text": "hi", "at": "x"})),
+                      ("dialog", json.dumps({"id": 3, "title": "Unmute?", "text": "", "buttons": ["Stay muted", "Unmute"]})),
+                      ("left", "")]:
+            provider._events.put_nowait(event)
+        await asyncio.wait_for(provider._watch_meeting(), timeout=5)
+        assert [m["text"] for m in info.chat["messages"]] == ["hi"]
+        assert provider.state == MeetingState.IDLE and provider.current_meeting is None
+        assert provider._dialogs == [] and not provider._on_screen and info.dialog is None   # nothing is said when the meeting ends: the list is cleared
+
+    async def test_a_handler_that_fails_is_a_warning_and_the_watcher_goes_on(self, caplog):
+        """Whatever is wrong with one event, the watcher must live: it is what sees the meeting end and returns the room to idle."""
+        provider = in_a_meeting(FakePage())
+
+        def fails(message):
+            raise RuntimeError("a bug in the handler")
+
+        provider._on_chat = fails
+        for event in [("chat", json.dumps({"from": "Ann", "text": "hi", "at": "x"})), ("left", "")]:
+            provider._events.put_nowait(event)
+        await asyncio.wait_for(provider._watch_meeting(), timeout=5)
+        assert provider.state == MeetingState.IDLE
+        assert [r.levelno for r in caplog.records if "Could not take an event" in r.getMessage()] == [logging.WARNING]
+
+    def test_what_the_page_sends_of_a_dialog_or_a_message_is_read_with_care(self):
+        provider = in_a_meeting(None)
+        assert provider._dialog_id({"id": "7"}) == 7 and provider._dialog_id({"id": 7.0}) == 7
+        for odd in ({}, {"id": "seven"}, {"id": None}, [1], None, "x", 7):
+            assert provider._dialog_id(odd) is None, odd
+        for odd in ([], 7, None, "hi"):
+            provider._on_chat(odd)
+        assert provider.current_meeting.chat == {"unread": 0, "messages": []}
+
+    async def test_an_error_takes_the_waiting_dialog_off_the_status(self):
+        provider = in_a_meeting(FakePage())
+        info = provider.current_meeting
+        for event in [("dialog", json.dumps({"id": 3, "title": "Unmute?", "text": "", "buttons": ["Stay muted", "Unmute"]})), ("error", "boom")]:
+            provider._events.put_nowait(event)
+        await asyncio.wait_for(provider._watch_meeting(), timeout=5)
+        assert provider.state == MeetingState.ERROR and info.error_message == "boom"
+        assert info.dialog is None and provider._dialogs == []
+
+    async def test_a_reconnect_keeps_the_dialogs_the_page_has_already_said(self):
+        """The page keeps its dialogs' ids across a reconnect and says a gone one closed: the list is not cleared on reconnecting."""
+        provider = in_a_meeting(FakePage())
+        provider._display = NoDisplay()
+        info = provider.current_meeting
+        watcher = asyncio.ensure_future(provider._watch_meeting())
+        for event in [("dialog", json.dumps({"id": 3, "title": "Unmute?", "text": "", "buttons": ["Stay muted", "Unmute"]})), ("reconnecting", ""), ("connected", "")]:
+            provider._events.put_nowait(event)
+        await asyncio.sleep(0.1)
+        assert info.dialog is not None and info.dialog["id"] == 3                        # the reconnect did not clear it
+        provider._events.put_nowait(("dialog-closed", json.dumps({"id": 3})))            # a dialog that went meanwhile is said to be closed
+        await asyncio.sleep(0.1)
+        assert info.dialog is None and provider.state == MeetingState.CONNECTED
+        provider._events.put_nowait(("left", ""))
+        await asyncio.wait_for(watcher, timeout=5)
+
+    async def test_state_events_older_than_the_last_read_at_join_are_dropped_and_the_others_kept(self):
+        """The watcher starts after the join's reads, so an event the page sent during the join is taken after them: one that is older than
+        the last read would put the status back to what it was. A read covers the state events; a dialog, a chat message or the meeting
+        ending is not something a read says, and stays for the watcher."""
+        page = BridgePage(True, True)                                  # Zoom says: muted
+        provider = ZoomSdkProvider(SDK_ONLY)
+        provider._page, provider._events = page, asyncio.Queue()
+        provider._current_meeting = MeetingInfo(platform="zoom", meeting_id="1", meeting_url=LINK)
+        stale = json.dumps({"muted": False, "videoOn": True})
+        dialog = json.dumps({"id": 1, "title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]})
+        chat = json.dumps({"from": "Ann", "text": "hi", "at": "x"})
+        for event in [("state", stale), ("dialog", dialog), ("state", stale), ("chat", chat), ("left", "")]:
+            provider._events.put_nowait(event)
+        zoom = await provider._read_state_from_zoom()
+        await provider._apply_wanted_state(zoom, camera_on=True, mic_on=False)
+        assert queued(provider._events) == [("dialog", dialog), ("chat", chat), ("left", "")]
+        assert provider.current_meeting.is_muted is True
+
+    async def test_the_view_is_read_once_when_the_view_button_is_there_and_no_dialog_is_open(self):
+        defaults = dict(READING, buttons={"layout": {"value": "speaker"}, "hide_self": {"on": False}})      # what the page says until the menu has been read
+        page = FakePage(reading=defaults, control_reading=READING)                                          # and what it says once it has: gallery, self view hidden
+        provider = in_a_meeting(page)
+        info = provider.current_meeting
+        provider._take_state(dict(READING, buttons={}))                                  # no View button on the screen yet
+        await settle_background(provider)
+        assert page.asked == [] and info.controls["layout"] == {"available": False, "choices": ["speaker", "gallery"]}
+        provider._on_dialog({"id": 1, "title": "Unmute?", "text": "", "buttons": ["Stay muted", "Unmute"]})
+        provider._take_state(defaults)                                                  # the button is there, a dialog too
+        await settle_background(provider)
+        assert page.asked == [] and info.controls["layout"]["value"] == "speaker"       # a dialog drawn in the menu's window would add its buttons to it
+        provider._on_dialog_closed({"id": 1})                                           # it closes: the state is read again, and now the view is looked at
+        await settle_background(provider)
+        assert page.asked == [["layout.read", None]]
+        assert info.controls["layout"]["value"] == "gallery" and info.controls["hide_self"]["on"] is True      # what the client has, from the menu's own answer
+        provider._take_state(defaults)
+        await settle_background(provider)
+        assert page.asked == [["layout.read", None]]                                    # once
+
+    async def test_the_view_is_not_read_while_the_room_is_still_joining(self):
+        page = FakePage()
+        provider = in_a_meeting(page)
+        provider._state = MeetingState.JOINING
+        provider._take_state(READING)
+        await settle_background(provider)
+        assert page.asked == []
+        provider._state = MeetingState.CONNECTED
+        provider._take_state(READING)
+        await settle_background(provider)
+        assert page.asked == [["layout.read", None]]
+
+    async def test_a_view_the_page_will_not_read_is_a_debug_line_and_is_not_asked_again(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="croom.meeting.providers.zoom_sdk")
+
+        class Refusing(FakePage):
+            async def evaluate(self, script, arg=None):
+                if "crystalMeet.control" in script:
+                    self.asked.append(arg)
+                    raise RuntimeError("Page.evaluate: Error: Zoom's layout button is not ready yet; try again in a moment")
+                return await super().evaluate(script, arg)
+
+        page = Refusing()
+        provider = in_a_meeting(page)
+        provider._take_state(READING)
+        await settle_background(provider)
+        provider._take_state(READING)
+        await settle_background(provider)
+        assert page.asked == [["layout.read", None]]
+        assert [r.levelno for r in caplog.records if "not ready yet" in r.getMessage()] == [logging.DEBUG]
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    @pytest.mark.parametrize("how", ["answered", "cut off", "gone first"])
+    async def test_ending_the_meeting_is_done_however_the_end_reaches_the_call(self, how):
+        """It is done when the call is answered, when the navigation that follows the end cuts the call off ("Execution context was
+        destroyed"), or when the meeting is already over by the time the call fails: in each the control waits for the room to be idle, and
+        none of them is an error for the table."""
+        provider = in_a_meeting(None)
+        provider._page = HostEndPage(provider, how)
+        provider._display = NoDisplay()
+        provider._watcher = asyncio.ensure_future(provider._watch_meeting())
+        assert await provider.control("host.end") == {}
+        assert provider.state == MeetingState.IDLE and provider.current_meeting is None and provider._watcher is None
+
+    async def test_an_end_zoom_refuses_is_in_words_and_the_meeting_goes_on(self):
+        provider = in_a_meeting(None)
+        provider._page = HostEndPage(provider, "refused")
+        provider._watcher = asyncio.ensure_future(provider._watch_meeting())
+        try:
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("host.end")
+            assert str(failure.value) == "Zoom refused endMeeting (code 3003)" and provider.state == MeetingState.CONNECTED
+        finally:
+            provider._watcher.cancel()
+            await asyncio.gather(provider._watcher, return_exceptions=True)
+
+    async def test_an_end_zoom_took_is_done_even_when_the_left_event_is_slow(self):
+        provider = in_a_meeting(None)
+        provider._page = HostEndPage(provider, "answered, no event")
+        provider._watcher = asyncio.ensure_future(provider._watch_meeting())
+        provider.LEFT_WAIT_S = 0.2
+        try:
+            assert await provider.control("host.end") == {}                                # Zoom said yes: the wait for the room to be idle is bounded
+            assert provider.state == MeetingState.CONNECTED                                # and the left event, when it comes, ends it
+        finally:
+            provider._watcher.cancel()
+            await asyncio.gather(provider._watcher, return_exceptions=True)
+

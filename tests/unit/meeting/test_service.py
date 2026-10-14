@@ -11,7 +11,7 @@ import pytest
 
 from croom.core.config import Config
 from croom.meeting.providers import get_all_providers
-from croom.meeting.providers.base import MeetingProvider, MeetingState, MeetingInfo
+from croom.meeting.providers.base import MeetingControlError, MeetingProvider, MeetingState, MeetingInfo
 from croom.meeting.providers.zoom_sdk import ZoomSdkProvider
 from croom.meeting.service import MeetingService
 
@@ -70,6 +70,20 @@ class TestMeetingInfo:
         assert "meeting_id" in result
         assert "platform" in result
         assert "meeting_url" in result
+
+    def test_the_model_for_the_table_starts_empty_and_goes_out_under_its_names(self):
+        """What the table draws from (spec 2026-10-13, section 3): nothing until the provider has read the meeting."""
+        sent = MeetingInfo(meeting_id="1", platform="zoom", meeting_url="https://zoom.us/j/1").to_dict()
+        assert sent["controls"] == {} and sent["people"] == {"count": 0, "list": []}
+        assert sent["chat"] == {"unread": 0, "messages": []} and sent["notice"] == "" and sent["dialog"] is None
+        assert sent["recording"] is False and sent["locked"] is False
+
+    def test_each_meeting_has_a_model_of_its_own(self):
+        first, second = (MeetingInfo(meeting_id=str(i), platform="zoom", meeting_url="u") for i in (1, 2))
+        first.chat["messages"].append({"from": "Ann", "text": "hi", "at": ""})
+        first.people["list"].append({"id": 1})
+        first.controls["mute"] = {"available": True}
+        assert second.chat == {"unread": 0, "messages": []} and second.people == {"count": 0, "list": []} and second.controls == {}
 
 
 class TestMeetingServiceBasic:
@@ -198,6 +212,57 @@ class TestJoinMeeting:
         await service.join_meeting("https://zoom.us/j/98765432100", "Lab", False, True, "940104")
         assert provider.joins == [{"url": "https://zoom.us/j/98765432100", "display_name": "Lab",
                                    "camera_on": False, "mic_on": True, "passcode": "940104"}]
+
+
+class ControllableProvider(RecordingProvider):
+    """A provider that carries out controls: remembers what it was asked and answers with the state it left."""
+
+    def __init__(self):
+        super().__init__()
+        self.controlled = []
+
+    async def control(self, name, value=None):
+        self.controlled.append((name, value))
+        if name == "raise_hand" and value == "refuse":
+            raise MeetingControlError("Zoom did not raise the hand")
+        return {"raise_hand": {"available": True, "on": True}}
+
+    async def leave_meeting(self):
+        pass
+
+
+class TestControl:
+    """A control from the table goes to the provider of the meeting (spec 2026-10-13, section 3)."""
+
+    async def joined(self):
+        service = MeetingService(Config())
+        provider = ControllableProvider()
+        service._providers["zoom"] = provider
+        await service.join_meeting("https://zoom.us/j/98765432100")
+        return service, provider
+
+    async def test_a_control_goes_to_the_provider_with_its_value_and_the_state_comes_back(self):
+        service, provider = await self.joined()
+        assert await service.control("raise_hand") == {"raise_hand": {"available": True, "on": True}}
+        await service.control("reactions", "Clap")
+        assert provider.controlled == [("raise_hand", None), ("reactions", "Clap")]
+
+    async def test_the_providers_words_reach_the_caller(self):
+        service, _ = await self.joined()
+        with pytest.raises(MeetingControlError, match="Zoom did not raise the hand"):
+            await service.control("raise_hand", "refuse")
+
+    async def test_without_a_meeting_a_control_says_so(self):
+        with pytest.raises(MeetingControlError) as failure:
+            await MeetingService(Config()).control("raise_hand")
+        assert str(failure.value) == "Not in a meeting"
+
+    async def test_a_meeting_that_ended_is_no_meeting(self):
+        service, provider = await self.joined()
+        await service.leave_meeting()
+        with pytest.raises(MeetingControlError, match="Not in a meeting"):
+            await service.control("mute")
+        assert provider.controlled == []
 
 
 @pytest.mark.parametrize(

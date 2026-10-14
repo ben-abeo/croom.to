@@ -12,6 +12,7 @@ from typing import Optional, Dict, Any, List, Callable
 from croom.core.config import Config
 from croom.core.service import Service
 from croom.meeting.providers.base import (
+    MeetingControlError,
     MeetingProvider,
     MeetingInfo,
     MeetingState,
@@ -202,6 +203,13 @@ class MeetingService(Service):
         if not self._active_provider:
             return True
         return await self._active_provider.toggle_mute()
+
+    async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
+        """Carry out a control from the table on the provider of the meeting (spec 2026-10-13, section 3); words for the table in a
+        MeetingControlError when the platform will not or cannot just now."""
+        if not self._active_provider:
+            raise MeetingControlError("Not in a meeting")
+        return await self._active_provider.control(name, value)
 
     async def diagnostics(self) -> Dict[str, Any]:
         """What the active provider's page sees, for pinning the platform's wording; empty without a meeting."""

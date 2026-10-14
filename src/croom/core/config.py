@@ -54,6 +54,26 @@ class RoomConfig:
         self.location = without_placeholder(self.location)
 
 
+# Dialogs Zoom draws over the TV that are only a notice (one button): pressed at once and kept on the table as a line under the title.
+DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on",
+                       "has been muted", "has been unmuted", "recording has started", "recording has stopped"]
+# Zoom 6.5.0's reaction picker has no emoji: its items are named, and the table offers them by those names.
+DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
+
+
+@dataclass
+class DialogsConfig:
+    """What the agent does with the dialogs Zoom draws over the TV (spec 2026-10-13, section 5)."""
+    acknowledge: List[str] = field(default_factory=lambda: list(DEFAULT_ACKNOWLEDGE))   # one-button notices pressed at once
+    ask_everything: bool = False   # every dialog waits for a tap on the table, the acknowledgeable ones too
+
+
+@dataclass
+class ControlsConfig:
+    """What the table offers from the meeting's controls (spec 2026-10-13, section 8)."""
+    reactions: List[str] = field(default_factory=lambda: list(DEFAULT_REACTIONS))   # by the names Zoom's picker gives them
+
+
 @dataclass
 class MeetingConfig:
     """Meeting service configuration."""
@@ -66,6 +86,19 @@ class MeetingConfig:
     zoom_credentials_path: str = ""  # /etc/croom/zoom-credentials.json on a room device
     google_profile_dir: str = ""  # /var/lib/croom/meet-profile on a room device; empty means a guest browser
     kiosk: bool = True  # the TV browser fills the screen with no window chrome
+    dialogs: DialogsConfig = field(default_factory=DialogsConfig)
+    controls: ControlsConfig = field(default_factory=ControlsConfig)
+
+    def __post_init__(self):
+        # From a config file the two sections are plain dicts, or nothing at all when their lines were deleted.
+        if isinstance(self.dialogs, dict):
+            self.dialogs = DialogsConfig(**self.dialogs)
+        elif self.dialogs is None:
+            self.dialogs = DialogsConfig()
+        if isinstance(self.controls, dict):
+            self.controls = ControlsConfig(**self.controls)
+        elif self.controls is None:
+            self.controls = ControlsConfig()
 
 
 @dataclass
@@ -255,6 +288,8 @@ class Config:
                 "zoom_credentials_path": self.meeting.zoom_credentials_path,
                 "google_profile_dir": self.meeting.google_profile_dir,
                 "kiosk": self.meeting.kiosk,
+                "dialogs": {"acknowledge": list(self.meeting.dialogs.acknowledge), "ask_everything": self.meeting.dialogs.ask_everything},
+                "controls": {"reactions": list(self.meeting.controls.reactions)},
             },
             "calendar": {
                 "providers": self.calendar.providers,

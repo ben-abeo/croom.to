@@ -25,6 +25,10 @@ from croom.core.config import (
     get_config_path,
     CONFIG_PATHS,
     without_placeholder,
+    ControlsConfig,
+    DialogsConfig,
+    DEFAULT_ACKNOWLEDGE,
+    DEFAULT_REACTIONS,
 )
 
 
@@ -367,3 +371,57 @@ class TestRoomLocationPlaceholder:
     def test_without_placeholder_handles_none_and_numbers(self):
         assert without_placeholder(None) == ""
         assert without_placeholder(3) == "3"
+
+
+class TestDialogAndControlConfig:
+    """What the agent does with the dialogs Zoom draws over the TV, and the reactions the table offers (spec 2026-10-13, sections 5 and 8)."""
+
+    def test_dialog_and_control_settings_round_trip_and_default(self):
+        config = Config()
+        assert "is being transcribed" in config.meeting.dialogs.acknowledge and config.meeting.dialogs.ask_everything is False
+        assert config.meeting.controls.reactions[0] == "Thumbs Up"
+        loaded = Config.from_dict({"meeting": {"dialogs": {"acknowledge": ["is being recorded"], "ask_everything": True}, "controls": {"reactions": ["Clap"]}}})
+        assert loaded.meeting.dialogs.acknowledge == ["is being recorded"] and loaded.meeting.dialogs.ask_everything is True
+        assert Config.from_dict(loaded.to_dict()).meeting.controls.reactions == ["Clap"]
+
+    def test_the_reactions_are_zooms_own_names_not_emoji(self):
+        """Zoom 6.5.0's picker has no emoji: its items are named Clap, Thumbs Up, Joy, Open Mouth, Heart and Tada."""
+        assert sorted(DEFAULT_REACTIONS) == ["Clap", "Heart", "Joy", "Open Mouth", "Tada", "Thumbs Up"]
+        assert Config().meeting.controls.reactions == DEFAULT_REACTIONS == ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
+
+    def test_the_defaults_are_written_out_and_are_copies(self):
+        acknowledge, reactions = list(DEFAULT_ACKNOWLEDGE), list(DEFAULT_REACTIONS)       # what they are now, to compare with after the edits below
+        assert acknowledge[:2] == ["is being recorded", "is being transcribed"]
+        config = Config()
+        written = config.to_dict()["meeting"]
+        assert written["dialogs"] == {"acknowledge": acknowledge, "ask_everything": False} and written["controls"] == {"reactions": reactions}
+        written["dialogs"]["acknowledge"].clear()                                         # what is written out is a copy of what the config holds
+        written["controls"]["reactions"].clear()
+        assert config.meeting.dialogs.acknowledge == acknowledge and config.meeting.controls.reactions == reactions
+        first, second = Config(), Config()
+        first.meeting.dialogs.acknowledge.append("one more")                              # and a config edits its own lists, not the module's
+        first.meeting.controls.reactions.clear()
+        assert second.meeting.dialogs.acknowledge == acknowledge and second.meeting.controls.reactions == reactions
+        assert DEFAULT_ACKNOWLEDGE == acknowledge and DEFAULT_REACTIONS == reactions
+
+    def test_a_section_given_in_part_keeps_the_defaults_of_the_rest(self):
+        config = Config.from_dict({"meeting": {"dialogs": {"ask_everything": True}}})
+        assert config.meeting.dialogs == DialogsConfig(acknowledge=list(DEFAULT_ACKNOWLEDGE), ask_everything=True)
+        assert config.meeting.controls == ControlsConfig()
+
+    def test_a_section_left_empty_in_the_file_is_the_default(self):
+        """A person who deletes the lines under `dialogs:` leaves the key with nothing: the file still loads, and means the defaults."""
+        config = Config.from_dict({"meeting": {"dialogs": None, "controls": None}})
+        assert config.meeting.dialogs == DialogsConfig() and config.meeting.controls == ControlsConfig()
+        assert Config.from_dict(config.to_dict()).meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE
+
+    def test_the_settings_survive_the_config_file(self, temp_dir):
+        config = Config()
+        config.meeting.dialogs.acknowledge = ["is being recorded"]
+        config.meeting.dialogs.ask_everything = True
+        config.meeting.controls.reactions = ["Clap", "Tada"]
+        path = str(temp_dir / "config.yaml")
+        config.save(path)
+        loaded = load_config(path)
+        assert loaded.meeting.dialogs == DialogsConfig(acknowledge=["is being recorded"], ask_everything=True)
+        assert loaded.meeting.controls == ControlsConfig(reactions=["Clap", "Tada"])

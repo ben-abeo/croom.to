@@ -90,7 +90,8 @@ body[data-photo] .event, body[data-photo] .day { background: rgba(0, 22, 54, 0.5
   z-index: 1;
   display: grid;
   grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
-  gap: clamp(24px, 4vw, 64px);
+  --gap: clamp(24px, 4vw, 64px);    /* between the status and what follows it; the week's head keeps to it too (below) */
+  gap: var(--gap);
   align-content: start;
   padding-top: clamp(20px, 4vh, 48px);
 }
@@ -162,10 +163,10 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
 .day-head { flex: none; }
 .day-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1rem; font-weight: 600; }   /* "Wednesday" is one line, or an ellipsis on a small sign */
 .day-date { display: block; color: var(--periwinkle-300); font-size: 0.875rem; }
-.none { margin: 0.625rem 0 0; color: var(--periwinkle-300); font-size: 0.875rem; }
+.none { margin: 0.625rem 0 0; color: var(--periwinkle-300); font-size: 0.875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, cut with an ellipsis on a day narrower than its words */
 .slots { list-style: none; margin: 0.5rem 0 0; padding: 0; flex: 1 1 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 0.375rem; }
-.slot { flex: none; padding: 0.375rem 0.5rem; border-radius: 12px; background: rgba(255, 255, 255, 0.07); }
-.slot time { display: block; color: var(--periwinkle-300); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.slot { flex: none; padding: 0.375rem 0.5rem; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }
+.slot time { display: block; color: var(--periwinkle-300); font-size: 0.875rem; font-variant-numeric: tabular-nums; }   /* the title's size */
 .slot .title { margin: 0.125rem 0 0; overflow: hidden; overflow-wrap: anywhere; font-size: 0.875rem; line-height: 1.25; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }   /* two lines, then an ellipsis */
 .slot .who { margin: 0.125rem 0 0; color: var(--periwinkle-300); font-size: 0.75rem; }
 .slot.now { box-shadow: inset 0 0 0 2px var(--status); }   /* the booking in progress, ringed as on the Today list */
@@ -189,12 +190,18 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
 .score .last b { color: #FFB366; font-weight: 600; }
 .score .next { color: var(--periwinkle-300); }
 
+/* A short screen (a 7-inch panel, 800 by 480) has no height to spare in the week view: the status gives up its detail line, which the
+   days need for what each leaves out ("+8 more"), and a day gives up its date, since its name says which day it is. */
+@media (max-height: 560px) {
+  body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }
+}
+
 @media (orientation: portrait) {
   .main { grid-template-columns: minmax(0, 1fr); }
   .room { font-size: clamp(2.6rem, 11vw, 4.6rem); }
   .room.long { font-size: clamp(2rem, 7vw, 3rem); }
-  body[data-view="week"] .main { grid-template-rows: auto auto minmax(0, 1fr); }
-  .week-head { grid-column: 1; grid-row: 2; margin-bottom: calc(10px - 1.25rem); }   /* the head and the days, ten pixels apart */
+  body[data-view="week"] .main { grid-template-rows: auto auto minmax(0, 1fr); row-gap: var(--gap); }   /* the head where the Today head was */
+  .week-head { grid-column: 1; grid-row: 2; margin-bottom: calc(10px - var(--gap)); }   /* and the days ten pixels under it */
   .week .note { grid-row: 3; }
   .days { grid-row: 3; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(7, minmax(0, 1fr)); }
   .day { flex-direction: row; gap: 1rem; padding: 0.5rem 0.75rem; }

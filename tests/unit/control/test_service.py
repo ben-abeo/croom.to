@@ -19,6 +19,7 @@ from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.core.config import Config
 from croom.core.service import Service
 from croom.meeting.providers.base import MeetingInfo, MeetingState, detect_platform
+from croom.control import service as control_service
 from croom.control.service import ControlService
 
 
@@ -470,11 +471,11 @@ def central_time(monkeypatch):
     time.tzset()
 
 
-def at(text, offset="Z", **kwargs):
-    """A booking starting at an ISO moment ("2026-11-01T04:30"), an hour long; offset is "Z" or "+09:00"."""
+def at(text, offset="Z", hours=1, **kwargs):
+    """A booking starting at an ISO moment ("2026-11-01T04:30"), an hour long unless `hours` says otherwise; offset is "Z" or "+09:00"."""
     start = datetime.fromisoformat(text + ("+00:00" if offset == "Z" else offset))
     return CalendarEvent(id=kwargs.pop("id", text), title=kwargs.pop("title", text), start_time=start,
-                         end_time=start + timedelta(hours=1), meeting_url="https://zoom.us/j/98765432100",
+                         end_time=start + timedelta(hours=hours), meeting_url="https://zoom.us/j/98765432100",
                          meeting_platform=MeetingPlatform.ZOOM)
 
 
@@ -494,7 +495,7 @@ class TestCalendarWeek:
         events = [
             at("2026-11-02T15:00", id="monday", title="Monday 9 AM"),                          # 9:00 AM CST on the 2nd
             at("2026-11-01T04:30", id="late", title="Saturday 11:30 PM"),                     # the 31st at 11:30 PM CDT: the 1st in UTC
-            at("2026-11-01T05:30", id="early", title="Sunday 12:30 AM"),                      # the 1st at 12:30 AM CDT: the same UTC day, the next local one
+            at("2026-11-01T05:30", hours=20, id="early", title="Sunday 12:30 AM"),            # the 1st at 12:30 AM CDT: the same UTC day, the next local one; it runs long, so it ends after the 5 PM booking that follows it
             at("2026-11-02T05:30", id="evening", title="Sunday 11:30 PM"),                    # the 1st at 11:30 PM CST: the 2nd in UTC, after the clocks went back
             at("2026-11-02T08:00", "+09:00", id="tokyo", title="Booked from Tokyo"),          # the 2nd by its own offset, the 1st at 5:00 PM here
             at("2026-10-29T15:00", id="today", title="Thursday 10 AM"),
@@ -509,7 +510,7 @@ class TestCalendarWeek:
         assert all(list(d) == ["date", "label", "events"] for d in data["days"])
         ids = {d["date"]: [e["id"] for e in d["events"]] for d in data["days"]}
         assert ids == {"2026-10-29": ["today"], "2026-10-30": [], "2026-10-31": ["late"],                    # the 31st's last booking stays on the 31st
-                       "2026-11-01": ["early", "tokyo", "evening"],                                           # the 1st's, in start order, whatever the order sent
+                       "2026-11-01": ["early", "tokyo", "evening"],                                           # the 1st's, in start order (not end order: the first one ends after the second), whatever the order sent
                        "2026-11-02": ["monday"], "2026-11-03": [], "2026-11-04": []}
 
     async def test_an_empty_week_is_seven_empty_days(self, client_factory, central_time):
@@ -527,6 +528,22 @@ class TestCalendarWeek:
         assert set(booking) == EVENT_FIELDS                                                                    # the page's fields, and nothing the room page keeps off the network
         assert (booking["title"], booking["meeting_platform"], booking["joinable"]) == ("Design review", "zoom", True)
         assert booking["start_time"] == ev.start_time.isoformat()
+
+    async def test_the_week_begins_on_the_local_day_of_the_devices_clock_not_the_utc_one(self, client_factory, central_time, monkeypatch):
+        """The device's clock says 3:30 AM UTC on November 2nd, which is 9:30 PM on November 1st in Central time: the room's own day is
+        the 1st, so that is where the week starts (the date in UTC would start it a day late and leave out the evening's bookings)."""
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 2, 3, 30, tzinfo=timezone.utc).astimezone(tz)
+
+        monkeypatch.setattr(control_service, "datetime", Clock)
+        evening = at("2026-11-02T03:00", id="evening", title="9:00 PM on the 1st")                              # 3:00 AM UTC on the 2nd
+        service = make_service(meeting=StubMeeting(), calendar=StubCalendar(events=[evening]))
+        assert service._local_today() == date(2026, 11, 1)
+        days = (await (await (await client_factory(service)).get("/api/calendar/week")).json())["days"]
+        assert [(d["date"], d["label"]) for d in (days[0], days[-1])] == [("2026-11-01", "Sunday"), ("2026-11-07", "Saturday")]
+        assert [e["id"] for e in days[0]["events"]] == ["evening"]
 
     async def test_the_week_begins_on_the_devices_own_today(self, client_factory, central_time):
         skip_if_day_ends_within(1)

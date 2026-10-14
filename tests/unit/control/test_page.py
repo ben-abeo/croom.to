@@ -1213,16 +1213,17 @@ def test_this_week_shows_seven_columns_and_back_returns(browser):
             assert page.locator("#chip-text").inner_text().startswith("Free until") and page.locator("#room-name").inner_text() == "Boardroom"   # the status stays
             assert page.locator("#week-back").inner_text() == "Back" and visible_buttons(page) == ["week-back"]
             boxes = [days.nth(n).bounding_box() for n in range(7)]
+            week_head = page.locator(".week-head").bounding_box()
+            assert all(abs(week_head[k] - today_head[k]) <= 1 for k in ("x", "y", "width")), (width, height, week_head, today_head)   # the head stands where the Today list's did, in both orientations: Back is where This week was
             if width > height:                                              # landscape: side by side in one row, the same width
                 assert all(abs(b["y"] - boxes[0]["y"]) <= 0.5 and abs(b["height"] - boxes[0]["height"]) <= 0.5 for b in boxes)
                 assert all(abs(b["width"] - boxes[0]["width"]) <= 1 for b in boxes)
                 assert all(a["x"] + a["width"] <= b["x"] for a, b in zip(boxes, boxes[1:]))
-                week_head = page.locator(".week-head").bounding_box()
-                assert all(abs(week_head[k] - today_head[k]) <= 1 for k in ("x", "y", "width"))      # the head stands where the Today list's did: Back is where This week was
             else:                                                           # portrait: stacked, one under the next, the same height
                 assert all(abs(b["x"] - boxes[0]["x"]) <= 0.5 and abs(b["width"] - boxes[0]["width"]) <= 0.5 for b in boxes)
                 assert all(abs(b["height"] - boxes[0]["height"]) <= 1 for b in boxes)
                 assert all(a["y"] + a["height"] <= b["y"] for a, b in zip(boxes, boxes[1:]))
+                assert abs(boxes[0]["y"] - (week_head["y"] + week_head["height"]) - 10) <= 1       # the head and the days, ten pixels apart
             assert all(b["x"] >= 0 and b["x"] + b["width"] <= width and b["y"] >= 0 and b["y"] + b["height"] <= height for b in boxes)
             assert fits(page)
             page.click("#week-back")                                         # Back: the Today list again
@@ -1512,6 +1513,162 @@ def test_the_week_view_can_be_opened_and_left_from_the_keyboard(browser):
         assert page.evaluate("document.activeElement.id") == "week-back"
         page.keyboard.press("Enter")
         assert page.evaluate("document.body.dataset.view") == "today" and page.evaluate("document.activeElement.id") == "this-week"
+        page.close()
+
+
+def test_the_weeks_ring_is_on_the_one_booking_that_ends_first_and_only_todays_column_has_the_outline(browser):
+    """Two bookings in progress together (neither has a video link, so the sign itself decides which one the room is in): the ring goes
+    to the one that ends first, once, in today's column, as it does on the Today list; the bookings of the other days, three of which
+    have some, are never ringed; and today's column alone has the thin outline."""
+    skip_if_day_ends_within(3)
+    now = datetime.now().astimezone()
+    if now - now.replace(hour=0, minute=0, second=0, microsecond=0) < timedelta(hours=1):
+        pytest.skip("less than an hour has passed in the local day")        # the long booking began 50 minutes ago
+    in_person = {"url": None, "platform": MeetingPlatform.UNKNOWN}
+    bookings = [event("long", "Long review", -50, duration=180, **in_person),   # 50 minutes in, 130 to go
+                event("short", "Short sync", -20, duration=40, **in_person),    # 20 minutes in, 20 to go: it ends first
+                event("later", "Sales pipeline", 100),
+                event_on("t1", "Design review", 1, 10, 0), event_on("t2", "Planning", 1, 14, 0),
+                event_on("w1", "Offsite lunch", 2, 12, 0, **in_person), event_on("w2", "Vendor demo", 4, 9, 30)]
+    with PageServer(calendar_events=bookings) as server:
+        page = open_sign(browser, server, state="occupied")
+        assert page.locator("#events .event.now .title").all_text_contents() == ["Short sync"]      # the Today list rings it ...
+        open_the_week(page)
+        days = page.locator("#week .day")
+        assert days.first.locator(".slot .title").all_text_contents() == ["Long review", "Short sync", "Sales pipeline"]
+        assert [days.nth(n).locator(".slot").count() for n in range(7)] == [3, 2, 1, 0, 1, 0, 0]   # bookings on today and on three other days
+        assert page.locator("#week .slot.now").count() == 1                 # ... and the week rings it, once, whatever the other days hold
+        assert days.first.locator(".slot.now .title").all_text_contents() == ["Short sync"]
+        outlines = days.evaluate_all("""days => days.map((day) => {
+            const style = getComputedStyle(day);
+            return [style.outlineStyle, style.outlineWidth, style.outlineColor, style.outlineOffset];
+        })""")
+        assert outlines[0] == ["solid", "1px", "rgba(255, 255, 255, 0.4)", "-1px"]    # today's own: 1 px, drawn inside the panel
+        assert [outline[0] for outline in outlines[1:]] == ["none"] * 6                # and no other day has one
+        page.close()
+
+
+def test_a_second_visit_to_the_week_whose_request_fails_shows_the_failure_and_none_of_the_first_visits_days(browser):
+    """What the first visit drew is not kept for the next: a visit that cannot be loaded says so, with no days under the note."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = open_sign(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        open_the_week(page)
+        assert page.locator("#week .slot").count() == 2                      # the first visit has bookings to show
+        page.click("#week-back")
+        page.route("**/api/calendar/week", lambda route: route.abort())
+        page.click("#this-week")
+        page.wait_for_function("document.getElementById('week-note').innerText === 'The week could not be loaded.'", timeout=5000)
+        assert page.locator("#week .day").count() == 0 and page.locator("#week .slot").count() == 0
+        assert page.evaluate("document.body.dataset.view") == "week" and visible_buttons(page) == ["week-back"] and fits(page)
+        page.click("#week-back")
+        page.unroute("**/api/calendar/week")
+        open_the_week(page)                                                  # and the visit after it, with its request answered, is whole again
+        assert page.locator("#week-note").inner_text() == "" and page.locator("#week .slot").count() == 2
+        assert errors == []
+        page.close()
+
+
+def test_the_week_stays_up_while_the_sign_cannot_reach_the_room_and_back_and_the_return_still_work(browser):
+    """Under "Sign not connected" the week that was on screen stays (nothing it shows has changed), Back puts the Today list in its
+    place, and a week opened then goes back to Today after thirty seconds, all without the room."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        view = lambda: page.evaluate("document.body.dataset.view")
+
+        def pass_seconds(seconds):
+            page.clock.fast_forward(seconds * 1000)
+            page.wait_for_timeout(300)
+
+        open_the_week(page)
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)                                         # the next poll fails: the room has gone
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        assert page.locator("#chip-text").inner_text() == "Sign not connected"
+        assert view() == "week" and page.locator("#week .day").count() == 7 and page.locator("#week").is_visible()   # the week it had stays
+        assert visible_buttons(page) == ["week-back"]
+        page.click("#week-back")                                             # Back works without the room
+        assert view() == "today" and page.locator("#today").is_visible() and visible_buttons(page) == ["this-week"]
+        open_the_week(page)                                                  # and so does a new visit, which the thirty seconds close
+        pass_seconds(29)
+        assert view() == "week" and page.locator("#chip-text").inner_text() == "Sign not connected"
+        pass_seconds(2)
+        assert view() == "today" and page.locator("#today").is_visible() and page.locator("#week").is_hidden()
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(390, 844), (600, 1000), (800, 1280), (1080, 1920)])
+def test_in_portrait_the_weeks_head_stands_where_todays_did_at_every_width(browser, width, height):
+    """The space between the status and what follows it grows with the width (24 px up to 64): the week's head keeps to that same
+    space, so that Back is where This week was, and the days start ten pixels under the head."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)], room_name="Boardroom") as server:
+        page = open_sign(browser, server, width, height)
+        today_head = page.locator(".today-head").bounding_box()
+        open_the_week(page)
+        head, days = page.locator(".week-head").bounding_box(), page.locator("#week-days").bounding_box()
+        assert all(abs(head[k] - today_head[k]) <= 1 for k in ("x", "y", "width")), (head, today_head)
+        assert abs(days["y"] - (head["y"] + head["height"]) - 10) <= 1, (head, days)
+        page.close()
+
+
+def test_a_weeks_booking_has_one_size_of_type_for_its_time_and_title_and_the_signs_panel_fill(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = open_sign(browser, server)
+        open_the_week(page)
+        slot = page.locator("#week .slot").first
+        style = lambda selector, prop: slot.locator(selector).evaluate(f"e => getComputedStyle(e).{prop}")
+        assert style("time", "fontSize") == style(".title", "fontSize") == "14px"      # one size, not 13 beside 14
+        assert style(".who", "fontSize") == "12px"                                      # the platform stays in small type
+        assert slot.evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(255, 255, 255, 0.06)"   # the sign's one panel fill
+        page.close()
+
+
+def test_a_weeks_day_with_nothing_booked_keeps_its_words_on_one_line_on_a_small_screen(browser):
+    """At 800 by 480 a day is about 95 px wide, less than "Nothing booked" asks for: the words are cut with an ellipsis, not wrapped."""
+    with PageServer(room_name="Boardroom") as server:
+        page = open_sign(browser, server, 800, 480)
+        open_the_week(page)
+        nones = page.locator("#week .none")
+        assert nones.count() == 7
+        assert nones.first.evaluate("e => { const s = getComputedStyle(e); return [s.whiteSpace, s.overflow, s.textOverflow]; }") == ["nowrap", "hidden", "ellipsis"]
+        lines = nones.evaluate_all("els => els.map((e) => e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight))")
+        assert all(abs(n - 1) < 0.01 for n in lines), lines                 # one line each, though the words are wider than the day
+        assert nones.first.evaluate("e => e.scrollWidth > e.clientWidth")
+        assert fits(page)
+        page.close()
+
+
+@pytest.mark.parametrize("room, location", [("Boardroom", "2nd floor, by the kitchen"), ("Conference Room Twelve", "2nd floor, by the kitchen, past the elevators")])
+def test_on_a_short_screen_the_week_gives_up_the_status_detail_and_the_dates_to_keep_its_plus_n_more(browser, room, location):
+    """Under 561 px of height the status's detail line is not shown while the week is, so that the days have the room for the count of
+    what each leaves out ("+8 more"), which a day's box clips when it has none; the Today list brings the detail back."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name=room, room_location=location) as server:
+        for width, height in ((800, 480), (900, 500), (1024, 560)):
+            page = open_sign(browser, server, width, height)
+            assert page.locator("#detail").is_visible()                      # on the Today list the detail is there
+            open_the_week(page)
+            assert page.locator("#detail").is_hidden(), (width, height)
+            assert fits(page), (width, height)
+            counts = page.evaluate("""() => [...document.querySelectorAll('#week .day')].map((day) => {
+                const more = day.querySelector('.more');
+                if (!more || more.hidden) return null;
+                const inside = more.getBoundingClientRect(), box = day.getBoundingClientRect();
+                return [inside.top >= box.top && inside.bottom <= box.bottom, more.textContent];
+            })""")
+            assert all(count is not None for count in counts[1:]) and all(count[0] for count in counts[1:]), (room, width, height, counts)   # every busy day shows its count, whole
+            page.click("#week-back")
+            assert page.locator("#detail").is_visible(), (width, height)
+            page.close()
+        page = open_sign(browser, server, 1024, 561)                         # one pixel more height and the detail stays
+        open_the_week(page)
+        assert page.locator("#detail").is_visible()
         page.close()
 
 

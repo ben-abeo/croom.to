@@ -117,6 +117,32 @@ async def test_what_the_tv_says_when_it_is_asked_after_a_control_is_one_printabl
         await service.stop()
 
 
+async def test_the_input_of_a_tv_that_does_not_name_it_is_found_by_the_app_id_as_the_tv_gave_it(tmp_path):
+    """The library has no current input: it is the one of the list whose app is on the screen, found by the id of the app as the TV
+    wrote it. The app shown is tidied (names.one_line), the match is not made on what has been tidied."""
+    raw = "com.webos.app.hdmi1\x07"
+
+    def unnamed(host, key):
+        client = FakeTvClient(host, key)
+        del client.tv_state.current_input                  # (the fake names its input itself, as the library does not)
+        client.tv_state.inputs = {raw: {"id": "HDMI_1", "label": "HDMI 1", "appId": raw},
+                                  "com.webos.app.hdmi2": {"id": "HDMI_2", "label": "HDMI 2", "appId": "com.webos.app.hdmi2"}}
+        client.tv_state.current_app_id = raw
+        return client
+    service = build_service(tmp_path, unnamed)
+    await service.start()
+    try:
+        s = service.status()                               # from the state the TV tells
+        assert s["app"] == "com.webos.app.hdmi1" and s["input"] == "HDMI_1"
+        await FakeTvClient.instances[-1].update(current_app_id="com.webos.app.hdmi2")
+        assert service.status()["input"] == "HDMI_2"
+        FakeTvClient.instances[-1].tv_state.current_app_id = raw
+        s = await service.control("input", "HDMI_1")        # and from the read-back after a control
+        assert s["app"] == "com.webos.app.hdmi1" and s["input"] == "HDMI_1"
+    finally:
+        await service.stop()
+
+
 async def test_a_channel_that_is_a_number_and_an_input_that_is_nothing_stay_what_they_are(tmp_path):
     """Only words are tidied: a channel the TV gives as a number is a number, and no input is None and not an empty string."""
     def numbered(host, key):

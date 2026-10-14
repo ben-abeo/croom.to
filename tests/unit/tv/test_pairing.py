@@ -138,7 +138,7 @@ async def test_the_library_missing_is_said_in_words_when_pairing(tmp_path):
     assert "aiowebostv" in str(failure.value)
 
 
-# A pairing waits for the person at the TV, for as long as the TV allows: the rest of the service goes on around it.
+# A pairing waits for the person at the TV, for as long as PAIR_WAIT_S allows: the rest of the service goes on around it.
 
 @pytest.mark.parametrize("factory", [PromptingTvClient, DeafPromptingTvClient])
 async def test_stop_during_a_pairing_leaves_nothing_connected(tmp_path, factory):
@@ -184,6 +184,51 @@ async def test_a_pairing_cancelled_while_it_waits_leaves_no_client(tmp_path):
     FakeTvClient.instances[-1].accept()
     await within(again)
     assert service.status()["paired"] is True and service.status()["reachable"] is True
+
+
+def test_the_words_for_a_pairing_nobody_answers_say_how_long_it_waited():
+    from croom.tv.service import NOBODY_ACCEPTED, TvService
+    assert NOBODY_ACCEPTED.format(seconds=TvService.PAIR_WAIT_S) == (
+        "Nobody accepted the prompt on the TV within 60 seconds: tap Pair to try again")
+
+
+async def test_a_pairing_nobody_answers_ends_in_words_and_leaves_the_service_ready_for_the_next(tmp_path):
+    """The library's own wait for the prompt does not end while the connection's heartbeat keeps it alive (aiohttp restarts its
+    receive timeout on every ping and pong, and aiowebostv pings every five seconds): a pairing nobody answers would wait for
+    ever, and every tap on Pair after it would be told that one is already waiting. The service gives the person a wait of its
+    own."""
+    service = build_service(tmp_path, PromptingTvClient, key=None)
+    service.PAIR_WAIT_S = 0.2
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    with pytest.raises(TvError) as failure:
+        await within(service.pair(), 3.0)
+    assert 0.15 <= loop.time() - t0 < 2.0                 # (the wait is the one it was given, and it is not the library's)
+    assert str(failure.value) == "Nobody accepted the prompt on the TV within 0.2 seconds: tap Pair to try again"
+    first = FakeTvClient.instances[-1]
+    assert ("disconnect",) in first.calls and first.connected is False
+    assert service._client is None and service._pairing is False and not (tmp_path / KEY).exists()
+    assert service.status()["paired"] is False and service.status()["reachable"] is False
+    again = asyncio.ensure_future(service.pair())         # tapping Pair again starts a pairing: it is not "already waiting"
+    await until(lambda: len(FakeTvClient.instances) == 2 and prompt_is_up())
+    FakeTvClient.instances[-1].accept()
+    await within(again)
+    assert service.status()["paired"] is True and service.status()["reachable"] is True
+
+
+async def test_a_pairing_the_library_gives_up_on_says_what_it_said_before_the_services_own_wait_is_up(tmp_path):
+    service = build_service(tmp_path, key=None)
+    service.PAIR_WAIT_S = 30.0
+    FakeTvClient.refuse_next = False
+    def timing_out(host, key):
+        client = FakeTvClient(host, key)
+        client.prompt_timeout = True                      # the library's own timeout: the prompt was not answered in its time
+        return client
+    service._factory = timing_out
+    with pytest.raises(TvError) as failure:
+        await service.pair()
+    assert "did not finish" in str(failure.value) and "Nobody accepted" not in str(failure.value)
+    assert ("disconnect",) in FakeTvClient.instances[-1].calls
 
 
 async def test_a_second_pair_while_one_waits_is_refused(tmp_path):

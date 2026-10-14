@@ -28,6 +28,7 @@ NOT_SET_UP = "The TV is not set up: use Find TVs and Pair under Options › TV"
 NOT_PAIRED = "Pair the TV under Options › TV"
 REFUSED = "The TV no longer accepts this table: Forget TV, then Pair"
 PAIRING_BUSY = "Pairing is already waiting for the TV"
+NOBODY_ACCEPTED = "Nobody accepted the prompt on the TV within {seconds:g} seconds: tap Pair to try again"
 
 # The remote's keys, by the names aiowebostv has for them (its buttons module; spec section 2). The library does not check
 # a name, and a TV that is sent one it does not know ignores it without a word, so a name outside this set is refused here.
@@ -185,6 +186,9 @@ class TvService(Service):
     MANUAL_TURN_ON_GRACE_S = 3.0   # when a person at the table asked for it, this long: they are waiting to be told
     ASK_TIMEOUT_S = 3.0       # a command that the service gives the TV on its own account (turn on, show the Pi) has this long
     REREAD_TIMEOUT_S = 2.0    # and each read-back after a control has this long
+    # A pairing waits this long for the person at the TV to accept the prompt. The library's own wait for it (ten seconds) does not
+    # end: aiohttp restarts its receive timeout on every ping and pong of the connection, and the library pings every five seconds.
+    PAIR_WAIT_S = 60.0
 
     def __init__(self, config: TvConfig, keystore: KeyStore, client_factory: ClientFactory, waker: Waker,
                  loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep):
@@ -272,7 +276,9 @@ class TvService(Service):
         TV's own remote, once. The key the TV hands out is kept and the connection stays.
 
         The wait for the person is the service's own to cut short: the client is the service's from the moment it is
-        built, so stop() and forget() hang up on it, and a caller that goes away leaves nothing connected."""
+        built, so stop() and forget() hang up on it, and a caller that goes away leaves nothing connected. It is bounded, too:
+        a prompt nobody accepts within PAIR_WAIT_S ends the pairing, in words (the library's own wait for it does not end), and
+        the next tap on Pair starts another."""
         if not self.configured:
             raise TvError(NOT_SET_UP)
         if self._pairing:                        # a double tap: one prompt on the TV is enough
@@ -286,15 +292,20 @@ class TvService(Service):
             await self._halt_loop()
             async with self._attempt:
                 await self._drop_client()
+                waiting: Optional[asyncio.Timeout] = None
                 try:
                     client = await self._open(None)
                     self._client = client
-                    await self._connected(client)
+                    async with asyncio.timeout(self.PAIR_WAIT_S) as waiting:
+                        await self._connected(client)
                 except TvError:
                     raise
                 except Exception as e:  # noqa: BLE001 - the TV was off, declined, did not answer in time, or was hung up on
                     if self._client is not client:       # hung up on by stop() or forget(): the library answers False
                         raise stopped from e
+                    if waiting is not None and waiting.expired():       # this wait, and not the library's own timeout
+                        logger.warning(f"Pairing with the TV at {host}: nobody accepted the prompt within {self.PAIR_WAIT_S:g} s")
+                        raise TvError(NOBODY_ACCEPTED.format(seconds=self.PAIR_WAIT_S)) from e
                     logger.warning(f"Pairing with the TV at {host} failed: {_why(e)}")
                     raise TvError(f"Pairing with the TV at {host} did not finish: check that the TV is on, accept the "
                                   "prompt it shows with its remote, and try again") from e

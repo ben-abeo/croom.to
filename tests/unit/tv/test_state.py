@@ -156,3 +156,25 @@ async def test_the_goodbye_of_a_client_the_service_closes_is_not_news(tmp_path):
     assert await service._connect_once() is True          # a new client: the TV is on again
     await FakeTvClient.instances[-1].drop()               # and now the TV is the one that hangs up
     assert service._shown["on"] is False
+
+
+@pytest.mark.parametrize("pi_input, shown, app, shows", [
+    ("HDMI_1", "HDMI_1", "com.webos.app.hdmi1", True),
+    ("HDMI_1", "HDMI_2", "com.webos.app.hdmi2", False),     # another input, which the TV's list names
+    ("HDMI_2", "HDMI_1", "com.webos.app.hdmi1", False),
+    ("HDMI1", "HDMI_1", "com.webos.app.hdmi1", False),      # an input the list names is compared by its id alone
+    ("HDMI_1", None, "com.webos.app.hdmi1", True),          # the list names no input for the app: the app's name says it ...
+    ("HDMI_2", None, "com.webos.app.hdmi2", True),
+    ("HDMI1", None, "com.webos.app.hdmi1", True),           # ... lower-cased, without the underscore
+    ("HDMI_1", None, "com.webos.app.hdmi2", False),
+    ("HDMI_1", None, "com.webos.app.hdmi10", False),        # (a different app, not one that begins as the Pi's does)
+    ("HDMI_1", None, "com.webos.app.livetv", False),        # live TV and the apps are not the room Pi
+    ("HDMI_1", None, "netflix", False),
+    ("HDMI_1", None, None, None),                           # nothing is known of what is on the screen
+    ("HDMI_1", None, "", None),
+    ("", "HDMI_2", "com.webos.app.hdmi2", None),            # no input is named for the room Pi
+    ("", None, "com.webos.app.hdmi1", None),
+])
+def test_whether_the_tv_shows_the_room_pis_input(pi_input, shown, app, shows):
+    from croom.tv.service import shows_the_pi
+    assert shows_the_pi(pi_input, shown, app) is shows

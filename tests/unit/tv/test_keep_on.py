@@ -272,8 +272,9 @@ async def test_a_manual_on_of_a_standby_tv_that_refuses_with_a_packet_that_does_
         t0 = loop.time()
         with pytest.raises(TvError) as failure:
             await service.control("power", "on")
-        assert "answered but did not turn on" in str(failure.value) and "power button" in str(failure.value)
-        assert "Quick Start+" in str(failure.value)
+        # The hint is the power button alone: a TV that answers on its socket while it is dark has Quick Start+ already, so
+        # "turn on Quick Start+" would send the person to a setting that is on
+        assert str(failure.value) == "The TV at 10.0.0.41 answered but did not turn on: press its power button"
         assert loop.time() - t0 < 0.5                            # a refusal is no moment to wait out
         assert service.woken == [MAC] and ("power_on",) in client.calls
         assert service.status()["held_off"] is False             # the person did want it on
@@ -760,6 +761,178 @@ async def test_a_tv_that_refuses_the_switch_is_logged_and_the_join_goes_on(tmp_p
     async with running(service):
         assert await service.before_join() is True
         assert "did not switch to the room Pi's input HDMI_1" in caplog.text and service.status()["input"] == "HDMI_2"
+
+
+def dark_on_input(input_id):
+    """A factory for a TV in standby (its socket up) that takes the command to turn on and stays dark, and last showed this input."""
+    def build(host, key):
+        client = StandbyTv(host, key)
+        client.delay = None
+        client.tv_state.current_input, client.tv_state.current_app_id = input_id, DoingTv.APPS.get(input_id)
+        return client
+    return build
+
+
+async def test_a_join_leaves_the_input_alone_for_a_tv_that_answered_but_stayed_dark(tmp_path):
+    """A TV that answers and does not come on is not switched: what it showed last is not on a screen. (It is the join that
+    asks for the TV, so the TV is told to turn on; and it is the TV being on that the switch waits for.)"""
+    service = service_for(tmp_path, dark_on_input("HDMI_2"), key="key-9", keep_on=False)
+    service.wake_works, service.TURN_ON_GRACE_S = False, 0.05
+    async with running(service) as client:
+        service._config.keep_on = True
+        assert service.status()["on"] is False and service.status()["input"] == "HDMI_2"
+        assert await service.before_join() is True                        # it answered: the join goes on
+        assert ("power_on",) in client.calls and service.status()["on"] is False
+        assert not [call for call in client.calls if call[0] == "set_input"]
+
+
+# When the TV's list of inputs cannot be matched to the app on the screen, the app's own name says whether it is the room Pi's
+
+def unlisted(app):
+    """A factory for a TV that is on with this app on its screen and a list of inputs that has no input for it."""
+    def build(host, key):
+        client = DoingTv(host, key)
+        client.tv_state.inputs, client.tv_state.current_input, client.tv_state.current_app_id = {}, None, app
+        return client
+    return build
+
+
+@pytest.mark.parametrize("pi_input, app", [("HDMI_1", "com.webos.app.hdmi1"), ("HDMI_2", "com.webos.app.hdmi2"),
+                                           ("HDMI1", "com.webos.app.hdmi1")])
+async def test_a_join_does_not_switch_a_tv_to_the_room_pi_when_the_app_it_runs_is_the_pis_input(tmp_path, pi_input, app):
+    service = service_for(tmp_path, unlisted(app), key="key-9", pi_input=pi_input)
+    async with running(service) as client:
+        assert service.status()["input"] is None and service.status()["app"] == app       # the list names no input for the app
+        assert await service.before_join() is True
+        assert not [call for call in client.calls if call[0] == "set_input"]
+
+
+@pytest.mark.parametrize("app", ["com.webos.app.hdmi2", "com.webos.app.livetv", "netflix", "com.webos.app.hdmi10"])
+async def test_a_join_still_switches_a_tv_to_the_room_pi_when_the_app_it_runs_is_not_the_pis_input(tmp_path, app):
+    service = service_for(tmp_path, unlisted(app), key="key-9")                       # pi_input is HDMI_1
+    async with running(service) as client:
+        assert await service.before_join() is True
+        assert ("set_input", "HDMI_1") in client.calls
+
+
+# A join waits no longer than the wait it is given for the TV: what comes after the TV has answered (the command to turn
+# on, the moment to say that it has, the switch to the room Pi, the reads that follow it) is held to what is left of it
+
+def answers_late(client, after, power_state):
+    """A TV that does not answer, and answers `after` seconds from now with this power state."""
+    async def comes_up():
+        await asyncio.sleep(after)
+        client.tv_state.power_state, client.refuse = power_state, False
+    return asyncio.ensure_future(comes_up())
+
+
+async def test_a_join_does_not_wait_for_a_slow_command_to_turn_on_past_the_time_it_has(tmp_path, caplog):
+    class Slow(StandbyTv):
+        async def power_on(self):
+            await asyncio.sleep(30)
+    service = service_for(tmp_path, Slow, key="key-9", keep_on=False)
+    service.wake_works, service.WAKE_TIMEOUT_S, service.WAKE_POLL_S = False, 0.5, 0.02       # (the command may take ASK_TIMEOUT_S: 3 s)
+    async with running(service) as client:
+        client.refuse = True
+        await client.drop()
+        service._config.keep_on = True
+        coming = answers_late(client, 0.3, {"state": "Active Standby"})                      # it answers with 0.2 s of the 0.5 left
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        assert await within(service.before_join(), 5.0) is True                              # and it did answer
+        assert 0.4 <= loop.time() - t0 < 0.8 and "did not accept power on" in caplog.text
+        await coming
+
+
+async def test_a_join_does_not_wait_for_the_moment_a_tv_is_given_to_say_it_is_on_past_the_time_it_has(tmp_path):
+    service = service_for(tmp_path, quick_start_tv(delay=None), key="key-9", keep_on=False)      # takes the command, stays dark
+    service.wake_works, service.WAKE_TIMEOUT_S, service.WAKE_POLL_S, service.TURN_ON_GRACE_S = False, 0.5, 0.02, 5.0
+    async with running(service) as client:
+        client.refuse = True
+        await client.drop()
+        service._config.keep_on = True
+        coming = answers_late(client, 0.3, {"state": "Active Standby"})
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        assert await within(service.before_join(), 8.0) is True
+        assert 0.4 <= loop.time() - t0 < 0.8 and ("power_on",) in client.calls
+        await coming
+
+
+async def test_a_wake_that_a_person_asked_for_does_not_wait_for_the_tv_to_say_it_is_on_past_its_wait_either(tmp_path):
+    service = service_for(tmp_path, quick_start_tv(delay=None), key="key-9", keep_on=False)
+    service.wake_works, service.WAKE_POLL_S, service.MANUAL_TURN_ON_GRACE_S = False, 0.02, 5.0
+    async with running(service) as client:
+        client.refuse = True
+        await client.drop()
+        coming = answers_late(client, 0.3, {"state": "Active Standby"})
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        assert await within(service.ensure_on(timeout=0.5, manual=True), 8.0) is True
+        assert 0.4 <= loop.time() - t0 < 0.8
+        await coming
+
+
+async def test_a_join_does_not_wait_for_a_slow_switch_to_the_room_pi_past_the_time_it_has(tmp_path, caplog):
+    def hanging(host, key):
+        client = on_input("HDMI_2")(host, key)
+
+        async def set_input(*args):
+            await asyncio.sleep(30)
+        client.set_input = set_input
+        return client
+    service = service_for(tmp_path, hanging, key="key-9")
+    service.wake_works, service.WAKE_TIMEOUT_S, service.WAKE_POLL_S = False, 0.5, 0.02
+    async with running(service) as client:
+        client.refuse = True
+        await client.drop()
+        coming = answers_late(client, 0.3, {"state": "Active"})                              # on, still showing HDMI_2
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        assert await within(service.before_join(), 5.0) is True
+        assert 0.4 <= loop.time() - t0 < 0.8 and "did not switch to the room Pi's input HDMI_1" in caplog.text
+        await coming
+
+
+async def test_a_join_does_not_wait_for_the_reads_after_the_switch_past_the_time_it_has(tmp_path):
+    class Slow(DoingTv):
+        async def get_volume(self):
+            await asyncio.sleep(30)
+
+        async def get_muted(self):
+            await asyncio.sleep(30)
+
+        async def get_input(self):
+            await asyncio.sleep(30)
+    service = service_for(tmp_path, Slow, key="key-9")
+    service.wake_works, service.WAKE_TIMEOUT_S, service.WAKE_POLL_S = False, 0.5, 0.02
+    async with running(service) as client:
+        client.tv_state.current_input, client.tv_state.current_app_id = "HDMI_2", DoingTv.APPS["HDMI_2"]
+        await client.update(power_state={"state": "Active"})
+        client.refuse = True
+        await client.drop()
+        coming = answers_late(client, 0.3, {"state": "Active"})
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        assert await within(service.before_join(), 5.0) is True
+        assert ("set_input", "HDMI_1") in client.calls                                       # the switch went out; the reads are what is cut
+        assert 0.4 <= loop.time() - t0 < 0.8                                                 # (REREAD_TIMEOUT_S: 2 s)
+        await coming
+
+
+async def test_nothing_after_the_wait_is_asked_of_the_tv_when_no_time_is_left(tmp_path, caplog):
+    """The steps that follow the TV's answer are not started at all when the wait is over, rather than started and cut (which
+    is a command the TV never got, logged as one it did not accept)."""
+    service = service_for(tmp_path, on_input("HDMI_2"), key="key-9")
+    caplog.set_level(logging.DEBUG, logger="croom.tv.service")
+    async with running(service) as client:
+        caplog.clear()
+        over = asyncio.get_running_loop().time() - 1.0
+        await service._turn_on(False, over)
+        await service._show_the_pi(over)
+        await service._read_back(client, "input", over)
+        assert not [call for call in client.calls if call[0] in ("power_on", "set_input", "get_volume", "get_muted", "get_input")]
+        assert [record.getMessage() for record in caplog.records] == []
 
 
 async def test_stop_ends_a_wait_for_the_tv_and_leaves_nothing_connected(tmp_path):

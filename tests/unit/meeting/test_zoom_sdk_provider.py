@@ -146,7 +146,7 @@ class TestControls:
             assert await provider.toggle_mute() is True and provider.current_meeting.is_muted is True
             assert await provider.toggle_mute() is False and provider.current_meeting.is_muted is False
             assert await provider.toggle_camera() is False and provider.current_meeting.is_camera_on is False
-            assert await provider._page.get_attribute("#stub-video", "aria-label") == "Start Video"
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "start my video"
             assert await provider.toggle_camera() is True
             await provider.leave_meeting()
             assert provider.state == MeetingState.IDLE and provider.current_meeting is None
@@ -158,7 +158,7 @@ class TestControls:
         provider = await provider_for(api=FakeApi())
         try:
             await provider.join_meeting(LINK, camera_on=False)
-            assert await provider._page.get_attribute("#stub-video", "aria-label") == "Start Video"
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "start my video"
             assert provider.current_meeting.is_camera_on is False
         finally:
             await shutdown(provider)
@@ -254,7 +254,7 @@ class TestReviewFixes:
         try:
             info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
             assert info.is_muted is False and info.is_camera_on is True
-            assert await provider._page.get_attribute("#stub-video", "aria-label") == "Stop Video"
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "stop my video"
             assert [c["mute"] for c in await provider._page.evaluate("window.__zoomCalls.filter(c => c[0] === 'mute').map(c => c[1])")] == [False]
         finally:
             await shutdown(provider)
@@ -323,7 +323,7 @@ class TestReviewFixes:
         try:
             info = await provider.join_meeting(LINK, camera_on=False)
             assert info.is_camera_on is False
-            assert await provider._page.get_attribute("#stub-video", "aria-label") == "Start Video"
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "start my video"
         finally:
             await shutdown(provider)
 

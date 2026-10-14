@@ -5,6 +5,7 @@ the stub ZoomMtg with Zoom's CDN blocked (spec 2026-09-25 Zoom, section 4.5).
 
 import asyncio
 import json
+import time
 
 import pytest
 
@@ -159,6 +160,7 @@ async def test_used_join_token_is_reported():
 
 
 CLIENT_LABELS = STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'client';"   # the way Zoom's web client names its buttons
+SDK_LABELS = STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'sdk';"          # the way other builds do: "Start Video"
 
 
 async def test_the_bridge_reads_mute_and_video_from_zoom():
@@ -171,7 +173,7 @@ async def test_the_bridge_reads_mute_and_video_from_zoom():
 
 
 async def test_the_video_button_is_found_by_what_it_is_not_by_one_label():
-    """Zoom's web client says "start my video" in the accessibility name and "Start Video" on the button; the old
+    """Zoom's web client says "start my video" in the accessibility name and just "Video" on the button; the old
     exact match found neither, so the camera could never be turned on (the fault seen in the test meeting)."""
     async with PageRun(stub=CLIENT_LABELS) as run:
         await run.wait_for("connected")
@@ -238,6 +240,13 @@ async def test_a_change_to_another_participant_reaches_the_device_with_the_whole
 # ---- Zoom as its real SDK is: its field names, its footer, and the reducer it calls listeners from ----
 
 
+async def settled(run):
+    """Connected, and past the read that Zoom's recording effect queues as the meeting UI mounts (50 ms after it): a test
+    that changes something right after connecting would otherwise have the change picked up by that read, not its own."""
+    await run.wait_for("connected")
+    await asyncio.sleep(0.3)
+
+
 async def states(run, count, timeout=3.0):
     """The "state" events' details, decoded, once there are at least `count` of them."""
     for _ in range(int(timeout * 20)):
@@ -275,7 +284,7 @@ async def test_zoom_firing_updates_inside_its_reducer_is_read_after_it_returns_a
 
 async def test_a_burst_of_updates_is_read_once():
     async with PageRun() as run:
-        await run.wait_for("connected")
+        await settled(run)
         await run.page.evaluate("""() => {
             window.__reads = 0;
             const real = window.ZoomMtg.getCurrentUser;
@@ -306,14 +315,9 @@ async def test_a_read_that_fails_is_dropped_quietly_and_the_next_change_still_ar
 
 
 async def test_the_five_second_read_is_installed_once_even_after_a_reconnect():
-    counting = STUB_JS + """
-    window.__polls = [];
-    const realSetInterval = window.setInterval;
-    window.setInterval = (fn, ms, ...rest) => { window.__polls.push(ms); return realSetInterval(fn, ms, ...rest); };
-    """
-    async with PageRun(stub=counting) as run:
+    async with PageRun() as run:
         await run.wait_for("connected")
-        assert await run.page.evaluate("window.__polls.filter((ms) => ms === 5000).length") == 1
+        assert await run.page.evaluate("window.__pollFns.length") == 1
         await run.page.evaluate("window.ZoomMtg._status(4)")        # Zoom reconnecting ...
         await run.page.evaluate("window.ZoomMtg._status(2)")        # ... and connected again
         for _ in range(100):
@@ -321,7 +325,7 @@ async def test_the_five_second_read_is_installed_once_even_after_a_reconnect():
                 break
             await asyncio.sleep(0.05)
         assert [s for s, _ in run.events].count("connected") == 2
-        assert await run.page.evaluate("window.__polls.filter((ms) => ms === 5000).length") == 1
+        assert await run.page.evaluate("window.__pollFns.length") == 1
 
 
 async def test_recording_starting_reaches_the_device():
@@ -334,7 +338,7 @@ async def test_recording_starting_reaches_the_device():
 
 async def test_people_joining_and_leaving_reach_the_device_with_the_new_count():
     async with PageRun() as run:
-        await run.wait_for("connected")
+        await settled(run)
         await run.page.evaluate("""() => {
             window.ZoomMtg._attendees.push({ userId: 16777219, userName: "Guest", muted: true, bVideoOn: false, bRaiseHand: false, isHost: false });
             window.ZoomMtg._fire("onUserJoin", { userId: 16777219 });
@@ -404,19 +408,21 @@ async def test_a_video_button_that_says_only_video_or_is_disabled_is_there_but_n
         assert "camera button" in str(failure.value)
         assert await run.page.evaluate("window.__videoClicks") == 0                           # nothing was pressed
         m = await run.page.evaluate("window.crystalMeet.readMeeting()")
-        assert "camera" not in m["buttons"] and m["me"]["videoOn"] is True                    # the user's record still says
+        assert m["buttons"]["camera"] == {"on": True, "usable": False} and m["me"]["videoOn"] is True   # offered as unavailable
         await run.page.evaluate("""() => {
             const b = document.getElementById('stub-video');
             b.setAttribute('aria-label', 'start my video'); b.setAttribute('aria-disabled', 'true');
         }""")
         assert await run.page.evaluate("window.crystalMeet.video()") == {"on": False, "usable": False, "label": "start my video"}
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["buttons"]["camera"] == {"on": False, "usable": False}
         with pytest.raises(Exception) as busy:
             await run.page.evaluate("window.crystalMeet.setVideo(true)")                         # a press the client would ignore
         assert "camera button" in str(busy.value) and await run.page.evaluate("window.__videoClicks") == 0
         assert await run.page.evaluate("window.crystalMeet.setVideo(false)") is False            # already what was asked: no press
 
 
-async def test_without_the_real_buttons_class_a_footer_button_named_start_or_stop_video_is_the_one():
+async def test_the_real_buttons_class_comes_first_and_the_fallback_reads_the_name_or_the_text():
     async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
         await run.wait_for("connected")
         await run.page.evaluate("""() => {
@@ -425,10 +431,21 @@ async def test_without_the_real_buttons_class_a_footer_button_named_start_or_sto
         assert await run.page.evaluate("window.crystalMeet.video()") == {"on": None, "label": None}     # not in the footer: not the one
         await run.page.evaluate("""() => {
             const footer = document.createElement("div"); footer.id = "wc-footer";
-            const inside = document.createElement("button"); inside.setAttribute("aria-label", "start my video");
+            const inside = document.createElement("button"); inside.id = "named"; inside.setAttribute("aria-label", "start my video");
             footer.append(inside); document.body.append(footer);
         }""")
-        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": False, "label": "start my video"}
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": False, "label": "start my video"}   # by its name ...
+        await run.page.evaluate("""() => {
+            const named = document.getElementById("named");
+            named.removeAttribute("aria-label"); named.textContent = "Stop Video";
+        }""")
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": True, "label": "Stop Video"}        # ... or by its text
+        await run.page.evaluate("""() => {
+            const bar = document.createElement("div"); bar.id = "foot-bar";
+            const real = document.createElement("button"); real.className = "send-video-container__btn"; real.setAttribute("aria-label", "start my video");
+            bar.append(real); document.getElementById("wc-footer").append(bar);
+        }""")
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": False, "label": "start my video"}   # the class comes first
 
 
 async def test_the_footer_is_searched_before_the_rest_of_the_page():
@@ -452,3 +469,193 @@ async def test_without_the_footer_the_whole_page_is_searched_but_never_a_menu():
         }""")
         m = await run.page.evaluate("window.crystalMeet.readMeeting()")
         assert m["buttons"] == {"raise_hand": {"on": True}}         # a menu's item is no button of the client's
+
+
+# ---- what Zoom 6.5.0 really sends and does (fix round 1) ----
+
+
+async def test_recording_is_read_from_the_words_zoom_sends_not_from_their_being_there():
+    """Zoom's only emitter sends {recording: "stop" | "recording" | "pause", hasLocalRecord} and fires it once as the
+    meeting UI mounts, with "stop": a meeting nobody records must not read as recording from that first event."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["recording"] is False      # after the mount event
+        seen = []
+        for words in ["stop", "recording", "pause", "stop"]:
+            await run.page.evaluate("(words) => window.ZoomMtg._fire('onRecordingChange', { recording: words, hasLocalRecord: false })", words)
+            seen.append((await run.page.evaluate("window.crystalMeet.readMeeting()"))["recording"])
+        assert seen == [False, True, False, False]
+        for flag in (True, False):                                                       # a boolean, as an older build may send
+            await run.page.evaluate("(flag) => window.ZoomMtg._fire('onRecordingChange', { recording: flag })", flag)
+            assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["recording"] is flag
+
+
+async def test_a_roster_that_never_answers_does_not_hang_the_read():
+    """Zoom's getAttendeeslist calls neither callback while its roster is empty (it fills a moment after "connected"):
+    readState and readMeeting must still answer, with the roster as last known (at first, empty)."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.silentAttendees = true;") as run:
+        await run.wait_for("connected")
+        started = time.monotonic()
+        state = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.readState()"), timeout=2.5)
+        assert time.monotonic() - started < 2.5 and state["muted"] is False and state["userId"] == 16777216
+        m = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.readMeeting()"), timeout=2.5)
+        assert m["participants"] == [] and m["count"] == 0 and m["me"]["userId"] == 16777216
+
+
+async def test_a_roster_that_goes_quiet_keeps_the_last_list():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["count"] == 3
+        await run.page.evaluate("window.ZoomMtg._behaviour.silentAttendees = true")
+        m = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.readMeeting()"), timeout=2.5)
+        assert m["count"] == 3 and [p["name"] for p in m["participants"]] == ["Room 1", "Ann Lee", "Raj Patel"]
+
+
+async def test_a_current_user_that_never_answers_does_not_hang_the_read_either():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("() => { window.ZoomMtg.getCurrentUser = () => {}; }")              # neither callback
+        state = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.readState()"), timeout=2.5)
+        assert state["muted"] is False and state["userId"] == 16777216 and "video" in state["keys"]     # as last known
+
+
+async def test_a_roster_that_arrives_late_is_read_once_it_is_there_and_no_older_read_overtakes_it():
+    """The first read finds the roster silent and waits out its two seconds with the empty list; a change that arrives
+    meanwhile, once the roster is there, must be read after that one, not answered by it finishing later."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 400;") as run:
+        await run.wait_for("connected")
+        await asyncio.sleep(0.6)                                                         # the roster has arrived by now
+        await run.page.evaluate("window.ZoomMtg._fire('onUserUpdate', { userId: 16777217 })")
+        [first] = await states(run, 1, timeout=4.0)
+        assert first["count"] == 3 and first["participants"][2]["name"] == "Raj Patel"
+        await asyncio.sleep(0.3)
+        assert [s["count"] for s in await states(run, 1)] == [3]                         # no stale event with the empty list after it
+
+
+async def test_the_current_user_is_filled_in_from_a_later_record_when_the_first_was_empty():
+    """getCurrentUser may answer {} while Zoom is still starting: neither the id nor the name is known until a record has them."""
+    emptyAtFirst = STUB_JS + """
+    (function () {
+      const real = window.ZoomMtg.getCurrentUser;
+      window.__emptyUser = true;
+      window.ZoomMtg.getCurrentUser = function (opts) {
+        if (window.__emptyUser) opts.success({ result: { currentUser: {} } }); else real.call(this, opts);
+      };
+    })();
+    """
+    async with PageRun({"micOn": False}, stub=emptyAtFirst) as run:
+        await run.wait_for("connected")
+        assert await run.page.evaluate("[window.crystalMeet.userId, window.crystalMeet.userName]") == [None, None]
+        assert await run.calls("mute") == []                           # no mute is sent for a user nobody knows the id of
+        await run.page.evaluate("window.__emptyUser = false")
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["me"]["userId"] == 16777216
+        assert await run.page.evaluate("[window.crystalMeet.userId, window.crystalMeet.userName]") == [16777216, "Room 1"]
+
+
+async def test_the_five_second_read_reports_a_change_nothing_else_announced():
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("window.ZoomMtg._muted = true")                          # no event from Zoom for it
+        await run.page.evaluate("window.__pollFns[0]()")                                 # the five-second tick
+        [detail] = await states(run, 1, timeout=2.0)
+        assert detail["muted"] is True
+
+
+async def test_the_five_second_read_swallows_a_failed_read():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("() => { window.ZoomMtg.getCurrentUser = () => { throw new Error('Minified Redux error #3'); }; window.__pollFns[0](); }")
+        await asyncio.sleep(0.3)
+        assert await run.page.evaluate("window.__rejections") == []
+
+
+async def test_a_failed_first_read_still_starts_the_five_second_read():
+    failsOnce = STUB_JS + """
+    (function () {
+      const real = window.ZoomMtg.getAttendeeslist; let first = true;
+      window.ZoomMtg.getAttendeeslist = function (opts) {
+        if (first) { first = false; throw new Error("Minified Redux error #3"); }
+        return real.call(this, opts);
+      };
+    })();
+    """
+    async with PageRun(stub=failsOnce) as run:
+        await run.wait_for("connected")
+        await asyncio.sleep(0.3)
+        assert await run.page.evaluate("window.__pollFns.length") == 1
+        assert await run.page.evaluate("window.__rejections") == []                      # and the failure was not left unhandled
+
+
+async def test_a_change_to_the_clients_buttons_alone_reaches_the_device():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.click("#stub-captions")                                           # the button says "Hide Captions" now
+        await run.page.evaluate("window.ZoomMtg._fire('onUserUpdate', { userId: 1 })")   # and Zoom says only that something changed
+        [detail] = await states(run, 1)
+        assert detail["buttons"]["captions"] == {"on": True}
+
+
+async def test_the_view_button_is_not_mistaken_for_the_self_view_button():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const bar = document.getElementById("foot-bar");
+            bar.insertBefore(document.getElementById("stub-self"), document.getElementById("stub-view"));     // self view comes first
+        }""")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["buttons"]["layout"] == {"value": "speaker"} and m["buttons"]["hide_self"] == {"on": False}
+        await run.page.evaluate("document.getElementById('stub-view').remove()")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert "layout" not in m["buttons"] and m["buttons"]["hide_self"] == {"on": False}     # "Hide Self View" is no view switcher
+
+
+async def test_a_video_button_outside_the_footer_bar_is_not_the_one():
+    """The real client has a second .send-video-container__btn, in .minimize-widget__footer, outside #foot-bar."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const mini = document.createElement("div"); mini.className = "minimize-widget__footer";
+            const decoy = document.createElement("button"); decoy.className = "send-video-container__btn"; decoy.setAttribute("aria-label", "start my video");
+            mini.append(decoy); document.body.prepend(mini);
+        }""")
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": True, "label": "stop my video"}
+
+
+async def test_zooms_own_field_names_win_over_the_older_ones_in_the_same_record():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            window.ZoomMtg.getCurrentUser = (o) => o.success({ result: { currentUser:
+                { userId: 16777216, video: true, bVideoOn: false, raiseHand: true, bRaiseHand: false } } });
+            window.ZoomMtg.getAttendeeslist = (o) => o.success({ result: { attendeesList: [
+                { userId: 5, userName: "A", video: true, bVideoOn: false, raiseHand: true, bRaiseHand: false, isHold: false, waiting: true },
+                { userId: 6, userName: "B", video: false, bVideoOn: true, raiseHand: false, bRaiseHand: true, isHold: true, waiting: false }] } });
+        }""")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["me"]["videoOn"] is True and m["me"]["raisedHand"] is True
+        a, b = m["participants"]
+        assert (a["video"], a["hand"], a["waiting"]) == (True, True, False)
+        assert (b["video"], b["hand"], b["waiting"]) == (False, False, True)
+
+
+async def test_a_build_that_names_the_video_button_start_video_is_read_too():
+    async with PageRun(stub=SDK_LABELS) as run:
+        await run.wait_for("connected")
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": True, "label": "Stop Video"}
+        assert await run.page.evaluate("window.crystalMeet.setVideo(false)") is False
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": False, "label": "Start Video"}
+
+
+async def test_another_persons_waiting_room_event_does_not_make_the_room_wait():
+    """Zoom also sends onUserIsInWaitingRoom to a host for other people entering or leaving its waiting room (self: false),
+    and with isInWaitingRoom false when this room is let in: only this room's own wait is a state of the page."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 99, self: false, isInWaitingRoom: true })")
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 99, self: false, isInWaitingRoom: false })")
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 16777216, self: true, isInWaitingRoom: false })")
+        assert await run.page.evaluate("window.crystalMeet.state") == "connected"
+        await run.page.evaluate("window.ZoomMtg._setMuted(true)")                        # and what changes is still reported
+        await states(run, 1)
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { isInWaitingRoom: true })")   # an older shape: no self
+        assert await run.page.evaluate("window.crystalMeet.state") == "waiting"

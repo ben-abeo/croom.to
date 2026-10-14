@@ -3,21 +3,33 @@ A stand-in for Zoom's Meeting SDK (window.ZoomMtg) so the page and the provider
 can be driven in the venv's Chromium without reaching Zoom. Behaviour flags:
 window.ZoomMtg._behaviour = {waiting, errorFor, errorCode, errorMessage, neverConnect, delayMs, pageSays, ...}; join
 fails with {errorCode, errorMessage} for the meeting number errorFor, and pageSays is text join puts on the page, as
-Zoom's own dialogs do. labelStyle "client" names the video button the way Zoom's web client does (aria-label "start my
-video"; its visible text is always "Video"); noToolbar leaves the buttons out; videoStuckOff makes the video button
-ignore clicks. window.ZoomMtg._setMuted(bool) is the host muting or unmuting the room: it changes what getCurrentUser
-says and fires onUserUpdate, as Zoom does. window.__videoClicks counts clicks on the video button.
+Zoom's own dialogs do. labelStyle "client" (the default) names the video button the way Zoom's web client does
+(aria-label "start my video" / "stop my video"; its visible text is always "Video"), "sdk" the way other builds do
+("Start Video" / "Stop Video"); noToolbar leaves the buttons out; videoStuckOff makes the video button ignore clicks.
+window.ZoomMtg._setMuted(bool) is the host muting or unmuting the room: it changes what getCurrentUser says and fires
+onUserUpdate, as Zoom does. window.__videoClicks counts clicks on the video button.
 
 The rest of the meeting: role (participant, co-host, host), attendees, recording, refuseHostCalls; _setAttendee(id,
 patch), _setRecording(on); the client's hand, reactions, captions, view and self-view buttons under .footer (the real
 client's #wc-footer > #foot-bar), with window.__presses logging each press; host calls are recorded and refused for a
 participant. getCurrentUser and getAttendeeslist answer in Zoom's own field names (userId, userName, muted, audio,
 video, raiseHand, isHost, isCoHost - "" when not -, isGuest, isHold, self) while the stub keeps its own flags (bVideoOn,
-bRaiseHand, waiting). onUserUpdate, onUserJoin, onUserLeave and onRecordingChange are fired from inside what Zoom calls
-its reducer, where both calls throw, so a listener that reads the meeting at once fails here as it does there.
+bRaiseHand, waiting). onUserUpdate, onUserJoin and onUserLeave are fired from inside what Zoom calls its reducer, where
+both calls throw, so a listener that reads the meeting at once fails here as it does there. onRecordingChange is an
+effect, not a reducer: it sends {recording: "stop" | "recording" | "pause", hasLocalRecord} and fires once, with "stop",
+as the meeting UI mounts. Zoom's getAttendeeslist calls neither callback while its roster is empty: silentAttendees
+never answers, rosterAfterMs stays silent until that long after join. window.__pollFns holds the page's 5000 ms
+setInterval callbacks (a test can call one as the tick) and window.__rejections its unhandled promise rejections.
 """
 
 STUB_JS = r"""
+(function () {
+  window.__pollFns = [];
+  window.__rejections = [];
+  const realSetInterval = window.setInterval;
+  window.setInterval = function (fn, ms, ...rest) { if (ms === 5000) window.__pollFns.push(fn); return realSetInterval.call(window, fn, ms, ...rest); };
+  window.addEventListener("unhandledrejection", (e) => { window.__rejections.push(String((e.reason && e.reason.message) || e.reason)); });
+})();
 window.__zoomCalls = [];
 window.__videoClicks = 0;
 window.__presses = [];
@@ -26,16 +38,16 @@ window.ZoomMtg = {
   _behaviour: { waiting: false, errorFor: "999", errorCode: 3712, errorMessage: "This meeting ID is not valid",
                 neverConnect: false, delayMs: 50, endAfterMs: 0, pageSays: "",
                 mutedOnEntry: false, videoOffOnEntry: false, silentConnect: false, statusField: "meetingStatus",
-                labelStyle: "sdk", noToolbar: false, videoStuckOff: false,
-                role: "participant", recording: false, refuseHostCalls: true,
+                labelStyle: "client", noToolbar: false, videoStuckOff: false,
+                role: "participant", recording: false, refuseHostCalls: true, silentAttendees: false, rosterAfterMs: 0,
                 attendees: [{ userId: 16777217, userName: "Ann Lee", muted: false, bVideoOn: true, bRaiseHand: false, isHost: true },
                             { userId: 16777218, userName: "Raj Patel", muted: true, bVideoOn: false, bRaiseHand: true, isHost: false }] },
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
-  _attendees: [], _dispatching: false,
+  _attendees: [], _dispatching: false, _joinedAt: 0,
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
   _setMuted(muted) { this._muted = !!muted; this._fire("onUserUpdate", { userId: 16777216 }); },
   _setAttendee(id, patch) { const a = this._attendees.find((x) => x.userId === id); if (a) Object.assign(a, patch); this._fire("onUserUpdate", { userId: id }); },
-  _setRecording(on) { this._behaviour.recording = !!on; this._fire("onRecordingChange", { bRecording: !!on }); },
+  _setRecording(on) { this._behaviour.recording = !!on; this._fire("onRecordingChange", { recording: on ? "recording" : "stop", hasLocalRecord: false }); },
   _me() { const b = this._behaviour; return { userId: 16777216, userName: "Room 1", muted: this._muted, audio: "computer", video: this._videoOn,
            isHost: b.role === "host", isCoHost: b.role === "co-host" || "", isGuest: false, raiseHand: this._hand, isHold: false, self: true }; },
   _record(a) { return { userId: a.userId, userName: a.userName, muted: a.muted, audio: "computer", video: !!a.bVideoOn,
@@ -88,7 +100,7 @@ window.ZoomMtg = {
   _fire(name, data) {
     const listener = this._listeners[name];
     if (!listener) return;
-    this._dispatching = ["onUserUpdate", "onUserJoin", "onUserLeave", "onRecordingChange"].includes(name);
+    this._dispatching = ["onUserUpdate", "onUserJoin", "onUserLeave"].includes(name);
     try { listener(data); } finally { this._dispatching = false; }
   },
   _guard() { if (this._dispatching) throw new Error("Minified Redux error #3"); },
@@ -114,18 +126,25 @@ window.ZoomMtg = {
     this._muted = b.mutedOnEntry;
     this._videoOn = !b.videoOffOnEntry;
     this._attendees = b.attendees.map((a) => Object.assign({}, a));
+    this._joinedAt = Date.now();
     window.__videoClicks = 0;
     setTimeout(() => this._status(1), 10);
-    if (b.waiting) setTimeout(() => this._fire("onUserIsInWaitingRoom", {}), 20);
+    if (b.waiting) setTimeout(() => this._fire("onUserIsInWaitingRoom", { userId: 16777216, userName: "Room 1", self: true, isInWaitingRoom: true }), 20);
     setTimeout(() => {
       if (!b.noToolbar) this._drawFooter();
+      this._fire("onRecordingChange", { recording: b.recording ? "recording" : "stop", hasLocalRecord: false });
       if (!b.silentConnect) this._status(2);
       opts.success && opts.success();
       if (b.endAfterMs > 0) setTimeout(() => this._status(3), b.endAfterMs);
     }, b.waiting ? 300 : b.delayMs);
   },
   getCurrentUser(opts) { this._guard(); opts.success && opts.success({ result: { currentUser: this._me() } }); },
-  getAttendeeslist(opts) { this._guard(); opts.success && opts.success({ result: { attendeesList: [this._me()].concat(this._attendees.map((a) => this._record(a))) } }); },
+  getAttendeeslist(opts) {
+    this._guard();
+    const b = this._behaviour;
+    if (b.silentAttendees || Date.now() - this._joinedAt < b.rosterAfterMs) return;
+    opts.success && opts.success({ result: { attendeesList: [this._me()].concat(this._attendees.map((a) => this._record(a))) } });
+  },
   _hostCall(name, args, opts) {
     window.__zoomCalls.push([name, args]);
     if (this._behaviour.role === "participant" && this._behaviour.refuseHostCalls) { opts.error && opts.error({ errorCode: 1, errorMessage: "Not the host" }); return false; }

@@ -150,6 +150,22 @@ room page's links, bare meeting ids and `?pwd=` keep working.
 - `toggle_camera()`: presses the Client View toolbar button whose accessible name
   contains "Start Video" or "Stop Video" (the SDK has no own-video call) and flips the
   recorded state; the button's absence raises "Zoom's video button was not found".
+
+  *Amended 2026-10-13 (branch `meeting-state`):* Zoom 6.5.0's web client never names the
+  button that way, and other buttons of Zoom's speak of video too ("Stop Incoming Video" in
+  the More menu). The page's bridge finds the footer's own button,
+  `#foot-bar .send-video-container__btn` (minimized: `.minimize-widget__footer
+  .send-video-container__btn`), else only a button inside `#wc-footer` whose aria-label is
+  exactly "start/stop (my) video". Its aria-label is "start my video" / "stop my video" while
+  Zoom can use a camera and just "Video" when it cannot, and it is `aria-disabled="true"`
+  while the video encoder starts or a switch is in progress. `crystalMeet.setVideo(on)`
+  presses only when Zoom's state differs: it waits up to 8 s for the button to be enabled,
+  presses once, and waits up to 10 s for the switch (and, first, up to 1.5 s for the button to be
+  there naming a usable camera, 6 s at join, when the footer and Zoom's camera list arrive a
+  moment after connected). Whatever does not happen is answered as a `MeetingControlError` in
+  words (button not on the screen yet, Zoom cannot use the camera, button still starting, Zoom
+  did not switch), a `409` to the table; the recorded state is what the button says afterwards,
+  never a flip.
 - `shutdown()`: closes the browser with a five-second guard (then kills it) and stops
   the site.
 - Test hooks: `headless` and `extra_init_script` constructor arguments, and the SDK
@@ -177,6 +193,15 @@ room page's links, bare meeting ids and `?pwd=` keep working.
 - `window.crystalMeet = {state, detail, mute(muted) -> Promise<boolean>, leave()}`; every
   state change calls `window.crystalMeetEvent(state, detail)` when the provider exposed
   it.
+
+  *Amended 2026-10-13 (branch `meeting-state`):* the bridge also has `readState()` (mute from
+  the current user's record, field `muted`; video from the footer's button, else the record's
+  `video`; `null` where Zoom has not said), `video()`, `setVideo(on, waits)` and
+  `diagnostics()`. It reports a `"state"` event when the room's state changes, read 50 ms
+  after Zoom's `onUserUpdate` (which Zoom fires inside its Redux reducer, where reading the
+  record throws) and every 5 s. At join the provider applies the room's camera default both
+  ways and its microphone default only towards muted: a room Zoom has muted (the host's mute
+  on entry) stays muted when the room wants its mic on, and the table offers Unmute.
 
 ### 4.6 The check command
 

@@ -20,7 +20,7 @@ from croom.control.settings import SettingsStore
 from croom.core.config import Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
-from croom.meeting.providers.base import MeetingState
+from croom.meeting.providers.base import MeetingControlError, MeetingState
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +43,12 @@ PLATFORM_HOSTS = {
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
+
+
+def first_line(error: BaseException) -> str:
+    """An exception's words for the table: its first line, never a stack or a second line."""
+    text = str(error).strip()
+    return text.splitlines()[0].strip() if text else type(error).__name__
 
 
 def _register_font_types() -> None:
@@ -194,6 +200,7 @@ class ControlService(Service):
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
         app.router.add_post("/api/meeting/camera", self._handle_camera)
+        app.router.add_get("/api/meeting/diagnostics", self._handle_diagnostics)
         app.router.add_get("/api/screensaver", self._handle_screensaver)
         app.router.add_post("/api/screensaver", self._handle_set_screensaver)
         app.router.add_get("/api/audio/volume", self._handle_volume)
@@ -706,7 +713,14 @@ class ControlService(Service):
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
-        muted = await self._meeting.toggle_mute()
+        try:
+            muted = await self._meeting.toggle_mute()
+        except MeetingControlError as e:
+            logger.info(f"The microphone was not changed: {first_line(e)}")
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            logger.warning(f"Could not change the microphone: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not change the microphone: {first_line(e)}", 409)
         return web.json_response({"muted": bool(muted)})
 
     async def _handle_camera(self, request: web.Request) -> web.Response:
@@ -717,5 +731,26 @@ class ControlService(Service):
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
-        camera_on = await self._meeting.toggle_camera()
+        try:
+            camera_on = await self._meeting.toggle_camera()
+        except MeetingControlError as e:
+            logger.info(f"The camera was not switched: {first_line(e)}")
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            logger.warning(f"Could not switch the camera: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not switch the camera: {first_line(e)}", 409)
         return web.json_response({"camera_on": bool(camera_on)})
+
+    async def _handle_diagnostics(self, request: web.Request) -> web.Response:
+        """What the meeting page sees (Zoom's field names, the client's buttons): for pinning real wording from a device."""
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        if self._meeting_state() != "connected":
+            return self._error_response("Not in a meeting", 409)
+        try:
+            return web.json_response(await self._meeting.diagnostics())
+        except MeetingControlError as e:
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - the meeting ending as the request came in, say: words, never a 500
+            logger.warning(f"Could not read the meeting page: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not read the meeting page: {first_line(e)}", 409)

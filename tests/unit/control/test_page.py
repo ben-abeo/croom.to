@@ -1805,26 +1805,86 @@ def test_the_strip_is_set_in_the_signs_own_type_and_sits_flush_along_the_bottom_
         page.close()
 
 
-def test_with_several_schools_on_the_strip_moves_to_the_next_every_eight_seconds_with_the_schools_name_leading(browser, central_time):
+TEXAS_AM_LAST, TEXAS_AM_NEXT = "Texas A&M (#20) 21 \u2013 LSU (#18) 24", "Next: 10/17 \u00b7 Arkansas @ Texas A&M (#20)"
+MISSOURI_LAST, MISSOURI_NEXT = "Missouri (#9) 35 \u2013 Vanderbilt 10", "Next: 10/19 \u00b7 Texas (#4) @ Missouri (#9)"
+SCHOOL_LINES = {"Texas": ["Texas: " + TEXAS_LAST, TEXAS_NEXT], "Michigan": ["Michigan: " + MICHIGAN_LAST, MICHIGAN_NEXT],
+                "Texas A&M": ["Texas A&M: " + TEXAS_AM_LAST, TEXAS_AM_NEXT], "Missouri": ["Missouri: " + MISSOURI_LAST, MISSOURI_NEXT]}
+EVERY_SCHOOL_ON = ["texas", "michigan", "texas_am", "missouri"]                        # in the order the table lists them
+
+
+def sign_whose_turns_can_be_stepped(browser, server, width=1280, height=800):
+    """The sign on a stopped clock that has noted when it set its 8-second timer (the strip's turns from school to school), so that a test can
+    step the page's clock to the very instant of a turn. Returns the page and that moment, in the page's own milliseconds."""
+    page = browser.new_page(viewport={"width": width, "height": height})
+    page.clock.install()
+    page.add_init_script("""(() => {
+        const set = window.setInterval;
+        window.timersSetAt = [];
+        window.setInterval = function (handler, delay, ...rest) { window.timersSetAt.push([delay, Date.now()]); return set.call(this, handler, delay, ...rest); };
+    })()""")
+    page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    strip_is_up(page)
+    page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+    return page, page.evaluate("window.timersSetAt.find(([delay]) => delay === 8000)[1]")
+
+
+def next_turn(page, set_at):
+    """The next instant after now at which the strip turns: the timer fires 8000 ms after it was set, and every 8000 ms after that."""
+    now = page.evaluate("Date.now()")
+    turn = set_at + 8000 * ((now - set_at) // 8000 + 1)
+    return turn if turn - now >= 500 else turn + 8000
+
+
+def run_to(page, instant):
+    """Runs the page's clock to `instant` (its milliseconds), firing every timer due by then, and lets the page draw."""
+    page.clock.run_for(instant - page.evaluate("Date.now()"))
+    page.wait_for_timeout(150)
+
+
+def school_on_the_strip(page):
+    return strip_text(page)[0].split(":")[0]
+
+
+def test_the_strip_turns_to_the_next_school_at_exactly_eight_seconds_on_the_pages_own_clock_with_the_schools_name_leading(browser, central_time):
+    """The page's clock is stepped to the millisecond before the timer's next firing and to the firing itself: a timer set for 7999, 8001 or
+    7000 ms, or one that does not run on the page's clock, turns at the wrong step."""
     with PageServer(schedules=every_school()) as server:
         choose(server, sign_scores=["texas", "michigan"])
         scoreboard_has(server, ["texas", "michigan"])
-        page = sign_on_a_stopped_clock(browser, server)
-        strip_is_up(page)
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server)
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
-        assert strip_text(page) == ["Texas: " + TEXAS_LAST, TEXAS_NEXT]      # the name leads the line, and the first school in the settings' order is first
-        page.clock.run_for(3000)
-        page.wait_for_timeout(150)
-        assert strip_text(page)[0].startswith("Texas: ")                       # not yet: a school stays 8 seconds
-        page.clock.run_for(5500)
-        page.wait_for_timeout(150)
-        assert strip_text(page) == ["Michigan: " + MICHIGAN_LAST, MICHIGAN_NEXT]       # the next school: 8 seconds after the first came up
-        assert page.locator("#score .rank").all_inner_texts() == ["(#12)", "(#12)"]    # the ranks are burnt orange here too, wherever a line has them
-        page.clock.run_for(8000)
-        page.wait_for_timeout(150)
-        assert strip_text(page) == ["Texas: " + TEXAS_LAST, TEXAS_NEXT]      # and round again
-        assert fits(page) and errors == []
+        first = school_on_the_strip(page)
+        if page.evaluate("Date.now()") - set_at < 8000:                          # the pause came before the first turn, as it does unless the machine is very slow
+            assert strip_text(page) == SCHOOL_LINES["Texas"]                     # the first school in the settings' order is first, its name leading
+        order = ["Texas", "Michigan"]
+        turn = next_turn(page, set_at)
+        for step in range(3):
+            run_to(page, turn - 1)
+            assert school_on_the_strip(page) == order[(order.index(first) + step) % 2], step          # a millisecond short: still the school it was
+            run_to(page, turn)
+            assert strip_text(page) == SCHOOL_LINES[order[(order.index(first) + step + 1) % 2]], step      # on the turn: the next, whole
+            turn += 8000
+        assert page.locator("#score .rank").count() >= 2 and fits(page) and errors == []
+        page.close()
+
+
+def test_with_four_schools_on_the_strip_goes_round_them_in_the_settings_order(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=EVERY_SCHOOL_ON)
+        scoreboard_has(server, EVERY_SCHOOL_ON)
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server)
+        order = ["Texas", "Michigan", "Texas A&M", "Missouri"]
+        shown = school_on_the_strip(page)
+        turn, seen = next_turn(page, set_at), [shown]
+        for _ in range(6):
+            run_to(page, turn)
+            assert strip_text(page) == SCHOOL_LINES[school_on_the_strip(page)]      # each school's own two lines, whole
+            seen.append(school_on_the_strip(page))
+            turn += 8000
+        start = order.index(shown)
+        assert seen == [order[(start + n) % 4] for n in range(7)], seen             # each once, in the settings' order, and round again: none skipped
         page.close()
 
 

@@ -248,17 +248,65 @@ async def test_a_manual_on_that_never_brings_the_tv_up_says_so_in_words(tmp_path
         assert service.woken == [MAC] and service.status()["held_off"] is False       # the person did want it on
 
 
-async def test_a_manual_on_of_a_tv_that_answers_but_stays_dark_answers_with_what_it_says(tmp_path):
-    """A TV in standby that is told to turn on and says nothing (the command did nothing) is not an error: what it says is
-    what the table shows."""
+async def test_a_manual_on_of_a_tv_that_answers_but_stays_dark_says_so_in_words(tmp_path):
+    """A TV in standby that is told to turn on and does nothing: the person at the table is told so, and is not shown a TV
+    that is still off as if all were well."""
     service = service_for(tmp_path, in_standby, key="key-9", keep_on=False)
-    service.wake_works, service.TURN_ON_GRACE_S = False, 0.1
+    service.wake_works, service.MANUAL_TURN_ON_GRACE_S = False, 0.1
     async with running(service) as client:
-        shown = await service.control("power", "on")
-        assert service.woken == [MAC] and ("power_on",) in client.calls
-        assert shown["on"] is False and shown["reachable"] is True
-        await client.update(power_state={"state": "Active"})
+        with pytest.raises(TvError) as failure:
+            await service.control("power", "on")
+        assert "answered but did not turn on" in str(failure.value) and "10.0.0.41" in str(failure.value)
+        assert service.woken == [MAC] and ("power_on",) in client.calls and service.status()["held_off"] is False
+        await client.update(power_state={"state": "Active"})                  # and if it comes on after all, the table follows
         assert service.status()["on"] is True
+
+
+async def test_a_manual_on_of_a_standby_tv_that_refuses_with_a_packet_that_does_nothing_says_so_in_words(tmp_path):
+    """The case the review had answering `on: false` without a word: the TV answers on its socket, the command to turn on is
+    refused, and the magic packet reaches nothing (Mobile TV On is off)."""
+    service = service_for(tmp_path, quick_start_tv(refuses=True), key="key-9", keep_on=False)
+    service.wake_works, service.MANUAL_TURN_ON_GRACE_S = False, 2.0
+    async with running(service) as client:
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        with pytest.raises(TvError) as failure:
+            await service.control("power", "on")
+        assert "answered but did not turn on" in str(failure.value) and "power button" in str(failure.value)
+        assert "Quick Start+" in str(failure.value)
+        assert loop.time() - t0 < 0.5                            # a refusal is no moment to wait out
+        assert service.woken == [MAC] and ("power_on",) in client.calls
+        assert service.status()["held_off"] is False             # the person did want it on
+
+
+async def test_a_manual_on_that_the_tv_took_and_did_nothing_about_says_so_after_a_few_seconds(tmp_path):
+    service = service_for(tmp_path, quick_start_tv(delay=None), key="key-9", keep_on=False)       # takes the command, stays dark
+    service.wake_works, service.MANUAL_TURN_ON_GRACE_S = False, 0.3
+    async with running(service):
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        with pytest.raises(TvError) as failure:
+            await service.control("power", "on")
+        assert "answered but did not turn on" in str(failure.value) and 0.25 <= loop.time() - t0 < 1.5
+
+
+async def test_a_manual_on_is_given_a_few_seconds_for_the_tv_to_say_that_it_is_on(tmp_path):
+    service = service_for(tmp_path, quick_start_tv(delay=0.3), key="key-9", keep_on=False)
+    service.wake_works, service.MANUAL_TURN_ON_GRACE_S, service.TURN_ON_GRACE_S = False, 2.0, 0.05   # (an automatic wake would not wait)
+    async with running(service):
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        shown = await service.control("power", "on")
+        assert shown["on"] is True and 0.25 <= loop.time() - t0 < 1.5
+
+
+async def test_the_power_key_that_turns_a_standby_tv_on_says_so_in_words_too(tmp_path):
+    service = service_for(tmp_path, quick_start_tv(refuses=True), key="key-9", keep_on=False)
+    service.wake_works = False
+    async with running(service):
+        with pytest.raises(TvError) as failure:
+            await service.control("key", "POWER")
+        assert "answered but did not turn on" in str(failure.value)
 
 
 async def test_a_manual_on_of_a_tv_that_is_out_of_reach_wakes_it(tmp_path):
@@ -445,6 +493,18 @@ async def test_a_tv_that_does_not_answer_the_command_to_turn_on_is_not_waited_fo
         t0 = loop.time()
         assert await within(service.ensure_on(timeout=5), 5.0) is True
         assert 0.15 <= loop.time() - t0 < 1.5 and "did not accept power on" in caplog.text
+
+
+async def test_a_join_goes_on_with_a_standby_tv_that_refuses_to_turn_on(tmp_path, caplog):
+    """The table is told when its own Turn on finds the TV dark; a join is not stopped by it, and is not made to wait."""
+    service = service_for(tmp_path, quick_start_tv(refuses=True), key="key-9", keep_on=False)
+    service.wake_works, service.MANUAL_TURN_ON_GRACE_S = False, 2.0
+    async with running(service):
+        service._config.keep_on = True
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        assert await service.before_join() is True                    # the TV answered: the join goes on
+        assert loop.time() - t0 < 0.5 and "did not accept power on" in caplog.text
 
 
 async def test_a_manual_on_turns_a_tv_in_standby_on(tmp_path):
@@ -648,14 +708,28 @@ async def test_a_join_leaves_a_tv_that_already_shows_the_room_pis_input_alone(tm
         assert not [call for call in client.calls if call[0] == "set_input"]
 
 
-async def test_a_join_leaves_the_input_alone_when_it_is_not_known(tmp_path):
+@pytest.mark.parametrize("app", ["com.webos.app.livetv", "netflix"])
+async def test_a_join_switches_a_tv_on_live_tv_or_an_app_to_the_room_pis_input(tmp_path, app):
+    """Live TV and the apps are not the room Pi: a meeting is not joined onto them."""
     def showing_an_app(host, key):
         client = DoingTv(host, key)
-        client.tv_state.current_input, client.tv_state.current_app_id = None, "com.webos.app.livetv"      # not an input
+        client.tv_state.current_input, client.tv_state.current_app_id = None, app
         return client
     service = service_for(tmp_path, showing_an_app, key="key-9")
     async with running(service) as client:
-        assert service.status()["input"] is None
+        assert service.status()["input"] is None and service.status()["app"] == app
+        assert await service.before_join() is True
+        assert ("set_input", "HDMI_1") in client.calls and service.status()["input"] == "HDMI_1"
+
+
+async def test_a_join_leaves_the_input_alone_while_the_state_is_unknown(tmp_path):
+    def saying_nothing(host, key):
+        client = DoingTv(host, key)
+        client.tv_state.current_input, client.tv_state.current_app_id = None, None
+        return client
+    service = service_for(tmp_path, saying_nothing, key="key-9")
+    async with running(service) as client:
+        assert service.status()["input"] is None and service.status()["app"] is None
         assert await service.before_join() is True
         assert not [call for call in client.calls if call[0] == "set_input"]
 

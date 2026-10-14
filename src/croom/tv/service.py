@@ -144,6 +144,7 @@ class TvService(Service):
     WAKE_POLL_S = 1.0         # and looks at the TV this often meanwhile
     WAKE_RESEND_S = 3.0       # sending the magic packet again this often while it does not (one can be lost)
     TURN_ON_GRACE_S = 0.5     # a TV that answers in standby is told to turn on, and has this long to say that it has
+    MANUAL_TURN_ON_GRACE_S = 3.0   # when a person at the table asked for it, this long: they are waiting to be told
     ASK_TIMEOUT_S = 3.0       # a command that the service gives the TV on its own account (turn on, show the Pi) has this long
     REREAD_TIMEOUT_S = 2.0    # and each read-back after a control has this long
 
@@ -330,6 +331,11 @@ class TvService(Service):
             client = self._client
             if client is not None and self._answering():
                 await self._read_back(client, "power")
+            if not self._is_on():
+                # The TV answers, was told to turn on (a refusal is the same), and is still not on. The person at the table
+                # is told so: a Turn on that answered "off" without a word would be the table lying by saying nothing.
+                raise TvError(f"The TV at {self._config.host} answered but did not turn on: press its power button, or turn "
+                              "on Quick Start+ in its settings")
         elif value == "off":
             client = self._require_ready()
             self._cancel_wake()
@@ -512,7 +518,7 @@ class TvService(Service):
                 return False
             if answered:
                 if not self._is_on():
-                    await self._turn_on()
+                    await self._turn_on(manual)
                 return True
             if loop.time() - sent >= self.WAKE_RESEND_S:      # still nothing: a packet can be lost, or sent too soon
                 sent = loop.time()
@@ -525,9 +531,10 @@ class TvService(Service):
                 return False
             await asyncio.sleep(min(self.WAKE_POLL_S, remaining))
 
-    async def _turn_on(self) -> None:
+    async def _turn_on(self, manual: bool = False) -> None:
         """The TV answers on its socket and is not on (standby with the network kept up): tell it to turn on, as the remote
-        would, and give it a moment to say that it has. A TV that refuses is logged and not waited for."""
+        would, and give it a moment to say that it has (a few seconds when a person at the table is waiting). A TV that
+        refuses is logged and not waited for."""
         client = self._client
         if client is None:
             return
@@ -537,14 +544,14 @@ class TvService(Service):
             logger.warning(f"The TV at {self._config.host} did not accept power on: {_why(e)}")
             return
         loop = asyncio.get_running_loop()
-        moment = loop.time() + self.TURN_ON_GRACE_S
+        moment = loop.time() + (self.MANUAL_TURN_ON_GRACE_S if manual else self.TURN_ON_GRACE_S)
         while not self._is_on() and loop.time() < moment:
             await asyncio.sleep(0.05)
 
     async def before_join(self) -> bool:
         """A meeting is about to be joined (the meeting service calls this first): the TV is wanted on, whatever the table
         turned it off for, and the join waits up to WAKE_TIMEOUT_S for it to answer; a TV that answers is switched to the
-        room Pi's input if it shows another. Whether the TV answered: the join goes on either way. A TV that there is nothing
+        room Pi's input if it is not showing it. Whether the TV answered: the join goes on either way. A TV that there is nothing
         to wait for (not set up, not paired, not accepting this table, a service that is stopped) is not one that failed to
         come on: the answer is True, and the room is not warned about it before every join."""
         if not self._config.keep_on:
@@ -560,17 +567,18 @@ class TvService(Service):
         return answered
 
     async def _show_the_pi(self) -> None:
-        """A meeting is not joined onto a TV that shows another input: when the TV's current input is known, and is not the
-        one the room Pi is on, it is switched to it. A TV that refuses is logged and the join goes on."""
-        pi, shown, client = self._config.pi_input, self._shown["input"], self._client
-        if not pi or shown is None or shown == pi or client is None:
+        """A meeting is not joined onto a TV that is not showing the room Pi: a TV that is not on the input the room Pi is
+        on (another input, live TV, an app) is switched to it. Only a TV whose state is not known (it says neither an input
+        nor an app) is left alone. A TV that refuses is logged and the join goes on."""
+        pi, shown, app, client = self._config.pi_input, self._shown["input"], self._shown["app"], self._client
+        if not pi or client is None or shown == pi or (shown is None and not app):
             return
         try:
             await asyncio.wait_for(client.set_input(pi), self.ASK_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001
             logger.warning(f"The TV at {self._config.host} did not switch to the room Pi's input {pi}: {_why(e)}")
             return
-        logger.info(f"The TV at {self._config.host} showed {shown}: switched to the room Pi's input {pi}")
+        logger.info(f"The TV at {self._config.host} showed {shown or app}: switched to the room Pi's input {pi}")
         await self._read_back(client, "input")
 
     def _is_on(self) -> bool:

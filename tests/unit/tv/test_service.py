@@ -73,11 +73,12 @@ async def test_a_tv_that_refuses_is_unreachable_in_words_and_retried(tmp_path):
         await service.stop()
 
 
-# The controls, Wake-on-LAN and keeping the TV on: the brief's own tests, as written. They pass with a waker that only
-# records the MAC address as well as with service_for's, which brings the TV on as a real wake does. More of the same, and
-# the edges, are in test_controls.py and test_keep_on.py. One line differs from the brief: the first test's list of calls
-# that are reads, not controls, gains the four reads that the review had every control followed by (the volume's and the
-# power state's were there); what it asserts of the control calls themselves is as it was.
+# The controls, Wake-on-LAN and keeping the TV on: the brief's own tests, as written, on service_for's waker, which brings
+# the fake TV on as a real wake does (with a waker that only records the MAC address, the fake stays off for ever, and a
+# manual On that finds the TV still off now says so, as the review asked: the second test would end in that TvError). More
+# of the same, and the edges, are in test_controls.py and test_keep_on.py. One line differs from the brief: the first test's
+# list of calls that are reads, not controls, gains the four reads that the review had every control followed by (the
+# volume's and the power state's were there); what it asserts of the control calls themselves is as it was.
 
 async def test_controls_map_to_the_tv_and_re_read_the_state(tmp_path):
     (tmp_path / "tv-client-key").write_text("key-9")
@@ -198,6 +199,7 @@ def test_the_waits_are_the_ones_the_spec_and_the_review_settled():
     assert TvService.WAKE_POLL_S == 1.0                   # and looked at this often meanwhile
     assert TvService.WAKE_RESEND_S == 3.0                 # with the magic packet sent again this often while it does not answer
     assert TvService.TURN_ON_GRACE_S == 0.5               # a TV in standby has this long to say that it was told to turn on
+    assert TvService.MANUAL_TURN_ON_GRACE_S == 3.0        # and, when a person at the table asked for it, this long
     assert TvService.START_WAIT_S == 0.5                  # starting waits this long for the first look at the TV
 
 

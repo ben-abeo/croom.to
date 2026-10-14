@@ -142,7 +142,7 @@ async def test_a_power_on_reads_the_power_back_when_the_tv_did_not_push_it(tmp_p
             self.tv_state.power_state = {"state": "Active"}
             return {}
     service = build_service(tmp_path, Quiet, keep_on=False)
-    service.TURN_ON_GRACE_S = 0.05
+    service.MANUAL_TURN_ON_GRACE_S = 0.05
     async with running(service):
         assert service.status()["on"] is False
         assert (await service.control("power", "on"))["on"] is True

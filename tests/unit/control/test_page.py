@@ -34,7 +34,7 @@ from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASK
 from croom.scores.espn import ScheduleUnavailable
 from croom.scores.service import ScoresService
 from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
-from tests.unit.scores.schedules import Feed, every_school, game, schedule, texas_sample
+from tests.unit.scores.schedules import Feed, every_school, game, longest_names, schedule, texas_sample
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -1888,12 +1888,13 @@ def test_with_four_schools_on_the_strip_goes_round_them_in_the_settings_order(br
         page.close()
 
 
-@pytest.mark.parametrize("width, height", [(800, 1280), (800, 480)])
-def test_in_a_sign_under_900_px_wide_the_strip_is_two_lines_for_every_school_so_that_its_height_and_the_weeks_rows_never_change_on_a_turn(browser, width, height, central_time):
-    """Four schools whose lines differ: Texas's two fit side by side (53 px) in the lines it used to have, Michigan's and Texas A&M's did not (80 px),
-    and here Texas has only a last game (its season is over) and Michigan only a next one (its season has not begun)."""
+@pytest.mark.parametrize("width, height", [(800, 1280), (800, 480), (1024, 600), (1099, 800)])
+def test_in_a_sign_under_1100_px_wide_the_strip_is_two_lines_for_every_school_so_that_its_height_and_the_weeks_rows_never_change_on_a_turn(browser, width, height, central_time):
+    """Four schools whose lines differ: Texas has only a last game (its season is over), Michigan only a next one (its season has not begun),
+    Texas A&M the longest names an SEC opponent gives (Mississippi State, Louisiana State, with ranks) and Missouri the usual pair."""
     skip_if_day_ends_within(3)
     schedules = every_school()
+    schedules[245] = longest_names()
     schedules[251]["events"] = [e for e in schedules[251]["events"] if e["competitions"][0]["status"]["type"]["completed"]]
     schedules[130]["events"] = [e for e in schedules[130]["events"] if not e["competitions"][0]["status"]["type"]["completed"]]
     with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=schedules) as server:
@@ -2064,49 +2065,57 @@ def test_the_strip_coming_up_moves_nothing_on_the_today_list_and_the_sign_still_
         page.close()
 
 
-def test_the_strip_with_the_longest_lines_it_gets_wraps_inside_the_sign_and_the_sign_still_fits(browser, central_time):
-    skip_if_day_ends_within(3)
-    long_season = schedule("Texas A&M", [
-        game("Mississippi State", "Texas A&M", "2026-10-10T20:00Z", home_score=24, away_score=21, home_rank=16, away_rank=20, state="post"),
-        game("Louisiana State", "Texas A&M", "2026-10-17T19:00Z", home_rank=18, away_rank=20)])
-    bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 100), event("e3", "Sales pipeline", 160)]
-    with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen, past the elevators",
-                    room_company="Lone Star Eye Care and Surgery Partners", schedules={245: long_season}) as server:
-        choose(server, sign_scores=["texas_am"])
-        scoreboard_has(server, ["texas_am"])
-        for width, height in ((1280, 800), (800, 1280), (1920, 1080)):
-            page = open_sign(browser, server, width, height)
-            strip_is_up(page)
-            assert strip_text(page) == ["Texas A&M (#20) 21 \u2013 Mississippi State (#16) 24", "Next: 10/17 \u00b7 Texas A&M (#20) @ Louisiana State (#18)"]
-            assert page.locator("#score").evaluate("e => e.scrollWidth <= e.clientWidth"), (width, height)      # nothing runs off the side
-            assert fits(page), (width, height)
-            last, following = page.locator("#score-last").bounding_box(), page.locator("#score-next").bounding_box()
-            for part in (last, following):
-                assert part["x"] >= 0 and part["x"] + part["width"] <= width, (width, height)
-            lines = page.locator("#score-last, #score-next").evaluate_all("els => els.map((e) => e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight))")
-            assert all(abs(n - 1) < 0.05 for n in lines), (width, height, lines)                            # each line is one line, whole: it moves, it does not wrap in two
-            if width >= 1280:
-                assert abs(last["y"] - following["y"]) <= 2 and following["x"] > last["x"] + last["width"], (width, height)    # side by side where they fit
-            else:
-                assert following["y"] >= last["y"] + last["height"], (width, height)                          # one under the other where they do not
-            page.close()
+LONGEST_LINES = ["Texas A&M: Texas A&M (#12) 45 \u2013 Mississippi State (#15) 42", "Next: 10/19 \u00b7 Louisiana State (#9) @ Texas A&M (#12)"]   # with the name leading, as it does with two schools on
 
 
-def test_on_a_sign_too_narrow_for_a_line_it_breaks_between_the_teams_and_never_inside_one(browser, central_time):
-    long_season = schedule("Texas A&M", [
-        game("Mississippi State", "Texas A&M", "2026-10-10T20:00Z", home_score=24, away_score=21, home_rank=16, away_rank=20, state="post"),
-        game("Louisiana State", "Texas A&M", "2026-10-17T19:00Z", home_rank=18, away_rank=20)])
-    with PageServer(schedules={245: long_season}) as server:
-        choose(server, sign_scores=["texas_am"])
-        scoreboard_has(server, ["texas_am"])
-        page = open_sign(browser, server, 420, 900)
-        strip_is_up(page)
-        sides = page.locator("#score .side").evaluate_all("""els => els.map((e) => [e.textContent, new Set([...e.getClientRects()].map((r) => Math.round(r.top))).size])""")
-        assert [name for name, _ in sides] == ["Texas A&M (#20) 21", "Mississippi State (#16) 24", "Texas A&M (#20)", "Louisiana State (#18)"]
-        assert all(lines == 1 for _, lines in sides), sides                  # each team and its score is on one line, whole
-        tops = page.locator("#score-last .side, #score-next .side").evaluate_all("els => els.map((e) => Math.round(e.getBoundingClientRect().top))")
-        assert len(set(tops)) > 1, tops                                       # and the line did have to break, between them
-        assert page.locator("#score").evaluate("e => e.scrollWidth <= e.clientWidth")
+def what_a_side_of_the_strip_is(page, selector):
+    """[its height in lines, scrollHeight == clientHeight, whether its text runs past its box] for #score-last or #score-next."""
+    return page.locator(selector).evaluate("""(e) => { const s = getComputedStyle(e);
+        return [e.getBoundingClientRect().height / parseFloat(s.lineHeight), e.scrollHeight === e.clientHeight, e.scrollWidth > e.clientWidth, s.whiteSpace, s.overflow, s.textOverflow]; }""")
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1080), (1100, 800), (1099, 800), (1024, 600), (800, 1280), (420, 900)])
+def test_the_strip_never_wraps_so_its_height_is_the_same_for_the_longest_names_as_for_a_short_pair_at_every_width_and_school_turn(browser, width, height, central_time):
+    """Each side of the strip is one clipped line (no wrapping, hidden overflow, an ellipsis), so the strip is the same height for Texas's short pair
+    and for the longest names an SEC opponent gives (Texas A&M (#12) 45 - Mississippi State (#15) 42 over Next: 10/19 - Louisiana State (#9) @ Texas A&M
+    (#12)), at every width: one line from 1100 px wide, the two sides sharing it, and two lines, one side to a line, below it. The text is clipped where it
+    does not fit, the final score last."""
+    with PageServer(schedules={**every_school(), 245: longest_names()}) as server:
+        choose(server, sign_scores=["texas", "texas_am"])                         # two on: the name leads, the longest line the strip can have
+        scoreboard_has(server, ["texas", "texas_am"])
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server, width, height)
+        root = page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)")
+        one_line, two_lines = 29 + 1.485 * root, 33 + 2 * 1.485 * root              # the band's padding and rule, one line of 1.1 rem at 1.35, or two with the gap
+        seen = {}
+        for step in range(2):
+            if step:
+                run_to(page, next_turn(page, set_at))
+            school = school_on_the_strip(page)
+            seen[school] = {"text": strip_text(page), "strip": page.locator("#score").bounding_box(),
+                            "last": what_a_side_of_the_strip_is(page, "#score-last"), "next": what_a_side_of_the_strip_is(page, "#score-next")}
+        assert set(seen) == {"Texas", "Texas A&M"}
+        assert seen["Texas A&M"]["text"] == LONGEST_LINES, seen["Texas A&M"]["text"]                         # the whole text is there, whatever is shown of it
+        expected = one_line if width >= 1100 else two_lines
+        for school, drawn in seen.items():
+            assert abs(drawn["strip"]["height"] - expected) <= 1, (school, drawn["strip"], expected)         # the same height for the short pair and the long one
+            for side in ("last", "next"):
+                lines, whole, _, white_space, overflow, ellipsis = drawn[side]
+                assert abs(lines - 1) < 0.01 and whole, (school, side, drawn[side])                         # one line, never a second
+                assert (white_space, overflow, ellipsis) == ("nowrap", "hidden", "ellipsis"), (school, side, drawn[side])
+        assert abs(seen["Texas"]["strip"]["y"] - seen["Texas A&M"]["strip"]["y"]) <= 0.5                     # so the top edge does not move on a turn
+        short_last, short_next = seen["Texas"]["last"][2], seen["Texas"]["next"][2]
+        assert not short_last and not short_next                                 # Texas's pair is never clipped
+        if width == 1100:                                                       # the narrowest one-line strip: the longest pair does not fit, and the next game gives way
+            assert not seen["Texas A&M"]["last"][2] and seen["Texas A&M"]["next"][2], seen["Texas A&M"]
+        if width == 420:                                                        # a phone: each side is clipped to its own line
+            assert seen["Texas A&M"]["last"][2] and seen["Texas A&M"]["next"][2], seen["Texas A&M"]
+        sides = page.locator("#score-last").bounding_box(), page.locator("#score-next").bounding_box()
+        if width >= 1100:
+            assert abs(sides[0]["y"] - sides[1]["y"]) <= 2 and sides[1]["x"] >= sides[0]["x"] + sides[0]["width"]     # side by side
+        else:
+            assert sides[1]["y"] >= sides[0]["y"] + sides[0]["height"] - 1                                          # one under the other
+        if width != 420:
+            assert fits(page)
         page.close()
 
 
@@ -2271,14 +2280,15 @@ def test_the_strip_stays_as_it_was_while_the_sign_cannot_reach_the_room(browser,
 def test_on_a_short_sign_with_a_school_on_the_week_counts_the_strip_and_keeps_every_days_plus_n_more_whole(browser, room, location, central_time):
     """The strip takes 53 to 81 px of a short screen's height, which the short-screen rules did not count: on a 1024 by 600 sign with a long room
     name the days were 74 px tall and their "+N more" cut off, on 900 by 500 they were 43 and on 800 by 480, 20. While a school is on, up to
-    640 px of height the week gives the days room: the status gives up its detail and its location and shrinks the room's name (the days keep their
-    dates down to 561 px, where the rule for short signs takes them); and up to 560 the Today list's status gives up its detail too. Every busy day's "+N more" is then whole: inside its day and
-    inside the box its bookings are in."""
+    680 px of height the week gives the days room (the strip is 81 px tall under 1100 px wide, where it is two lines, and a 1024 by 641 sign's
+    "+N more" was cut off by it, as a 1280 by 641 sign's was before): the status gives up its detail and its location and shrinks the room's name
+    (the days keep their dates down to 561 px, where the rule for short signs takes them); and up to 560 the Today list's status gives up its
+    detail too. Every busy day's "+N more" is then whole: inside its day and inside the box its bookings are in."""
     skip_if_day_ends_within(3)
     with PageServer(calendar_events=a_full_week(), room_name=room, room_location=location, schedules=every_school()) as server:
         choose(server, sign_scores=["texas", "texas_am"])                      # two on: the name leads, the longest line the strip has
         scoreboard_has(server, ["texas", "texas_am"])
-        for width, height in ((1024, 640), (1024, 600), (1024, 561), (900, 500), (800, 480), (1024, 560), (1280, 561), (1024, 641), (1280, 720)):
+        for width, height in ((1024, 680), (1024, 641), (1280, 641), (1024, 600), (1024, 561), (900, 500), (800, 480), (1024, 560), (1280, 561), (1024, 681), (1280, 720)):
             page = open_sign(browser, server, width, height)
             strip_is_up(page)
             today_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
@@ -2287,8 +2297,8 @@ def test_on_a_short_sign_with_a_school_on_the_week_counts_the_strip_and_keeps_ev
             open_the_week(page)
             page.wait_for_timeout(200)
             assert fits(page), ("week", width, height)
-            short = height <= 640
-            assert page.locator("#detail").is_hidden() == short, (width, height)                       # up to 640 px of height the detail goes while the strip is up ...
+            short = height <= 680
+            assert page.locator("#detail").is_hidden() == short, (width, height)                       # up to 680 px of height the detail goes while the strip is up ...
             assert page.locator("#room-location").is_hidden() == short, (width, height)                # ... and the location ...
             assert page.locator("#week .day-date").first.is_hidden() == (height <= 560), (width, height)        # while the days keep their dates until 560
             week_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")

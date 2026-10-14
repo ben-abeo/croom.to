@@ -175,9 +175,11 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
 
 /* The scoreboard strip along the bottom edge (spec 2.5): hidden until a school the room has on has a score to show. It takes a row of
    its own under the week or the Today list while it is up, and none while it is not, so that the status, the head and the tops of the
-   days never move for it. The last game is on the left and the next one on the right (on a line of its own on a narrow sign, where
-   they do not fit side by side); a team and its score are one unit that never splits across lines; the ranks are burnt orange,
-   the one colour the strip adds. */
+   days never move for it. The strip never wraps: each side (the last game, the next one) is one line, clipped with an ellipsis where it
+   does not fit, so that its height is the same for every school and every name at every width and the strip's top edge, and the week's
+   rows with it, never move when it turns from one school to the next. From 1100 px wide the two sides share one line, the last game
+   on the left and the next one on the right; below that they are stacked, two lines, each side the full width. The ranks are burnt
+   orange, the one colour the strip adds. */
 .score {
   position: relative;
   z-index: 1;
@@ -186,24 +188,22 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   background: rgba(0, 0, 0, 0.35);
   border-top: 1px solid rgba(255, 255, 255, 0.12);
   display: flex;
-  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
   gap: 4px 24px;
   font-size: 1.1rem;
 }
-.score .last, .score .next { min-width: 0; }
-.score .last { font-weight: 600; }
+.score .last, .score .next { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.score .last { flex: none; max-width: 100%; font-weight: 600; }   /* on one line the next game gives way first: a final score is not the thing to cut */
 .score .next { color: var(--periwinkle-300); }
 .score .last:empty, .score .next:empty { display: none; }
 .score .last:empty + .next { margin-left: auto; }   /* a next game with no last one beside it stays on the right */
-.score .side { white-space: nowrap; }
 .score .rank { color: #FFB366; }
-/* A sign under 900 px wide stacks the last game over the next one for every school, however short its two lines are, and keeps the band
-   to the height of two lines: otherwise a school whose lines fit side by side (53 px) and one whose lines do not (80 px) would move the
-   strip's top edge, and the week's rows with it, by 27 px at every turn. Two lines, the gap between them and the band's padding and rule. */
-@media (max-width: 899px) {
-  .score { flex-direction: column; flex-wrap: nowrap; align-items: flex-start; justify-content: center; min-height: calc(33px + 2 * 1.485rem); }
+/* Under 1100 px wide (a 1024 px panel included) the two sides are stacked, whichever school is up and however short its lines are, and the band
+   keeps the height of two lines (the padding and the rule, the gap between them and two lines): a school with one line to give is as tall as
+   one with two. */
+@media (max-width: 1099px) {
+  .score { flex-direction: column; align-items: stretch; justify-content: center; min-height: calc(33px + 2 * 1.485rem); }
   .score .last:empty + .next { margin-left: 0; }
 }
 
@@ -213,13 +213,14 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }
 }
 
-/* The scoreboard strip takes 53 to 81 px of a short screen's height (body[data-strip], set by sign.js while it is up), which the rule above
-   did not count: with a long room name the days were 74 px tall at 1024 by 600, 43 at 900 by 500 and 20 at 800 by 480, and their "+N more"
-   was cut off. So while the strip is up the week gives the days room up to 640 px of height: the status gives up its detail line and its
-   location and shrinks the room's name (to a size that still reads across a room); the days keep their dates until 560 px, where the
-   rule above takes them. On a screen of 560 or less the Today list gives up its detail line too (the status would not fit above the strip
-   at 800 by 480 with a long name). */
-@media (max-height: 640px) {
+/* The scoreboard strip takes 53 px of a short screen's height (81 under 1100 px wide, where it is two lines; body[data-strip], set by sign.js
+   while it is up), which the rule above did not count: with a long room name the days were 74 px tall at 1024 by 600, 43 at 900 by 500 and
+   20 at 800 by 480, and their "+N more" was cut off. So while the strip is up the week gives the days room up to 680 px of height (the
+   "+N more" of a long name is whole from 650 px up on a 1024 px sign and from 660 on a 1280 px one, and the margin is 20 px): the status gives
+   up its detail line and its location and shrinks the room's name (to a size that still reads across a room); the days keep their dates until
+   560 px, where the rule above takes them. On a screen of 560 or less the Today list gives up its detail line too (the status would not fit
+   above the strip at 800 by 480 with a long name). */
+@media (max-height: 680px) {
   body[data-view="week"][data-strip] .detail, body[data-view="week"][data-strip] .location { display: none; }
   body[data-view="week"][data-strip] .room { font-size: clamp(1.8rem, 4vw, 2.6rem); }
 }

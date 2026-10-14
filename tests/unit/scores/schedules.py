@@ -73,6 +73,15 @@ def missouri() -> Dict[str, Any]:
     ])
 
 
+def longest_names() -> Dict[str, Any]:
+    """Texas A&M's schedule with the longest names its opponents give the strip, Mississippi State and Louisiana State, ranked: "Texas A&M
+    (#12) 45 – Mississippi State (#15) 42" over "Next: 10/19 · Louisiana State (#9) @ Texas A&M (#12)"."""
+    return schedule("Texas A&M", [
+        game("Texas A&M", "Mississippi State", "2026-10-10T20:00Z", home_score=45, away_score=42, home_rank=12, away_rank=15, state="post"),
+        game("Texas A&M", "Louisiana State", "2026-10-19T19:00Z", home_rank=12, away_rank=9),
+    ])
+
+
 def every_school() -> Dict[int, Dict[str, Any]]:
     """What the feed would answer for each school's team id."""
     return {251: texas_sample(), 130: michigan(), 245: texas_am(), 142: missouri()}

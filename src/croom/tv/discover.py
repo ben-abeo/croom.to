@@ -15,6 +15,7 @@ from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
 from urllib.parse import urlsplit
 
 from croom.tv.errors import TvError
+from croom.tv.names import one_line
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,6 @@ SEND_GRACE_S = 1.0                      # a search that has not ended this long 
 FETCH_TIMEOUT_S = 2.0                   # a description has this long to arrive
 MAX_DESCRIPTION_BYTES = 65536           # and is read as far as this
 MAX_TVS = 64                            # more answers than this from different addresses are not a network of TVs
-MAX_NAME_LENGTH = 100
 
 Answer = Callable[[bytes, str], None]                      # a datagram that came back, and the address it came from
 Send = Callable[[bytes, Answer, float], Awaitable[None]]   # put the search out, hand each answer on, end after the window
@@ -74,9 +74,13 @@ async def discover_tvs(timeout: float = 3.0, send: Optional[Send] = None, fetch:
 
 def _location_of(datagram: bytes) -> Optional[str]:
     """The LOCATION in an answer from a webOS TV ("" when it names none); None when the datagram is not such an answer (another
-    device, an announcement, noise): the ST header says what a device is answering to."""
+    device, an announcement, noise). An answer is `HTTP/1.1 200` and headers, and its ST header says what it answers for: the ST
+    of a search or an announcement, or of an error, is not an answer."""
+    lines = datagram.decode("utf-8", errors="replace").splitlines()
+    if (lines[0].split()[:2] if lines else []) != ["HTTP/1.1", "200"]:
+        return None
     headers: Dict[str, str] = {}
-    for line in datagram.decode("utf-8", errors="replace").splitlines():
+    for line in lines[1:]:
         name, colon, value = line.partition(":")
         if colon:
             headers.setdefault(name.strip().upper(), value.strip())
@@ -119,8 +123,7 @@ def _friendly_name(description: str) -> str:
     root = ET.fromstring(description)
     for element in root.iter():
         if element.tag.rpartition("}")[2] == "friendlyName":        # (whatever the namespace is called)
-            name = " ".join((element.text or "").split())
-            return "".join(char for char in name if char.isprintable())[:MAX_NAME_LENGTH]
+            return one_line(element.text)
     return ""
 
 
@@ -173,11 +176,14 @@ async def _multicast(request: bytes, on_answer: Answer, window: float) -> None:
 
 async def _get(url: str) -> str:
     """The real `fetch`: the page at this address as text, as far as MAX_DESCRIPTION_BYTES of it (ValueError when there is
-    more). A redirect is not followed, and an error page is an error. aiohttp is imported here, as the other services do."""
+    more). Only a 200 is a description: a redirect is not followed, and neither it nor an error page is read. What the device
+    sends is not decompressed on the way (a few kilobytes can unpack to gigabytes), a description being plain XML. aiohttp is
+    imported here, as the other services do."""
     import aiohttp
-    async with aiohttp.ClientSession() as session:
+    async with aiohttp.ClientSession(auto_decompress=False) as session:
         async with session.get(url, allow_redirects=False) as response:
-            response.raise_for_status()
+            if response.status != 200:
+                raise ValueError(f"the page at {url} answered {response.status}")
             body = bytearray()
             async for chunk in response.content.iter_chunked(8192):
                 body += chunk

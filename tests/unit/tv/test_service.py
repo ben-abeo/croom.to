@@ -203,6 +203,9 @@ def test_the_waits_are_the_ones_the_spec_and_the_review_settled():
     assert TvService.START_WAIT_S == 0.5                  # starting waits this long for the first look at the TV
     assert TvService.ASK_TIMEOUT_S == 3.0                 # a command the service gives the TV on its own account (turn on, show the Pi)
     assert TvService.REREAD_TIMEOUT_S == 2.0              # and each read-back after a control has this long
+    # a person's tap keeps its own command and grace beyond the wait: the longest a Turn on from the table can take, which the
+    # constants' comment in the service says, and the control's client waits longer than
+    assert TvService.WAKE_TIMEOUT_S + TvService.ASK_TIMEOUT_S + TvService.MANUAL_TURN_ON_GRACE_S + TvService.REREAD_TIMEOUT_S == 23.0
 
 
 def test_from_config_keeps_the_key_in_the_data_dir(tmp_path):

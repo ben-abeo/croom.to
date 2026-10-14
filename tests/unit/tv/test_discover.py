@@ -68,7 +68,7 @@ def test_the_waits_and_the_limits_are_the_ones_settled():
     assert discover.SEARCHES == 2 and discover.RESEND_AFTER_S == 0.5      # which is sent twice, half a second apart
     assert discover.SEND_GRACE_S == 1.0                           # a search that is not over a second after its window is cut off
     assert discover.FETCH_TIMEOUT_S == 2.0                        # a description has two seconds to arrive
-    assert discover.MAX_DESCRIPTION_BYTES == 65536 and discover.MAX_TVS == 64 and discover.MAX_NAME_LENGTH == 100
+    assert discover.MAX_DESCRIPTION_BYTES == 65536 and discover.MAX_TVS == 64      # (and names are 100 characters: test_names)
 
 
 async def test_the_search_is_the_one_a_webos_tv_answers_to_and_goes_to_the_ssdp_group():
@@ -128,11 +128,29 @@ async def test_the_header_names_may_be_in_any_case_and_the_target_too():
     b"NOTIFY * HTTP/1.1\r\nNT: " + SEARCH_TARGET.encode() + b"\r\nLOCATION: " + LG_LOCATION.encode() + b"\r\n\r\n",    # an announcement
     ssdp_answer(LG_LOCATION, st="ssdp:all"), ssdp_answer(LG_LOCATION, st=SEARCH_TARGET + ":extra"),
     ssdp_answer(LG_LOCATION, st="urn:schemas-upnp-org:device:MediaRenderer:1"),
+    # carrying the target is not answering for it: a request is somebody's search or announcement, and an error is no TV
+    b"M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: " + SEARCH_TARGET.encode()
+    + b"\r\nLOCATION: " + LG_LOCATION.encode() + b"\r\n\r\n",
+    b"NOTIFY * HTTP/1.1\r\nST: " + SEARCH_TARGET.encode() + b"\r\nLOCATION: " + LG_LOCATION.encode() + b"\r\n\r\n",
+    ssdp_answer(LG_LOCATION).replace(b"200 OK", b"404 Not Found"), ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK\r\n", b""),
 ])
 async def test_what_does_not_answer_the_search_for_a_webos_tv_is_ignored(datagram):
     fetch = serving({LG_LOCATION: description()})
     assert await discover_tvs(send=answering((datagram, LG)), fetch=fetch) == []
     assert fetch.asked == []
+
+
+@pytest.mark.parametrize("how", ["bare newlines", "spaces before the colons", "both"])
+async def test_an_answer_with_bare_newlines_or_spaces_before_the_colons_is_still_an_answer(how):
+    """Devices are not all as careful as the specification: the lines may end in a newline alone, and a header's name may be
+    followed by a space before its colon."""
+    answer = ssdp_answer(LG_LOCATION)
+    if how != "spaces before the colons":
+        answer = answer.replace(b"\r\n", b"\n")
+    if how != "bare newlines":
+        answer = answer.replace(b"ST:", b"ST :").replace(b"LOCATION:", b"LOCATION :")
+    found = await discover_tvs(send=answering((answer, LG)), fetch=serving({LG_LOCATION: description()}))
+    assert found == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 # The name
@@ -164,6 +182,19 @@ async def test_a_description_that_never_arrives_is_cut_off_and_the_others_are_re
     found = await within(discover_tvs(send=answering((ssdp_answer(LG_LOCATION), LG), (ssdp_answer(other), "10.0.0.50")), fetch=fetch), 5.0)
     assert loop.time() - t0 < 1.0
     assert found == [{"host": "10.0.0.50", "name": "Training room", "location": other}, {"host": LG, "name": "", "location": LG_LOCATION}]
+
+
+async def test_descriptions_are_read_together_so_that_a_search_takes_one_fetch_timeout_not_one_per_tv(monkeypatch):
+    monkeypatch.setattr(discover, "FETCH_TIMEOUT_S", 0.3)
+
+    async def fetch(url):
+        await asyncio.sleep(30)                                   # TVs that take the connection and say nothing
+    hosts = [f"10.0.0.{n}" for n in range(10, 20)]
+    send = answering(*[(ssdp_answer(f"http://{h}:1234/d.xml"), h) for h in hosts])
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    found = await within(discover_tvs(send=send, fetch=fetch), 5.0)
+    assert len(found) == 10 and loop.time() - t0 < 1.0            # ten in a row would be three seconds
 
 
 @pytest.mark.parametrize("markup, name", [
@@ -434,10 +465,6 @@ class FakeResponse:
     async def __aexit__(self, *exc):
         return False
 
-    def raise_for_status(self):
-        if self.status >= 400:
-            raise RuntimeError(f"{self.status}, message='no'")                    # (aiohttp's ClientResponseError, as far as _get cares)
-
     @property
     def content(self):
         return self
@@ -455,6 +482,7 @@ def web(monkeypatch):
     class Holder:
         asked = []
         response = FakeResponse([])
+        session_args = None
 
         def respond(self, chunks, status=200):
             self.response = FakeResponse(chunks, status)
@@ -462,6 +490,9 @@ def web(monkeypatch):
     holder = Holder()
 
     class Session:
+        def __init__(self, **kwargs):
+            holder.session_args = kwargs
+
         async def __aenter__(self):
             return self
 
@@ -494,11 +525,21 @@ async def test_the_real_fetch_reads_no_more_than_a_description_needs(web):
         await discover._get(LG_LOCATION)
 
 
-async def test_the_real_fetch_of_a_page_that_is_an_error_is_an_error(web):
-    web.respond([b"<html>nothing here</html>"], status=404)
+@pytest.mark.parametrize("status", [301, 302, 204, 404, 500])
+async def test_the_real_fetch_takes_nothing_but_a_200_for_a_description(web, status):
+    """An error page is an error, and so is a redirect that was not followed: its body is not the description."""
+    web.respond([description().encode()], status=status)
     with pytest.raises(Exception) as failure:
         await discover._get(LG_LOCATION)
-    assert "404" in str(failure.value)
+    assert str(status) in str(failure.value)
+
+
+async def test_the_real_fetch_does_not_decompress_what_a_device_sends(web):
+    """A description is plain XML: a body that says it is compressed is not unpacked on the way (a few kilobytes can unpack to
+    gigabytes), and is not a description either."""
+    web.respond([description().encode()])
+    await discover._get(LG_LOCATION)
+    assert web.session_args == {"auto_decompress": False}
 
 
 async def test_the_real_search_and_the_real_fetch_are_what_discover_tvs_uses_unless_it_is_told_otherwise(endpoint, web):

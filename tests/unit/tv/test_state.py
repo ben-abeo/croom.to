@@ -39,6 +39,27 @@ async def test_the_state_is_read_in_the_names_the_real_library_uses(tmp_path):
         await service.stop()
 
 
+@pytest.mark.parametrize("hello, system, name", [
+    ({"deviceName": "Boardroom TV"}, {"modelName": "OLED65C6"}, "Boardroom TV"),
+    ({"deviceName": "Salle de réunion"}, {}, "Salle de réunion"),
+    ({"deviceName": "Board\x1b[2Jroom\n  TV"}, {}, "Board[2Jroom TV"),         # the TV chooses its name: one printable line
+    ({}, {"modelName": "OLED65C6\x07"}, "OLED65C6"),                          # and its model, which stands in for it
+    ({"deviceName": "x" * 300}, {}, "x" * 100),
+    ({}, {}, ""),
+])
+async def test_the_name_the_tv_gives_is_one_printable_line(tmp_path, hello, system, name):
+    def named(host, key):
+        client = FakeTvClient(host, key)
+        client.tv_info = SimpleNamespace(hello_info=hello, system_info=system)
+        return client
+    service = build_service(tmp_path, named)
+    await service.start()
+    try:
+        assert service.status()["name"] == name
+    finally:
+        await service.stop()
+
+
 def librarys_is_on(power_state, app):
     """What aiowebostv 0.10 works out for tv_state.is_on (WebOsClient._is_tv_on), before it hands the state over."""
     if not power_state:

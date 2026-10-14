@@ -356,6 +356,10 @@ def main() -> None:
 
     if args.check_tv:
         from croom.tv.check import check_tv
+        # It prints names that a TV, or a person's directory, chose: one that this terminal cannot encode is shown as a ? and does
+        # not end the check in a traceback
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
         raise SystemExit(asyncio.run(check_tv(load_config(args.config))))
 
     if args.check_meet:

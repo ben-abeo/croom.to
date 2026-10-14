@@ -6,11 +6,11 @@ pairing and lets the agent control it, so it is never in the config or the repo.
 import contextlib
 import os
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 
 class KeyStore:
-    def __init__(self, path):
+    def __init__(self, path: Union[str, Path]) -> None:
         self.path = Path(path)
 
     @property

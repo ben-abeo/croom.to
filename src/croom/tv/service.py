@@ -18,6 +18,7 @@ from croom.core.service import Service
 from croom.tv.client import ClientFactory, TvClient
 from croom.tv.errors import TvError, TvTimeout
 from croom.tv.keystore import KeyStore
+from croom.tv.names import one_line
 
 logger = logging.getLogger(__name__)
 
@@ -147,10 +148,11 @@ def _first(obj: Any, *names: str) -> Any:
 
 def _name_of(tv_info: Any) -> str:
     """What to call the TV: the name it gives itself, else its model. The library's WebOsTvInfo keeps the TV's hello
-    and system info as `hello` and `system`; the test fake calls them `hello_info` and `system_info`."""
+    and system info as `hello` and `system`; the test fake calls them `hello_info` and `system_info`. The TV chooses its name, and
+    it is shown on the table and printed on a terminal: one printable line (names.one_line)."""
     hello = _first(tv_info, "hello_info", "hello") or {}
     system = _first(tv_info, "system_info", "system") or {}
-    return str(hello.get("deviceName") or system.get("modelName") or "")
+    return one_line(hello.get("deviceName") or system.get("modelName"))
 
 
 class TvService(Service):
@@ -159,10 +161,12 @@ class TvService(Service):
     WATCH_S = 1.0             # how often a live connection is looked at
     START_WAIT_S = 0.5        # start() waits this long for the first look at the TV, then leaves it to the background
     REWAKE_AFTER_S = 5.0      # a TV that went off by itself is woken after this long, unless it is back on by then
-    WAKE_TIMEOUT_S = 15.0     # a wake waits this long for the TV to answer (a join waits no longer for it)
+    WAKE_TIMEOUT_S = 15.0     # a wake waits this long for the TV to answer (a join waits no longer for it, whatever is slow)
     WAKE_POLL_S = 1.0         # and looks at the TV this often meanwhile
     WAKE_RESEND_S = 3.0       # sending the magic packet again this often while it does not (one can be lost)
     TURN_ON_GRACE_S = 0.5     # a TV that answers in standby is told to turn on, and has this long to say that it has
+    # A person's tap keeps its own command and grace beyond the wait, so a Turn on from the table takes at most 15 (the wait,
+    # WAKE_TIMEOUT_S) + 3 (the command, ASK_TIMEOUT_S) + 3 (the grace, below) + 2 (the read-back, REREAD_TIMEOUT_S) = 23 s
     MANUAL_TURN_ON_GRACE_S = 3.0   # when a person at the table asked for it, this long: they are waiting to be told
     ASK_TIMEOUT_S = 3.0       # a command that the service gives the TV on its own account (turn on, show the Pi) has this long
     REREAD_TIMEOUT_S = 2.0    # and each read-back after a control has this long
@@ -322,7 +326,9 @@ class TvService(Service):
         then says what it shows), and raises TvError, in words, when it cannot be asked or does not answer, the look being cut
         off after `timeout` seconds (a TvTimeout, as is a look that ended in the library's own timeout). A look is no more than
         that: the service is not started, nothing is woken, and a service with no key is not connected at all, because a
-        connect without a key is a pairing. Hang up with stop()."""
+        connect without a key is a pairing. (A TV that did not know the key shows its prompt, and if somebody accepts it during
+        the look the TV issues a new key, which is kept, as at every connect: the one change a look can make.) Hang up with
+        stop()."""
         self._require_paired()
         try:
             answered = await asyncio.wait_for(self._connect_once(), timeout)
@@ -539,7 +545,9 @@ class TvService(Service):
         service's own it is logged, and the TV is not waited for.
 
         All of it is within `timeout`, the packet and the steps after the TV has answered (telling it to turn on, the moment it
-        is given to say that it has) included: a join, which waits no longer than that for the TV, never takes longer."""
+        is given to say that it has) included, except a person's tap (`manual`), whose command and grace come after the wait:
+        they are waiting to be told, and a TV that answered in the last moments is still given its time. A join, which waits
+        no longer than that for the TV, never takes longer."""
         if self._is_on():
             return True
         if not self._still_wanted(manual):
@@ -569,7 +577,7 @@ class TvService(Service):
                 return False
             if answered:
                 if not self._is_on():
-                    await self._turn_on(manual, deadline)
+                    await self._turn_on(manual, None if manual else deadline)
                 return True
             if loop.time() - sent >= self.WAKE_RESEND_S:      # still nothing: a packet can be lost, or sent too soon
                 sent = loop.time()
@@ -586,7 +594,7 @@ class TvService(Service):
         """The TV answers on its socket and is not on (standby with the network kept up): tell it to turn on, as the remote
         would, and give it a moment to say that it has (a few seconds when a person at the table is waiting). A TV that
         refuses is logged and not waited for. Neither the command nor the moment goes on past `deadline` (a time on the
-        loop's clock): with none of it left, the TV is not asked."""
+        loop's clock; a person's tap has none): with none of it left, the TV is not asked."""
         client = self._client
         ask = self._within(self.ASK_TIMEOUT_S, deadline)
         if client is None or not ask:

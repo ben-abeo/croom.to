@@ -3,6 +3,7 @@ network. The check looks and changes nothing: it never wakes the TV, never pairs
 connected. Its words are what a person at a shell reads, so they are pinned."""
 import asyncio
 import io
+import os
 import subprocess
 import sys
 
@@ -130,6 +131,33 @@ async def test_a_tv_that_gives_no_name_or_inputs_is_reported_as_such(tmp_path):
     config, service = room(tmp_path, mute)
     code, text, _ = await run(config, service)
     assert code == 0 and "The TV answers: it gives no name, on." in text and "The TV lists no inputs." in text
+
+
+async def test_a_key_the_tv_issues_while_it_is_looked_at_is_kept_and_said(tmp_path):
+    """Somebody accepts the TV's pairing prompt during the look (the stored key was not one it knew): the TV issues a new key, and the
+    service keeps it, as it does at every connect, or the next start would show the prompt again. It is the one thing the check
+    changes, so it says so."""
+    class Renewing(FakeTvClient):
+        async def connect(self):
+            connected = await super().connect()
+            self.client_key = "key-new"                           # the prompt was accepted: the TV hands out a key
+            return connected
+    config, service = room(tmp_path, Renewing)
+    code, text, _ = await run(config, service)
+    assert code == 0, text
+    assert text.splitlines()[:4] == [
+        "TV: 10.0.0.41, MAC AA:BB:CC:DD:EE:FF",
+        f"The TV is paired with this device (its key is in {tmp_path / KEY}).",
+        "The TV issued a new key (its pairing prompt was accepted during the check), which is kept.",
+        "The TV answers: Boardroom TV, on.",
+    ]
+    assert (tmp_path / KEY).read_text() == "key-new"
+
+
+async def test_a_key_that_the_tv_hands_back_as_it_was_is_not_news(tmp_path):
+    config, service = room(tmp_path)
+    code, text, _ = await run(config, service)
+    assert code == 0 and "issued a new key" not in text and (tmp_path / KEY).read_text() == "key-9"
 
 
 async def test_the_check_wakes_nothing_pairs_nothing_and_leaves_nothing_connected(tmp_path):
@@ -457,9 +485,15 @@ def test_the_key_is_kept_where_the_service_says(tmp_path):
 
 # The command line
 
+def croom(*args, **kwargs):
+    """`python -m croom.core.agent ...` for as long as a check may take. The timeout matters: a flag that is not acted on falls
+    through to the whole agent, which listens on the network until it is killed, and a test that waits for it waits for ever."""
+    return subprocess.run([sys.executable, "-m", "croom.core.agent", *args], capture_output=True, text=True, timeout=30, **kwargs)
+
+
 class TestCommandLine:
     def test_help_names_the_flag(self):
-        result = subprocess.run([sys.executable, "-m", "croom.core.agent", "--help"], capture_output=True, text=True)
+        result = croom("--help")
         assert result.returncode == 0 and "--check-tv" in result.stdout
 
     def test_flag_runs_the_check(self, tmp_path):
@@ -467,7 +501,17 @@ class TestCommandLine:
         cfg = tmp_path / "config.yaml"
         cfg.write_text(yaml.safe_dump({"data_dir": str(tmp_path / "data"),
                                        "tv": {"enabled": True, "host": "10.0.0.41", "mac": "AA:BB:CC:DD:EE:FF"}}))
-        result = subprocess.run([sys.executable, "-m", "croom.core.agent", "--check-tv", "-c", str(cfg)], capture_output=True, text=True)
+        result = croom("--check-tv", "-c", str(cfg))
         assert result.returncode == 1, result.stderr
         assert "TV: 10.0.0.41, MAC AA:BB:CC:DD:EE:FF" in result.stdout and "The TV is not paired with this device" in result.stdout
         assert str(tmp_path / "data" / KEY) in result.stdout
+
+    def test_what_a_terminal_cannot_show_is_replaced_and_is_not_a_traceback(self, tmp_path):
+        """The check prints names that a TV, or a person's directory, chose: on a terminal that cannot encode one (an ASCII one) a ?
+        stands for it, and the check goes on to say what it found."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(yaml.safe_dump({"data_dir": str(tmp_path / "données"),
+                                       "tv": {"enabled": True, "host": "10.0.0.41", "mac": "AA:BB:CC:DD:EE:FF"}}))
+        result = croom("--check-tv", "-c", str(cfg), env=dict(os.environ, PYTHONIOENCODING="ascii"))
+        assert "UnicodeEncodeError" not in result.stderr, result.stderr
+        assert result.returncode == 1 and "donn?es" in result.stdout and "The TV is not paired with this device" in result.stdout

@@ -1,6 +1,8 @@
 """
 `croom --check-tv`: prove the room's TV can be reached from this device, in plain words (spec 2026-10-13 TV remote and
 touchpad, section 3). It looks and changes nothing: the TV is not woken, not paired, not switched, and nothing is left connected.
+(The one thing that can change is the key: a TV that did not know the stored one shows its pairing prompt, and if somebody
+accepts it during the look the TV issues a new key, which is kept as it is at every connect, and the check says so.)
 With no TV configured it lists the LG TVs on the network instead, as Find TVs does on the table. Exit 0 when the TV answered,
 1 otherwise.
 """
@@ -13,6 +15,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional, TextIO, Tuple
 from croom.core.config import Config
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TvError, TvTimeout
+from croom.tv.keystore import KeyStore
 from croom.tv.service import REFUSED, TvService, shows_the_pi
 from croom.tv.wake import mac_problem
 
@@ -60,6 +63,7 @@ async def check_tv(config: Config, out: TextIO = sys.stdout, service_factory: Op
                   file=out)
             return 1
         print(f"The TV is paired with this device (its key is in {service.key_path}).", file=out)
+        key_before = KeyStore(service.key_path).read()
         try:
             await service.probe(CHECK_TIMEOUT_S)
         except TvError as e:
@@ -71,6 +75,8 @@ async def check_tv(config: Config, out: TextIO = sys.stdout, service_factory: Op
                 print("If the TV is showing a prompt to allow this device, it no longer knows this device: Forget TV, then Pair, "
                       "under Options > TV on the room's table.", file=out)
             return 1
+        if KeyStore(service.key_path).read() != key_before:       # (a look that fails has not got as far as a new key)
+            print("The TV issued a new key (its pairing prompt was accepted during the check), which is kept.", file=out)
         shown = service.status()
         state = "on" if shown["on"] else "in standby (its screen is off)"
         print(f"The TV answers: {shown['name'] or 'it gives no name'}, {state}.", file=out)
@@ -136,8 +142,8 @@ async def _find_tvs(out: TextIO, discover: Discover) -> None:
     print(f"Found {len(found)} LG TV{'' if len(found) == 1 else 's'}:", file=out)
     for tv in found:
         print(f"  {tv['name'] or '(no name)'}  {tv['host']}", file=out)
-    print("Put the address of yours in tv.host (and its MAC address in tv.mac, in quotes), make sure tv.enabled is true, then pair "
-          "it under Options > TV on the room's table.", file=out)
+    print("Put the address of yours in tv.host (and its MAC address in tv.mac, in quotes), make sure tv.enabled is true, "
+          "then pair it under Options > TV on the room's table.", file=out)
 
 
 async def _let_go(service: TvService) -> None:

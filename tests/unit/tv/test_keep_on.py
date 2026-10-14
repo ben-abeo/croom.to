@@ -859,17 +859,35 @@ async def test_a_join_does_not_wait_for_the_moment_a_tv_is_given_to_say_it_is_on
         await coming
 
 
-async def test_a_wake_that_a_person_asked_for_does_not_wait_for_the_tv_to_say_it_is_on_past_its_wait_either(tmp_path):
-    service = service_for(tmp_path, quick_start_tv(delay=None), key="key-9", keep_on=False)
-    service.wake_works, service.WAKE_POLL_S, service.MANUAL_TURN_ON_GRACE_S = False, 0.02, 5.0
+async def test_ruling_a_tap_on_turn_on_keeps_its_own_grace_after_a_late_answer(tmp_path):
+    """The clamp is for the join. A person's tap: the wait is for the TV to answer, and what comes after it has its own time."""
+    service = service_for(tmp_path, quick_start_tv(delay=0.3), key="key-9", keep_on=False)    # comes on 0.3 s after it is told
+    service.wake_works, service.WAKE_POLL_S = False, 0.02
     async with running(service) as client:
         client.refuse = True
         await client.drop()
-        coming = answers_late(client, 0.3, {"state": "Active Standby"})
+        coming = answers_late(client, 0.4, {"state": "Active Standby"})            # answers with 0.1 s of the 0.5 s wait left
         loop = asyncio.get_running_loop()
         t0 = loop.time()
         assert await within(service.ensure_on(timeout=0.5, manual=True), 8.0) is True
-        assert 0.4 <= loop.time() - t0 < 0.8
+        assert ("power_on",) in client.calls and service.status()["on"] is True     # told, and it said so, past the wait
+        assert 0.6 <= loop.time() - t0 < 1.5
+        await coming
+
+
+async def test_ruling_a_tap_on_turn_on_keeps_its_own_time_for_a_slow_command(tmp_path, caplog):
+    class Slow(StandbyTv):
+        async def power_on(self):
+            await asyncio.sleep(0.3)                                                    # longer than what is left of the wait
+            await super().power_on()
+    service = service_for(tmp_path, Slow, key="key-9", keep_on=False)
+    service.wake_works, service.WAKE_POLL_S = False, 0.02
+    async with running(service) as client:
+        client.refuse = True
+        await client.drop()
+        coming = answers_late(client, 0.4, {"state": "Active Standby"})
+        assert await within(service.ensure_on(timeout=0.5, manual=True), 8.0) is True
+        assert "did not accept power on" not in caplog.text and service.status()["on"] is True
         await coming
 
 

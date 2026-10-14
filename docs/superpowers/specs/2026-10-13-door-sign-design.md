@@ -68,7 +68,7 @@ Tokens from the Crystal brand: navy `#001636` base, panels at 6 % white, blue `#
 
 ## 3. Files
 
-`sign.html`, `sign.css`, `sign.js` (restyled; the week view and the strip), `src/croom/control/service.py` (`/api/calendar/week`, `/api/settings` with `sign_background` and `sign_scoreboard`, `scores` in the status), `src/croom/scores/` (new: the fetcher, the parser, a cached `ScoresService`), `src/croom/core/config.py` (`room.company`), `index.html`/`app.js` (Options › Door sign card), the installer's stock config, the room setup guide and README.
+`sign.html`, `sign.css`, `sign.js` (restyled; the week view and the strip), `src/croom/control/service.py` (`/api/calendar/week`, `/api/settings` with `sign_background` and `sign_scores`, `scores` in the status), `src/croom/scores/` (new: the fetcher, the parser, a cached `ScoresService`), `src/croom/core/config.py` (`room.company`), `index.html`/`app.js` (Options › Door sign card), the installer's stock config, the room setup guide and README.
 
 ## 4. Testing
 

@@ -6,6 +6,7 @@ and record what the control service asked them to do.
 """
 
 import asyncio
+import json
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -680,6 +681,37 @@ class TestPage:
             text = f.read()
         assert 'control/static/*' in text
 
+    def test_the_photographs_are_package_data(self):
+        """The room devices install the agent with pip, not from a checkout: a folder the package data does not name
+        (setuptools' "control/static/*" takes files only, which is why fonts has a line of its own) is missing there, and
+        every door sign would show plain."""
+        with open("pyproject.toml", encoding="utf-8") as f:
+            text = f.read()
+        assert "control/static/backgrounds/*" in text
+
+    def test_every_photograph_is_a_background_the_service_knows_and_has_its_credit(self):
+        """The set on disk, the whitelist and CREDITS.md cannot drift apart: a photograph the picker cannot choose is dead
+        weight, and one with no credit line breaks the licence it came under."""
+        from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR
+        folder = STATIC_DIR / "backgrounds"
+        credits = (folder / "CREDITS.md").read_text(encoding="utf-8")
+        photographs = sorted(p.stem for p in folder.glob("*.jpg"))
+        assert photographs, "no photographs found: the glob is looking at the wrong folder"
+        for name in photographs:
+            assert name in SIGN_BACKGROUNDS and name != "plain", name
+            assert f"`{name}.jpg`" in credits, name
+
+    async def test_the_photographs_are_served_as_images(self, client_factory):
+        from croom.control.service import STATIC_DIR
+        client = await client_factory(make_service())
+        for path in sorted((STATIC_DIR / "backgrounds").glob("*.jpg")):
+            response = await client.get(f"/static/backgrounds/{path.name}")
+            assert response.status == 200, path.name
+            assert response.headers["Content-Type"] == "image/jpeg", path.name
+            assert response.headers["Cache-Control"] == "no-cache", path.name
+            assert (await client.head(f"/static/backgrounds/{path.name}")).status == 200, path.name   # the sign asks with HEAD first
+        assert (await client.head("/static/backgrounds/not-there.jpg")).status == 404
+
     async def test_brand_assets_are_served(self, client_factory):
         client = await client_factory(make_service())
         for path, content_type in (
@@ -959,6 +991,146 @@ class TestScreensaver:
         service = ControlService.from_config(config)
         assert service.config["screensaver"] == "quiet"
         assert service.config["settings_file"] == str(config.resolve_data_dir() / "control-settings.json")
+
+
+class TestRoomSettings:
+    """The room's settings, chosen on the room page and read by the door sign: one route over a whitelist of keys
+    (key -> default and check), kept in the settings file beside the screensaver's choice."""
+
+    DEFAULTS = {"sign_background": "skyline", "sign_scores": []}
+
+    def settings(self, tmp_path, **overrides):
+        config = {"settings_file": str(tmp_path / "control-settings.json")}
+        config.update(overrides)
+        return config
+
+    @staticmethod
+    async def read(client):
+        response = await client.get("/api/settings")
+        assert response.status == 200
+        return await response.json()
+
+    async def test_the_settings_start_at_their_defaults_and_the_status_carries_them(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        assert (await (await client.get("/api/status")).json())["settings"] == self.DEFAULTS
+
+    async def test_sign_settings_round_trip_and_refuse_bad_values(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        # One key at a time: the answer is every setting, as the status and a later GET give them.
+        response = await client.post("/api/settings", json={"sign_background": "bridge"})
+        assert response.status == 200
+        assert await response.json() == {"sign_background": "bridge", "sign_scores": []}
+        response = await client.post("/api/settings", json={"sign_scores": ["texas", "texas_am"]})
+        assert response.status == 200
+        both = {"sign_background": "bridge", "sign_scores": ["texas", "texas_am"]}
+        assert await response.json() == both
+        assert await self.read(client) == both
+        assert (await (await client.get("/api/status")).json())["settings"] == both
+        # Both in one request, and every background the picker offers is accepted.
+        for key in ("skyline", "capitol", "tower", "bridge", "pool", "star", "hills", "stadium", "plain"):
+            response = await client.post("/api/settings", json={"sign_background": key, "sign_scores": []})
+            assert response.status == 200 and (await response.json())["sign_background"] == key, key
+        everyone = ["texas", "michigan", "texas_am", "missouri"]
+        assert (await (await client.post("/api/settings", json={"sign_scores": everyone})).json())["sign_scores"] == everyone
+        # Kept in the settings file under the keys the other services read, readable by the service user only.
+        file = tmp_path / "control-settings.json"
+        assert json.loads(file.read_text())["sign_background"] == "plain" and json.loads(file.read_text())["sign_scores"] == everyone   # the last background posted
+        assert oct(file.stat().st_mode & 0o777) == "0o600"
+        # A restart keeps them.
+        again = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(again) == {"sign_background": "plain", "sign_scores": everyone}
+        # Bad values are refused in words that name the value and what is allowed, and nothing changes.
+        before = await self.read(again)
+        on_disk = file.read_text()
+        refused = [
+            ({"sign_background": "disco"}, ["disco", "skyline", "plain"]),
+            ({"sign_background": "Skyline"}, ["Skyline"]),                   # the keys are exact
+            ({"sign_background": 7}, ["7", "skyline"]),
+            ({"sign_background": ["bridge"]}, ["skyline"]),
+            ({"sign_background": None}, ["skyline"]),
+            ({"sign_scores": "texas"}, ["list", "texas_am"]),
+            ({"sign_scores": ["texas", "ohio_state"]}, ["ohio_state", "michigan"]),
+            ({"sign_scores": [["texas"]]}, ["texas_am"]),
+            ({"sign_scores": [3]}, ["texas_am"]),
+            ({"sign_scores": None}, ["list"]),
+            ({"colour": "red"}, ["colour", "sign_background", "sign_scores"]),
+            ({"sign_background": "tower", "colour": "red"}, ["colour"]),     # one bad key spoils the whole request: the good one, which
+            ({"sign_scores": ["texas"], "sign_background": "disco"}, ["disco"]),   # differs from what is kept and comes first, is not kept either
+            ({}, ["sign_background"]),
+        ]
+        for body, words in refused:
+            response = await again.post("/api/settings", json=body)
+            assert response.status == 400, body
+            message = (await response.json())["error"]
+            assert all(word in message for word in words), (body, message)
+        assert (await again.post("/api/settings", data="sign_background=plain")).status == 415   # a form from another site
+        assert (await again.post("/api/settings", json=["plain"])).status == 400
+        assert await self.read(again) == before and file.read_text() == on_disk
+
+    async def test_the_scores_list_is_kept_in_the_order_sent_without_repeats(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        response = await client.post("/api/settings", json={"sign_scores": ["missouri", "texas", "missouri"]})
+        assert (await response.json())["sign_scores"] == ["missouri", "texas"]
+        assert (await client.post("/api/settings", json={"sign_scores": []})).status == 200       # empty means off
+        assert (await self.read(client))["sign_scores"] == []
+
+    async def test_only_the_whitelisted_keys_are_served_or_changed(self, client_factory, tmp_path):
+        """The settings file holds the screensaver and the camera's presets too: none of that is this route's."""
+        (tmp_path / "control-settings.json").write_text(json.dumps({"screensaver": "bounce", "camera_home": {"pan": 1}}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        assert (await client.post("/api/settings", json={"screensaver": "quiet"})).status == 400
+        assert (await client.post("/api/settings", json={"camera_home": None})).status == 400
+        assert json.loads((tmp_path / "control-settings.json").read_text()) == {"screensaver": "bounce", "camera_home": {"pan": 1}}
+        assert (await (await client.get("/api/screensaver")).json())["style"] == "bounce"
+
+    async def test_one_save_leaves_the_screensaver_choice_alone(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/screensaver", json={"style": "bounce"})
+        await client.post("/api/settings", json={"sign_background": "pool"})
+        stored = json.loads((tmp_path / "control-settings.json").read_text())
+        assert stored["screensaver"] == "bounce" and stored["sign_background"] == "pool"
+
+    async def test_stored_settings_that_are_no_longer_valid_fall_back_to_the_defaults(self, client_factory, tmp_path):
+        stored = {"sign_background": "disco", "sign_scores": ["texas", "ohio_state"]}
+        (tmp_path / "control-settings.json").write_text(json.dumps(stored))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        (tmp_path / "control-settings.json").write_text(json.dumps({"sign_background": ["plain"], "sign_scores": "texas"}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        (tmp_path / "control-settings.json").write_text(json.dumps({"sign_background": "plain", "sign_scores": ["missouri"]}))   # one good, one default
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == {"sign_background": "plain", "sign_scores": ["missouri"]}
+
+    async def test_the_lists_in_the_answers_are_copies(self, client_factory, tmp_path):
+        """The lists in the answers are copies: a caller that changes one has not changed the room."""
+        service = make_service(**self.settings(tmp_path))
+        client = await client_factory(service)
+        await client.post("/api/settings", json={"sign_scores": ["texas"]})
+        status = service._status()
+        status["settings"]["sign_scores"].append("michigan")
+        status["settings"]["sign_background"] = "plain"
+        assert (await self.read(client)) == {"sign_background": "skyline", "sign_scores": ["texas"]}
+
+    async def test_a_settings_write_that_fails_still_applies_the_choice_and_says_so_in_the_log(self, client_factory, tmp_path, caplog):
+        """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
+        class FullDisk:
+            path = tmp_path / "control-settings.json"
+
+            def get(self, key, default=None):
+                return default
+
+            def save(self, key, value):
+                raise OSError(28, "No space left on device")
+
+        service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
+        client = await client_factory(service)
+        response = await client.post("/api/settings", json={"sign_background": "capitol"})
+        assert response.status == 200 and (await response.json())["sign_background"] == "capitol"
+        assert (await self.read(client))["sign_background"] == "capitol"
+        assert "No space left on device" in caplog.text
 
 
 class TestRoomDevices:

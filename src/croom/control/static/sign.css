@@ -1,6 +1,6 @@
-/* Crystal Meet door sign: navy, with the room's status in a rail down the left edge, a solid chip under the room's
-   name and the tint of the scenery along the bottom. Nothing else is coloured, so the sign reads from the hallway
-   and still looks calm up close. */
+/* Crystal Meet door sign: a photograph of Austin under a navy overlay, with the room's status in a rail down the left
+   edge and a solid chip under the room's name. Nothing else is coloured, so the sign reads from the hallway and still
+   looks calm up close. */
 @font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
 
@@ -47,24 +47,40 @@ body {
 /* The status rail: the one place the status colour is solid, with the chip. */
 .rail { position: absolute; z-index: 1; left: 0; top: 0; bottom: 0; width: var(--rail); background: var(--status); }
 
-/* The scenery, behind everything: a silhouette along the bottom tinted in the status colour (drawn by sign.js from
-   body[data-bg]), or for "plain" a soft glow in the corner. The backdrop clips it, so it never adds to the sign's size. */
+/* Behind everything. The room's choice is body[data-bg] (sign.js reads it from the status). When the room has the choice's
+   photograph, sign.js sets body[data-photo] and puts its address in --photo, and the two layers below draw it. "plain" has
+   none, and neither has a choice whose file the room does not have (body[data-photo-missing]): the navy alone, with a soft
+   glow in the corner in the status colour. The backdrop clips the glow, so it never adds to the sign's size. */
 .backdrop { position: absolute; z-index: 0; top: 0; right: 0; bottom: 0; left: 0; overflow: hidden; pointer-events: none; }
-.scene { position: absolute; left: 0; right: 0; bottom: 0; height: 34%; }
-.scene svg { width: 100%; height: 100%; display: block; }
-.scene .fill { fill: var(--status); opacity: 0.28; }
-.scene .fill2 { fill: var(--status); opacity: 0.12; }
-.scene .line { fill: none; stroke: var(--status); stroke-opacity: 0.55; stroke-width: 2; }
 .glow { display: none; position: absolute; right: -10%; bottom: -30%; width: 60%; height: 70%; border-radius: 50%; background: radial-gradient(closest-side, var(--status), transparent); opacity: 0.28; }
-body[data-bg="plain"] .scene { display: none; }
-body[data-bg="plain"] .glow { display: block; }
+body[data-bg="plain"] .glow, body[data-photo-missing] .glow { display: block; }
 
-.top { position: relative; z-index: 1; display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
-.brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+/* The photograph under a navy overlay that is heaviest on the left, where the words are (94 % at the left edge, 55 % at the
+   right, and darker again along the bottom): the room name, the chip and the bookings read as they do on plain navy, and the
+   place shows through on the right. The photograph is not tinted: the status colour stays in the rail, the chip and the ring. */
+body[data-photo] .sign::before { content: ""; position: absolute; z-index: 0; top: 0; right: 0; bottom: 0; left: 0; background-image: var(--photo); background-size: cover; background-position: center 40%; }
+body[data-photo] .sign::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: linear-gradient(90deg, rgba(0, 22, 54, 0.94) 0%, rgba(0, 22, 54, 0.84) 45%, rgba(0, 22, 54, 0.55) 100%),
+              linear-gradient(180deg, rgba(0, 22, 54, 0.35) 0%, rgba(0, 22, 54, 0) 40%, rgba(0, 22, 54, 0.55) 100%);
+}
+body[data-photo] .event { background: rgba(0, 22, 54, 0.55); backdrop-filter: blur(2px); }
+
+/* A narrow sign wraps: the clock and date drop to a line of their own, on the right, and the company name keeps its words
+   whole. The brand row will not shrink under 16 rem, which is the logo, its gap and "Management" with a little to spare
+   (overflow-wrap would otherwise break the word mid-way). */
+.top { position: relative; z-index: 1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 24px; row-gap: 0.5rem; }
+.brand { display: flex; align-items: center; gap: 14px; flex: 1 1 16rem; min-width: 0; }
 .logo { height: 1.875rem; width: auto; flex: none; display: block; }
 .company { color: var(--periwinkle-300); font-size: 1.05rem; letter-spacing: 0.01em; overflow-wrap: anywhere; }
 .company:empty { display: none; }
-.when { flex: none; text-align: right; }
+.when { flex: none; margin-left: auto; text-align: right; }
 .clock { margin: 0; font-size: 2.6rem; font-weight: 400; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .date { margin: 4px 0 0; color: var(--periwinkle-300); font-size: 1rem; white-space: nowrap; }
 
@@ -78,6 +94,7 @@ body[data-bg="plain"] .glow { display: block; }
   padding-top: clamp(20px, 4vh, 48px);
 }
 .room { margin: 0; font-size: clamp(3rem, 7.2vw, 5.4rem); font-weight: 600; line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.room.long { font-size: clamp(2.2rem, 4.8vw, 3.6rem); }   /* a name over 24 characters, so it takes fewer lines (sign.js) */
 .room:empty { display: none; }
 .location { margin: 6px 0 0; color: var(--periwinkle-300); font-size: 1.15rem; overflow-wrap: anywhere; }
 
@@ -95,7 +112,7 @@ body[data-bg="plain"] .glow { display: block; }
   font-weight: 600;
 }
 body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-state="loading"] .chip { color: #fff; }
-.chip .dot { flex: none; width: 14px; height: 14px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+.chip .dot { flex: none; width: 0.875rem; height: 0.875rem; border-radius: 50%; background: currentColor; opacity: 0.85; }
 #chip-text { min-width: 0; overflow-wrap: anywhere; }
 .detail { margin: 14px 0 0; max-width: 30ch; color: var(--periwinkle-300); font-size: 1.2rem; overflow-wrap: anywhere; }
 .detail:empty { display: none; }
@@ -117,10 +134,10 @@ body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-s
   gap: 8px;
   cursor: pointer;
 }
-.button svg { width: 18px; height: 18px; flex: none; }
+.button svg { width: 1.125rem; height: 1.125rem; flex: none; }
 .button:focus-visible { outline: 3px solid var(--blue-600); outline-offset: 3px; }
 .events { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
-.event { display: grid; grid-template-columns: 8.5ch minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 10px 14px; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }   /* "10:30 AM" is eight characters */
+.event { display: grid; grid-template-columns: 8.5ch minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 0.625rem 0.875rem; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }   /* "10:30 AM" is eight characters */
 .event time { font-variant-numeric: tabular-nums; color: var(--periwinkle-300); }
 .event .title { margin: 0; overflow-wrap: anywhere; }
 .event .who { margin: 2px 0 0; color: var(--periwinkle-300); font-size: 0.9em; }
@@ -149,5 +166,5 @@ body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-s
 @media (orientation: portrait) {
   .main { grid-template-columns: minmax(0, 1fr); }
   .room { font-size: clamp(2.6rem, 11vw, 4.6rem); }
-  .scene { height: 22%; }
+  .room.long { font-size: clamp(2rem, 7vw, 3rem); }
 }

@@ -7,9 +7,14 @@ when Playwright or its browser is not installed.
 """
 
 import asyncio
+import json
+import re
 import socket
+import struct
 import tempfile
 import threading
+import urllib.request
+import zlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 
 from croom.calendar.providers.base import MeetingPlatform
-from croom.control.service import ControlService
+from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASKED
@@ -240,6 +245,8 @@ def test_door_sign_shows_bookings_without_a_video_link(browser):
         assert sign_colors(page) == (SIGN_RED, SIGN_RED, SIGN_NAVY)   # a booking holds the room as much as a call does
         assert page.locator("#events .event.now .title").inner_text() == "Board lunch"   # the booking in progress is ringed, and only it
         assert page.locator("#events .event.now").count() == 1 and page.locator("#events .event").first.get_attribute("class") == "event now"
+        assert page.locator("#events .event.now").evaluate("e => getComputedStyle(e).boxShadow") == "rgb(229, 72, 77) 0px 0px 0px 2px inset"   # the ring: 2 px, inside, in the status colour
+        assert page.locator("#events .event:not(.now)").first.evaluate("e => getComputedStyle(e).boxShadow") == "none"
         page.close()
 
 
@@ -300,7 +307,7 @@ def test_the_door_sign_shows_the_location_line_when_the_room_has_one(browser):
         page.close()
 
 
-def test_the_sign_shows_the_status_as_a_rail_a_chip_and_a_tint_on_navy(browser):
+def test_the_sign_shows_the_status_as_a_rail_and_a_chip_over_a_photograph_that_is_not_tinted(browser):
     skip_if_day_ends_within(1)
     with PageServer(calendar_events=[event("e1", "Design review", 8)]) as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
@@ -308,9 +315,12 @@ def test_the_sign_shows_the_status_as_a_rail_a_chip_and_a_tint_on_navy(browser):
         page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
         rail, chip, body = sign_colors(page)
         assert rail == chip == "rgb(232, 160, 19)" and body == "rgb(0, 22, 54)"      # amber on navy, never an amber wall
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY   # navy words on amber
         assert page.locator("#chip-text").inner_text() == "Design review starts in 8 minutes"
-        assert page.locator("#scene svg").count() == 1
-        assert page.locator("#scene .fill").first.evaluate("e => getComputedStyle(e).fill") == "rgb(232, 160, 19)"
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        layers = page.evaluate("""() => ['::before', '::after'].map(q => getComputedStyle(document.querySelector('.sign'), q).backgroundImage).join(' ')""")
+        assert "backgrounds/skyline.jpg" in layers and "232, 160, 19" not in layers   # the status colour is the rail's, the chip's and the ring's; the photograph is left as it is
+        assert page.locator("#scene").count() == 0 and page.locator(".backdrop svg").count() == 0   # the drawn scenery is gone
         assert page.locator("#company").inner_text() == "Crystal Practice Management"
         assert fits(page)
         page.close()
@@ -342,28 +352,21 @@ def test_long_names_wrap_inside_the_sign_at_both_sizes(browser):
             page.close()
 
 
-def drawn_top(page):
-    """The top edge of what the scenery draws (its tallest shape): lower than the top of its box, which is mostly sky."""
-    return page.evaluate("""() => Math.min(...[...document.querySelectorAll('#scene svg path, #scene svg rect, #scene svg circle, #scene svg ellipse')]
-        .filter(e => !e.closest('defs')).map(e => e.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0).map(r => r.top))""")
-
-
-def test_the_sign_keeps_its_words_clear_of_the_scenery_when_names_are_long(browser):
-    """The words end above the skyline at both sizes, with a long room name, location, company and title, free or about to start."""
+def test_the_sign_keeps_its_words_on_the_sign_when_names_are_long_over_a_photograph(browser):
+    """With a long room name, location, company and title, free or about to start, at both sizes: every block of words ends
+    inside the sign, on the photograph, and nothing needs to scroll."""
     skip_if_day_ends_within(1)
     title = "Quarterly planning review with the regional leadership teams and the partners"
     for width, height in ((1280, 800), (800, 1280)):
         for minutes, state in ((30, "free"), (8, "soon")):   # soon puts the long title in the chip too, at 1.5 rem
             with PageServer(calendar_events=[event("e1", title, minutes)], room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen",
                             room_company="Lone Star Eye Care and Surgery Partners") as server:
-                page = browser.new_page(viewport={"width": width, "height": height})
-                page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
-                page.wait_for_function(f"document.body.dataset.state === '{state}'", timeout=5000)
-                top = drawn_top(page)
-                assert height / 2 < top < height                                     # it found the drawing, in the lower half
-                for selector in (".status", "#today"):
+                page = open_sign(browser, server, width, height, state)
+                page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+                for selector in (".top", ".status", "#today"):
                     box = page.locator(selector).bounding_box()
-                    assert box["y"] + box["height"] <= top, (width, height, state, selector)
+                    assert box["x"] >= 0 and box["x"] + box["width"] <= width, (width, height, state, selector)
+                    assert box["y"] >= 0 and box["y"] + box["height"] <= height, (width, height, state, selector)
                 assert fits(page)
                 page.close()
 
@@ -396,7 +399,6 @@ def test_the_sign_lists_the_next_three_bookings_as_rows_with_their_platform(brow
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        import re
         rows = page.locator("#events .event")
         assert rows.count() == 3                                                    # the next three, not the fourth
         assert page.locator("#events .title").all_text_contents() == ["Customer call", "Design review", "Offsite lunch"]
@@ -425,7 +427,7 @@ def test_the_sign_without_bookings_says_so_instead_of_showing_an_empty_list(brow
 def test_the_sign_sits_side_by_side_in_landscape_and_stacks_in_portrait(browser):
     skip_if_day_ends_within(1)
     with PageServer(calendar_events=[event("e1", "Design review", 30)]) as server:
-        for (width, height), stacked, scenery in (((1280, 800), False, 0.34), ((800, 1280), True, 0.22)):
+        for (width, height), stacked in (((1280, 800), False), ((800, 1280), True)):
             page = browser.new_page(viewport={"width": width, "height": height})
             page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
             page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
@@ -434,9 +436,6 @@ def test_the_sign_sits_side_by_side_in_landscape_and_stacks_in_portrait(browser)
                 assert today["y"] >= status["y"] + status["height"]                  # the bookings under the status
             else:
                 assert today["x"] >= status["x"] + status["width"]                   # the bookings beside it
-            sign, scene = page.locator("main").bounding_box(), page.locator("#scene").bounding_box()
-            assert abs(scene["height"] / sign["height"] - scenery) < 0.01            # the scenery is shorter when stacked
-            assert scene["y"] + scene["height"] == pytest.approx(sign["y"] + sign["height"], abs=1) and scene["width"] == pytest.approx(width, abs=1)
             assert fits(page)
             page.close()
 
@@ -449,6 +448,427 @@ def test_the_sign_loads_nothing_but_its_own_files(browser):
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert urls and all(u.startswith(f"http://127.0.0.1:{server.port}/") for u in urls), urls
+        page.close()
+
+
+# --- the door sign's photographs (spec 2026-10-13, section 2.4) and the room settings that choose them ---
+
+PHOTOGRAPHS = sorted(p.stem for p in (STATIC_DIR / "backgrounds").glob("*.jpg"))   # the backgrounds with a file on disk: the others show plain until one is added
+BACKGROUND_LABELS = ["Austin skyline", "Capitol", "UT Tower", "Pennybacker Bridge", "Hamilton Pool", "Texas star", "Hill Country", "DKR stadium", "Plain"]   # the table's buttons, in the spec's order
+SCHOOL_LABELS = ["Texas", "Michigan", "Texas A&M", "Missouri"]
+NAVY = (0, 22, 54)
+
+
+def choose(server, **settings):
+    """Change the room's settings through the route the table's page uses."""
+    request = urllib.request.Request(f"http://127.0.0.1:{server.port}/api/settings", data=json.dumps(settings).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def open_sign(browser, server, width=1280, height=800, state="free", **options):
+    page = browser.new_page(viewport={"width": width, "height": height}, **options)
+    page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+    page.wait_for_function(f"document.body.dataset.state === '{state}'", timeout=5000)
+    return page
+
+
+def sign_on_a_stopped_clock(browser, server, width=1280, height=800):
+    """The sign, loaded, with its timers stopped: its polls run only when the test calls page.clock.run_for."""
+    page = browser.new_page(viewport={"width": width, "height": height})
+    page.clock.install()
+    page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+    return page
+
+
+def poll(page):
+    """One status poll of the sign (every 5 s of page time), answered and drawn."""
+    with page.expect_response("**/api/status"):
+        page.clock.run_for(5000)
+    page.wait_for_timeout(150)
+
+
+def photo_request_methods(page):
+    """What the page asks of the photographs' folder, as (method, status) pairs, in the order the answers arrive."""
+    asked = []
+    page.on("response", lambda r: asked.append((r.request.method, r.status)) if "/static/backgrounds/" in r.url else None)
+    return asked
+
+
+def screenshot_pixel(page, x, y):
+    """The colour of one pixel as the browser draws it, from a screenshot of just that pixel (a PNG of one pixel needs no decoder:
+    whichever filter its row byte names, a first pixel is its raw bytes)."""
+    png = page.screenshot(clip={"x": x, "y": y, "width": 1, "height": 1})
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    position, data = 8, b""
+    while position < len(png):
+        length, kind = struct.unpack(">I4s", png[position:position + 8])
+        body = png[position + 8:position + 8 + length]
+        if kind == b"IHDR":
+            assert body[8] == 8 and body[9] in (2, 6)                      # 8 bits a channel, RGB or RGBA
+        elif kind == b"IDAT":
+            data += body
+        position += 12 + length
+    return tuple(zlib.decompress(data)[1:4])
+
+
+def wait_for_the_photograph_to_paint(page):
+    """The photograph the sign shows is decoded and two frames have been drawn with it: a screenshot from here has it in."""
+    page.evaluate("""async () => {
+        const address = getComputedStyle(document.body).getPropertyValue('--photo').match(/url\\('(.*)'\\)/)[1];
+        const image = new Image();
+        image.src = address;
+        await image.decode();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }""")
+
+
+def open_door_sign_screen(page):
+    page.click("#open-options")
+    page.click("#open-door-sign")
+    page.wait_for_function("document.body.dataset.view === 'door-sign'", timeout=5000)
+
+
+def test_the_background_choice_made_on_the_table_shows_on_the_sign(browser):
+    shows_bridge = ("document.body.dataset.bg === 'bridge' && document.body.dataset.photo === 'bridge'"
+                    " && getComputedStyle(document.body).getPropertyValue('--photo').includes('backgrounds/bridge.jpg')")
+    with PageServer() as server:
+        sign = open_sign(browser, server)
+        assert sign.evaluate("document.body.dataset.bg") == "skyline"      # the default
+        sign.wait_for_function("getComputedStyle(document.body).getPropertyValue('--photo').includes('backgrounds/skyline.jpg')", timeout=5000)
+        table = open_page(browser, server)
+        open_door_sign_screen(table)
+        assert table.locator("#sign-picker button[aria-pressed='true']").inner_text() == "Austin skyline"
+        table.click("#sign-picker button:has-text('Pennybacker Bridge')")
+        table.wait_for_function("document.querySelector(\"#sign-picker button[aria-pressed='true']\").innerText === 'Pennybacker Bridge'", timeout=5000)
+        sign.wait_for_function(shows_bridge, timeout=8000)                  # the sign's own poll (5 s) brings it
+        sign.reload(wait_until="networkidle")
+        sign.wait_for_function(shows_bridge, timeout=5000)                  # and a reload keeps it: it is the room's, not the page's
+        table.close()
+        sign.close()
+
+
+@pytest.mark.parametrize("key", SIGN_BACKGROUNDS)
+def test_each_background_loads_its_photograph_and_plain_shows_the_glow(browser, key):
+    has_file = key in PHOTOGRAPHS
+    with PageServer() as server:
+        choose(server, sign_background=key)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        asked = photo_request_methods(page)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function(f"document.body.dataset.state === 'free' && document.body.dataset.bg === '{key}'", timeout=5000)
+        page.wait_for_load_state("networkidle")
+        layer = lambda q: page.evaluate(f"getComputedStyle(document.querySelector('.sign'), '{q}').backgroundImage")
+        glow = page.locator(".glow").evaluate("e => getComputedStyle(e).display")
+        if has_file:
+            assert page.evaluate("document.body.dataset.photo") == key
+            assert asked and {status for _, status in asked} == {200} and ("GET", 200) in asked   # the photograph itself came, not only a question about it
+            assert f"backgrounds/{key}.jpg" in layer("::before")           # the photograph, as a layer of its own ...
+            assert layer("::after").count("linear-gradient") == 2          # ... under the navy overlay (the left-to-right one and the top-to-bottom one)
+            assert glow == "none"
+        else:
+            assert page.evaluate("document.body.dataset.photo === undefined")
+            assert layer("::before") == "none" and layer("::after") == "none"      # no photograph, no overlay: the navy, with the glow
+            assert glow == "block"
+            if key == "plain":
+                assert asked == []                                         # plain asks for nothing at all
+            else:
+                assert [status for _, status in asked] == [404]            # a photograph that is not there is asked about once, and plain shows instead
+        assert page.evaluate("document.body.dataset.bg") == key             # whichever it shows, the page says which was chosen
+        assert fits(page)
+        page.close()
+
+
+def test_the_booking_rows_sit_on_translucent_navy_over_a_photograph_and_on_a_pale_veil_over_plain(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        for key, row in (("capitol", "rgba(0, 22, 54, 0.55)"), ("plain", "rgba(255, 255, 255, 0.06)")):
+            choose(server, sign_background=key)
+            page = open_sign(browser, server)
+            page.wait_for_selector("#events .event", timeout=5000)
+            page.wait_for_function(f"document.body.dataset.bg === '{key}' && (document.body.dataset.photo === 'capitol') === {str(key == 'capitol').lower()}", timeout=5000)
+            assert page.locator("#events .event").first.evaluate("e => getComputedStyle(e).backgroundColor") == row, key
+            page.close()
+
+
+@pytest.mark.parametrize("key", PHOTOGRAPHS)
+def test_the_words_stay_readable_over_every_photograph(browser, key):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        choose(server, sign_background=key)
+        page = open_sign(browser, server)
+        page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
+        page.wait_for_load_state("networkidle")
+        wait_for_the_photograph_to_paint(page)
+        assert colour(page, "#room-name") == "rgb(255, 255, 255)"          # the words and the chip keep their colours, as on plain navy
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).backgroundColor") == SIGN_GREEN
+        overlay = page.evaluate("getComputedStyle(document.querySelector('.sign'), '::after').backgroundImage")
+        red, green, blue, alpha = re.search(r"rgba\((\d+), (\d+), (\d+), ([\d.]+)\) 0%", overlay).groups()   # the left edge of the left-to-right gradient
+        assert (int(red), int(green), int(blue)) == NAVY and float(alpha) >= 0.9
+        # So at the left edge, where the words are, the screen is navy whatever the photograph: at 90 % the photograph moves a channel
+        # by 26 at most (a tenth of 255), and the overlay is 94 %.
+        pixel = screenshot_pixel(page, 40, 400)
+        assert all(abs(c - n) <= 26 for c, n in zip(pixel, NAVY)), (key, pixel)
+        page.close()
+
+
+def test_the_picker_on_the_table_offers_every_background_and_posts_the_one_pressed(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_door_sign_screen(page)
+        picker = page.locator("#sign-picker")
+        assert picker.locator("button").all_inner_texts() == BACKGROUND_LABELS     # the spec's order
+        assert picker.locator("button[aria-pressed='true']").all_inner_texts() == ["Austin skyline"]
+        for key, label in zip(SIGN_BACKGROUNDS, BACKGROUND_LABELS):
+            page.click(f"#sign-picker button:text-is('{label}')")
+            page.wait_for_function(f"document.querySelector(\"#sign-picker button[aria-pressed='true']\").innerText === {label!r}", timeout=5000)
+            assert page.request.get(f"http://127.0.0.1:{server.port}/api/settings").json()["sign_background"] == key
+            assert picker.locator("button[aria-pressed='true']").count() == 1
+        page.close()
+
+
+def test_the_school_switches_round_trip(browser):
+    with PageServer() as server:
+        base = f"http://127.0.0.1:{server.port}"
+        page = open_page(browser, server)
+        schools = lambda: page.request.get(base + "/api/settings").json()["sign_scores"]
+        open_door_sign_screen(page)
+        switches = page.locator("#scores-picker button")
+        assert "FOOTBALL SCORES" in page.locator(".door-section").inner_text().upper()   # the label the four switches sit under
+        assert switches.all_inner_texts() == SCHOOL_LABELS
+        assert page.locator("#scores-picker button[aria-pressed='true']").count() == 0 and schools() == []   # off until someone turns a school on
+        pressed = lambda: page.locator("#scores-picker button[aria-pressed='true']").all_inner_texts()
+        page.click("#scores-picker button:text-is('Texas A&M')")
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 1", timeout=5000)
+        assert schools() == ["texas_am"] and pressed() == ["Texas A&M"]
+        page.click("#scores-picker button:text-is('Texas')")
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 2", timeout=5000)
+        assert schools() == ["texas", "texas_am"] and pressed() == ["Texas", "Texas A&M"]      # in the list's own order, not the order of the taps
+        assert page.request.get(base + "/api/status").json()["settings"]["sign_scores"] == ["texas", "texas_am"]   # what the sign reads
+        page.click("#scores-picker button:text-is('Texas A&M')")                                  # a switch turns off as it turned on
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 1", timeout=5000)
+        assert schools() == ["texas"]
+        page.reload(wait_until="networkidle")                                                      # and the page shows what the room remembers
+        open_door_sign_screen(page)
+        assert pressed() == ["Texas"]
+        page.click("#scores-picker button:text-is('Texas')")
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 0", timeout=5000)
+        assert schools() == []
+        refused = page.request.post(base + "/api/settings", data='{"sign_scores": ["ohio_state"]}', headers=JSON)   # a school nobody listed
+        assert refused.status == 400 and "ohio_state" in refused.json()["error"] and schools() == []
+        page.close()
+
+
+def test_the_door_sign_buttons_are_not_rebuilt_while_nothing_changes(browser):
+    """As the screensaver picker's: a tap is never lost to a re-render, so the buttons stay while the page polls."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_door_sign_screen(page)
+        handles = [page.locator("#sign-picker button").first.element_handle(), page.locator("#scores-picker button").first.element_handle()]
+        page.wait_for_timeout(2600)                                          # the page polls every two seconds
+        assert all(h.evaluate("e => e.isConnected") for h in handles)
+        page.close()
+
+
+def test_options_leads_to_the_door_sign_screen_and_back(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        assert page.locator("#open-door-sign").inner_text() == "Door sign" and page.locator("#open-door-sign").is_visible()
+        page.click("#open-door-sign")
+        assert page.evaluate("document.body.dataset.view") == "door-sign"
+        assert page.locator("#sign-picker").is_visible() and page.locator("#scores-picker").is_visible()
+        assert page.locator("#link-form").is_hidden()                       # the idle screen is gone
+        page.click("#back-from-door-sign")
+        assert page.evaluate("document.body.dataset.view") == "options"
+        page.click("#back-from-options")
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        page.close()
+
+
+def test_the_door_sign_screen_is_a_sub_screen_of_idle_mode_like_the_screensaver(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_door_sign_screen(page)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)   # a call that begins takes the page back to its own screen
+        page.close()
+
+
+def test_the_door_sign_choices_are_hidden_while_the_room_cannot_be_reached(browser):
+    """What the page shows there would be a guess: it says so as the other pickers do, and comes back with the room."""
+    port = free_port()
+    page = browser.new_page(viewport={"width": 1280, "height": 800})
+    with PageServer(port=port):
+        page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        open_door_sign_screen(page)
+        assert page.locator(".door-section").is_visible()
+    page.wait_for_function("document.body.dataset.state === 'offline'", timeout=10000)
+    assert page.locator(".door-section").is_hidden()
+    with PageServer(port=port):
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=10000)
+        assert page.locator(".door-section").is_visible()
+    page.close()
+
+
+def test_the_sign_fits_with_a_photograph_at_both_sizes_and_on_a_full_hd_screen(browser):
+    skip_if_day_ends_within(1)
+    bookings = [event("e1", "Quarterly planning review with the regional leadership teams and the partners", 30),
+                event("e2", "Design review", 70), event("e3", "Offsite lunch", 100, url=None, platform=MeetingPlatform.UNKNOWN)]
+    for key in ("capitol", "star"):                                          # a pale photograph and a busy one
+        with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen") as server:
+            choose(server, sign_background=key)
+            for width, height in ((1280, 800), (800, 1280), (1920, 1080)):
+                page = open_sign(browser, server, width, height)
+                page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
+                assert fits(page), (key, width, height)
+                page.close()
+
+
+def test_a_long_room_name_gets_smaller_type_on_the_sign(browser):
+    short, edge, long = "Second Floor Conf Room 2", "Second Floor Conf Room 22", "Executive Conference Room North Wing"
+    assert (len(short), len(edge), len(long)) == (24, 25, 36)               # a name of 24 characters keeps the full size; 25 is "long"
+    sizes = {}
+    for width, height in ((1280, 800), (800, 1280)):
+        for name in (short, edge, long):
+            with PageServer(room_name=name) as server:
+                page = open_sign(browser, server, width, height)
+                sizes[(width, name)] = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+                assert page.locator("#room-name").evaluate("e => e.classList.contains('long')") == (name != short)
+                assert page.locator("#room-name").inner_text() == name and fits(page), (width, name)
+                page.close()
+        assert sizes[(width, edge)] < sizes[(width, short)] and sizes[(width, long)] == sizes[(width, edge)]
+        assert sizes[(width, edge)] <= 0.7 * sizes[(width, short)]          # clearly smaller, not a point less
+
+
+def test_the_sign_header_wraps_instead_of_breaking_the_company_name(browser):
+    """The clock and date used to squeeze the brand row until "Management" broke mid-word. At every width from a small phone to a
+    desktop, in steps of four pixels (the clock and date share the row from about 584 px; a brand row allowed down to 14 rem still
+    broke the word at 552 to 560), every word of the company name stays whole on one line and nothing runs off the sign."""
+    with PageServer(room_company="Crystal Practice Management") as server:
+        page = open_sign(browser, server)
+        for width in [*range(320, 700, 4), 768, 1024, 1280]:
+            page.set_viewport_size({"width": width, "height": 800})
+            lines = page.evaluate("""() => {
+                const node = document.getElementById('company').firstChild, text = node.textContent, range = document.createRange();
+                const tops = [...text].map((_, i) => { range.setStart(node, i); range.setEnd(node, i + 1); return Math.round(range.getBoundingClientRect().top); });
+                let at = 0; return text.split(' ').map((word) => { const t = tops.slice(at, at + word.length); at += word.length + 1; return new Set(t).size; });
+            }""")
+            assert lines == [1, 1, 1], (width, lines)                        # each word on one line: none is split
+            clock, date = page.locator("#clock").bounding_box(), page.locator("#date").bounding_box()
+            assert clock["x"] >= 0 and clock["x"] + clock["width"] <= width and date["x"] + date["width"] <= width, width
+            assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), width
+        page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_sign(browser):
+    """The status words are aria-live: writing the same words again is announced again, so they are written when they change. The
+    backdrop is drawn once, when the room's choice is first known or changes, not at every poll."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        page.evaluate("""() => {
+            window.records = [];
+            const watch = (node, options, label) => new MutationObserver((list) => list.forEach((r) => window.records.push(label + ':' + r.type + ':' + (r.attributeName || ''))))
+                .observe(node, options);
+            watch(document.querySelector('[aria-live]'), { subtree: true, childList: true, characterData: true, attributes: true }, 'status');
+            watch(document.querySelector('.backdrop'), { subtree: true, childList: true, characterData: true, attributes: true }, 'backdrop');
+            watch(document.body, { attributes: true, attributeFilter: ['style', 'data-bg', 'data-photo', 'data-photo-missing'] }, 'body');
+        }""")
+        poll(page)
+        assert page.evaluate("window.records") == []                         # the same status and the same choice: nothing is written
+        choose(server, sign_background="capitol")
+        poll(page)
+        page.wait_for_function("document.body.dataset.photo === 'capitol'", timeout=5000)
+        records = page.evaluate("window.records")
+        assert any(r.startswith("body:attributes:") for r in records)        # the observers do see a real change ...
+        assert not any(r.startswith(("status:", "backdrop:")) for r in records)   # ... which is the choice and nothing else
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, root", [(1280, 800, 16), (1920, 1080, 24)])
+def test_the_dot_the_calendar_icon_and_the_row_padding_scale_with_the_text(browser, width, height, root):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = open_sign(browser, server, width, height)
+        px = lambda selector, prop: page.locator(selector).first.evaluate(f"e => parseFloat(getComputedStyle(e).{prop})")
+        assert page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)") == root     # the sign grows with a bigger screen
+        assert px(".chip .dot", "width") == px(".chip .dot", "height") == 0.875 * root
+        assert px("#this-week svg", "width") == px("#this-week svg", "height") == 1.125 * root
+        assert px("#events .event", "paddingTop") == px("#events .event", "paddingBottom") == 0.625 * root
+        assert px("#events .event", "paddingLeft") == px("#events .event", "paddingRight") == 0.875 * root
+        assert fits(page)
+        page.close()
+
+
+def test_a_photograph_that_is_missing_shows_plain_is_asked_for_once_and_again_after_an_outage(browser):
+    """hills and stadium have no file yet. The sign remembers the room's 404 and does not ask at every poll; when the room goes
+    away and comes back (an update that may have brought the photograph) it asks again."""
+    photograph = (STATIC_DIR / "backgrounds" / "bridge.jpg").read_bytes()
+    there, answers = {"now": False}, []
+
+    def answer(route):
+        answers.append(200 if there["now"] else 404)
+        if there["now"]:
+            route.fulfill(status=200, body=photograph, content_type="image/jpeg")
+        else:
+            route.fulfill(status=404, body="Not Found", content_type="text/plain")
+
+    with PageServer() as server:
+        choose(server, sign_background="bridge")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/bridge.jpg", answer)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.bg === 'bridge'", timeout=5000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        page.wait_for_function("getComputedStyle(document.querySelector('.glow')).display === 'block'", timeout=5000)
+        assert page.evaluate("document.body.dataset.photo === undefined") and answers == [404]      # plain's look; the room was asked once
+        poll(page)
+        poll(page)
+        assert answers == [404] and page.evaluate("document.body.dataset.bg") == "bridge"          # and not at every poll
+        there["now"] = True                                                                          # an update brings the file ...
+        page.route("**/api/status", lambda route: route.abort())                                      # ... and restarts the room
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        page.unroute("**/api/status")
+        poll(page)                                                                                    # the room is back
+        page.wait_for_function("document.body.dataset.photo === 'bridge'", timeout=5000)
+        assert answers.count(404) == 1 and 200 in answers
+        assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"
+        page.close()
+
+
+def test_a_room_that_does_not_answer_the_question_about_a_photograph_is_asked_again(browser):
+    """Only the room's 404 is remembered: a question that fails on the way (the room is restarting) is asked at the next poll."""
+    photograph = (STATIC_DIR / "backgrounds" / "capitol.jpg").read_bytes()
+    failing = {"now": True}
+
+    def answer(route):
+        if failing["now"]:
+            route.abort()
+        else:
+            route.fulfill(status=200, body=photograph, content_type="image/jpeg")
+
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/capitol.jpg", answer)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.bg === 'capitol'", timeout=5000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        assert page.evaluate("document.body.dataset.photo === undefined")
+        failing["now"] = False
+        poll(page)
+        page.wait_for_function("document.body.dataset.photo === 'capitol'", timeout=5000)
         page.close()
 
 
@@ -1855,6 +2275,10 @@ def test_every_idle_screen_fits_the_kiosk_without_scrolling(browser):
         page.click("#back-from-camera")
         page.click("#open-screensaver")
         assert fits(page), "the screensaver screen scrolls"
+        page.click("#back-from-screensaver")
+        page.click("#open-door-sign")
+        assert page.locator("#scores-picker").is_visible()
+        assert fits(page), "the door sign screen scrolls"
         page.close()
 
 
@@ -3009,18 +3433,18 @@ def test_a_leave_waiting_for_its_second_tap_does_not_outlive_the_call(browser):
 
 TWELVE_HOUR = r"^\d{1,2}:\d{2}\u00a0[AP]M$"   # the no-break space is the pin: a time never splits across lines on the sign or the TV
 AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
+SIGN_DATE = r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"   # the sign adds the weekday: "Monday, October 13, 2026"
 
 
 def test_the_clock_the_date_and_the_booking_times_read_the_american_way_under_a_twenty_four_hour_locale(browser):
     """The Pi's Chromium follows the system locale, which showed 24-hour times; the pages pin the format instead."""
-    import re
     skip_if_day_ends_within(2)                                 # the booking is 90 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 90)]) as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800}, locale="en-GB")
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
-        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
+        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())   # the room page's date has no weekday: only the sign's does
         page.wait_for_selector("#events .event time", timeout=5000)
         assert re.match(TWELVE_HOUR, page.locator("#events .event time").first.inner_text())
         assert fits(page)
@@ -3028,11 +3452,13 @@ def test_the_clock_the_date_and_the_booking_times_read_the_american_way_under_a_
 
 
 def test_the_door_sign_clock_and_date_read_the_american_way_under_a_twenty_four_hour_locale(browser):
-    import re
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 1024, "height": 600}, locale="en-GB")
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
-        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
+        shown = page.locator("#date").inner_text()
+        assert re.match(SIGN_DATE, shown)                                       # "Monday, October 13, 2026"
+        earlier, later = datetime.now().astimezone() - timedelta(seconds=2), datetime.now().astimezone()   # the date can change between the tick and here
+        assert shown in {d.strftime("%A, %B ") + str(d.day) + d.strftime(", %Y") for d in (earlier, later)}   # the weekday is today's
         page.close()

@@ -7,50 +7,28 @@
   const IN_PROGRESS = ["joining", "in_lobby", "connected", "leaving"];
   const TODAY_ROWS = 3;
 
-  // The scenery along the bottom of the sign: a silhouette in inline SVG, so the page loads nothing but its own files.
-  // sign.css tints it in the status colour (.fill, .fill2 and .line take var(--status)); body[data-bg] picks which one.
-  // The drawings are the ones in docs/superpowers/mockups/2026-10-13-door-sign-mockup.html.
-  const SCENES = {
-    // The Austin skyline as it stands from Lady Bird Lake, with the lake's faint reflection of it.
-    skyline: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
-      <defs><clipPath id="water"><rect x="0" y="254" width="1280" height="46"/></clipPath></defs>
-      <g id="city"><path class="fill" d="M0 236 L0 198.8 L70 198.8 L70 236 Z M60 236 L60 183.92 L110 183.92 L110 236 Z M118 236 L118 189.5 L178 189.5 L178 236 Z M186 236 L186 133.7 L209.0 107.7 L232 133.7 L232 236 Z M240 236 L240 165.32 L298 165.32 L298 236 Z M302 236 L302 150.44 L342 150.44 L342 236 Z M346 236.0 L346 216.7 L400 216.7 L400 236.0 Z M362 216.7 L362 197.3 L416 197.3 L416 216.7 Z M346 197.3 L346 178.0 L400 178.0 L400 197.3 Z M362 178.0 L362 158.6 L416 158.6 L416 178.0 Z M346 158.6 L346 139.3 L392 139.3 L392 158.6 Z M420 236 L420 170.9 L486 170.9 L486 236 Z M492 236 L492 150.7 L483 126.7 L483 116.7 L511.8 116.7 L518.0 98.7 L524.2 116.7 L553 116.7 L553 126.7 L544 150.7 L544 236 Z M552 236 L552 157.88 L608 157.88 L608 236 Z M612 236 L612 112.08000000000001 L654 112.08000000000001 L654 236 Z M620 236 L620 102.08000000000001 L646 102.08000000000001 L646 236 Z M660 236 L660 143.0 L740 143.0 L740 236 Z M746 236 L746 87.19999999999999 L788 87.19999999999999 L788 236 Z M792 236 L792 79.76000000000002 L828 79.76000000000002 L828 236 Z M838 236 L838 96.0 Q 870.4 60.0 910 50.0 L910 236 Z M916 236 L916 98.36000000000001 L966 98.36000000000001 L966 236 Z M972 236 L972 128.12 L1032 128.12 L1032 236 Z M1036 236 L1036 165.32 L1086 165.32 L1086 236 Z M1092 236 L1092 180.2 L1162 180.2 L1162 236 Z M1168 236 L1168 191.36 L1228 191.36 L1228 236 Z M1232 236 L1232 198.8 L1280 198.8 L1280 236 Z"/><path class="fill2" d="M0 236 L0 202 L60 202 L60 236 Z M60 236 L60 192 L120 192 L120 236 Z M120 236 L120 196 L180 196 L180 236 Z M180 236 L180 200 L240 200 L240 236 Z M240 236 L240 190 L300 190 L300 236 Z M300 236 L300 196 L360 196 L360 236 Z M360 236 L360 192 L420 192 L420 236 Z M420 236 L420 198 L480 198 L480 236 Z M480 236 L480 190 L540 190 L540 236 Z M540 236 L540 196 L600 196 L600 236 Z M600 236 L600 192 L660 192 L660 236 Z M660 236 L660 198 L720 198 L720 236 Z M720 236 L720 190 L780 190 L780 236 Z M780 236 L780 194 L840 194 L840 236 Z M840 236 L840 190 L900 190 L900 236 Z M900 236 L900 196 L960 196 L960 236 Z M960 236 L960 192 L1020 192 L1020 236 Z M1020 236 L1020 198 L1080 198 L1080 236 Z M1080 236 L1080 194 L1140 194 L1140 236 Z M1140 236 L1140 200 L1200 200 L1200 236 Z M1200 236 L1200 196 L1260 196 L1260 236 Z M1260 236 L1260 202 L1320 202 L1320 236 Z"/></g>
-      <path class="fill2" d="M0 300 L0 248 Q 15 236 30 248 Q 45 239 60 248 Q 75 242 90 248 Q 105 236 120 248 Q 135 239 150 248 Q 165 242 180 248 Q 195 236 210 248 Q 225 239 240 248 Q 255 242 270 248 Q 285 236 300 248 Q 315 239 330 248 Q 345 242 360 248 Q 375 236 390 248 Q 405 239 420 248 Q 435 242 450 248 Q 465 236 480 248 Q 495 239 510 248 Q 525 242 540 248 Q 555 236 570 248 Q 585 239 600 248 Q 615 242 630 248 Q 645 236 660 248 Q 675 239 690 248 Q 705 242 720 248 Q 735 236 750 248 Q 765 239 780 248 Q 795 242 810 248 Q 825 236 840 248 Q 855 239 870 248 Q 885 242 900 248 Q 915 236 930 248 Q 945 239 960 248 Q 975 242 990 248 Q 1005 236 1020 248 Q 1035 239 1050 248 Q 1065 242 1080 248 Q 1095 236 1110 248 Q 1125 239 1140 248 Q 1155 242 1170 248 Q 1185 236 1200 248 Q 1215 239 1230 248 Q 1245 242 1260 248 Q 1275 236 1290 248 L1280 300 Z"/>
-      <g clip-path="url(#water)" opacity="0.4" transform="translate(0 506) scale(1 -1)"><use href="#city"/></g>
-      <path class="line" style="stroke-opacity: 0.35" d="M0 254 L1280 254"/>
-    </svg>`,
-    // The UT Tower rising from the Main Building, the campus roofs beside it.
-    tower: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
-      <path class="fill2" d="M40 236 L40 214 L70 200 L100 214 L100 236 Z M110 236 L110 214 L140 200 L170 214 L170 236 Z M180 236 L180 214 L210 200 L240 214 L240 236 Z M250 236 L250 214 L280 200 L310 214 L310 236 Z M320 236 L320 214 L350 200 L380 214 L380 236 Z M390 236 L390 214 L420 200 L450 214 L450 236 Z M830 236 L830 214 L860 200 L890 214 L890 236 Z M900 236 L900 214 L930 200 L960 214 L960 236 Z M970 236 L970 214 L1000 200 L1030 214 L1030 236 Z M1040 236 L1040 214 L1070 200 L1100 214 L1100 236 Z M1110 236 L1110 214 L1140 200 L1170 214 L1170 236 Z M1180 236 L1180 214 L1210 200 L1240 214 L1240 236 Z"/>
-      <path class="fill" d="M470 236 L470 196 L810 196 L810 236 Z M560 236 L560 180 L720 180 L720 236 Z M614 236 L614 70 L666 70 L666 236 Z M606 236 L606 56 L674 56 L674 236 Z M606 236 L606 70 L674 70 L674 236 Z M618 236 L618 36 L662 36 L662 236 Z M626 236 L626 28 L654 28 L654 236 Z M626 28 L640 18 L654 28 Z"/>
-      <path d="M622 236 L622 36 L628 36 L628 236 Z M634 236 L634 36 L640 36 L640 236 Z M646 236 L646 36 L652 36 L652 236 Z M656 236 L656 36 L662 36 L662 236 Z  M626 104 L626 170 L634 170 L634 104 Z M646 104 L646 170 L654 170 L654 104 Z" style="fill: var(--navy-900); opacity: 0.7"/>
-      <circle cx="640" cy="88" r="8" style="fill: var(--navy-900); opacity: 0.8"/>
-      <path class="fill" d="M0 300 L0 236 L1280 236 L1280 300 Z"/>
-    </svg>`,
-    // Three ridges of the hill country and the road that winds between them.
-    hills: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
-      <path class="fill2" d="M0 300 L0 150 Q 160 110 320 140 T 640 118 T 960 150 T 1280 122 L1280 300 Z"/>
-      <path class="fill2" d="M0 300 L0 198 Q 200 160 400 194 T 800 180 T 1280 198 L1280 300 Z"/>
-      <path class="fill" d="M0 300 L0 246 Q 240 206 480 240 T 960 232 T 1280 246 L1280 300 Z"/>
-      <path class="line" style="stroke-width: 3; stroke-opacity: 0.7" d="M1060 300 Q 1000 250 900 244 T 720 220 T 580 190"/>
-    </svg>`,
-    plain: ``,   // no scenery: the glow in the corner is all (see sign.css)
-  };
+  const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css)
+
+  // The backgrounds are photographs the room serves, static/backgrounds/<key>.jpg; "plain" has none. The sign shows the one the
+  // room's settings name once the room has said it has the file, and the navy with a glow when it has not.
+  const BACKGROUND = /^[a-z_]+$/;
+  const photoUrl = (key) => "/static/backgrounds/" + key + ".jpg";
 
   const el = (id) => document.getElementById(id);
   const model = { status: null, events: [], offline: false };
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
-  // Times read the American way whatever the browser's locale: 12-hour with AM or PM, and the date as "October 13, 2026"
+  // Times read the American way whatever the browser's locale: 12-hour with AM or PM, and the date as "Monday, October 13, 2026"
   // (the Pi's Chromium would otherwise follow the system locale and show 24-hour times).
   const fmtTime = (d) => d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).replace(/\s+(?=[AP]M$)/, "\u00A0");   // no-break space: a time never splits across lines
-  const fmtDate = (d) => d.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+  const fmtDate = (d) => d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
   const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
 
+  const timeout = () => (typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(4000) } : {});
+
   async function getJson(path) {
-    const options = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(4000) } : {};
-    const response = await fetch(path, options);
+    const response = await fetch(path, timeout());
     if (!response.ok) throw new Error("Request failed (" + response.status + ")");
     return response.json();
   }
@@ -61,6 +39,7 @@
       model.offline = false;
     } catch (e) {
       model.offline = true;
+      forgetMissingPhotos();   // the room may be restarting after an update, which may have brought a photograph
     }
     render();
   }
@@ -74,21 +53,67 @@
     render();
   }
 
-  // The scenery is drawn once, from body[data-bg]: the skyline unless the page says otherwise.
-  let drawnScene = null;
-  function drawScene() {
-    const name = document.body.dataset.bg || "skyline";
-    if (name === drawnScene) return;
-    drawnScene = name;
-    el("scene").innerHTML = SCENES[name] || "";
+  // Writes only what changed: the status words are aria-live, where the same words written again are announced again, and
+  // the backdrop is drawn when the room's choice first arrives or changes, not at every poll.
+  const setText = (node, value) => { if (node.textContent !== value) node.textContent = value; };
+  const setData = (name, value) => {   // value null removes the attribute
+    const data = document.body.dataset;
+    if (value === null) { if (name in data) delete data[name]; } else if (data[name] !== value) data[name] = value;
+  };
+
+  // The photograph behind the sign. body[data-bg] is the room's choice (settings.sign_background in the status). When the room
+  // has that photograph, body[data-photo] names it and --photo holds its address, and sign.css draws it under the navy overlay;
+  // "plain", and a choice the room has no file for (hills and stadium, until there are photographs for them), show the navy
+  // with the glow instead (a missing file also sets body[data-photo-missing]).
+  const photoFiles = new Map();   // key -> true when the room has the file, false when it answered 404: asked once, then kept
+  const asking = new Set();
+  let wanted = "skyline";
+
+  function showPhoto(key, missing) {
+    setData("photo", key);
+    setData("photoMissing", missing ? "" : null);
+    if (key) document.body.style.setProperty("--photo", "url('" + photoUrl(key) + "')");
+    else document.body.style.removeProperty("--photo");
   }
 
-  // The state (free, soon, occupied, offline, loading) colours the rail, the chip and the scenery through the CSS;
+  // What the sign shows follows what it knows: a choice the room has not answered for yet leaves the sign as it is.
+  function showBackground() {
+    setData("bg", wanted);
+    if (wanted === "plain") { showPhoto(null, false); return; }
+    const there = photoFiles.get(wanted);
+    if (there !== undefined) showPhoto(there ? wanted : null, !there);
+  }
+
+  async function askForPhoto(key) {
+    if (asking.has(key)) return;
+    asking.add(key);
+    try {
+      const response = await fetch(photoUrl(key), Object.assign({ method: "HEAD" }, timeout()));
+      if (response.ok) photoFiles.set(key, true);
+      else if (response.status === 404) photoFiles.set(key, false);
+    } catch (e) {
+      // no answer (the room is busy or restarting): the next poll asks again
+    }
+    asking.delete(key);
+    showBackground();
+  }
+
+  function chooseBackground(key) {
+    wanted = key;
+    showBackground();
+    if (key !== "plain" && !photoFiles.has(key)) askForPhoto(key);
+  }
+
+  function forgetMissingPhotos() {
+    for (const [key, there] of photoFiles) if (!there) photoFiles.delete(key);
+  }
+
+  // The state (free, soon, occupied, offline, loading) colours the rail, the chip and the ring through the CSS;
   // the chip says it in words and the detail line adds what the room is for.
   function setStatus(state, chipText, detail) {
-    document.body.dataset.state = state;
-    el("chip-text").textContent = chipText;
-    el("detail").textContent = detail || "";
+    setData("state", state);
+    setText(el("chip-text"), chipText);
+    setText(el("detail"), detail || "");
   }
 
   const startMs = (ev) => new Date(ev.start_time).getTime();
@@ -104,10 +129,12 @@
       return;
     }
     const s = model.status;
-    el("room-name").textContent = s.room.name;
-    el("room-location").textContent = s.room.location;
+    setText(el("room-name"), s.room.name);
+    el("room-name").classList.toggle("long", s.room.name.length > LONG_NAME);
+    setText(el("room-location"), s.room.location);
     el("room-location").hidden = !s.room.location;
-    el("company").textContent = s.room.company || "";
+    setText(el("company"), s.room.company || "");
+    chooseBackground(s.settings && BACKGROUND.test(s.settings.sign_background) ? s.settings.sign_background : "skyline");
     const m = s.meeting;
     const cal = s.calendar;
     const now = Date.now();
@@ -174,7 +201,6 @@
     el("date").textContent = fmtDate(new Date());
   }
 
-  drawScene();
   tick();
   setInterval(tick, 1000);
   refreshStatus();

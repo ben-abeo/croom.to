@@ -61,6 +61,7 @@
     <div class="menu">
       <button type="button" id="open-camera-setup" class="button quiet menu-item">Camera framing</button>
       <button type="button" id="open-screensaver" class="button quiet menu-item">Screensaver</button>
+      <button type="button" id="open-door-sign" class="button quiet menu-item">Door sign</button>
     </div>
   </section>
 
@@ -111,6 +112,16 @@
     <section class="screen-section">
       <p class="kicker">Screensaver</p>
       <div id="screen-picker" class="picker" role="group" aria-label="Screensaver style"></div>
+    </section>
+  </section>
+
+  <section class="view" data-view="door-sign">
+    <button type="button" id="back-from-door-sign" class="button quiet back">Back</button>
+    <section class="door-section">
+      <p id="sign-picker-label" class="kicker">Door sign background</p>
+      <div id="sign-picker" class="picker" role="group" aria-labelledby="sign-picker-label"></div>
+      <p id="scores-picker-label" class="kicker">Football scores</p>
+      <div id="scores-picker" class="picker" role="group" aria-labelledby="scores-picker-label"></div>
     </section>
   </section>
 

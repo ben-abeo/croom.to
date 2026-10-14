@@ -6,9 +6,11 @@ and record what the control service asked them to do.
 """
 
 import asyncio
+import base64
 import contextlib
 import json
 import logging
+import os
 import socket
 import sys
 import threading
@@ -2280,6 +2282,80 @@ class TestPointerSocket:
         finally:
             tv.cursor.gate.set()
         assert tv.cursor.cancelled == 1 and service._pointers == {}
+
+    @staticmethod
+    async def a_page_that_floods_and_never_reads(service, seen):
+        """A raw client: it opens a pointer socket, then sends garbage frames and reads no answer. Each is answered with an error, which
+        piles up at the server's end (aiohttp lets 256 KiB of them pile up before a send waits) until the socket's handler is blocked in
+        a send. The window is kept small at both ends so that it takes a few thousand frames, not millions. Returns its end of the
+        connection (the test cuts it, and keeps it until then: a stream writer that is dropped open complains)."""
+        loop = asyncio.get_running_loop()
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        sock.setblocking(False)
+        await loop.sock_connect(sock, ("127.0.0.1", service.bound_port))
+        reader, writer = await asyncio.open_connection(sock=sock)
+        key = base64.b64encode(os.urandom(16)).decode()
+        writer.write((f"GET /ws/pointer HTTP/1.1\r\nHost: 127.0.0.1:{service.bound_port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        await writer.drain()
+        await reader.readuntil(b"\r\n\r\n")
+        server_end = seen.requests[-1].transport
+        server_end.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+        server_end.set_write_buffer_limits(high=2048)
+        mask = os.urandom(4)
+        payload = b"not json"
+        garbage = bytes([0x81, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        for _ in range(100):
+            writer.write(garbage * 50)
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.3)
+        return writer
+
+    async def test_stopping_the_service_does_not_wait_for_a_page_that_floods_it_and_never_reads(self, monkeypatch):
+        """Such a page cannot be closed politely (the close frame cannot be written either), and the listener would wait for it for
+        two minutes (a minute for it to end, and another once it is cancelled). After the bounded wait the connection is cut."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.3)
+        service = make_service(mouse=StubMouse())
+        seen = watching(service, "_handle_pointer")
+        await service.start()
+        loop = asyncio.get_running_loop()
+        page = await self.a_page_that_floods_and_never_reads(service, seen)
+        try:
+            t0 = loop.time()
+            await asyncio.wait_for(service.stop(), 5.0)
+            assert loop.time() - t0 < 2.0
+        finally:
+            page.transport.abort()
+
+    async def test_the_bound_on_stop_is_one_for_the_tasks_and_the_closes_together(self, monkeypatch):
+        """A join that is slow to let go takes the whole bound; the closes that are stuck behind a page that floods are cut at that
+        moment, and not given a bound of their own after it."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 1.0)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()
+        service = make_service(meeting=meeting, mouse=StubMouse())
+        seen = watching(service, "_handle_pointer")
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                assert await self.post(page, f"http://127.0.0.1:{service.bound_port}/api/meeting/join", {"url": "https://zoom.us/j/98765432100"}) == 202
+            await wait_until(lambda: meeting.state == MeetingState.JOINING)
+            page = await self.a_page_that_floods_and_never_reads(service, seen)
+            try:
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 8.0)
+                assert 0.9 < loop.time() - t0 < 1.6                       # the join's second, not that and another
+            finally:
+                page.transport.abort()
+        finally:
+            meeting.cancel_gate.set()
+
+    @staticmethod
+    async def post(http, url, body):
+        async with http.post(url, json=body) as response:
+            return response.status
 
     async def test_the_mouse_is_closed_when_the_service_stops_whether_or_not_a_page_used_it(self):
         mouse = StubMouse()

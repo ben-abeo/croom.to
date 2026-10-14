@@ -15,7 +15,7 @@ import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Set
 from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, WSMsgType, web
@@ -105,6 +105,13 @@ class _PageGone(Exception):
     """The page that sent a request has hung up: there is nobody to do it for."""
 
 
+class _Pointer(NamedTuple):
+    """An open pointer socket's side of the service: the request that opened it (its connection, which stop() cuts when the page does not
+    answer the close) and the relay that carries its messages out."""
+    request: web.Request
+    relay: PointerRelay
+
+
 @web.middleware
 async def _static_no_cache(
     request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -173,7 +180,7 @@ class ControlService(Service):
         self._search: Optional[asyncio.Task] = None          # the search for TVs that is running (see _handle_tv_discover)
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
         self._mouse = mouse if mouse is not None else PiMouse()
-        self._pointers: Dict[web.WebSocketResponse, PointerRelay] = {}   # the pointer sockets that are open, each with its relay
+        self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -288,14 +295,23 @@ class ControlService(Service):
         to wait for. They are the join or the leave, the search for TVs, the requests that are with the TV (a Turn on, a pairing that
         waits for a person) or wait their turn behind them, and the pointer sockets, which are closed (going away) with the move that is
         on its way to the TV. None of them is given time to finish: the pages that asked are going away with this service. It must not
-        raise: an error here would end the listener's shutdown half way."""
-        closing = [asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping"))
-                   for ws in self._pointers]
-        moves = [relay.sending for relay in self._pointers.values()]
+        raise: an error here would end the listener's shutdown half way.
+
+        All of it is bounded by CANCEL_WAIT_S, the pointer sockets' closes included: a page that does not answer a close, or that sends
+        frames and reads no answer (the socket's handler is then blocked in a send, and the close frame cannot be written either), would
+        hold the listener's wait up for two minutes. The connection of a socket that is still open after the bound is cut."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.CANCEL_WAIT_S
+        closing = {asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping")): pointer.request
+                   for ws, pointer in self._pointers.items()}
+        moves = [pointer.relay.sending for pointer in self._pointers.values()]
         await self._cancel(self._task, self._search, *self._tv_requests, *moves)
         if closing:
-            # (a page that does not answer the close is not waited for longer: aiohttp ends that close itself, after its own timeout)
-            await asyncio.wait(closing, timeout=self.CANCEL_WAIT_S)
+            _, left = await asyncio.wait(list(closing), timeout=max(0.0, deadline - loop.time()))
+            for task in left:
+                transport = closing[task].transport
+                if transport is not None:
+                    transport.abort()                  # (what the handler is blocked on then fails, and the handler ends)
 
     async def _cancel(self, *tasks: Optional[asyncio.Task]) -> None:
         """Cancel the tasks that are running among these and wait until they are over, for CANCEL_WAIT_S in all: what has not ended
@@ -795,7 +811,7 @@ class ControlService(Service):
         ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
         await ws.prepare(request)
         relay = PointerRelay(self._tv, self._mouse)
-        self._pointers[ws] = relay
+        self._pointers[ws] = _Pointer(request, relay)
         try:
             await self._make_the_mouse()
             async for frame in ws:

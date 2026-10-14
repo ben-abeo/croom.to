@@ -424,12 +424,6 @@ def test_shift_once_double_locks_and_a_tap_releases(browser):
         touch(page, "#keyboard .key[data-key='shift']")
         touch(page, "#keyboard .key[data-key='e']")
         assert page.input_value("#link-input") == "AbCDe"
-        touch(page, "#keyboard .key[data-key='shift']")
-        page.clock.run_for(400)
-        touch(page, "#keyboard .key[data-key='shift']")               # a second tap that comes too late releases, it does not lock
-        assert page.evaluate("document.getElementById('keyboard').dataset.shift") == "off"
-        touch(page, "#keyboard .key[data-key='f']")
-        assert page.input_value("#link-input") == "AbCDef"
         page.close()
 
 
@@ -451,6 +445,8 @@ def test_a_slow_second_shift_tap_releases_and_a_quick_one_locks(browser):
         page.clock.run_for(400)
         touch(page, "#keyboard .key[data-key='shift']")
         assert shift() == "off"                                       # the second tap came too late: it released the capital
+        touch(page, "#keyboard .key[data-key='f']")
+        assert page.input_value("#link-input") == "f"                 # and the next letter is a small one
         page.close()
 
 
@@ -729,6 +725,258 @@ def test_the_keyboard_tray_takes_no_scroll_zoom_or_text_selection(browser):
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         assert page.evaluate("""() => { const s = getComputedStyle(document.getElementById('keyboard')); return [s.touchAction, s.userSelect]; }""") == ["none", "none"]
+        page.close()
+
+
+# --- how the keyboard looks: three layers, key caps, the pop above a pressed key (spec 2026-10-13, sections 3.2 to 3.4) ---
+
+LAYER_ROWS = {      # the iPad's layers, row by row, by data-key
+    "letters": ["q w e r t y u i o p", "a s d f g h j k l", "shift z x c v b n m backspace", "layer:symbols . - / space join hide"],
+    "symbols": ["1 2 3 4 5 6 7 8 9 0", '- / : ; ( ) $ & @ "', "layer:more . , ? ! ' backspace", "layer:letters space join hide"],
+    "more": ["[ ] { } # % ^ * + =", "_ \\ | ~ < > \N{EURO SIGN} \N{POUND SIGN} \N{YEN SIGN} \N{BULLET}", "layer:symbols . , ? ! ' backspace", "layer:letters space join hide"],
+}
+
+
+def keyboard_rows(page):
+    """The keys of the layer in the tray, row by row, as their data-key values."""
+    return page.evaluate("Array.from(document.querySelectorAll('#keyboard .row')).map(r => Array.from(r.querySelectorAll('.key')).map(k => k.dataset.key).join(' '))")
+
+
+def key_heights(page):
+    return page.evaluate("Array.from(document.querySelectorAll('#keyboard .key')).map(k => k.getBoundingClientRect().height)")
+
+
+def pop(page):
+    """What the preview above a pressed key shows, or None while it is not on the screen (its display, not its hidden attribute: a style rule can beat the attribute)."""
+    return page.evaluate("(() => { const p = document.getElementById('key-preview'); return getComputedStyle(p).display === 'none' ? null : p.textContent; })()")
+
+
+def test_the_three_layers_hold_the_ipad_keys_and_fit_the_kiosk(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for layer, key in (("letters", None), ("symbols", "layer:symbols"), ("more", "layer:more")):
+            if key:
+                touch(page, f"#keyboard .key[data-key='{key}']")
+            assert keyboard_rows(page) == LAYER_ROWS[layer], layer
+            heights = key_heights(page)
+            assert min(heights) >= 50 and max(heights) <= 56, (layer, heights)   # a thumb's width: 52 px at the kiosk's 1.5x scale
+            keyboard = page.locator("#keyboard").bounding_box()
+            assert keyboard["y"] + keyboard["height"] <= 800 and keyboard["height"] <= 290, layer   # on the screen, in the room the page leaves under its content
+            assert page.evaluate("document.querySelector('#link-input').getBoundingClientRect().bottom <= document.querySelector('#keyboard').getBoundingClientRect().top"), layer
+            assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), layer
+        page.close()
+
+
+def test_the_keyboard_keys_are_44_px_tall_on_a_phone(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server, width=390, height=844)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        heights = key_heights(page)
+        assert min(heights) >= 43.5 and max(heights) <= 44.5, heights
+        page.close()
+
+
+def test_a_pressed_letter_shows_its_preview_and_a_wide_key_does_not(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='g']", pointer_id=1, release=False)
+        assert page.locator("#key-preview").is_visible() and page.locator("#key-preview").inner_text() == "g"
+        lift(page, "#keyboard .key[data-key='g']", pointer_id=1)
+        page.wait_for_function("document.getElementById('key-preview').hidden", timeout=2000)
+        touch(page, "#keyboard .key[data-key='shift']", pointer_id=1, release=False)
+        assert page.evaluate("document.getElementById('key-preview').hidden")
+        lift(page, "#keyboard .key[data-key='shift']", pointer_id=1)
+        page.close()
+
+
+@pytest.mark.parametrize("key", ["shift", "backspace", "layer:symbols", "space", "join", "hide"])
+def test_a_wide_key_space_and_join_show_no_preview(browser, key):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)   # a pop that came would still be waiting for its 60 ms to go
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.fill("#link-input", "98765432100")                        # something for Join to send
+        page.evaluate("""() => { window.__popMoves = 0; new MutationObserver((records) => { window.__popMoves += records.length; })
+            .observe(document.getElementById('key-preview'), { childList: true, attributes: true, attributeFilter: ['style'] }); }""")
+        touch(page, f"#keyboard .key[data-key='{key}']")
+        assert pop(page) is None
+        assert page.evaluate("window.__popMoves") == 0                 # and none was made ready: Hide and Join hide a pop as the keys go, so its end state alone would show nothing
+        page.close()
+
+
+def test_the_preview_sits_centred_above_its_key(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for key in ("g", "q", "p", "m"):                                # the middle of the tray, the edges of its first row, a key of its third
+            touch(page, f"#keyboard .key[data-key='{key}']", release=False)
+            above, cap = page.locator("#key-preview").bounding_box(), page.locator(f"#keyboard .key[data-key='{key}']").bounding_box()
+            assert abs((above["x"] + above["width"] / 2) - (cap["x"] + cap["width"] / 2)) <= 1, key   # centred on the key
+            assert above["y"] + above["height"] <= cap["y"] and above["y"] >= 0, key                  # above it, not over it, on the screen
+            lift(page, f"#keyboard .key[data-key='{key}']")
+            page.wait_for_function("document.getElementById('key-preview').hidden", timeout=2000)
+        page.close()
+
+
+def test_the_preview_stays_on_the_screen_at_the_edges_of_a_phone(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server, width=390, height=844)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for key in ("q", "p"):                                          # the keys at the edges are narrower than their pop
+            touch(page, f"#keyboard .key[data-key='{key}']", release=False)
+            above = page.locator("#key-preview").bounding_box()
+            assert above["x"] >= 0 and above["x"] + above["width"] <= 390, key
+            lift(page, f"#keyboard .key[data-key='{key}']")
+            page.wait_for_function("document.getElementById('key-preview').hidden", timeout=2000)
+        page.close()
+
+
+def test_the_preview_shows_what_is_typed_and_goes_60_ms_after_the_lift(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)   # the 60 ms are told by the clock the test holds
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        assert pop(page) is None                                       # there from the start, and hidden
+        touch(page, "#keyboard .key[data-key='g']", release=False)
+        assert pop(page) == "g"
+        lift(page, "#keyboard .key[data-key='g']")
+        page.clock.run_for(50)
+        assert pop(page) == "g"                                        # it stays a moment after the finger, as the iPad's does
+        page.clock.run_for(20)
+        assert pop(page) is None
+        tap(page, "shift")
+        touch(page, "#keyboard .key[data-key='g']", release=False)
+        assert pop(page) == "G"                                        # a capital under Shift, as the key showed it before the press spent the Shift
+        lift(page, "#keyboard .key[data-key='g']")
+        tap(page, "layer:symbols")
+        touch(page, "#keyboard .key[data-key='@']", release=False)
+        assert pop(page) == "@"
+        lift(page, "#keyboard .key[data-key='@']")
+        assert page.evaluate("document.querySelectorAll('#key-preview').length") == 1   # one pop, moved from key to key
+        assert page.evaluate("document.getElementById('key-preview').getAttribute('aria-hidden')") == "true"   # that a screen reader skips: the key is read
+        page.close()
+
+
+def test_a_key_pressed_within_the_60_ms_keeps_the_pop_for_itself(browser):
+    """Fast typing: the pop of the last letter is still waiting to go when the next one lands, and must not take it away."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='g']")
+        page.clock.run_for(30)
+        touch(page, "#keyboard .key[data-key='h']", release=False)
+        assert pop(page) == "h"
+        page.clock.run_for(50)                                          # past the 60 ms the first letter's pop was to stay
+        assert pop(page) == "h"                                         # and h is still down
+        lift(page, "#keyboard .key[data-key='h']")
+        page.clock.run_for(100)
+        assert pop(page) is None
+        page.close()
+
+
+def test_a_finger_lifting_leaves_the_preview_of_the_key_another_still_holds(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='a']", pointer_id=1, release=False)
+        touch(page, "#keyboard .key[data-key='b']", pointer_id=2, release=False)
+        assert pop(page) == "b"                                        # the pop follows the latest finger
+        lift(page, "#keyboard .key[data-key='a']", pointer_id=1)
+        page.clock.run_for(200)
+        assert pop(page) == "b"                                        # the first finger lifting does not take it from the second
+        lift(page, "#keyboard .key[data-key='b']", pointer_id=2)
+        page.clock.run_for(100)
+        assert pop(page) is None
+        page.close()
+
+
+def test_the_preview_goes_at_once_with_the_keys(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='g']", release=False)
+        assert pop(page) == "g"
+        page.evaluate("croomKeyboard.hide()")                           # Hide, Join or a view change, the finger still down
+        assert pop(page) is None                                        # not left over the page: nothing waited for, the clock being held
+        page.close()
+
+
+def test_the_keys_wear_the_rooms_colours_and_show_pressed_and_shift_on(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+
+        def style(selector, prop, pseudo=None):
+            return page.evaluate("([s, p, ps]) => getComputedStyle(document.querySelector(s), ps)[p]", [selector, prop, pseudo])
+
+        assert style("#keyboard", "backgroundColor") == "rgb(11, 18, 32)"                    # the tray: #0B1220
+        assert style("#keyboard .key[data-key='g']", "backgroundColor") == "rgb(31, 41, 55)"  # a key: surface-800
+        assert style("#keyboard .key[data-key='join']", "backgroundColor") == "rgb(27, 82, 229)"   # Join: the room's blue
+        touch(page, "#keyboard .key[data-key='g']", release=False)
+        assert style("#keyboard .key[data-key='g']", "backgroundColor") == "rgb(22, 36, 79)"  # pressed: navy-800
+        assert style("#key-preview", "backgroundColor") == "rgb(22, 36, 79)" and style("#key-preview", "color") == "rgb(255, 255, 255)"
+        assert style("#key-preview", "fontSize") == "25.6px"                                  # the glyph at 1.6 rem
+        lift(page, "#keyboard .key[data-key='g']")
+        assert style("#keyboard .key[data-key='g']", "backgroundColor") == "rgb(31, 41, 55)"  # and back
+        tap(page, "shift")
+        assert style("#keyboard .key[data-key='shift']", "backgroundColor") == "rgb(255, 255, 255)"   # Shift on shows white
+        assert page.locator("#keyboard .key[data-key='q']").inner_text() == "Q"              # and the caps are capitals
+        assert "\N{BULLET}" not in style("#keyboard .key[data-key='shift'] .cap", "content", "::after")
+        tap(page, "shift")                                                                    # the clock is held: a double tap, so a lock
+        assert "\N{BULLET}" in style("#keyboard .key[data-key='shift'] .cap", "content", "::after")   # the lock mark
+        page.close()
+
+
+def touchstart_listeners_on_the_document(cdp):
+    """The touchstart listeners the keyboard has put on the document, as the browser lists them. A listener that may cancel
+    (not passive) makes the browser wait for the script before it scrolls on any touch, anywhere on the page."""
+    document = cdp.send("Runtime.evaluate", {"expression": "document"})["result"]["objectId"]
+    return [l for l in cdp.send("DOMDebugger.getEventListeners", {"objectId": document})["listeners"] if l["type"] == "touchstart"]
+
+
+def test_the_keyboards_touch_listener_is_on_the_page_only_while_the_keyboard_is_up(browser):
+    """Cancelling a tap's touch is what keeps a tap on Hide or Join from reaching the page beneath. It is needed only while
+    the keys are up, and a tick after they go (the touch that took them away is still to come)."""
+    with PageServer() as server:
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
+        assert touchstart_listeners_on_the_document(cdp) == []          # the page loads without one: the other screens scroll at once
+        finger_tap(page, cdp, "#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        assert [l["passive"] for l in touchstart_listeners_on_the_document(cdp)] == [False]   # the keys are up: one that may cancel
+        finger_tap(page, cdp, "#keyboard .key[data-key='hide']")
+        page.wait_for_function("document.getElementById('keyboard').hidden", timeout=5000)
+        for _ in range(50):                                             # a tick is all it takes; the wait is for a slow machine
+            if not touchstart_listeners_on_the_document(cdp):
+                break
+            page.wait_for_timeout(20)
+        assert touchstart_listeners_on_the_document(cdp) == []
+        page.evaluate("window.__clicks = 0; document.addEventListener('click', () => { window.__clicks += 1; }, true)")
+        finger_tap(page, cdp, "#open-options")
+        page.wait_for_function("document.body.dataset.view === 'options'", timeout=5000)
+        assert page.evaluate("window.__clicks") == 1                    # a real touch on a button of the page clicks it, the keys being down
+        page.close()
+
+
+def test_the_keyboard_hidden_and_shown_in_the_same_breath_keeps_its_touch_listener(browser):
+    with PageServer() as server:
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
+        finger_tap(page, cdp, "#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.evaluate("croomKeyboard.hide(); croomKeyboard.open()")     # the tick that takes the listener away comes after the keys are back
+        page.wait_for_timeout(100)
+        assert not page.evaluate("document.getElementById('keyboard').hidden")
+        assert len(touchstart_listeners_on_the_document(cdp)) == 1
         page.close()
 
 

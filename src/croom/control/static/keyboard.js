@@ -18,7 +18,7 @@
   // The glyphs (shift, backspace and hide here; euro, pound, yen and bullet above) are escapes: the page's scripts are plain ASCII.
   const LABELS = { shift: "\u21E7", backspace: "\u232B", space: "space", join: "Join", hide: "\u2304", "layer:symbols": "123", "layer:more": "#+=", "layer:letters": "ABC" };
   const WIDE = new Set(["shift", "backspace", "layer:symbols", "layer:more", "layer:letters", "hide"]);
-  const REPEAT_AFTER_MS = 400, REPEAT_EVERY_MS = 83, DOUBLE_TAP_MS = 350;
+  const REPEAT_AFTER_MS = 400, REPEAT_EVERY_MS = 83, DOUBLE_TAP_MS = 350, PREVIEW_LINGER_MS = 60;
   const kiosk = P.kiosk;
   const box = el("keyboard");
   const link = el("link-input");
@@ -35,6 +35,13 @@
   const built = new Map();           // layer name -> its rows, built once
   const down = new Map();            // pointerId -> { button, timer, interval }
   let listeners = [];                // what tests may hook (press)
+  const preview = document.createElement("div");   // the pop above a pressed key: made once, moved from key to key, never rebuilt
+  preview.id = "key-preview";
+  preview.setAttribute("aria-hidden", "true");     // it repeats the key, which is already read
+  preview.hidden = true;
+  document.body.append(preview);
+  let previewOf = null;              // the pointer whose key the pop shows
+  let previewTimer = null;
 
   const field = () => (input.hidden ? link : input);
   const inTray = (t) => Boolean(t && t.closest && t.closest(".key, .keyboard"));   // a key may be on the shelf: its row is not under the tray then
@@ -77,9 +84,21 @@
     box.dataset.shift = shift;
     box.dataset.layer = layer();
   }
+  // A touchscreen follows a tap with a click at the finger's spot once it lifts, and by then Hide or Join has taken the tray
+  // away, or a layer key has taken its own row to the shelf: the click would land on whatever is beneath the finger now.
+  // Cancelling the touch leaves no click to land (the pointer events, which do the typing, are not touch events and still
+  // come). It is the document that listens: a layer key's pointerdown has moved its row off the tray before the touchstart
+  // that follows it, and a listener on the tray would not hear it. And only while the keys are up (show(), hide()): a
+  // listener that may cancel makes the browser wait for it before it scrolls on any touch, anywhere on the page.
+  const cancelTrayTouch = (e) => { if (inTray(e.target)) e.preventDefault(); };
+  function trayTouches(on) {
+    if (on) document.addEventListener("touchstart", cancelTrayTouch, { capture: true, passive: false });
+    else document.removeEventListener("touchstart", cancelTrayTouch, true);
+  }
   function show() {
     if (P.view() !== "idle" || open) return;
     open = true;
+    trayTouches(true);
     place(layer());
     relabel();
     box.hidden = false;
@@ -94,6 +113,10 @@
     box.hidden = true;
     document.body.classList.remove("keyboard-open");
     toggle.setAttribute("aria-pressed", "false");
+    // Not at once: the touch that took the keys away (a tap on Hide or Join) has its touchstart still to come, and the
+    // listener has to cancel it, or the tap's click lands on whatever is beneath. A tick is time enough; keys that are back
+    // by then keep the listener.
+    setTimeout(() => { if (!open) trayTouches(false); }, 0);
   }
   function switchLayer(name) {
     layers.set(field(), name);
@@ -136,7 +159,23 @@
   }
   function stopRepeat(d) { clearTimeout(d.timer); clearInterval(d.interval); }
   function letGo(d) { stopRepeat(d); d.button.classList.remove("down"); }
-  function letGoAll() { for (const d of down.values()) letGo(d); down.clear(); }
+  function letGoAll() { for (const d of down.values()) letGo(d); down.clear(); hidePreview(); }
+  // The pop is for letters and symbols, not for the wide keys, Space or Join. It shows the key as the finger found it (a
+  // capital under Shift: the press spends the Shift and relabels the keys), centred above the key and kept on the screen,
+  // follows the latest finger, and stays 60 ms after that finger lifts.
+  const popsUp = (key) => !WIDE.has(key) && key !== "space" && key !== "join";
+  function showPreview(button, pointerId) {
+    clearTimeout(previewTimer);
+    previewOf = pointerId;
+    preview.textContent = button.querySelector(".cap").textContent;
+    preview.hidden = false;
+    const r = button.getBoundingClientRect();
+    const left = r.left + r.width / 2 - preview.offsetWidth / 2;
+    preview.style.left = Math.max(4, Math.min(left, document.documentElement.clientWidth - preview.offsetWidth - 4)) + "px";
+    preview.style.top = r.top - preview.offsetHeight - 6 + "px";
+  }
+  function hidePreview() { clearTimeout(previewTimer); previewOf = null; preview.hidden = true; }
+  function lingerPreview(pointerId) { if (previewOf === pointerId) previewTimer = setTimeout(hidePreview, PREVIEW_LINGER_MS); }
   function onDown(e) {
     if (e.pointerType === "mouse" && e.button !== 0) return;   // only the main button types; the tray's own handler keeps the focus for the others
     e.preventDefault();   // the field keeps the focus
@@ -146,6 +185,7 @@
     b.classList.add("down");
     const d = { button: b, timer: null, interval: null };
     down.set(e.pointerId, d);   // before the key acts: Hide and Join let every press go, this one with them
+    if (popsUp(b.dataset.key)) showPreview(b, e.pointerId);   // before it too: a press may change the labels
     if (b.dataset.key === "backspace") d.timer = setTimeout(() => { d.interval = setInterval(() => act("backspace"), REPEAT_EVERY_MS); }, REPEAT_AFTER_MS);
     act(b.dataset.key);
   }
@@ -156,6 +196,7 @@
     if (!d) return;
     letGo(d);
     down.delete(e.pointerId);
+    lingerPreview(e.pointerId);
   }
   document.addEventListener("pointerup", onUp, true);
   document.addEventListener("pointercancel", onUp, true);
@@ -176,13 +217,7 @@
     for (const type of ["pointerdown", "click"]) target.addEventListener(type, () => { if (kiosk && !open) { aim(target); show(); } });
   }
   box.addEventListener("pointerdown", (e) => e.preventDefault());   // the tray's gaps: no focus change either
-  // A touchscreen follows a tap with a click at the finger's spot once it lifts, and by then Hide or Join has taken the tray
-  // away, or a layer key has taken its own row to the shelf: the click would land on whatever is beneath the finger now.
-  // Cancelling the touch leaves no click to land (the pointer events, which do the typing, are not touch events and still
-  // come). It is the document that listens: a layer key's pointerdown has moved its row off the tray before the touchstart
-  // that follows it, and a listener on the tray would not hear it. A long press is no context menu on the keys either.
-  document.addEventListener("touchstart", (e) => { if (inTray(e.target)) e.preventDefault(); }, { capture: true, passive: false });
-  document.addEventListener("contextmenu", (e) => { if (inTray(e.target)) e.preventDefault(); }, true);
+  document.addEventListener("contextmenu", (e) => { if (inTray(e.target)) e.preventDefault(); }, true);   // a long press is no context menu on the keys either
   toggle.addEventListener("pointerdown", (e) => e.preventDefault());
   toggle.addEventListener("click", () => { if (open) { hide(); return; } show(); field().focus(); });
   P.onViewChange((name) => { if (name !== "idle") hide(); });

@@ -66,13 +66,25 @@ Behaviour flags, window.ZoomMtg._behaviour = {...}:
   not the View menu, and a press of one of its items is logged as stub-stray. attendeeViewFirst puts a host's Attendee View
   section before the host's own items.
 - role (participant, co-host, host), attendees (the other participants, in the stub's own flags bVideoOn, bRaiseHand and
-  waiting), recording and refuseHostCalls: the rest of the meeting. The host's calls (muteAll, record, lockMeeting,
-  putOnHold, expel, endMeeting, and mute for anyone but the room) are recorded in window.__zoomCalls as [name, args] and
-  refused for a participant the way Zoom answers: error({errorCode: 1, errorMessage: "Not the host"}). One that is carried
-  out does its work, then is answered (window.ZoomMtg._locked is what lockMeeting last set). muteAll with muteAll false only
-  asks everyone to unmute: nobody's mute changes.
-  rename is any role's for the room: it is recorded with the old and the new name, and the room's name follows it (Zoom's
-  records of the room say the new one afterwards).
+  waiting), recording and refuseHostCalls: the rest of the meeting. refuseHostCalls false lets a participant's calls through.
+- The SDK's calls as its own wrapper treats them (muteAll, record, lockMeeting, putOnHold, expel, mute, endMeeting, rename). A
+  call it drops is answered false, and nothing is called back; a call it takes is answered through its callbacks. It drops a
+  call with a key its method does not take, or without one it does (muteAll {muteAll}, record {record}, lockMeeting
+  {lockMeeting}, putOnHold {userId, hold}, expel {userId}, mute {userId, mute}, endMeeting {}, rename {userId, oldName,
+  newName}), and a call made again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and
+  lockMeeting 5 s; putOnHold 0.1 s). The room's own mute keeps no window, as the page's own tests toggle it freely (the SDK
+  drops that too). The windows run on a clock of the stub's own, which only window.ZoomMtg._later(ms) moves: time goes by
+  without the test waiting for it, and without the machine's speed deciding. Every call is recorded in window.__zoomCalls as
+  [name, args], the keys it was given with the callbacks left out; window.__dropped holds the ones dropped.
+- The host's calls (muteAll, record, lockMeeting, putOnHold, expel, endMeeting, and mute for anyone but the room) are refused
+  for a participant as the SDK refuses: error({errorCode: 1, errorMessage: "Current user is neither host nor cohost"}).
+  endMeeting is the host's alone: a co-host is refused too, with {errorCode: 3003, errorMessage: null}. A call it carries out
+  does its work, then is answered (window.ZoomMtg._locked is what lockMeeting last set). muteAll with muteAll false only asks
+  everyone to unmute: nobody's mute changes. record answers at once, and the recording changes, with onRecordingChange, when
+  Zoom's server confirms: recordConfirmsAfterMs later (50), or never with recordNeverConfirms.
+- rename runs the SDK's host check first and goes on: for a participant it calls error ("Current user is neither host nor
+  cohost", code 1) and then, with the caller's own id, renames the room and calls success. The room's name follows the rename
+  (Zoom's records of the room say the new one afterwards).
 - silentAttendees: getAttendeeslist never answers. rosterAfterMs: it stays silent until that long after join, and
   getCurrentUser gives the four-field record until then.
 
@@ -92,6 +104,7 @@ STUB_JS = r"""
   window.addEventListener("unhandledrejection", (e) => { window.__rejections.push(String((e.reason && e.reason.message) || e.reason)); });
 })();
 window.__zoomCalls = [];
+window.__dropped = [];
 window.__videoClicks = 0;
 window.__presses = [];
 window.__reactErrors = [];
@@ -104,12 +117,15 @@ window.ZoomMtg = {
                 labelStyle: "client", noToolbar: false, videoStuckOff: false, videoStartsAfterMs: 0, videoUnusable: false,
                 handInFooter: false, handIgnored: false, selfViewIgnored: false, openerIgnored: false, popoverOpensAfterMs: 0,
                 popoverStays: false, popoverClosesAfterMs: 0, paddedLabels: false, openersRedrawn: false,
-                strayDropdown: false, attendeeViewFirst: false,
+                strayDropdown: false, attendeeViewFirst: false, recordConfirmsAfterMs: 50, recordNeverConfirms: false,
                 role: "participant", recording: false, refuseHostCalls: true, silentAttendees: false, rosterAfterMs: 0,
                 attendees: [{ userId: 16777217, userName: "Ann Lee", muted: false, bVideoOn: true, bRaiseHand: false, isHost: true },
                             { userId: 16777218, userName: "Raj Patel", muted: true, bVideoOn: false, bRaiseHand: true, isHost: false }] },
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
-  _attendeeView: "speaker", _name: "Room 1", _locked: false,
+  _attendeeView: "speaker", _name: "Room 1", _locked: false, _skew: 0, _lastCall: {},
+  _takes: { mute: ["userId", "mute"], muteAll: ["muteAll"], record: ["record"], lockMeeting: ["lockMeeting"], putOnHold: ["userId", "hold"],
+            expel: ["userId"], endMeeting: [], rename: ["userId", "oldName", "newName"] },
+  _windowMs: { mute: 1000, muteAll: 5000, rename: 5000, expel: 5000, record: 5000, lockMeeting: 5000, putOnHold: 100 },
   _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
   _open: { picker: false, view: false }, _shown: { picker: null, view: null }, _where: { picker: null, view: null },
   _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null,
@@ -426,37 +442,68 @@ window.ZoomMtg = {
     if (this._behaviour.silentAttendees || !this._listed()) return;
     opts.success && opts.success({ result: { attendeesList: [this._me()].concat(this._attendees.map((a) => this._record(a))) } });
   },
-  // A call only a host or a co-host may make: recorded, refused for a participant in Zoom's shape, else carried out and answered.
-  _hostCall(name, args, opts, work) {
+  // The windows run on the stub's clock, which only _later moves.
+  _now() { return this._skew; },
+  _later(ms) { this._skew += ms; },
+  // A call of the SDK is recorded as asked, and is dropped, answered false with nothing called back, when it has a key its method
+  // does not take (or lacks one it does) or is made again inside the window kept for its method. A call that is taken starts the
+  // window; one that is dropped does not.
+  _taken(name, opts) {
+    const args = {};
+    for (const key of Object.keys(opts)) if (key !== "success" && key !== "error") args[key] = opts[key];
     window.__zoomCalls.push([name, args]);
-    if (this._behaviour.role === "participant" && this._behaviour.refuseHostCalls) { opts.error && opts.error({ errorCode: 1, errorMessage: "Not the host" }); return; }
+    const takes = this._takes[name], keys = Object.keys(args);
+    let taken = keys.length === takes.length && takes.every((key) => keys.includes(key));
+    if (taken && !(name === "mute" && opts.userId === 16777216)) {
+      const now = this._now(), last = this._lastCall[name];
+      if (last !== undefined && now - last < this._windowMs[name]) taken = false; else this._lastCall[name] = now;
+    }
+    if (!taken) window.__dropped.push([name, args]);
+    return taken;
+  },
+  // A call only a host or a co-host may make. The SDK refuses a participant in its words with code 1; endMeeting is the host's
+  // alone, and refuses a co-host too, with a code and no words. A call it carries out does its work, then is answered.
+  _hostCall(name, opts, work) {
+    if (!this._taken(name, opts)) return false;
+    const b = this._behaviour;
+    if (b.refuseHostCalls && (name === "endMeeting" ? b.role !== "host" : b.role === "participant")) {
+      opts.error && opts.error(name === "endMeeting" ? { errorCode: 3003, errorMessage: null } : { errorCode: 1, errorMessage: "Current user is neither host nor cohost" });
+      return;
+    }
     work();
     opts.success && opts.success();
   },
   // The room's own mute is any participant's to make, another's is a host's.
   mute(opts) {
-    const args = { userId: opts.userId, mute: opts.mute };
     const work = () => {
       if (opts.userId === 16777216) this._muted = !!opts.mute;
       else { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.muted = !!opts.mute; }
       this._fire("onUserUpdate", { userId: opts.userId, muted: !!opts.mute });
     };
-    if (opts.userId !== 16777216) { this._hostCall("mute", args, opts, work); return; }
-    window.__zoomCalls.push(["mute", args]);
+    if (opts.userId !== 16777216) return this._hostCall("mute", opts, work);
+    if (!this._taken("mute", opts)) return false;
     work();
     opts.success && opts.success();
   },
   // muteAll false asks everyone to unmute: they stay muted until they choose to unmute.
-  muteAll(opts) { this._hostCall("muteAll", { muteAll: opts.muteAll }, opts, () => { if (opts.muteAll) this._attendees.forEach((a) => { a.muted = true; }); }); },
-  record(opts) { this._hostCall("record", { record: opts.record }, opts, () => this._setRecording(opts.record)); },
-  lockMeeting(opts) { this._hostCall("lockMeeting", { lockMeeting: opts.lockMeeting }, opts, () => { this._locked = !!opts.lockMeeting; }); },
-  putOnHold(opts) { this._hostCall("putOnHold", { userId: opts.userId, hold: opts.hold }, opts, () => { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.waiting = !!opts.hold; }); },
-  expel(opts) { this._hostCall("expel", { userId: opts.userId }, opts, () => { this._attendees = this._attendees.filter((a) => a.userId !== opts.userId); }); },
-  endMeeting(opts) { this._hostCall("endMeeting", {}, opts, () => setTimeout(() => this._status(3), 10)); },
-  // Any participant may rename themselves: the room's name follows, and Zoom says so as it does of every change of a user.
+  muteAll(opts) { return this._hostCall("muteAll", opts, () => { if (opts.muteAll) this._attendees.forEach((a) => { a.muted = true; }); }); },
+  // record answers at once: the recording changes, and onRecordingChange says so, when Zoom's server confirms.
+  record(opts) {
+    const b = this._behaviour;
+    return this._hostCall("record", opts, () => { if (!b.recordNeverConfirms) setTimeout(() => this._setRecording(opts.record), b.recordConfirmsAfterMs); });
+  },
+  lockMeeting(opts) { return this._hostCall("lockMeeting", opts, () => { this._locked = !!opts.lockMeeting; }); },
+  putOnHold(opts) { return this._hostCall("putOnHold", opts, () => { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.waiting = !!opts.hold; }); },
+  expel(opts) { return this._hostCall("expel", opts, () => { this._attendees = this._attendees.filter((a) => a.userId !== opts.userId); }); },
+  endMeeting(opts) { return this._hostCall("endMeeting", opts, () => setTimeout(() => this._status(3), 10)); },
+  // rename runs the SDK's host check first and goes on: a participant is told so by error and then, with their own id, is renamed
+  // and told by success. Any participant may rename themselves: the room's name follows, and Zoom says so as it does of every
+  // change of a user.
   rename(opts) {
-    window.__zoomCalls.push(["rename", { userId: opts.userId, oldName: opts.oldName, newName: opts.newName }]);
-    if (opts.userId === 16777216) { this._name = opts.newName; this._fire("onUserUpdate", { userId: 16777216, userName: this._name }); }
+    if (!this._taken("rename", opts)) return false;
+    const participant = this._behaviour.role === "participant";
+    if (participant) opts.error && opts.error({ errorCode: 1, errorMessage: "Current user is neither host nor cohost" });
+    if (participant || opts.userId === 16777216) { this._name = opts.newName; this._fire("onUserUpdate", { userId: 16777216, userName: this._name }); }
     opts.success && opts.success();
   },
   leaveMeeting(opts) { window.__zoomCalls.push(["leaveMeeting", { confirm: opts.confirm }]); opts.success && opts.success(); },

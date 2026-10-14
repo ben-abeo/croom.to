@@ -1850,6 +1850,7 @@ async def test_host_calls_go_to_the_sdk_and_a_participant_gets_zooms_refusal():
         m = await run.page.evaluate("window.crystalMeet.control('host.remove', 16777218)")
         assert [p["name"] for p in m["participants"]] == ["Room 1", "Ann Lee"]
         await run.page.evaluate("window.crystalMeet.control('host.hold', 16777217)")
+        await later(run)                                                          # Zoom drops a putOnHold made again within a tenth of a second
         m = await run.page.evaluate("window.crystalMeet.control('host.admit', 16777217)")
         assert m["participants"][1]["waiting"] is False
         calls = [c[0] for c in await run.page.evaluate("window.__zoomCalls")]
@@ -1858,7 +1859,7 @@ async def test_host_calls_go_to_the_sdk_and_a_participant_gets_zooms_refusal():
         await run.wait_for("connected")
         with pytest.raises(Exception) as failure:
             await run.page.evaluate("window.crystalMeet.control('host.lock')")
-        assert "Not the host" in str(failure.value)
+        assert "Current user is neither host nor cohost" in str(failure.value)
 
 
 async def test_end_for_everyone_ends_the_meeting():
@@ -1894,6 +1895,11 @@ async def control(run, name, value=None):
     return await run.page.evaluate("([name, value]) => window.crystalMeet.control(name, value)", [name, value])
 
 
+async def later(run, ms=6000):
+    """Time goes by for Zoom's windows (a call made again inside the one its method keeps is dropped), without the test waiting."""
+    await run.page.evaluate("(ms) => window.ZoomMtg._later(ms)", ms)
+
+
 async def test_each_host_call_sends_zoom_the_arguments_it_takes():
     """The first test sees which calls were made; each takes its own arguments, and a participant's id reaches Zoom as the number
     Zoom lists it by. Recording and locking are asked for as the opposite of what the meeting has."""
@@ -1903,6 +1909,7 @@ async def test_each_host_call_sends_zoom_the_arguments_it_takes():
                             ("host.lock", None), ("host.admit", 16777217), ("host.hold", 16777217), ("host.remove", 16777218),
                             ("host.mute_one", 16777217), ("host.end", None)]:
             await control(run, name, value)
+            await later(run)                                                                  # Zoom drops a call made again within seconds
         assert asked(await run.page.evaluate("window.__zoomCalls")) == [
             ["muteAll", {"muteAll": True}], ["muteAll", {"muteAll": False}],
             ["record", {"record": True}], ["record", {"record": False}],
@@ -1921,16 +1928,19 @@ async def test_the_meeting_says_whether_it_is_locked_and_recording_follows_what_
         m = await control(run, "host.lock")
         assert m["locked"] is True and await run.page.evaluate("window.ZoomMtg._locked") is True
         assert (await states(run, 1, timeout=1.0))[-1]["locked"] is True
+        await later(run)
         m = await control(run, "host.lock")
         assert m["locked"] is False and await run.page.evaluate("window.ZoomMtg._locked") is False
         assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["locked"] is False
         m = await control(run, "host.record")
         assert m["recording"] is True and m["locked"] is False
         await run.page.evaluate("window.ZoomMtg._setRecording(false)")             # stopped by somebody else: the next press starts it
+        await later(run)
         m = await control(run, "host.record")
         assert m["recording"] is True
         await run.page.evaluate("window.ZoomMtg._setRecording(false)")
         await run.page.evaluate("window.ZoomMtg._setRecording(true)")               # started by somebody else: the next press stops it
+        await later(run)
         m = await control(run, "host.record")
         assert m["recording"] is False
         assert [c[1] for c in await run.calls("record")] == [{"record": True}, {"record": True}, {"record": False}]
@@ -1943,7 +1953,9 @@ async def test_a_refused_host_call_changes_nothing_and_says_zooms_words():
                             ("host.hold", 16777217), ("host.remove", 16777218), ("host.mute_one", 16777217), ("host.end", None)]:
             with pytest.raises(Exception) as failure:
                 await control(run, name, value)
-            assert "Not the host (code 1)" in str(failure.value)
+            # the SDK's words and code 1; endMeeting is the host's alone, and refuses with a code and no words, which the call names
+            assert ("Zoom refused endMeeting (code 3003)" if name == "host.end" else "Current user is neither host nor cohost (code 1)") in str(failure.value)
+            await later(run)
         m = await run.page.evaluate("window.crystalMeet.readMeeting()")
         assert m["locked"] is False and m["recording"] is False and m["count"] == 3                        # not kept as done
         assert [p["muted"] for p in m["participants"]] == [False, False, True] and not any(p["waiting"] for p in m["participants"])
@@ -1959,6 +1971,7 @@ async def test_rename_sends_zoom_the_rooms_id_and_the_name_zoom_has_for_it():
         await run.wait_for("connected")
         m = await control(run, "rename", "  Boardroom 2 ")
         assert [p["name"] for p in m["participants"] if p["me"]] == ["Boardroom 2"]                         # as Zoom says it now
+        await later(run)
         m = await control(run, "rename", "Boardroom")
         assert [p["name"] for p in m["participants"] if p["me"]] == ["Boardroom"]
         assert [c[1] for c in await run.calls("rename")] == [
@@ -1983,13 +1996,15 @@ async def test_a_host_call_without_a_participant_and_a_rename_without_a_name_are
     async with PageRun(stub=client(role="host")) as run:
         await run.wait_for("connected")
         for name in ["host.admit", "host.hold", "host.remove", "host.mute_one"]:
-            for value in [None, "", "  ", "everyone", 0, -1, 1.5]:
+            for value in [None, "", "  ", "everyone", 0, -1, 1.5, "0x10", "1e3", " 5 ", "-5", 2 ** 53]:
                 with pytest.raises(Exception, match="Say which participant"):
                     await control(run, name, value)
         for value in [None, "", "   "]:
             with pytest.raises(Exception, match="Say which name to use"):
                 await control(run, "rename", value)
         assert asked(await run.page.evaluate("window.__zoomCalls")) == []
+        said = await run.page.evaluate("window.crystalMeet.control('host.remove', 'everyone').then(() => 'done', (e) => e.message)")
+        assert said == "Say which participant"                                                              # a rejected promise, as every control gives, not a throw
         await control(run, "host.remove", "16777218")                                                       # an id that came as text is the number
         assert asked(await run.page.evaluate("window.__zoomCalls")) == [["expel", {"userId": 16777218}]]
 
@@ -2051,8 +2066,9 @@ BOUNDS = """() => {
 
 async def test_a_call_zoom_never_answers_ends_in_words_and_does_not_hold_the_controls_behind_it():
     """Controls run one at a time, so a call Zoom never answered would hold every later control, and the inventory, until the page
-    was reloaded. It ends after ten seconds in words, and what waited behind it goes on. The ten seconds are not waited for: the
-    page's timer for them is taken, its delay is looked at, and the test lets it go off."""
+    was reloaded. It ends after twelve seconds in words (the SDK's own ten-second wait for its store, which says why, comes first
+    where there is one), and what waited behind it goes on. The twelve seconds are not waited for: the page's timer for them is
+    taken, its delay is looked at, and the test lets it go off."""
     async with PageRun(stub=client(role="host")) as run:
         await settled(run)
         await run.page.evaluate(BOUNDS)
@@ -2065,8 +2081,8 @@ async def test_a_call_zoom_never_answers_ends_in_words_and_does_not_hold_the_con
                 await asyncio.sleep(0.05)
             raise AssertionError(f"Zoom was not asked {count} times")
 
-        async def ten_seconds_go_by():
-            assert await run.page.evaluate("[...window.__bounds.values()].map((b) => b.ms)") == [10000]       # one call waiting, for ten seconds
+        async def twelve_seconds_go_by():
+            assert await run.page.evaluate("[...window.__bounds.values()].map((b) => b.ms)") == [12000]       # one call waiting, for twelve seconds
             await run.page.evaluate("[...window.__bounds].forEach(([id, b]) => { window.__bounds.delete(id); b.fn(); })")      # it goes off, once
 
         stuck = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.control('host.mute_all')"))
@@ -2075,7 +2091,7 @@ async def test_a_call_zoom_never_answers_ends_in_words_and_does_not_hold_the_con
         await asked_of_zoom(1)
         await asyncio.sleep(0.3)
         assert not stuck.done() and not behind.done() and not inventory.done()                              # they wait for it
-        await ten_seconds_go_by()
+        await twelve_seconds_go_by()
         with pytest.raises(Exception) as failure:
             await asyncio.wait_for(stuck, timeout=5)
         assert "Zoom did not answer muteAll in time" in str(failure.value)
@@ -2084,14 +2100,14 @@ async def test_a_call_zoom_never_answers_ends_in_words_and_does_not_hold_the_con
         assert (await asyncio.wait_for(inventory, timeout=5))["popovers"]["reactions"]["found"] is True
         again = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.control('host.mute_all')"))    # no longer in flight: a new call, which ends the same way
         await asked_of_zoom(2)
-        await ten_seconds_go_by()
+        await twelve_seconds_go_by()
         with pytest.raises(Exception, match="Zoom did not answer muteAll in time"):
             await asyncio.wait_for(again, timeout=5)
 
 
 async def test_a_call_that_ends_leaves_no_timer_behind_whichever_way_it_ends():
-    """The ten-second bound is a timer set with every call: it is cleared when Zoom answers, when it refuses and when it throws,
-    and Zoom's own words, whatever they are, are the call's error."""
+    """The bound on a call is a timer set with it: it is cleared when Zoom answers, when it refuses and when it throws, and Zoom's
+    own words, whatever they are, are the call's error."""
     async with PageRun(stub=client(role="host")) as run:
         await settled(run)
         await run.page.evaluate(BOUNDS)
@@ -2107,3 +2123,145 @@ async def test_a_call_that_ends_leaves_no_timer_behind_whichever_way_it_ends():
         with pytest.raises(Exception, match="Minified Redux error #3"):
             await control(run, "host.remove", 16777218)
         assert await run.page.evaluate("window.__bounds.size") == 0
+
+
+# ---- What Zoom 6.5.0's API does that the page lives with: a refusal followed by success, calls it drops, a recording it confirms later ----
+
+
+ANSWERS_IN_ORDER = """() => {            // what Zoom calls back for a rename, in order
+    const real = window.ZoomMtg.rename; window.__order = [];
+    window.ZoomMtg.rename = function (o) {
+        return real.call(this, Object.assign({}, o, { error: (e) => { window.__order.push("error"); o.error(e); }, success: () => { window.__order.push("success"); o.success(); } }));
+    };
+}"""
+
+
+async def test_a_participants_own_rename_is_done_though_zoom_refuses_it_first():
+    """Zoom's rename runs its host check first and goes on: for a participant it calls error ("Current user is neither host nor
+    cohost", code 1) and then, with their own id, carries the rename out and calls success. The rename happened, so it is not a
+    failure; a refusal that nothing follows is one, and is said at once. A host is not refused first."""
+    async with PageRun(stub=client(role="host")) as run:
+        await run.wait_for("connected")
+        await run.page.evaluate(ANSWERS_IN_ORDER)
+        await control(run, "rename", "Boardroom")
+        assert await run.page.evaluate("window.__order") == ["success"]
+    async with PageRun() as run:                                                   # a participant, the room's usual case
+        await run.wait_for("connected")
+        await run.page.evaluate(ANSWERS_IN_ORDER)
+        m = await control(run, "rename", "Boardroom")
+        assert await run.page.evaluate("window.__order") == ["error", "success"]                           # the premise: Zoom's order
+        assert [p["name"] for p in m["participants"] if p["me"]] == ["Boardroom"]
+        await run.page.evaluate("() => { window.ZoomMtg.rename = (o) => o.error({ errorCode: 1, errorMessage: 'Current user is neither host nor cohost' }); }")
+        said, took = await run.page.evaluate("""async () => {
+            const t = performance.now();
+            const said = await window.crystalMeet.control('rename', 'Another').then(() => "done", (e) => e.message);
+            return [said, performance.now() - t];
+        }""")
+        assert said == "Current user is neither host nor cohost (code 1)" and took < 1000, (said, took)
+
+
+async def test_a_call_zoom_drops_is_refused_at_once_in_words_and_does_not_hold_the_controls_behind_it():
+    """Zoom's API drops a call made again inside the window it keeps for its method (five seconds for muteAll, a second for mute):
+    it answers false and calls nothing back. That is an ordinary pair of taps (Mute all, then Ask all to unmute), and it is said
+    at once, not left to the bound that would hold every control behind it."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        await control(run, "host.mute_all")
+        results, took = await run.page.evaluate("""(async () => {
+            const t = performance.now();
+            const r = await Promise.allSettled([window.crystalMeet.control('host.ask_unmute'), window.crystalMeet.control('captions')]);
+            return [r.map((x) => x.status === "fulfilled" ? "fulfilled" : x.reason.message), performance.now() - t];
+        })()""")
+        assert results == ["Zoom ignored muteAll (it takes one a few seconds after the last); try again in a moment", "fulfilled"], results
+        assert took < 2000, took                                                          # at once: not the twelve seconds of a call nobody answers
+        assert len(await run.calls("muteAll")) == 2 and [d[1] for d in await run.page.evaluate("window.__dropped")] == [{"muteAll": False}]
+        assert await run.page.evaluate("window.ZoomMtg._captions") is True                # the control behind it went on
+        await later(run)
+        await control(run, "host.ask_unmute")                                              # after the window the same call is taken
+        assert len(await run.calls("muteAll")) == 3 and len(await run.page.evaluate("window.__dropped")) == 1
+        # two Mute taps inside a second, for two people: the SDK keeps one window for mute, not one for each person
+        results = await run.page.evaluate("""Promise.allSettled([window.crystalMeet.control('host.mute_one', 16777217), window.crystalMeet.control('host.mute_one', 16777218)])
+                                              .then((r) => r.map((x) => x.status === "fulfilled" ? "fulfilled" : x.reason.message))""")
+        assert results == ["fulfilled", "Zoom ignored mute (it takes one a few seconds after the last); try again in a moment"], results
+        await later(run, 1000)
+        await control(run, "host.mute_one", 16777218)
+
+
+async def test_the_stub_drops_what_the_sdk_drops():
+    """What the tests above rely on: Zoom's API answers false, and calls nothing back, to a call with a key its method does not take
+    (or without one it does) and to one made again inside the window it keeps for its method; the windows run on the stub's clock."""
+    async with PageRun(stub=client(role="host")) as run:
+        await run.wait_for("connected")
+
+        async def ask(name, args):
+            return await run.page.evaluate("""([name, args]) => {
+                const answered = [];
+                const r = window.ZoomMtg[name](Object.assign({}, args, { success: () => answered.push("success"), error: () => answered.push("error") }));
+                return [r === false ? "dropped" : "taken", answered];
+            }""", [name, args])
+
+        keys = {"muteAll": {"muteAll": True}, "record": {"record": True}, "lockMeeting": {"lockMeeting": True}, "putOnHold": {"userId": 16777217, "hold": True},
+                "expel": {"userId": 16777218}, "mute": {"userId": 16777217, "mute": True}, "rename": {"userId": 16777216, "oldName": "Room 1", "newName": "Room 2"}}
+        windows = {"muteAll": 5000, "record": 5000, "lockMeeting": 5000, "expel": 5000, "rename": 5000, "mute": 1000, "putOnHold": 100}
+        for name, args in keys.items():
+            assert await ask(name, args) == ["taken", ["success"]]
+            await later(run, windows[name] - 1)
+            assert await ask(name, args) == ["dropped", []]                               # a moment too soon: dropped, and nothing called back
+            await later(run, 1)
+            assert await ask(name, args) == ["taken", ["success"]]                        # the window is over
+        for name, args in [("lockMeeting", {"lockMeeting": True, "note": "x"}), ("endMeeting", {"end": True}), ("muteAll", {"mute": True}), ("record", {}),
+                           ("putOnHold", {"userId": 16777217}), ("mute", {"userId": 16777217, "mute": True, "all": True}), ("expel", {"userId": 16777218, "reason": "x"})]:
+            await later(run)
+            assert await ask(name, args) == ["dropped", []]                               # a key it does not take, or one it needs missing
+        assert [await ask("mute", {"userId": 16777216, "mute": True}) for _ in range(3)] == [["taken", ["success"]]] * 3      # the room's own mute keeps no window
+        assert await ask("endMeeting", {}) == ["taken", ["success"]]
+
+
+async def test_a_refusal_with_no_words_is_named_by_the_call():
+    """endMeeting is the host's alone: the SDK refuses a co-host with a code and no message, which would read as a blob of JSON."""
+    async with PageRun(stub=client(role="co-host")) as run:
+        await settled(run)
+        with pytest.raises(Exception) as failure:
+            await control(run, "host.end")
+        assert "Zoom refused endMeeting (code 3003)" in str(failure.value) and "errorMessage" not in str(failure.value)
+        await run.page.evaluate("() => { window.ZoomMtg.lockMeeting = (o) => o.error(); }")                  # no reason and no code at all
+        with pytest.raises(Exception) as failure:
+            await control(run, "host.lock")
+        assert "Zoom refused lockMeeting" in str(failure.value) and "(code" not in str(failure.value)
+        m = await control(run, "host.mute_all")                                                                # a co-host may do the rest
+        assert all(p["muted"] for p in m["participants"] if not p["me"])
+
+
+async def test_recording_is_answered_once_zoom_has_confirmed_it_and_says_so_when_it_does_not():
+    """Zoom's record answers at once and tells of the recording when its server has confirmed it (onRecordingChange): the answer
+    waits for that, up to three seconds, and a recording nobody confirms is a failure in words, for starting and for stopping."""
+    async with PageRun(stub=client(role="host", recordConfirmsAfterMs=800)) as run:
+        await settled(run)
+        recording, took = await run.page.evaluate("""async () => {
+            const t = performance.now(), m = await window.crystalMeet.control('host.record');
+            return [m.recording, performance.now() - t];
+        }""")
+        assert recording is True and 700 <= took < 2500, (recording, took)               # not the answer as it was at the call
+    async with PageRun(stub=client(role="host", recordNeverConfirms=True)) as run:
+        await settled(run)
+        with pytest.raises(Exception, match="Zoom did not start recording"):
+            await asyncio.wait_for(control(run, "host.record"), timeout=10)
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["recording"] is False
+        await run.page.evaluate("window.ZoomMtg._setRecording(true)")                      # it is recording, though (somebody else started it)
+        await later(run)
+        with pytest.raises(Exception, match="Zoom did not stop recording"):
+            await asyncio.wait_for(control(run, "host.record"), timeout=10)
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["recording"] is True
+
+
+async def test_the_same_participant_spelled_two_ways_is_one_call():
+    """Zoom drops the second call of a method made within seconds of the first, so a number and its text must not be two calls."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        same, results = await run.page.evaluate("""(async () => {
+            const a = window.crystalMeet.control('host.remove', 16777218), b = window.crystalMeet.control('host.remove', '16777218');
+            const r = await Promise.allSettled([a, b]);
+            return [a === b, r.map((x) => x.status)];
+        })()""")
+        assert same is True and results == ["fulfilled", "fulfilled"]
+        assert [c[1] for c in await run.calls("expel")] == [{"userId": 16777218}]

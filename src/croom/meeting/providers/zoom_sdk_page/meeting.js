@@ -514,41 +514,65 @@
 
   // ---- The host's calls and rename: Zoom's own calls, not its buttons ----
   // They go through the same dispatch as the presses, so the guard, the chain that runs controls one at a time and the double
-  // tap are theirs too. Zoom answers each through its success or error callback, the error in its own words. The chain has no
-  // end of its own: a call Zoom never answered would hold every control after it, and the inventory, until the page was
-  // reloaded, so a call ends after SDK_MS, in words, and the next control goes on.
-  const SDK_MS = 10000;
+  // tap are theirs too. Zoom answers each through its success or error callback, the error in its own words (a refusal with none
+  // is named by the call). The chain has no end of its own: a call Zoom never answered would hold every control after it, and
+  // the inventory, until the page was reloaded, so a call ends after SDK_MS, in words, and the next control goes on. SDK_MS is
+  // longer than the ten seconds the SDK itself waits for its store, whose own error says why.
+  const SDK_MS = 12000;
   const sdk = (method, args) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Zoom did not answer " + method + " in time")), SDK_MS);
     const over = (end, value) => { clearTimeout(timer); end(value); };
+    // Zoom's words; a refusal with none (endMeeting's, for a co-host, is {errorCode: 3003, errorMessage: null}) is named by the call.
+    const refusal = (e) => {
+      if (e && (e.errorMessage || e.reason || e.message)) return words(e);
+      return "Zoom refused " + method + (e && known(e.errorCode) ? " (code " + e.errorCode + ")" : "");
+    };
     try {
-      ZoomMtg[method](Object.assign({}, args, { success: () => over(resolve, true), error: (e) => over(reject, new Error(words(e))) }));
+      const taken = ZoomMtg[method](Object.assign({}, args, {
+        success: () => over(resolve, true),
+        // Zoom 6.5.0 calls error, then success, for a participant renaming themselves (its host check answers before the rename
+        // goes on, with their own id): a refusal is passed on a moment later, and an answer in the same call is the answer.
+        error: (e) => { Promise.resolve().then(() => over(reject, new Error(refusal(e)))); },
+      }));
+      // Its API answers false, and calls nothing back, to a call it drops: one with a key its method does not take, or one made
+      // again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and lockMeeting 5 s; putOnHold
+      // 0.1 s). A pair of ordinary taps does that, so it is said at once and not left to the bound.
+      if (taken === false) over(reject, new Error("Zoom ignored " + method + " (it takes one a few seconds after the last); try again in a moment"));
     } catch (e) { over(reject, e); }
   });
-  // The participant a host call acts on: the id Zoom lists them by, a whole number, which may come as text. An id that is missing,
-  // or is not one, is refused before anything is asked of Zoom.
+  // The participant a host call acts on: the id Zoom lists them by, a whole number, which may come as digits in text. An id that is
+  // missing, or is not one, is refused before anything is asked of Zoom.
   const person = (id) => {
-    const n = typeof id === "string" && id.trim() !== "" ? Number(id) : id;
-    if (!Number.isInteger(n) || n <= 0) throw new Error("Say which participant");
+    const n = typeof id === "string" ? (/^\d+$/.test(id) ? Number(id) : NaN) : id;
+    if (!Number.isSafeInteger(n) || n <= 0) throw new Error("Say which participant");
     return n;
   };
+  const ofPerson = (call) => Object.assign((id) => call(person(id)), { ofPerson: true });
   // Renaming the room: Zoom is told who (the room's id, once Zoom has listed it) and what the room was called (its record's name).
   function rename(name) {
     const next = need(name, "name to use");
     if (!known(bridge.userId)) throw new Error(UNLISTED);
     return sdk("rename", { userId: bridge.userId, oldName: bridge.userName || "", newName: next });
   }
+  // The SDK answers a record at once and tells of the recording (onRecordingChange) when its server has confirmed it: the answer is
+  // the meeting once Zoom has said so, as the hand's is, and a recording nobody confirms is a failure in words.
+  const RECORD_MS = 3000;
+  async function record() {
+    const want = !bridge._recording;
+    await sdk("record", { record: want });
+    if (!await settle(() => bridge._recording === want, RECORD_MS)) throw new Error("Zoom did not " + (want ? "start" : "stop") + " recording");
+  }
   // By the control's name, in a table with no prototype: no name an object has (constructor, toString) is a control. Recording
   // is asked for as the opposite of what Zoom last said of it (its event), locking as the opposite of how it last went.
   const HOST = Object.assign(Object.create(null), {
     "host.mute_all": () => sdk("muteAll", { muteAll: true }),
     "host.ask_unmute": () => sdk("muteAll", { muteAll: false }),
-    "host.record": () => sdk("record", { record: !bridge._recording }),
+    "host.record": record,
     "host.lock": async () => { const lock = !bridge._locked; await sdk("lockMeeting", { lockMeeting: lock }); bridge._locked = lock; },
-    "host.admit": (id) => sdk("putOnHold", { userId: person(id), hold: false }),
-    "host.hold": (id) => sdk("putOnHold", { userId: person(id), hold: true }),
-    "host.remove": (id) => sdk("expel", { userId: person(id) }),
-    "host.mute_one": (id) => sdk("mute", { userId: person(id), mute: true }),
+    "host.admit": ofPerson((id) => sdk("putOnHold", { userId: id, hold: false })),
+    "host.hold": ofPerson((id) => sdk("putOnHold", { userId: id, hold: true })),
+    "host.remove": ofPerson((id) => sdk("expel", { userId: id })),
+    "host.mute_one": ofPerson((id) => sdk("mute", { userId: id, mute: true })),
     "host.end": () => sdk("endMeeting", {}),
     "rename": rename,
   });
@@ -577,8 +601,15 @@
     return run;
   }
   const controlsInFlight = new Map();
+  // What makes a control the one already running: its name and its value, and for a control on a participant the id as the number
+  // it is (16777218 and "16777218" are one participant: Zoom drops the second call of a method made within seconds of the first).
+  function keyOf(name, value) {
+    let what = value === undefined ? null : value;
+    if (HOST[name] && HOST[name].ofPerson) { try { what = person(value); } catch (e) { /* refused when it runs, in words */ } }
+    return name + "\u0000" + JSON.stringify(what);
+  }
   bridge.control = function (name, value) {
-    const key = name + "\u0000" + JSON.stringify(value === undefined ? null : value);
+    const key = keyOf(name, value);
     if (controlsInFlight.has(key)) return controlsInFlight.get(key);
     const tracked = alone(() => controlNow(name, value)).finally(() => controlsInFlight.delete(key));
     controlsInFlight.set(key, tracked);

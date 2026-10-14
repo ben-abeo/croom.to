@@ -99,6 +99,7 @@ async def test_mute_and_leave_go_through_the_sdk():
     async with PageRun() as run:
         await run.wait_for("connected")
         assert await run.page.evaluate("window.crystalMeet.mute(true)") is True
+        await later(run, 1000)                                                       # Zoom drops a mute made again within a second
         assert await run.page.evaluate("window.crystalMeet.mute(false)") is False
         assert [c[1] for c in await run.calls("mute")] == [{"userId": 16777216, "mute": True}, {"userId": 16777216, "mute": False}]
         assert await run.page.evaluate("window.crystalMeet.leave()") is True
@@ -774,6 +775,7 @@ async def test_a_reconnect_does_not_mute_the_room_again():
     async with PageRun({"micOn": False}) as run:
         await settled(run)
         assert [c[1]["mute"] for c in await run.calls("mute")] == [True]                          # the join's default
+        await later(run, 1000)                                                                    # Zoom drops a mute made again within a second
         assert await run.page.evaluate("window.crystalMeet.mute(false)") is False                 # the table unmutes
         await run.page.evaluate("window.ZoomMtg._status(4)")                                      # Zoom reconnecting ...
         await run.page.evaluate("window.ZoomMtg._status(2)")                                      # ... and connected again
@@ -2189,32 +2191,41 @@ async def test_a_call_zoom_drops_is_refused_at_once_in_words_and_does_not_hold_t
 
 async def test_the_stub_drops_what_the_sdk_drops():
     """What the tests above rely on: Zoom's API answers false, and calls nothing back, to a call with a key its method does not take
-    (or without one it does) and to one made again inside the window it keeps for its method; the windows run on the stub's clock."""
+    (or without one it does) and to one made again inside the window it keeps for its method; the windows run on the stub's clock.
+    A call it takes returns nothing and is answered after it has returned, as the SDK answers."""
     async with PageRun(stub=client(role="host")) as run:
         await run.wait_for("connected")
 
         async def ask(name, args):
-            return await run.page.evaluate("""([name, args]) => {
+            """[dropped or taken, what had been called back when the call returned, and a moment after]"""
+            return await run.page.evaluate("""async ([name, args]) => {
                 const answered = [];
                 const r = window.ZoomMtg[name](Object.assign({}, args, { success: () => answered.push("success"), error: () => answered.push("error") }));
-                return [r === false ? "dropped" : "taken", answered];
+                const inside = answered.slice();
+                await null;
+                return [r === false ? "dropped" : "taken", inside, answered];
             }""", [name, args])
 
         keys = {"muteAll": {"muteAll": True}, "record": {"record": True}, "lockMeeting": {"lockMeeting": True}, "putOnHold": {"userId": 16777217, "hold": True},
                 "expel": {"userId": 16777218}, "mute": {"userId": 16777217, "mute": True}, "rename": {"userId": 16777216, "oldName": "Room 1", "newName": "Room 2"}}
         windows = {"muteAll": 5000, "record": 5000, "lockMeeting": 5000, "expel": 5000, "rename": 5000, "mute": 1000, "putOnHold": 100}
         for name, args in keys.items():
-            assert await ask(name, args) == ["taken", ["success"]]
+            assert await ask(name, args) == ["taken", [], ["success"]]
             await later(run, windows[name] - 1)
-            assert await ask(name, args) == ["dropped", []]                               # a moment too soon: dropped, and nothing called back
+            assert await ask(name, args) == ["dropped", [], []]                               # a moment too soon: dropped, and nothing called back
             await later(run, 1)
-            assert await ask(name, args) == ["taken", ["success"]]                        # the window is over
+            assert await ask(name, args) == ["taken", [], ["success"]]                        # the window is over
         for name, args in [("lockMeeting", {"lockMeeting": True, "note": "x"}), ("endMeeting", {"end": True}), ("muteAll", {"mute": True}), ("record", {}),
                            ("putOnHold", {"userId": 16777217}), ("mute", {"userId": 16777217, "mute": True, "all": True}), ("expel", {"userId": 16777218, "reason": "x"})]:
             await later(run)
-            assert await ask(name, args) == ["dropped", []]                               # a key it does not take, or one it needs missing
-        assert [await ask("mute", {"userId": 16777216, "mute": True}) for _ in range(3)] == [["taken", ["success"]]] * 3      # the room's own mute keeps no window
-        assert await ask("endMeeting", {}) == ["taken", ["success"]]
+            assert await ask(name, args) == ["dropped", [], []]                               # a key it does not take, or one it needs missing
+        await later(run)
+        assert await ask("mute", {"userId": 16777216, "mute": True}) == ["taken", [], ["success"]]              # the room's own mute shares the window with another's
+        assert await ask("mute", {"userId": 16777217, "mute": True}) == ["dropped", [], []]
+        assert await ask("mute", {"userId": 16777216, "mute": False}) == ["dropped", [], []]
+        await later(run, 1000)
+        assert await ask("mute", {"userId": 16777216, "mute": False}) == ["taken", [], ["success"]]
+        assert await ask("endMeeting", {}) == ["taken", [], ["success"]]
 
 
 async def test_a_refusal_with_no_words_is_named_by_the_call():
@@ -2265,3 +2276,53 @@ async def test_the_same_participant_spelled_two_ways_is_one_call():
         })()""")
         assert same is True and results == ["fulfilled", "fulfilled"]
         assert [c[1] for c in await run.calls("expel")] == [{"userId": 16777218}]
+
+
+async def test_a_second_mute_inside_the_second_zoom_keeps_for_it_is_refused_at_once_in_words_and_the_first_stands():
+    """Two Mute taps within a second: Zoom drops the second (its API answers false and calls nothing back), and the page waited for
+    an answer that never came. It is refused at once, in words, and what the first did stands."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        assert await run.page.evaluate("window.crystalMeet.mute(true)") is True
+        said, took = await asyncio.wait_for(run.page.evaluate("""async () => {
+            const t = performance.now();
+            const said = await window.crystalMeet.mute(false).then(() => "done", (e) => e.message);
+            return [said, performance.now() - t];
+        }"""), timeout=5)
+        assert said == "Zoom ignored mute (it takes one a few seconds after the last); try again in a moment" and took < 1000, (said, took)
+        assert await run.page.evaluate("window.ZoomMtg._muted") is True                                    # the first stands ...
+        assert (await run.page.evaluate("window.crystalMeet.readState()"))["muted"] is True               # ... and so does what the page says of it
+        assert [c[1] for c in await run.calls("mute")] == [{"userId": 16777216, "mute": True}, {"userId": 16777216, "mute": False}]   # both were asked
+        assert [d[1] for d in await run.page.evaluate("window.__dropped")] == [{"userId": 16777216, "mute": False}]
+        await later(run, 1000)
+        assert await run.page.evaluate("window.crystalMeet.mute(false)") is False                         # a second later the tap is taken
+
+
+async def test_the_mute_at_join_is_taken_and_a_tap_right_after_it_is_the_one_zoom_ignores():
+    """The join's mic-off default is the first mute there is, so Zoom takes it, and nothing of the join asks twice: a reconnect does
+    not mute the room again. An Unmute tapped inside the second after it is a second mute, and is refused at once."""
+    async with PageRun({"micOn": False}) as run:
+        await settled(run)
+        assert [c[1]["mute"] for c in await run.calls("mute")] == [True] and await run.page.evaluate("window.__dropped") == []   # the default, taken
+        with pytest.raises(Exception, match="Zoom ignored mute"):
+            await asyncio.wait_for(run.page.evaluate("window.crystalMeet.mute(false)"), timeout=5)
+        await run.page.evaluate("window.ZoomMtg._status(4)")                                              # Zoom reconnecting ...
+        await run.page.evaluate("window.ZoomMtg._status(2)")                                              # ... and connected again
+        await asyncio.sleep(0.3)
+        assert [c[1]["mute"] for c in await run.calls("mute")] == [True, False]                           # the reconnect asked for nothing: only the tap
+        assert await run.page.evaluate("window.ZoomMtg._muted") is True                                   # and the default stands
+        await later(run, 1000)
+        assert await run.page.evaluate("window.crystalMeet.mute(false)") is False                         # a second later the tap is taken
+
+
+async def test_the_rooms_mute_and_a_hosts_mute_of_somebody_share_the_one_window():
+    """Zoom keeps one window for mute, whoever is muted: a Mute tapped for a person right after the room's own is the one ignored."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        assert await run.page.evaluate("window.crystalMeet.mute(true)") is True
+        with pytest.raises(Exception, match="Zoom ignored mute"):
+            await asyncio.wait_for(control(run, "host.mute_one", 16777217), timeout=5)
+        await later(run, 1000)
+        await control(run, "host.mute_one", 16777217)
+        with pytest.raises(Exception, match="Zoom ignored mute"):
+            await asyncio.wait_for(run.page.evaluate("window.crystalMeet.mute(false)"), timeout=5)

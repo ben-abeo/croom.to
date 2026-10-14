@@ -160,6 +160,7 @@ class TestControls:
         try:
             await provider.join_meeting(LINK)
             assert await provider.toggle_mute() is True and provider.current_meeting.is_muted is True
+            await provider._page.evaluate("window.ZoomMtg._later(1000)")         # Zoom drops a mute made again within a second
             assert await provider.toggle_mute() is False and provider.current_meeting.is_muted is False
             assert await provider.toggle_camera() is False and provider.current_meeting.is_camera_on is False
             assert await provider._page.get_attribute("#stub-video", "aria-label") == "start my video"
@@ -286,6 +287,17 @@ class TestReviewFixes:
         finally:
             await shutdown(provider)
 
+    async def test_at_join_the_room_is_asked_to_mute_once_and_zoom_takes_it(self):
+        """Zoom drops a mute made again within a second. The join's own look finds the room already muted by the page's mic-off
+        default (the first mute there is), so it asks for no second: nothing of the join is the call Zoom drops."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK, mic_on=False)
+            assert info.is_muted is True and await mute_calls(provider) == [True]
+            assert await provider._page.evaluate("window.__dropped") == []
+        finally:
+            await shutdown(provider)
+
     async def test_the_camera_wanted_on_at_join_waits_for_zooms_button_to_take_the_press(self):
         """Zoom's video button is disabled while its video encoder starts, two or three seconds after connecting, and a
         press then does nothing: the room joined dark. The join now waits for the button, and the camera comes on."""
@@ -333,6 +345,22 @@ class TestReviewFixes:
             await provider._page.evaluate("() => { window.ZoomMtg.mute = (o) => o.success(); }")   # Zoom answers, and nothing changes
             assert await provider.toggle_mute() is False
             assert provider.current_meeting.is_muted is False
+        finally:
+            await shutdown(provider)
+
+    async def test_a_second_mute_tap_inside_the_second_zoom_keeps_for_it_is_refused_at_once_in_zooms_words(self):
+        """Zoom drops a mute made again within a second and calls nothing back: the page says so at once, where the table waited out
+        the whole page call. What the first tap did stands."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            assert await provider.toggle_mute() is True
+            with pytest.raises(MeetingControlError) as failure:
+                await asyncio.wait_for(provider.toggle_mute(), timeout=5)        # not the ten seconds a page call that never answers takes
+            assert str(failure.value) == "Zoom ignored mute (it takes one a few seconds after the last); try again in a moment"
+            assert provider.current_meeting.is_muted is True and provider.state == MeetingState.CONNECTED
+            await provider._page.evaluate("window.ZoomMtg._later(1000)")         # a second later the tap is taken
+            assert await provider.toggle_mute() is False and provider.current_meeting.is_muted is False
         finally:
             await shutdown(provider)
 

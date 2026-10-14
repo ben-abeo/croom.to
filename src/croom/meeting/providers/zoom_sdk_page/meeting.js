@@ -33,6 +33,9 @@
   }
 
   const UNLISTED = "Zoom has not listed the room in the meeting yet; try again in a moment";
+  // Zoom's API answers false, and calls nothing back, to a call it drops: one made again inside the window it keeps for its method
+  // (a second for mute), or with a key its method does not take. That is said at once, not waited for.
+  const ignored = (method) => new Error("Zoom ignored " + method + " (it takes one a few seconds after the last); try again in a moment");
   bridge.mute = function (muted) {
     return new Promise((resolve, reject) => {
       if (!known(bridge.userId)) {
@@ -40,11 +43,12 @@
         reject(new Error(bridge.state === "connected" ? UNLISTED : "not in a meeting"));
         return;
       }
-      ZoomMtg.mute({
+      const taken = ZoomMtg.mute({
         userId: bridge.userId, mute: !!muted,
         success: () => { bridge.muted = !!muted; resolve(bridge.muted); },
         error: (e) => reject(new Error(words(e))),
       });
+      if (taken === false) reject(ignored("mute"));      // two taps inside the second: the second is the one Zoom drops
     });
   };
 
@@ -537,7 +541,7 @@
       // Its API answers false, and calls nothing back, to a call it drops: one with a key its method does not take, or one made
       // again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and lockMeeting 5 s; putOnHold
       // 0.1 s). A pair of ordinary taps does that, so it is said at once and not left to the bound.
-      if (taken === false) over(reject, new Error("Zoom ignored " + method + " (it takes one a few seconds after the last); try again in a moment"));
+      if (taken === false) over(reject, ignored(method));
     } catch (e) { over(reject, e); }
   });
   // The participant a host call acts on: the id Zoom lists them by, a whole number, which may come as digits in text. An id that is

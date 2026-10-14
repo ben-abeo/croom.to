@@ -72,10 +72,11 @@ Behaviour flags, window.ZoomMtg._behaviour = {...}:
   call with a key its method does not take, or without one it does (muteAll {muteAll}, record {record}, lockMeeting
   {lockMeeting}, putOnHold {userId, hold}, expel {userId}, mute {userId, mute}, endMeeting {}, rename {userId, oldName,
   newName}), and a call made again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and
-  lockMeeting 5 s; putOnHold 0.1 s). The room's own mute keeps no window, as the page's own tests toggle it freely (the SDK
-  drops that too). The windows run on a clock of the stub's own, which only window.ZoomMtg._later(ms) moves: time goes by
-  without the test waiting for it, and without the machine's speed deciding. Every call is recorded in window.__zoomCalls as
-  [name, args], the keys it was given with the callbacks left out; window.__dropped holds the ones dropped.
+  lockMeeting 5 s; putOnHold 0.1 s). The room's own mute shares the mute window with another participant's. The windows run on
+  a clock of the stub's own, which only window.ZoomMtg._later(ms) moves: time goes by without the test waiting for it, and
+  without the machine's speed deciding. Every call is recorded in window.__zoomCalls as [name, args], the keys it was given
+  with the callbacks left out; window.__dropped holds the ones dropped. A call that is taken is answered after it has returned
+  (a microtask later), as the SDK answers, so what a call returns is not what its callbacks have said.
 - The host's calls (muteAll, record, lockMeeting, putOnHold, expel, endMeeting, and mute for anyone but the room) are refused
   for a participant as the SDK refuses: error({errorCode: 1, errorMessage: "Current user is neither host nor cohost"}).
   endMeeting is the host's alone: a co-host is refused too, with {errorCode: 3003, errorMessage: null}. A call it carries out
@@ -454,24 +455,26 @@ window.ZoomMtg = {
     window.__zoomCalls.push([name, args]);
     const takes = this._takes[name], keys = Object.keys(args);
     let taken = keys.length === takes.length && takes.every((key) => keys.includes(key));
-    if (taken && !(name === "mute" && opts.userId === 16777216)) {
+    if (taken) {
       const now = this._now(), last = this._lastCall[name];
       if (last !== undefined && now - last < this._windowMs[name]) taken = false; else this._lastCall[name] = now;
     }
     if (!taken) window.__dropped.push([name, args]);
     return taken;
   },
+  // A call the SDK takes is answered after the call has returned, not inside it.
+  _answer(fn) { queueMicrotask(fn); },
   // A call only a host or a co-host may make. The SDK refuses a participant in its words with code 1; endMeeting is the host's
   // alone, and refuses a co-host too, with a code and no words. A call it carries out does its work, then is answered.
   _hostCall(name, opts, work) {
     if (!this._taken(name, opts)) return false;
     const b = this._behaviour;
     if (b.refuseHostCalls && (name === "endMeeting" ? b.role !== "host" : b.role === "participant")) {
-      opts.error && opts.error(name === "endMeeting" ? { errorCode: 3003, errorMessage: null } : { errorCode: 1, errorMessage: "Current user is neither host nor cohost" });
+      this._answer(() => opts.error && opts.error(name === "endMeeting" ? { errorCode: 3003, errorMessage: null } : { errorCode: 1, errorMessage: "Current user is neither host nor cohost" }));
       return;
     }
     work();
-    opts.success && opts.success();
+    this._answer(() => opts.success && opts.success());
   },
   // The room's own mute is any participant's to make, another's is a host's.
   mute(opts) {
@@ -483,7 +486,7 @@ window.ZoomMtg = {
     if (opts.userId !== 16777216) return this._hostCall("mute", opts, work);
     if (!this._taken("mute", opts)) return false;
     work();
-    opts.success && opts.success();
+    this._answer(() => opts.success && opts.success());
   },
   // muteAll false asks everyone to unmute: they stay muted until they choose to unmute.
   muteAll(opts) { return this._hostCall("muteAll", opts, () => { if (opts.muteAll) this._attendees.forEach((a) => { a.muted = true; }); }); },
@@ -502,9 +505,11 @@ window.ZoomMtg = {
   rename(opts) {
     if (!this._taken("rename", opts)) return false;
     const participant = this._behaviour.role === "participant";
-    if (participant) opts.error && opts.error({ errorCode: 1, errorMessage: "Current user is neither host nor cohost" });
     if (participant || opts.userId === 16777216) { this._name = opts.newName; this._fire("onUserUpdate", { userId: 16777216, userName: this._name }); }
-    opts.success && opts.success();
+    this._answer(() => {
+      if (participant) opts.error && opts.error({ errorCode: 1, errorMessage: "Current user is neither host nor cohost" });
+      opts.success && opts.success();
+    });
   },
   leaveMeeting(opts) { window.__zoomCalls.push(["leaveMeeting", { confirm: opts.confirm }]); opts.success && opts.success(); },
 };

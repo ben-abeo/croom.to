@@ -10,7 +10,7 @@
   const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css)
 
   // The backgrounds are photographs the room serves, static/backgrounds/<key>.jpg; "plain" has none. The sign shows the one the
-  // room's settings name once the room has said it has the file, and the navy with a glow when it has not.
+  // room's settings name once it has loaded, and the navy with a glow when it cannot.
   const BACKGROUND = /^[a-z_]+$/;
   const photoUrl = (key) => "/static/backgrounds/" + key + ".jpg";
 
@@ -39,7 +39,7 @@
       model.offline = false;
     } catch (e) {
       model.offline = true;
-      forgetMissingPhotos();   // the room may be restarting after an update, which may have brought a photograph
+      forgetFailedPhotos();   // the room may be restarting after an update, which may have brought a photograph
     }
     render();
   }
@@ -61,12 +61,13 @@
     if (value === null) { if (name in data) delete data[name]; } else if (data[name] !== value) data[name] = value;
   };
 
-  // The photograph behind the sign. body[data-bg] is the room's choice (settings.sign_background in the status). When the room
-  // has that photograph, body[data-photo] names it and --photo holds its address, and sign.css draws it under the navy overlay;
-  // "plain", and a choice the room has no file for (hills and stadium, until there are photographs for them), show the navy
-  // with the glow instead (a missing file also sets body[data-photo-missing]).
-  const photoFiles = new Map();   // key -> true when the room has the file, false when it answered 404: asked once, then kept
-  const asking = new Set();
+  // The photograph behind the sign. body[data-bg] is the room's choice (settings.sign_background in the status). The photograph is
+  // loaded once, as an image, and shown only when it has decoded: body[data-photo] names it and --photo holds its address, and sign.css
+  // draws it under the navy overlay. Until then the sign keeps what it shows, so a photograph does not arrive after bare navy and a new
+  // choice does not take the old photograph away before its own is ready. "plain", and a photograph that fails to load (the room has no
+  // file for it, or it is not an image), show the navy with the glow instead (a failed load also sets body[data-photo-missing]).
+  const photos = new Map();   // key -> the decoded Image (kept, so that the style sheet draws that one and the room is asked once), or false when it failed
+  const loading = new Set();
   let wanted = "skyline";
 
   function showPhoto(key, missing) {
@@ -76,36 +77,39 @@
     else document.body.style.removeProperty("--photo");
   }
 
-  // What the sign shows follows what it knows: a choice the room has not answered for yet leaves the sign as it is.
+  // What the sign shows follows what it has loaded: a choice that is still loading leaves the sign as it is.
   function showBackground() {
     setData("bg", wanted);
     if (wanted === "plain") { showPhoto(null, false); return; }
-    const there = photoFiles.get(wanted);
-    if (there !== undefined) showPhoto(there ? wanted : null, !there);
+    const photo = photos.get(wanted);
+    if (photo !== undefined) showPhoto(photo ? wanted : null, !photo);
   }
 
-  async function askForPhoto(key) {
-    if (asking.has(key)) return;
-    asking.add(key);
+  async function loadPhoto(key) {
+    if (loading.has(key)) return;
+    loading.add(key);
+    const image = new Image();
+    image.src = photoUrl(key);
     try {
-      const response = await fetch(photoUrl(key), Object.assign({ method: "HEAD" }, timeout()));
-      if (response.ok) photoFiles.set(key, true);
-      else if (response.status === 404) photoFiles.set(key, false);
+      await image.decode();
+      photos.set(key, image);
     } catch (e) {
-      // no answer (the room is busy or restarting): the next poll asks again
+      photos.set(key, false);
     }
-    asking.delete(key);
+    loading.delete(key);
     showBackground();
   }
 
   function chooseBackground(key) {
     wanted = key;
     showBackground();
-    if (key !== "plain" && !photoFiles.has(key)) askForPhoto(key);
+    if (key !== "plain" && !photos.has(key)) loadPhoto(key);
   }
 
-  function forgetMissingPhotos() {
-    for (const [key, there] of photoFiles) if (!there) photoFiles.delete(key);
+  // A room that goes away and comes back may have been updated, with a photograph it lacked: what failed is asked for again, once,
+  // when the room is back.
+  function forgetFailedPhotos() {
+    for (const [key, photo] of photos) if (!photo) photos.delete(key);
   }
 
   // The state (free, soon, occupied, offline, loading) colours the rail, the chip and the ring through the CSS;

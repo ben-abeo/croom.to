@@ -56,8 +56,9 @@ body {
 body[data-bg="plain"] .glow, body[data-photo-missing] .glow { display: block; }
 
 /* The photograph under a navy overlay that is heaviest on the left, where the words are (94 % at the left edge, 55 % at the
-   right, and darker again along the bottom): the room name, the chip and the bookings read as they do on plain navy, and the
-   place shows through on the right. The photograph is not tinted: the status colour stays in the rail, the chip and the ring. */
+   right, and darker again along the top and the bottom edges, the top so that the date reads over the brightest photograph): the
+   room name, the chip and the bookings read as they do on plain navy, and the place shows through on the right. The photograph is
+   not tinted: the status colour stays in the rail, the chip and the ring. */
 body[data-photo] .sign::before { content: ""; position: absolute; z-index: 0; top: 0; right: 0; bottom: 0; left: 0; background-image: var(--photo); background-size: cover; background-position: center 40%; }
 body[data-photo] .sign::after {
   content: "";
@@ -68,7 +69,7 @@ body[data-photo] .sign::after {
   bottom: 0;
   left: 0;
   background: linear-gradient(90deg, rgba(0, 22, 54, 0.94) 0%, rgba(0, 22, 54, 0.84) 45%, rgba(0, 22, 54, 0.55) 100%),
-              linear-gradient(180deg, rgba(0, 22, 54, 0.35) 0%, rgba(0, 22, 54, 0) 40%, rgba(0, 22, 54, 0.55) 100%);
+              linear-gradient(180deg, rgba(0, 22, 54, 0.5) 0%, rgba(0, 22, 54, 0) 40%, rgba(0, 22, 54, 0.55) 100%);
 }
 body[data-photo] .event { background: rgba(0, 22, 54, 0.55); backdrop-filter: blur(2px); }
 

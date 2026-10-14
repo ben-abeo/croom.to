@@ -709,8 +709,7 @@ class TestPage:
             assert response.status == 200, path.name
             assert response.headers["Content-Type"] == "image/jpeg", path.name
             assert response.headers["Cache-Control"] == "no-cache", path.name
-            assert (await client.head(f"/static/backgrounds/{path.name}")).status == 200, path.name   # the sign asks with HEAD first
-        assert (await client.head("/static/backgrounds/not-there.jpg")).status == 404
+        assert (await client.get("/static/backgrounds/not-there.jpg")).status == 404                   # the sign loads the picture as an image: a missing file is a failed load
 
     async def test_brand_assets_are_served(self, client_factory):
         client = await client_factory(make_service())
@@ -998,35 +997,42 @@ class TestRoomSettings:
     (key -> default and check), kept in the settings file beside the screensaver's choice."""
 
     DEFAULTS = {"sign_background": "skyline", "sign_scores": []}
+    KEYS = tuple(DEFAULTS)
 
     def settings(self, tmp_path, **overrides):
         config = {"settings_file": str(tmp_path / "control-settings.json")}
         config.update(overrides)
         return config
 
-    @staticmethod
-    async def read(client):
+    @classmethod
+    def ours(cls, settings):
+        """Just the door sign's two settings: another setting added to the same route (the keyboard branch's key_click) is not these
+        tests' business, so they compare these two and the branch that merges second needs no change here."""
+        return {key: settings[key] for key in cls.KEYS}
+
+    @classmethod
+    async def read(cls, client):
         response = await client.get("/api/settings")
         assert response.status == 200
-        return await response.json()
+        return cls.ours(await response.json())
 
     async def test_the_settings_start_at_their_defaults_and_the_status_carries_them(self, client_factory, tmp_path):
         client = await client_factory(make_service(**self.settings(tmp_path)))
         assert await self.read(client) == self.DEFAULTS
-        assert (await (await client.get("/api/status")).json())["settings"] == self.DEFAULTS
+        assert self.ours((await (await client.get("/api/status")).json())["settings"]) == self.DEFAULTS
 
     async def test_sign_settings_round_trip_and_refuse_bad_values(self, client_factory, tmp_path):
         client = await client_factory(make_service(**self.settings(tmp_path)))
         # One key at a time: the answer is every setting, as the status and a later GET give them.
         response = await client.post("/api/settings", json={"sign_background": "bridge"})
         assert response.status == 200
-        assert await response.json() == {"sign_background": "bridge", "sign_scores": []}
+        assert self.ours(await response.json()) == {"sign_background": "bridge", "sign_scores": []}
         response = await client.post("/api/settings", json={"sign_scores": ["texas", "texas_am"]})
         assert response.status == 200
         both = {"sign_background": "bridge", "sign_scores": ["texas", "texas_am"]}
-        assert await response.json() == both
+        assert self.ours(await response.json()) == both
         assert await self.read(client) == both
-        assert (await (await client.get("/api/status")).json())["settings"] == both
+        assert self.ours((await (await client.get("/api/status")).json())["settings"]) == both
         # Both in one request, and every background the picker offers is accepted.
         for key in ("skyline", "capitol", "tower", "bridge", "pool", "star", "hills", "stadium", "plain"):
             response = await client.post("/api/settings", json={"sign_background": key, "sign_scores": []})

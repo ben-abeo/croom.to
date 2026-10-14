@@ -7,6 +7,7 @@ when Playwright or its browser is not installed.
 """
 
 import asyncio
+import base64
 import json
 import re
 import socket
@@ -320,6 +321,12 @@ def test_the_sign_shows_the_status_as_a_rail_and_a_chip_over_a_photograph_that_i
         page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
         layers = page.evaluate("""() => ['::before', '::after'].map(q => getComputedStyle(document.querySelector('.sign'), q).backgroundImage).join(' ')""")
         assert "backgrounds/skyline.jpg" in layers and "232, 160, 19" not in layers   # the status colour is the rail's, the chip's and the ring's; the photograph is left as it is
+        for layer in ("::before", "::after"):                                          # and the layers do nothing to it: no blend, no filter, no fading, no colour behind it
+            style = page.evaluate("""(q) => { const s = getComputedStyle(document.querySelector('.sign'), q);
+                return [s.opacity, s.filter, s.mixBlendMode, s.backgroundBlendMode, s.backgroundColor]; }""", layer)
+            assert style[:3] == ["1", "none", "normal"] and set(style[3].split(", ")) == {"normal"} and style[4] == "rgba(0, 0, 0, 0)", (layer, style)   # one blend mode per background layer
+        picture = page.evaluate("(q) => { const s = getComputedStyle(document.querySelector('.sign'), q); return [s.backgroundSize, s.backgroundPosition, s.backgroundRepeat]; }", "::before")
+        assert picture == ["cover", "50% 40%", "repeat"], picture                       # it fills the sign, whatever its shape, and is cropped about 40 % of the way down
         assert page.locator("#scene").count() == 0 and page.locator(".backdrop svg").count() == 0   # the drawn scenery is gone
         assert page.locator("#company").inner_text() == "Crystal Practice Management"
         assert fits(page)
@@ -526,6 +533,35 @@ def wait_for_the_photograph_to_paint(page):
     }""")
 
 
+def white_photograph():
+    """A solid white picture, one pixel of it: with `cover` it fills the sign with white, so what a screenshot reads back at a point
+    is white seen through the overlay, and the overlay can be measured."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)                          # 1 by 1, 8 bits, RGB
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff")) + chunk(b"IEND", b"")
+
+
+# The navy overlay (spec 2.4) as alpha at fractions of the way across the sign (94 % at the left edge, 84 % at 45 %, 55 % at the right)
+# and of the way down (50 % at the top edge, none from 40 % down, 55 % at the bottom edge): the two gradients, one over the other.
+OVERLAY_ACROSS = [(0, 0.94), (0.45, 0.84), (1, 0.55)]
+OVERLAY_DOWN = [(0, 0.5), (0.4, 0.0), (1, 0.55)]
+
+
+def stop_between(fraction, stops):
+    for (a, low), (b, high) in zip(stops, stops[1:]):
+        if fraction <= b:
+            return low + (high - low) * (fraction - a) / (b - a)
+    return stops[-1][1]
+
+
+def white_under_the_overlay(x, y, width, height):
+    """What the pixel at (x, y) shows when the photograph is white: white and navy mixed by the two gradients together."""
+    across, down = stop_between((x + 0.5) / width, OVERLAY_ACROSS), stop_between((y + 0.5) / height, OVERLAY_DOWN)
+    alpha = 1 - (1 - across) * (1 - down)
+    return tuple(255 * (1 - alpha) + navy * alpha for navy in NAVY)
+
+
 def open_door_sign_screen(page):
     page.click("#open-options")
     page.click("#open-door-sign")
@@ -560,12 +596,15 @@ def test_each_background_loads_its_photograph_and_plain_shows_the_glow(browser, 
         asked = photo_request_methods(page)
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function(f"document.body.dataset.state === 'free' && document.body.dataset.bg === '{key}'", timeout=5000)
+        if has_file:
+            page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)     # shown once it has decoded
+        elif key != "plain":
+            page.wait_for_function("'photoMissing' in document.body.dataset", timeout=5000)
         page.wait_for_load_state("networkidle")
         layer = lambda q: page.evaluate(f"getComputedStyle(document.querySelector('.sign'), '{q}').backgroundImage")
         glow = page.locator(".glow").evaluate("e => getComputedStyle(e).display")
         if has_file:
-            assert page.evaluate("document.body.dataset.photo") == key
-            assert asked and {status for _, status in asked} == {200} and ("GET", 200) in asked   # the photograph itself came, not only a question about it
+            assert asked == [("GET", 200)]                                 # one request, answered: the style sheet draws the picture already loaded
             assert f"backgrounds/{key}.jpg" in layer("::before")           # the photograph, as a layer of its own ...
             assert layer("::after").count("linear-gradient") == 2          # ... under the navy overlay (the left-to-right one and the top-to-bottom one)
             assert glow == "none"
@@ -573,12 +612,33 @@ def test_each_background_loads_its_photograph_and_plain_shows_the_glow(browser, 
             assert page.evaluate("document.body.dataset.photo === undefined")
             assert layer("::before") == "none" and layer("::after") == "none"      # no photograph, no overlay: the navy, with the glow
             assert glow == "block"
-            if key == "plain":
-                assert asked == []                                         # plain asks for nothing at all
-            else:
-                assert [status for _, status in asked] == [404]            # a photograph that is not there is asked about once, and plain shows instead
+            assert asked == ([] if key == "plain" else [("GET", 404)])     # plain asks for nothing at all; a file that is not there, once
         assert page.evaluate("document.body.dataset.bg") == key             # whichever it shows, the page says which was chosen
         assert fits(page)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_overlay_over_a_white_photograph_reads_back_at_fixed_pixels_and_the_status_stays_solid(browser, width, height):
+    """What the sign draws, measured on the screen: a white photograph under the overlay, read back at ten points (seven at the edges
+    and the corners, three more at 1280 by 800 where nothing is written), each within 3 of the white and navy that the two gradients
+    mix; and the rail and the chip exactly the status colour, which they are only while they are stacked above the overlay."""
+    with PageServer(calendar_events=[event("e1", "Design review", 45)], room_name="Boardroom") as server:
+        choose(server, sign_background="skyline")
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.route("**/static/backgrounds/skyline.jpg", lambda route: route.fulfill(status=200, body=white_photograph(), content_type="image/png"))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.photo === 'skyline'", timeout=8000)
+        wait_for_the_photograph_to_paint(page)
+        points = [(40, 20), (width // 2, 20), (width - 40, 20), (40, height - 20), (width // 2, height - 20), (width - 40, height - 20), (width - 40, height - 60)]
+        if height == 800:
+            points += [(40, 600), (576, 600), (width - 40, 600)]             # clear of the words at 1280 by 800
+        for x, y in points:
+            got, want = screenshot_pixel(page, x, y), white_under_the_overlay(x, y, width, height)
+            assert all(abs(g - w) <= 3 for g, w in zip(got, want)), ((x, y), got, tuple(round(v) for v in want))
+        chip = page.locator(".chip").bounding_box()
+        assert screenshot_pixel(page, 10, height // 2) == (31, 169, 113)    # the rail: #1FA971 itself, not a mix with anything
+        assert screenshot_pixel(page, int(chip["x"]) + 5, int(chip["y"] + chip["height"] / 2)) == (31, 169, 113)   # and the chip
         page.close()
 
 
@@ -613,6 +673,70 @@ def test_the_words_stay_readable_over_every_photograph(browser, key):
         # by 26 at most (a tenth of 255), and the overlay is 94 %.
         pixel = screenshot_pixel(page, 40, 400)
         assert all(abs(c - n) <= 26 for c, n in zip(pixel, NAVY)), (key, pixel)
+        page.close()
+
+
+SIGN_WORDS = {"company": "#company", "room name": "#room-name", "location": "#room-location", "detail": "#detail", "clock": "#clock", "date": "#date",
+              "Today": ".today-head h2", "booking time": "#events .event time", "booking title": "#events .event .title", "booking platform": "#events .event .who"}
+BRIGHTEST_BEHIND = """async ([png, boxes]) => {
+    const image = new Image();
+    image.src = 'data:image/png;base64,' + png;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d');
+    context.drawImage(image, 0, 0);
+    const linear = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return boxes.map((b) => {
+        const data = context.getImageData(Math.floor(b.x), Math.floor(b.y), Math.ceil(b.width), Math.ceil(b.height)).data;
+        const lights = [];
+        for (let i = 0; i < data.length; i += 4) lights.push(0.2126 * linear(data[i]) + 0.7152 * linear(data[i + 1]) + 0.0722 * linear(data[i + 2]));
+        lights.sort((a, b) => a - b);
+        return lights[Math.floor(lights.length * 0.99)];
+    });
+}"""
+
+
+def luminance(colour):
+    """The WCAG relative luminance of a colour given as (red, green, blue), each 0 to 255."""
+    def channel(value):
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+    red, green, blue = (channel(v) for v in colour)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+@pytest.mark.parametrize("key", PHOTOGRAPHS)
+def test_every_word_keeps_its_contrast_over_every_photograph(browser, key):
+    """Measured, not looked at: with the words hidden, the brightest 1 % of the picture behind each word (so each word is judged at the
+    hardest it is to read over this photograph) against the word's own colour: 4.5 to 1 for text, 3 to 1 for large text (WCAG AA). A
+    photograph swapped in later that is too bright where the words are fails here, by name."""
+    skip_if_day_ends_within(2)
+    bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 70), event("e3", "Sales pipeline", 100)]
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
+        choose(server, sign_background=key)
+        page = open_sign(browser, server)
+        page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
+        page.wait_for_selector("#events .event", timeout=5000)
+        wait_for_the_photograph_to_paint(page)
+        words = page.evaluate("""(selectors) => Object.entries(selectors).flatMap(([name, selector]) => [...document.querySelectorAll(selector)].map((e) => {
+            const r = e.getBoundingClientRect(), s = getComputedStyle(e);
+            return { name: name, x: r.x, y: r.y, width: r.width, height: r.height, color: s.color, size: parseFloat(s.fontSize), weight: parseInt(s.fontWeight) };
+        }))""", SIGN_WORDS)
+        assert {w["name"] for w in words} == set(SIGN_WORDS)                 # every kind of word was found
+        page.add_style_tag(content=".top *, .status *, .today-head *, .event > * { visibility: hidden !important; }")   # the rows keep their own veil
+        picture = base64.b64encode(page.screenshot()).decode()
+        reader = browser.new_page()
+        try:
+            lights = reader.evaluate(BRIGHTEST_BEHIND, [picture, words])
+        finally:
+            reader.close()
+        for word, light in zip(words, lights):
+            ink = tuple(int(v) for v in re.findall(r"\d+", word["color"])[:3])
+            contrast = (luminance(ink) + 0.05) / (light + 0.05)
+            large = word["size"] >= 24 or (word["size"] >= 18.66 and word["weight"] >= 700)
+            assert contrast >= (3.0 if large else 4.5), (key, word["name"], round(contrast, 2))
         page.close()
 
 
@@ -807,9 +931,96 @@ def test_the_dot_the_calendar_icon_and_the_row_padding_scale_with_the_text(brows
         page.close()
 
 
-def test_a_photograph_that_is_missing_shows_plain_is_asked_for_once_and_again_after_an_outage(browser):
-    """hills and stadium have no file yet. The sign remembers the room's 404 and does not ask at every poll; when the room goes
-    away and comes back (an update that may have brought the photograph) it asks again."""
+def test_a_photograph_that_is_there_is_asked_for_once_and_not_again_at_a_poll(browser):
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        asked = photo_request_methods(page)
+        page.clock.install()
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.photo === 'capitol'", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        page.wait_for_timeout(300)
+        assert asked == [("GET", 200)]                                       # one request, answered: the picture is held, and the style sheet draws that one
+        for _ in range(3):
+            poll(page)
+        assert asked == [("GET", 200)] and page.evaluate("document.body.dataset.photo") == "capitol"      # nothing across polls
+        page.close()
+
+
+def test_a_reload_asks_for_the_photograph_once_and_the_room_may_say_it_is_unchanged(browser):
+    with PageServer() as server:
+        choose(server, sign_background="tower")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        asked = photo_request_methods(page)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.photo === 'tower'", timeout=8000)
+        assert asked == [("GET", 200)]
+        page.reload(wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.photo === 'tower'", timeout=8000)
+        assert len(asked) == 2 and asked[1][0] == "GET" and asked[1][1] in (200, 304)                   # a 304 is the browser's copy, still good
+        page.close()
+
+
+def test_a_new_choice_keeps_the_old_photograph_on_screen_until_its_own_has_decoded(browser):
+    held = []
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/bridge.jpg", lambda route: held.append(route))                # not answered until the test says
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.photo === 'capitol'", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        choose(server, sign_background="bridge")
+        poll(page)
+        page.wait_for_function("document.body.dataset.bg === 'bridge'", timeout=5000)                   # the sign knows what was chosen ...
+        page.wait_for_timeout(300)
+        assert [route.request.method for route in held] == ["GET"]                                      # the picture itself is the one request
+        assert page.evaluate("document.body.dataset.photo") == "capitol"                                # ... and the sign shows the old photograph, as it was
+        assert "backgrounds/capitol.jpg" in page.evaluate("getComputedStyle(document.body).getPropertyValue('--photo')")
+        assert "backgrounds/capitol.jpg" in page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage")
+        assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"      # not the glow, not bare navy
+        held[0].fulfill(status=200, body=(STATIC_DIR / "backgrounds" / "bridge.jpg").read_bytes(), content_type="image/jpeg")
+        page.wait_for_function("document.body.dataset.photo === 'bridge'", timeout=8000)
+        assert "backgrounds/bridge.jpg" in page.evaluate("getComputedStyle(document.body).getPropertyValue('--photo')")
+        page.close()
+
+
+@pytest.mark.parametrize("failure", ["not found", "not a picture", "connection refused"])
+def test_a_photograph_that_fails_to_load_shows_plain_and_is_asked_for_once(browser, failure):
+    """A file the room has no copy of, one that is not an image, a request that fails on the way: the same to the sign, which shows
+    the navy with the glow, keeps saying which background was chosen, and does not ask again at a poll."""
+    asked = []
+
+    def answer(route):
+        asked.append(failure)
+        if failure == "not found":
+            route.fulfill(status=404, body="Not Found", content_type="text/plain")
+        elif failure == "not a picture":
+            route.fulfill(status=200, body=b"<html>this is not a picture</html>", content_type="image/jpeg")
+        else:
+            route.abort()
+
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/capitol.jpg", answer)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && 'photoMissing' in document.body.dataset", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "block"
+        assert page.evaluate("document.body.dataset.photo === undefined && document.body.dataset.bg") == "capitol"
+        assert page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage") == "none"
+        poll(page)
+        poll(page)
+        assert asked == [failure] and page.evaluate("'photoMissing' in document.body.dataset")           # once, and not at every poll
+        page.close()
+
+
+def test_a_photograph_that_failed_is_asked_for_again_after_an_outage(browser):
+    """The room going away and coming back is an update, which may have brought the photograph: the sign asks once more."""
     photograph = (STATIC_DIR / "backgrounds" / "bridge.jpg").read_bytes()
     there, answers = {"now": False}, []
 
@@ -826,9 +1037,8 @@ def test_a_photograph_that_is_missing_shows_plain_is_asked_for_once_and_again_af
         page.clock.install()
         page.route("**/static/backgrounds/bridge.jpg", answer)
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
-        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.bg === 'bridge'", timeout=5000)
+        page.wait_for_function("document.body.dataset.state === 'free' && 'photoMissing' in document.body.dataset", timeout=8000)
         page.clock.pause_at(datetime.now() + timedelta(seconds=2))
-        page.wait_for_function("getComputedStyle(document.querySelector('.glow')).display === 'block'", timeout=5000)
         assert page.evaluate("document.body.dataset.photo === undefined") and answers == [404]      # plain's look; the room was asked once
         poll(page)
         poll(page)
@@ -840,35 +1050,10 @@ def test_a_photograph_that_is_missing_shows_plain_is_asked_for_once_and_again_af
         page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
         page.unroute("**/api/status")
         poll(page)                                                                                    # the room is back
-        page.wait_for_function("document.body.dataset.photo === 'bridge'", timeout=5000)
+        page.wait_for_function("document.body.dataset.photo === 'bridge'", timeout=8000)
         assert answers.count(404) == 1 and 200 in answers
         assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"
-        page.close()
-
-
-def test_a_room_that_does_not_answer_the_question_about_a_photograph_is_asked_again(browser):
-    """Only the room's 404 is remembered: a question that fails on the way (the room is restarting) is asked at the next poll."""
-    photograph = (STATIC_DIR / "backgrounds" / "capitol.jpg").read_bytes()
-    failing = {"now": True}
-
-    def answer(route):
-        if failing["now"]:
-            route.abort()
-        else:
-            route.fulfill(status=200, body=photograph, content_type="image/jpeg")
-
-    with PageServer() as server:
-        choose(server, sign_background="capitol")
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
-        page.clock.install()
-        page.route("**/static/backgrounds/capitol.jpg", answer)
-        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
-        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.bg === 'capitol'", timeout=5000)
-        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
-        assert page.evaluate("document.body.dataset.photo === undefined")
-        failing["now"] = False
-        poll(page)
-        page.wait_for_function("document.body.dataset.photo === 'capitol'", timeout=5000)
+        assert page.evaluate("'photoMissing' in document.body.dataset") is False
         page.close()
 
 

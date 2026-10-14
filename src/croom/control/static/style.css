@@ -225,20 +225,20 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
   padding: 10px 8px calc(10px + env(safe-area-inset-bottom, 0px));
   background: #0B1220; border-top: 1px solid var(--surface-800);
-  display: grid; gap: 6px;
+  display: grid; gap: 6px; touch-action: none;   /* a finger on a key is a key press, never a scroll or a zoom */
 }
 .keyboard[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 .keyboard .row { display: flex; gap: 6px; }
 .keyboard .key {
   flex: 1 1 0; min-width: 0; min-height: 48px; padding: 0;
   border: 0; border-radius: var(--radius-sm); background: var(--surface-800); color: #fff;
-  font: inherit; font-size: 1.1rem; font-weight: 600; touch-action: manipulation; cursor: pointer;
+  font: inherit; font-size: 1.1rem; font-weight: 600; cursor: pointer;
 }
 .keyboard .key.wide { flex: 1.6 1 0; font-size: 0.95rem; }
 .keyboard .key.space { flex: 4 1 0; }
 .keyboard .key.join { flex: 2 1 0; background: var(--blue-600); }
-.keyboard .key.active { background: var(--blue-700); }
-.keyboard .key:active { background: var(--blue-700); }
+.keyboard[data-shift="once"] .key[data-key="shift"], .keyboard[data-shift="lock"] .key[data-key="shift"] { background: var(--blue-700); }
+.keyboard .key.down, .keyboard .key:active { background: var(--blue-700); }
 /* The link box stays above the keys because the page makes room under them (the padding) and may grow into it (height:
    auto): the field scrolls up above the keys however tall the status card is. Hiding the Today box moves nothing above
    or beside the link box; it only keeps the keys from covering the lower half of a list. */

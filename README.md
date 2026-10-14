@@ -159,6 +159,7 @@ the plan holds the how, step by step with the code.
 | The TV screensaver and the one page on the TV: `TvDisplay` owns the browser, providers borrow its page, the `/tv` page with four styles, `/api/screensaver`, the picker on the room page | [spec](docs/superpowers/specs/2026-10-07-tv-screensaver-and-one-page-design.md) | [plan](docs/superpowers/plans/2026-10-07-tv-screensaver-and-one-page.md) |
 | Sound and camera from the room page: volume through PipeWire, MeetUp framing with timed presets, the idle camera preview on the TV | [spec](docs/superpowers/specs/2026-10-08-sound-and-camera-controls-design.md) | [plan](docs/superpowers/plans/2026-10-08-sound-and-camera-controls.md) |
 | The room page in two modes: an idle screen and a meeting screen behind one view switch, Options with Camera framing and Screensaver, Back on every sub-screen, the ten-minute return to the idle screen, the kiosk at 1.5 times scale, a placeholder location counted as none | [spec](docs/superpowers/specs/2026-10-12-room-page-modes-design.md) | [plan](docs/superpowers/plans/2026-10-12-room-page-modes.md) |
+| The door sign redesigned: the status as a rail, a solid chip and a tinted Austin scenery on navy, the company name, a week view, four backgrounds chosen from the table, an optional Longhorns scoreboard | [spec](docs/superpowers/specs/2026-10-13-door-sign-design.md) | [plan](docs/superpowers/plans/2026-10-13-door-sign.md) |
 
 Decisions worth knowing before changing things:
 

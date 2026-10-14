@@ -482,15 +482,21 @@ def test_the_save_button_keeps_its_icon_when_it_changes_its_words(browser):
         page.close()
 
 
-def test_the_speaker_button_keeps_its_icon_when_it_changes_its_words(browser):
+def test_the_speaker_icon_shows_the_state_and_its_label_the_action(browser):
+    """The rule of the microphone and the camera: the picture is what the speaker is doing now, the words what a tap will do."""
     with PageServer() as server:
         page = open_page(browser, server)
         join_by_id(page)
         page.wait_for_function("document.querySelector('#speaker-mute svg use')", timeout=5000)
+        assert drawn_icons(page, ".sound-buttons")[-1] == "Mute speaker: #icon-volume"             # the speaker is live
         page.click("#speaker-mute")
         page.wait_for_function("document.getElementById('speaker-mute').innerText.trim() === 'Unmute speaker'", timeout=5000)
-        assert drawn_icons(page, ".sound-buttons")[-1] == "Unmute speaker: #icon-volume"
+        assert drawn_icons(page, ".sound-buttons")[-1] == "Unmute speaker: #icon-volume-x"         # and now muted
         assert page.locator("#speaker-mute").get_attribute("aria-pressed") == "true"
+        assert page.locator("#speaker-mute svg.icon").count() == 1                                 # one picture, not a second beside the first
+        page.click("#speaker-mute")
+        page.wait_for_function("document.getElementById('speaker-mute').innerText.trim() === 'Mute speaker'", timeout=5000)
+        assert drawn_icons(page, ".sound-buttons")[-1] == "Mute speaker: #icon-volume"             # live again
         page.close()
 
 

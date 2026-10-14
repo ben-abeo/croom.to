@@ -42,11 +42,25 @@ A tap on **This week** replaces the Today list with seven columns, today first, 
 
 ### 2.4 Backgrounds
 
-Four, chosen from the touchscreen under Options › Door sign: **Austin skyline** (the default: a stylised silhouette with the Independent, the Austonian, Frost Bank Tower's crown, the Capitol dome and UT Tower), **UT Tower** (the tower alone over the hills), **Hill Country** (rolling lines), **Plain** (no scenery; a soft glow in the status colour at the bottom right). The choice is a room setting (`sign_background`) kept by the control service beside the screensaver style and read by the sign from `/api/status`, so it survives reloads and applies to every sign of the room. The silhouettes are inline SVG in the sign page, tinted through CSS, no images to load.
+Nine, chosen from the touchscreen under Options › Door sign, each a stylised silhouette drawn from Ben's photos and tinted in the status colour (amended 2026-10-14 after his review of the first set: the lone tower read as a finger and the first skyline did not match Austin's):
 
-### 2.5 The Longhorns scoreboard
+- **Austin skyline** (the default): the towers as they stand from Lady Bird Lake, left to right: the pointed-cap tower, the Independent's stacked blocks, Frost Bank Tower's crown, the Austonian's cap, the Fairmont, 44 East and Natiivo, the Google tower's sail, 70 Rainey; the tree line; the lake with the skyline's faint reflection.
+- **Capitol**: the dome on its drum with the lantern and the statue, the wings with their colonnades, trees at the sides.
+- **UT Tower**: the tower rising from the Main Building, the campus roofs beside it, the clock.
+- **Pennybacker Bridge**: the 360 bridge's arch and hangers over Lake Austin, the hills behind.
+- **Hamilton Pool**: the grotto's overhang, the fall into the pool, the trees beyond, the rocks.
+- **Hill Country**: three ridges and a road that winds between them.
+- **Texas star**: the Bullock museum's star against the glass of the tower behind it.
+- **DKR stadium**: the bowl from above, the field, the end zones.
+- **Plain**: no scenery; a soft glow in the status colour at the bottom right.
 
-Off by default; **Options › Door sign › Longhorns scoreboard: On / Off** on the touchscreen (`sign_scoreboard`). When on, the agent's `croom.scores` module fetches the Texas Longhorns football schedule from ESPN's public site API every ten minutes (team 251 at `site.api.espn.com/apis/site/v2/sports/football/college-football/teams/251/schedule`, an unauthenticated JSON feed; the fetcher is one function behind an interface, so a different source is a one-file change) and keeps the last completed game and the next one: `{"last": {"home": "Texas", "home_rank": 4, "home_score": 45, "away": "Texas A&M", "away_rank": null, "away_score": 42, "date": "2026-10-12"}, "next": {"date": "2026-10-19", "home": "Missouri", "home_rank": 9, "away": "Texas", "away_rank": 4}}`. The sign draws the strip along the bottom: "Texas (#4) 45 – Texas A&M 42" on the left and "Next: 10/19 · Texas (#4) @ Missouri (#9)" on the right, ranks in burnt orange `#FFB366` on navy. No data, a fetch failure or the setting off hide the strip; nothing else on the sign moves. `/api/status` carries `scores` when the setting is on.
+The choice is a room setting (`sign_background`) kept by the control service beside the screensaver style and read by the sign from `/api/status`, so it survives reloads and applies to every sign of the room. The silhouettes are inline SVG in the sign page (the mockup `docs/superpowers/mockups/2026-10-13-door-sign-mockup.html` holds the drawings), tinted through CSS, no images to load.
+
+### 2.5 The college football scoreboard
+
+Off by default. **Options › Door sign › Football scores** on the touchscreen lists the schools and each is a switch: **Texas**, **Michigan**, **Texas A&M**, **Missouri** (`sign_scores`, a list of the schools turned on; empty means off). When at least one is on, the agent's `croom.scores` module fetches each chosen school's football schedule from ESPN's public site API every ten minutes (`site.api.espn.com/apis/site/v2/sports/football/college-football/teams/<id>/schedule`, an unauthenticated JSON feed; team ids: Texas 251, Michigan 130, Texas A&M 245, Missouri 142; the fetcher is one function behind an interface, so a different source is a one-file change) and keeps, per school, the last completed game and the next one: `{"school": "texas", "name": "Texas", "last": {"home": "Texas", "home_rank": 4, "home_score": 45, "away": "Texas A&M", "away_rank": null, "away_score": 42, "date": "2026-10-12"}, "next": {"date": "2026-10-19", "home": "Missouri", "home_rank": 9, "away": "Texas", "away_rank": 4}}`.
+
+The sign draws the strip along the bottom: the school's last score on the left ("Texas (#4) 45 – Texas A&M 42") and the next game on the right ("Next: 10/19 · Texas (#4) @ Missouri (#9)"), ranks in burnt orange `#FFB366`. With more than one school on, the strip shows one school at a time and moves to the next every 8 seconds, the school's name leading the line ("Michigan: Michigan (#12) 31 – Ohio State 24"). No data, a fetch failure or every school off hide the strip; nothing else on the sign moves. `/api/status` carries `scores` (a list, one entry per school on) when any is on.
 
 ### 2.6 Design direction
 
@@ -67,7 +81,7 @@ Tokens from the Crystal brand: navy `#001636` base, panels at 6 % white, blue `#
 ## 5. Decisions made here
 
 - The status colour moves from the whole background to a rail, a solid chip and the tinted scenery (Ben: cleaner, professional, still colour-coded).
-- Four backgrounds, settable from the touchscreen, Austin skyline by default (Ben: skyline, UT, a list to choose from).
-- The scoreboard is built now but off by default, switched from the touchscreen (Ben: eventually, optional, not on by default).
+- Nine backgrounds drawn from Ben's photos, settable from the touchscreen, Austin skyline by default (Ben: skyline, UT, the signature landscapes, a list to choose from; the first skyline and the lone tower were redrawn after his review).
+- The scoreboard is built now but off by default, with Texas, Michigan, Texas A&M and Missouri each switchable from the touchscreen (Ben: eventually, optional, not on by default; the four schools, configurable).
 - The company name is configurable with the Crystal PM default.
 - The design uses the Crystal brand tokens; the plugin link Ben gave (plugin_01Vkx3KVjWNESJpXEVjrxKpy) is not among the plugins visible to this session, so the house style came from the crystal-brand-docs skill on this machine.

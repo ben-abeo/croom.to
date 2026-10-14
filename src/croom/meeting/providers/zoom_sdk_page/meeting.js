@@ -19,6 +19,13 @@
     }
   }
 
+  // An event whose detail is JSON (the "state", "dialog", "dialog-closed" and "chat" events), sent to the device if it is listening.
+  function reportJson(state, data) {
+    if (typeof window.crystalMeetEvent === "function") {
+      try { window.crystalMeetEvent(state, JSON.stringify(data)); } catch (e) { /* the device is not listening */ }
+    }
+  }
+
   function words(error) {
     if (!error) return "Zoom gave no reason";
     const text = error.errorMessage || error.reason || error.message || "";
@@ -312,9 +319,7 @@
     if (key === lastSeen) return;
     const first = lastSeen === null;
     lastSeen = key;
-    if (!first && typeof window.crystalMeetEvent === "function") {
-      try { window.crystalMeetEvent("state", JSON.stringify(Object.assign({}, now.me, now))); } catch (e) { /* the device is not listening */ }
-    }
+    if (!first) reportJson("state", Object.assign({}, now.me, now));
   }
   // One read at a time: a request that comes while a read is in progress waits for it and is answered by one more read after
   // it, so a late answer can never overtake a newer one and a change made during a read is not lost, not even when that
@@ -637,6 +642,89 @@
     return tracked;
   };
 
+  // ---- Dialogs: what the client draws over the meeting that can be answered is reported; nothing is pressed here on its own ----
+  // Zoom 6.5.0 draws its modals with React, so they are the client's nodes: a dialog is answered only by pressing one of its own
+  // buttons, found by what it says as the popovers' items are, and the client closes it; no node of its is ever taken out of the page.
+  // The page is watched with a MutationObserver, not a timer, and a burst of changes is looked at once, DIALOG_LOOK_MS after the first
+  // of them. A dialog is reported once, with an id of its own that is not used again, and reported closed when its element goes. That
+  // starts when the room is in the meeting: the device follows nothing before it, so what is open when the room comes in is said
+  // then, and what came and went before is not said at all. A dialog is a modal with a button to press: a banner has nothing to
+  // answer from the table and is not one, and a dialog that has lost its buttons is closed.
+  const DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"], .zm-modal, .zm-modal-legacy';
+  const DIALOG_LOOK_MS = 50, DIALOG_MS = 2000;
+  const dialogs = new Map();      // element -> id, for the dialogs that are open and have been reported
+  let dialogIds = 0;
+  const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
+  const dialogButtons = (el) => Array.from(el.querySelectorAll("button")).filter((b) => clean(labelOf(b)));
+  const isOpen = (el) => el.isConnected && el.matches(DIALOG_SELECTOR) && dialogButtons(el).length > 0;
+  // Its title, and the rest of its words as its text nodes say them (the buttons' words are theirs), as the client has them now.
+  function dialogInfo(el, id) {
+    const heading = Array.from(el.querySelectorAll("h1, h2, h3, [class*='title']")).find((h) => !h.closest("button"));
+    const parts = [];
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode, owner = node.parentElement, button = owner && owner.closest("button");
+      if (!owner || /^(script|style)$/i.test(owner.tagName) || (heading && heading.contains(node)) || (button && el.contains(button))) continue;
+      if (clean(node.nodeValue)) parts.push(clean(node.nodeValue));
+    }
+    return { id: id, title: heading ? clean(heading.textContent) : "", text: parts.join(" ").slice(0, 400), buttons: dialogButtons(el).map((b) => clean(labelOf(b))) };
+  }
+  function scanDialogs() {
+    if (bridge.state !== "connected") return;
+    const open = new Set();
+    for (const el of document.querySelectorAll(DIALOG_SELECTOR)) {
+      if (el.parentElement && el.parentElement.closest(DIALOG_SELECTOR)) continue;      // a part of another modal, which is the dialog
+      if (!isOpen(el)) continue;
+      if (!dialogs.has(el)) {
+        const id = ++dialogIds;
+        dialogs.set(el, id);
+        reportJson("dialog", dialogInfo(el, id));
+      }
+      open.add(el);
+    }
+    for (const [el, id] of Array.from(dialogs)) {
+      if (!open.has(el)) { dialogs.delete(el); reportJson("dialog-closed", { id: id }); }
+    }
+  }
+  let dialogTimer = null;
+  new MutationObserver(() => {
+    if (dialogTimer !== null || bridge.state !== "connected") return;
+    dialogTimer = setTimeout(() => { dialogTimer = null; scanDialogs(); }, DIALOG_LOOK_MS);
+  }).observe(document.body, { childList: true, subtree: true });
+  bridge.dialogs = () => Array.from(dialogs, ([el, id]) => dialogInfo(el, id));
+  // Press the button the label names and see the dialog go: the client closes it when it takes the press, and a press it does not
+  // take is a failure in words, not an answer. It is one of the page's presses, so it waits its turn among the controls. The look that
+  // sees the dialog gone is made here too, so the device has been told it is gone before it is answered.
+  async function answerNow(id, label) {
+    const wanted = need(label, "button");
+    const entry = Array.from(dialogs).find(([, i]) => i === Number(id));
+    if (!entry || !isOpen(entry[0])) throw new Error("That dialog is no longer on the screen");
+    const el = entry[0];
+    const button = dialogButtons(el).find((b) => named(b, [norm(wanted)]));
+    if (!button) throw new Error("The dialog has no button called " + wanted);
+    if (unready(button)) throw new Error("The dialog's " + wanted + " button is not ready yet; try again in a moment");
+    button.click();
+    if (!await settle(() => !isOpen(el), DIALOG_MS)) throw new Error("Zoom's dialog did not close when " + wanted + " was pressed; try again in a moment");
+    scanDialogs();
+    return true;
+  }
+  bridge.answerDialog = (id, label) => alone(() => answerNow(id, label));
+
+  // ---- Chat: every message the client receives is reported; the chat panel is not opened or drawn here ----
+  // The moment a message came is a number of milliseconds (as text too) or a date as text; with any other it is dated by its arrival.
+  const isoOf = (stamp) => {
+    for (const when of [new Date(Number(stamp)), new Date(stamp)]) {
+      if (stamp && Number.isFinite(when.getTime())) return when.toISOString();
+    }
+    return new Date().toISOString();
+  };
+  function chatListener(data) {
+    const sender = pick(data, ["sender"]);
+    const from = pick(data, ["senderName", "from", "userName"]) || (typeof sender === "string" ? sender : sender && (sender.name || sender.userName || sender.displayName)) || "";
+    const text = pick(data, ["content", "message", "text", "msg"]) || "";
+    reportJson("chat", { from: String(from), text: String(text), at: isoOf(pick(data, ["timestamp", "timeStamp", "time"])) });
+  }
+
   // The join's mic-off default goes out as soon as the room's id is known: at once, or when a later read first finds it (Zoom
   // builds the current user's record from its roster, so the first record can have no id), and only once. It is an action,
   // so the meeting is read again once Zoom has answered it: a read that found the id has the record from before the mute.
@@ -657,6 +745,7 @@
       applyPendingMute();
       syncState().catch(() => {});
       startPolling();
+      scanDialogs();      // what the client has drawn over the meeting so far, after what the join needs of this has been done
     };
     ZoomMtg.getCurrentUser({
       success: (result) => {
@@ -714,6 +803,7 @@
       bridge._recording = typeof state === "boolean" ? state : state === "recording";
       queueSync();
     });
+    ZoomMtg.inMeetingServiceListener("onReceiveChatMsg", chatListener);
     report("joining", "");
     ZoomMtg.init({
       leaveUrl: "/left",

@@ -2380,3 +2380,372 @@ async def test_the_rooms_mute_and_a_hosts_mute_of_somebody_share_the_one_window(
         await control(run, "host.mute_one", 16777217)
         with pytest.raises(Exception, match="Zoom ignored mute"):
             await asyncio.wait_for(run.page.evaluate("window.crystalMeet.mute(false)"), timeout=5)
+
+
+# ---- Dialogs and chat (spec 2026-10-13, sections 4.2 and 5): everything the client draws over the meeting is reported, and a dialog is
+# answered on request by pressing its own button; the page never presses one on its own, and never takes a node of the client's out ----
+
+
+async def reported(run, state, count=1, timeout=3.0):
+    """The decoded details of the page's events of one kind, once there are at least `count` of them."""
+    for _ in range(int(timeout * 20)):
+        found = [json.loads(d) for s, d in run.events if s == state]
+        if len(found) >= count:
+            return found
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{count} {state!r} events never reported; events: {run.events}")
+
+
+async def show(run, title, text, buttons):
+    """Zoom draws a modal; answers the id of its node (the page's own id for it comes with its report)."""
+    return await run.page.evaluate("([title, text, buttons]) => window.ZoomMtg._showDialog(title, text, buttons)", [title, text, buttons])
+
+
+async def open_dialogs(run):
+    return await run.page.evaluate("window.crystalMeet.dialogs()")
+
+
+async def test_a_dialog_is_reported_with_its_words_and_buttons_and_answered_by_label():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded.', ['Got it', 'Leave meeting'])")
+        await run.wait_for("dialog")
+        d = json.loads(next(x for s, x in run.events if s == "dialog"))
+        assert d["title"] == "Recording consent" and d["buttons"] == ["Got it", "Leave meeting"] and "being recorded" in d["text"]
+        assert not any(c[0] == "dialog" for c in await run.page.evaluate("window.__zoomCalls"))   # the page presses nothing on its own
+        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'got it')") is True
+        assert ["dialog", "Recording consent", "Got it"] in await run.page.evaluate("window.__zoomCalls")
+        await run.wait_for("dialog-closed")
+        assert await run.page.evaluate("window.__reactErrors") == []                                 # the client's node left as its owner took it
+
+
+async def test_a_dialog_that_goes_away_on_its_own_is_reported_closed_and_cannot_be_answered():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        sid = await run.page.evaluate("window.ZoomMtg._showDialog('Unmute?', 'The host would like you to unmute.', ['Unmute', 'Stay muted'])")
+        await run.wait_for("dialog")
+        d = json.loads(next(x for s, x in run.events if s == "dialog"))
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{sid}')")
+        await run.wait_for("dialog-closed")
+        assert json.loads(next(x for s, x in run.events if s == "dialog-closed")) == {"id": d["id"]}
+        with pytest.raises(Exception, match="no longer on the screen"):
+            await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'Unmute')")
+        assert await run.calls("dialog") == [] and await run.page.evaluate("window.__reactErrors") == []
+
+
+async def test_chat_messages_reach_the_device():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.ZoomMtg._chat('Ann Lee', 'Can you hear us?')")
+        await run.wait_for("chat")
+        c = json.loads(next(x for s, x in run.events if s == "chat"))
+        assert c["from"] == "Ann Lee" and c["text"] == "Can you hear us?" and c["at"]
+
+
+async def test_a_dialog_is_reported_once_with_the_words_of_the_dialog_alone():
+    """Its title, its own words (the buttons' words are theirs, a style or a script is not words), the words of separate parts kept
+    apart, and its buttons as the client draws them, tidied of the client's spacing. A redraw inside it is not a new dialog, and the
+    open dialogs say what the dialog says now."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        sid = await run.page.evaluate("""() => {
+            const id = window.ZoomMtg._showDialog("  Recording\\n   consent ", "This meeting is being recorded.\\n  Anyone may see the recording.", ["Got it", " Leave   meeting "]);
+            const dialog = document.getElementById(id), more = document.createElement("div");
+            more.innerHTML = "<p>Ask the host.</p><p><b>Not</b> now</p><style>.zm-modal { color: red; }</style><script type='text/plain'>ignored()</script>";
+            dialog.insertBefore(more, dialog.lastChild);
+            return id;
+        }""")
+        [d] = await reported(run, "dialog")
+        assert d == {"id": d["id"], "title": "Recording consent", "buttons": ["Got it", "Leave meeting"],
+                     "text": "This meeting is being recorded. Anyone may see the recording. Ask the host. Not now"}
+        assert await open_dialogs(run) == [d]
+        await run.page.evaluate("(id) => { document.querySelector('#' + id + ' p').textContent = 'This meeting is being recorded and transcribed.'; }", sid)
+        await asyncio.sleep(0.4)
+        assert len(await reported(run, "dialog")) == 1                                                  # a redraw inside is the same dialog
+        assert (await open_dialogs(run))[0]["text"] == "This meeting is being recorded and transcribed. Ask the host. Not now"
+        assert await presses(run) == [] and await run.calls("dialog") == []
+
+
+async def test_a_dialogs_words_are_cut_at_four_hundred_characters():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await show(run, "Terms", "word " * 200, ["OK"])
+        [d] = await reported(run, "dialog")
+        assert len(d["text"]) == 400 and d["text"].startswith("word word") and d["title"] == "Terms"
+
+
+async def test_each_dialog_has_an_id_of_its_own_and_one_drawn_again_is_a_new_dialog():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        first = await show(run, "Unmute?", "The host would like you to unmute.", ["Unmute", "Stay muted"])
+        await show(run, "Breakout rooms", "Join Room 1?", ["Join", "Later"])
+        a, b = (await reported(run, "dialog", 2))[:2]
+        assert [a["title"], b["title"]] == ["Unmute?", "Breakout rooms"] and a["id"] != b["id"]
+        assert [d["id"] for d in await open_dialogs(run)] == [a["id"], b["id"]]
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{first}')")
+        assert (await reported(run, "dialog-closed"))[0] == {"id": a["id"]}
+        assert [d["id"] for d in await open_dialogs(run)] == [b["id"]]                                  # the other stays
+        await show(run, "Unmute?", "The host would like you to unmute.", ["Unmute", "Stay muted"])      # the same words again: another dialog
+        c = (await reported(run, "dialog", 3))[2]
+        assert c["id"] not in (a["id"], b["id"]) and c["title"] == "Unmute?"
+        assert len(await reported(run, "dialog-closed", 1)) == 1
+
+
+async def test_a_banner_with_no_buttons_is_not_a_dialog_until_it_has_one():
+    """Nothing in it can be answered from the table (spec section 5: a banner with no buttons is never a dialog): it is reported once a
+    button appears in it, and nothing is said of one that goes without ever having had one."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        passing = await show(run, "", "Recording has started.", [])
+        await asyncio.sleep(0.4)
+        assert not [s for s, _ in run.events if s.startswith("dialog")] and await open_dialogs(run) == []
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{passing}')")
+        await asyncio.sleep(0.4)
+        assert not [s for s, _ in run.events if s.startswith("dialog")]                                 # it went, and nobody was told of it
+        banner = await show(run, "Recording", "The host is recording.", [])
+        await asyncio.sleep(0.2)
+        await run.page.evaluate("(id) => { const b = document.createElement('button'); b.textContent = 'OK'; document.getElementById(id).appendChild(b); }", banner)
+        [d] = await reported(run, "dialog")
+        assert d["buttons"] == ["OK"] and d["text"] == "The host is recording."
+        await run.page.evaluate("(id) => document.querySelector('#' + id + ' button').remove()", banner)                      # it has nothing to answer again: closed
+        assert (await reported(run, "dialog-closed"))[0] == {"id": d["id"]} and await open_dialogs(run) == []
+        await run.page.evaluate("(id) => { const b = document.createElement('button'); b.textContent = 'Later'; document.getElementById(id).appendChild(b); }", banner)
+        again = (await reported(run, "dialog", 2))[1]
+        assert again["id"] != d["id"] and again["buttons"] == ["Later"]                                                       # and a dialog again, another one
+
+
+async def test_the_parts_of_one_modal_are_one_dialog():
+    """The client may draw a modal in layers that each match what a dialog is (a wrapper, the dialog inside it): they are one."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const outer = document.createElement("div"); outer.className = "zm-modal-legacy";
+            const inner = document.createElement("div"); inner.setAttribute("role", "dialog"); inner.className = "zm-modal";
+            const h = document.createElement("h2"); h.textContent = "Join breakout room"; inner.appendChild(h);
+            const b = document.createElement("button"); b.textContent = "Join";
+            b.addEventListener("click", () => queueMicrotask(() => outer.parentNode.removeChild(outer)));
+            inner.appendChild(b); outer.appendChild(inner); document.body.appendChild(outer);
+        }""")
+        [d] = await reported(run, "dialog")
+        await asyncio.sleep(0.4)
+        assert len(await reported(run, "dialog")) == 1 and [x["id"] for x in await open_dialogs(run)] == [d["id"]]
+        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'Join')") is True
+        assert (await reported(run, "dialog-closed"))[0] == {"id": d["id"]} and await open_dialogs(run) == []
+        await asyncio.sleep(0.3)
+        assert len(await reported(run, "dialog-closed")) == 1                                           # said once
+
+
+async def test_a_dialogs_buttons_are_found_by_what_they_say_whatever_the_case_and_spacing():
+    """The same names the popovers' items go by: lower case, only letters and digits. A button may say its name in its label alone
+    (an icon), and one with no name at all is no button the table can be offered."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const d = document.createElement("div"); d.setAttribute("role", "dialog");
+            const add = (html, name) => {
+                const b = document.createElement("button"); b.innerHTML = html;
+                b.addEventListener("click", () => { window.__presses.push(["built", name]); queueMicrotask(() => d.parentNode.removeChild(d)); });
+                d.appendChild(b);
+            };
+            add('<svg width="8" height="8"></svg>', "unnamed");
+            add('<svg width="8" height="8"></svg>', "icon"); d.lastChild.setAttribute("aria-label", "Close");
+            add("\\n   Got\\n     it\\n", "text");
+            document.body.appendChild(d);
+        }""")
+        [d] = await reported(run, "dialog")
+        assert d["buttons"] == ["Close", "Got it"]
+        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, ' GOT-it ')") is True
+        assert await run.page.evaluate("window.__presses") == [["built", "text"]]
+    async with PageRun() as run:                                                                        # by its label alone
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const d = document.createElement("div"); d.setAttribute("role", "alertdialog");
+            const b = document.createElement("button"); b.setAttribute("aria-label", "Close"); b.appendChild(document.createElementNS("http://www.w3.org/2000/svg", "svg"));
+            b.addEventListener("click", () => { window.__presses.push(["built", "icon"]); queueMicrotask(() => d.parentNode.removeChild(d)); });
+            d.appendChild(b); document.body.appendChild(d);
+        }""")
+        [d] = await reported(run, "dialog")
+        assert d["buttons"] == ["Close"] and await run.page.evaluate(f"window.crystalMeet.answerDialog('{d['id']}', 'close')") is True      # the id as text is the same id
+        assert await run.page.evaluate("window.__presses") == [["built", "icon"]]
+
+
+async def test_an_answer_that_cannot_be_given_says_why_and_presses_nothing():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        sid = await show(run, "Unmute?", "The host would like you to unmute.", ["Unmute", "Stay muted"])
+        [d] = await reported(run, "dialog")
+        await run.page.evaluate("(id) => { document.querySelector('#' + id + ' button').disabled = true; }", sid)
+        for call, words in [(f"answerDialog({d['id']}, 'Maybe')", "has no button called Maybe"), (f"answerDialog({d['id']})", "Say which button"),
+                            (f"answerDialog({d['id']}, '  ')", "Say which button"), (f"answerDialog({d['id']}, 'Unmute')", "not ready yet"),
+                            ("answerDialog(99, 'Unmute')", "no longer on the screen"), ("answerDialog()", "Say which button")]:
+            with pytest.raises(Exception, match=words):
+                await run.page.evaluate(f"window.crystalMeet.{call}")
+        assert await run.calls("dialog") == [] and await presses(run) == []
+        assert [x["id"] for x in await open_dialogs(run)] == [d["id"]]                                  # still there, and still to be answered
+        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'Stay muted')") is True
+        assert await run.calls("dialog") == [["dialog", "Unmute?", "Stay muted"]]
+
+
+async def test_a_dialog_taken_out_of_the_page_cannot_be_answered_even_before_the_page_has_noticed():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        sid = await show(run, "Unmute?", "The host would like you to unmute.", ["Unmute", "Stay muted"])
+        [d] = await reported(run, "dialog")
+        with pytest.raises(Exception, match="no longer on the screen"):
+            await run.page.evaluate("""([id, answer]) => {
+                window.ZoomMtg._closeDialog(id);                       // gone, and the page has not looked yet
+                return window.crystalMeet.answerDialog(answer, "Unmute");
+            }""", [sid, d["id"]])
+        assert await run.calls("dialog") == []
+
+
+async def test_a_press_that_does_not_close_the_dialog_is_a_failure_in_words_and_holds_nothing_behind_it():
+    """The press is made once; when the dialog is still there two seconds later the answer says so, and what waited behind it goes on."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.dialogStays = true;") as run:
+        await run.wait_for("connected")
+        await show(run, "Unmute?", "The host would like you to unmute.", ["Unmute", "Stay muted"])
+        [d] = await reported(run, "dialog")
+        answer = asyncio.ensure_future(run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'Unmute')"))
+        behind = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.control('captions')"))
+        with pytest.raises(Exception, match="did not close"):
+            await asyncio.wait_for(answer, timeout=8)
+        m = await asyncio.wait_for(behind, timeout=8)
+        assert m["buttons"]["captions"] == {"on": True}
+        assert await run.calls("dialog") == [["dialog", "Unmute?", "Unmute"]]                           # pressed once
+        assert [x["id"] for x in await open_dialogs(run)] == [d["id"]]                                  # and it is still there, still reported open
+        assert not [s for s, _ in run.events if s == "dialog-closed"]
+
+
+async def test_a_dialog_that_closes_a_moment_after_the_press_is_waited_for():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.dialogClosesAfterMs = 600;") as run:
+        await run.wait_for("connected")
+        await show(run, "Recording consent", "This meeting is being recorded.", ["Got it"])
+        [d] = await reported(run, "dialog")
+        answered, took = await run.page.evaluate("""async (id) => {
+            const t = performance.now(), r = await window.crystalMeet.answerDialog(id, "Got it");
+            return [r, performance.now() - t];
+        }""", d["id"])
+        assert answered is True and 500 <= took < 2000, (answered, took)
+        assert (await reported(run, "dialog-closed"))[0] == {"id": d["id"]}
+
+
+async def test_the_answer_comes_back_after_the_dialog_has_been_said_closed():
+    """The device hears that the dialog is gone before it hears the answer, and hears it once: the page's later look at the client has
+    nothing more to say of it."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => { window.__sent = []; const real = window.crystalMeetEvent;
+                                          window.crystalMeetEvent = (state, detail) => { window.__sent.push(state); return real(state, detail); }; }""")
+        await show(run, "Recording consent", "This meeting is being recorded.", ["Got it", "Leave meeting"])
+        [d] = await reported(run, "dialog")
+        sent = await run.page.evaluate("""async (id) => {
+            await window.crystalMeet.answerDialog(id, "Got it");
+            return window.__sent.filter((s) => s.startsWith("dialog"));
+        }""", d["id"])
+        assert sent == ["dialog", "dialog-closed"]
+        await asyncio.sleep(0.3)
+        assert await run.page.evaluate("window.__sent.filter((s) => s.startsWith('dialog'))") == ["dialog", "dialog-closed"]   # and once
+
+
+async def test_answering_a_dialog_waits_its_turn_among_the_controls():
+    """It is one of the page's presses: never between those of a control, which would find the dialog's buttons in its popover."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        sid = await show(run, "Recording consent", "This meeting is being recorded.", ["Got it", "Leave meeting"])
+        [d] = await reported(run, "dialog")
+        await run.page.evaluate("""() => {            // Zoom answers this a moment after it is asked
+            const real = window.ZoomMtg.muteAll;
+            window.ZoomMtg.muteAll = function (o) { window.__presses.push(["muteAll asked", ""]); setTimeout(() => { window.__presses.push(["muteAll answered", ""]); real.call(this, o); }, 300); };
+        }""")
+        results = await run.page.evaluate(f"""Promise.allSettled([window.crystalMeet.control('host.mute_all'), window.crystalMeet.answerDialog({d['id']}, 'Got it'),
+                                              window.crystalMeet.control('captions')]).then((r) => r.map((x) => x.status))""")
+        assert results == ["fulfilled"] * 3
+        assert await presses(run) == ["muteAll asked", "muteAll answered", sid, "stub-captions"]
+
+
+async def test_answering_a_dialog_waits_for_the_inventory_too():
+    async with PageRun(stub=client(popoverOpensAfterMs=300)) as run:
+        await settled(run)
+        sid = await show(run, "Recording consent", "This meeting is being recorded.", ["Got it", "Leave meeting"])
+        [d] = await reported(run, "dialog")
+        results = await run.page.evaluate(f"""Promise.allSettled([window.crystalMeet.diagnostics(), window.crystalMeet.answerDialog({d['id']}, 'Got it')])
+                                              .then((r) => r.map((x) => x.status))""")
+        assert results == ["fulfilled"] * 2
+        assert await presses(run) == ["stub-reactions", "stub-reactions", "stub-view", "stub-view", sid]      # the openers and their closing, then the dialog
+        await tidy(run)
+
+
+async def test_a_dialog_drawn_before_the_room_is_in_the_meeting_is_reported_once_it_is():
+    """Nothing on the device follows the meeting before it is connected (what it hears then is let go), so what is open when the room
+    comes in is said then, and what came and went before is not said at all."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.delayMs = 1500; window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        for _ in range(100):
+            if await run.page.evaluate("window.crystalMeet.state") == "joining":
+                break
+            await asyncio.sleep(0.02)
+        # Nothing of the client changes as the room comes in (no footer is drawn, and the page's status label is gone), which the
+        # observer would see: only the look the page makes itself at that moment can say what is open.
+        await run.page.evaluate("document.getElementById('crystal-meet-status').remove()")
+        await show(run, "Recording consent", "This meeting is being recorded.", ["Got it", "Leave meeting"])
+        passing = await show(run, "Passing", "Gone before the room is in.", ["OK"])
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{passing}')")
+        await asyncio.sleep(0.4)
+        assert await run.page.evaluate("window.crystalMeet.state") == "joining" and not [s for s, _ in run.events if s.startswith("dialog")]
+        await run.wait_for("connected")
+        [d] = await reported(run, "dialog")
+        assert [s for s, _ in run.events].index("connected") < [s for s, _ in run.events].index("dialog") and d["title"] == "Recording consent"
+        await asyncio.sleep(0.4)
+        assert [s for s, _ in run.events if s.startswith("dialog")] == ["dialog"]                       # the one that came and went is not heard of
+
+
+async def test_across_a_reconnect_a_dialog_still_open_is_not_said_again_and_one_that_went_is_said_closed():
+    """While Zoom reconnects the page looks at nothing (the room is not in the meeting); when it is in again, one look says what went."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        first = await show(run, "Unmute?", "The host would like you to unmute.", ["Unmute", "Stay muted"])
+        await show(run, "Breakout rooms", "Join Room 1?", ["Join", "Later"])
+        a, b = (await reported(run, "dialog", 2))[:2]
+        await run.page.evaluate("window.ZoomMtg._status(4)")                                            # Zoom is reconnecting ...
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{first}')")                              # ... and a dialog goes meanwhile
+        await asyncio.sleep(0.4)
+        assert not [s for s, _ in run.events if s == "dialog-closed"]
+        await run.page.evaluate("window.ZoomMtg._status(2)")                                            # ... connected again
+        assert (await reported(run, "dialog-closed"))[0] == {"id": a["id"]}
+        await asyncio.sleep(0.3)
+        assert [s for s, _ in run.events if s.startswith("dialog")] == ["dialog", "dialog", "dialog-closed"]       # the other was not said again
+        assert [x["id"] for x in await open_dialogs(run)] == [b["id"]]
+
+
+async def test_a_burst_of_changes_to_the_page_is_looked_at_once():
+    """Zoom's client draws a great deal: the page is looked at after the changes, once, and not once for each of them."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await asyncio.sleep(0.3)
+        looks = await run.page.evaluate("""async () => {
+            let looks = 0;
+            for (const proto of [Document.prototype, Element.prototype]) {
+                const real = proto.querySelectorAll;
+                proto.querySelectorAll = function (selector) { if (String(selector).includes("dialog")) looks += 1; return real.call(this, selector); };
+            }
+            for (let i = 0; i < 20; i++) { document.body.appendChild(document.createElement("div")); await null; }      // twenty changes, each seen by the observer
+            await new Promise((resolve) => setTimeout(resolve, 400));
+            return looks;
+        }""")
+        assert looks <= 2                                                                               # one (a stall of the machine's in the middle of the twenty could make it two), never twenty
+
+
+async def test_chat_messages_come_in_the_shapes_zoom_sends():
+    """The sender is a name or a record, the words and the time have more than one name; a time that is no time is the moment the
+    message came."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        payloads = [{"senderName": "Raj Patel", "message": "Hello", "timestamp": 1700000000000}, {"sender": "Ann Lee", "text": "Hi", "time": "1700000060000"},
+                    {"sender": {"userName": "Cy"}, "msg": "Yo"}, {"content": "Anonymous"}, {"content": "Late", "timestamp": 1e20},
+                    {"sender": {"name": "Di"}, "content": "Dated", "timeStamp": "2023-11-14T22:15:20.000Z"}]
+        for payload in payloads:
+            await run.page.evaluate("(p) => window.ZoomMtg._fire('onReceiveChatMsg', p)", payload)
+        got = await reported(run, "chat", len(payloads))
+        assert [(c["from"], c["text"]) for c in got] == [("Raj Patel", "Hello"), ("Ann Lee", "Hi"), ("Cy", "Yo"), ("", "Anonymous"), ("", "Late"), ("Di", "Dated")]
+        assert [c["at"] for c in got[:2]] == ["2023-11-14T22:13:20.000Z", "2023-11-14T22:14:20.000Z"] and got[5]["at"] == "2023-11-14T22:15:20.000Z"
+        assert all(c["at"].endswith("Z") and c["at"].startswith("20") for c in got[2:5])
+        assert run.errors == []

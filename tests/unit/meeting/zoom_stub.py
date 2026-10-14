@@ -39,6 +39,12 @@ depends on Zoom's behaviour it mirrors Zoom 6.5.0 as its own bundle has it:
   bridge to leave alone. Like the popovers it is a node its owner removes with removeChild on its own parent, as React's
   unmount does, which throws if anything else took it out first: window.__reactErrors collects each such throw, and
   _unmountBystander() is the owner's unmount of the box (window.__unmounted says "ok" or the error).
+- A dialog, window.ZoomMtg._showDialog(title, text, buttons), is Zoom's modal: div#stub-dialog-N.zm-modal[role="dialog"] on the
+  body with an h2 for the title, a paragraph and a <button> for each label (given none, it is a banner). It is the client's node,
+  as the popovers are: its owner takes it out, with removeChild on the body, in a microtask after a button is pressed or when Zoom
+  closes it (_closeDialog(id)), and anything else that took it out first makes that throw (window.__reactErrors). A press is
+  logged as ["dialog", title, label] in window.__zoomCalls and as [id, label] in window.__presses. _chat(from, text) fires
+  onReceiveChatMsg as the SDK does.
 - window.__presses logs every press of a button or an item as [id, label]; window.__maxOpen is the most popovers drawn at
   once; window.__zoomCalls gets ["reaction", "thumbs_up"] (the name, lower case) for a reaction.
 
@@ -67,6 +73,8 @@ Behaviour flags, window.ZoomMtg._behaviour = {...}:
   section before the host's own items.
 - role (participant, co-host, host), attendees (the other participants, in the stub's own flags bVideoOn, bRaiseHand and
   waiting), recording and refuseHostCalls: the rest of the meeting. refuseHostCalls false lets a participant's calls through.
+- dialogStays is a dialog that takes a button's press (it is logged) and stays up; dialogClosesAfterMs has Zoom close it that
+  long after the press, in place of the microtask.
 - The SDK's calls as its own wrapper treats them (muteAll, record, lockMeeting, putOnHold, expel, mute, endMeeting, rename). A
   call it drops is answered false, and nothing is called back; a call it takes is answered through its callbacks. It drops a
   call with a key its method does not take (muteAll {muteAll}, record {record}, lockMeeting {lockMeeting}, putOnHold {userId,
@@ -123,6 +131,7 @@ window.ZoomMtg = {
                 popoverStays: false, popoverClosesAfterMs: 0, paddedLabels: false, openersRedrawn: false,
                 strayDropdown: false, attendeeViewFirst: false, recordConfirmsAfterMs: 50, recordNeverConfirms: false,
                 role: "participant", recording: false, refuseHostCalls: true, silentAttendees: false, rosterAfterMs: 0,
+                dialogStays: false, dialogClosesAfterMs: 0,
                 attendees: [{ userId: 16777217, userName: "Ann Lee", muted: false, bVideoOn: true, bRaiseHand: false, isHost: true },
                             { userId: 16777218, userName: "Raj Patel", muted: true, bVideoOn: false, bRaiseHand: true, isHost: false }] },
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
@@ -132,7 +141,7 @@ window.ZoomMtg = {
   _windowMs: { mute: 1000, muteAll: 5000, rename: 5000, expel: 5000, record: 5000, lockMeeting: 5000, putOnHold: 100 },
   _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
   _open: { picker: false, view: false }, _shown: { picker: null, view: null }, _where: { picker: null, view: null },
-  _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null,
+  _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null, _dialogs: 0, _dialogNodes: {},
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
   _setMuted(muted) { this._muted = !!muted; this._fire("onUserUpdate", { userId: 16777216, muted: this._muted }); },
   _setAttendee(id, patch) { const a = this._attendees.find((x) => x.userId === id); if (a) Object.assign(a, patch); this._fire("onUserUpdate", { userId: id }); },
@@ -360,6 +369,34 @@ window.ZoomMtg = {
     try { this._bystanderWhere.removeChild(this._bystander); window.__unmounted = "ok"; }
     catch (e) { window.__unmounted = String(e.message || e); window.__reactErrors.push(window.__unmounted); }
   },
+  // A modal of the client's, drawn over the meeting on the body. A press of its button is logged, and Zoom closes it as React unmounts
+  // a node: in a microtask after the press (or dialogClosesAfterMs later, or never with dialogStays), with removeChild on its parent.
+  _showDialog(title, text, buttons) {
+    const id = "stub-dialog-" + (++this._dialogs), b = this._behaviour;
+    const d = document.createElement("div"); d.id = id; d.setAttribute("role", "dialog"); d.className = "zm-modal";
+    const h = document.createElement("h2"); h.textContent = title; d.appendChild(h);
+    const p = document.createElement("p"); p.textContent = text; d.appendChild(p);
+    const footer = document.createElement("div");
+    for (const label of buttons) {
+      const btn = document.createElement("button"); btn.textContent = label;
+      btn.addEventListener("click", () => {
+        this._press(id, label);
+        window.__zoomCalls.push(["dialog", title, label]);
+        if (b.dialogStays) return;
+        if (b.dialogClosesAfterMs) setTimeout(() => this._closeDialog(id), b.dialogClosesAfterMs); else queueMicrotask(() => this._closeDialog(id));
+      });
+      footer.appendChild(btn);
+    }
+    d.appendChild(footer); document.body.appendChild(d); this._dialogNodes[id] = d;
+    return id;
+  },
+  // Its owner's unmount: removeChild on the parent it put it in. It throws, as React's does, when something else took it out.
+  _closeDialog(id) {
+    const d = this._dialogNodes[id]; if (!d) return;
+    delete this._dialogNodes[id];
+    try { document.body.removeChild(d); } catch (e) { window.__reactErrors.push(String(e.message || e)); }
+  },
+  _chat(from, text) { this._fire("onReceiveChatMsg", { sender: { name: from }, content: text, timestamp: Date.now() }); },
   _drawFooter() {
     const b = this._behaviour;
     const footer = document.createElement("div"); footer.id = "wc-footer"; footer.className = "footer";

@@ -770,6 +770,20 @@ async def test_a_record_whose_id_is_empty_names_nobody():
         assert [c[1] for c in await run.calls("mute")] == [{"userId": 16777216, "mute": True}]   # a real id: the default goes out
 
 
+async def test_a_roster_record_with_no_id_is_not_the_room():
+    """An assistant-shaped current user has no id (userId null, a name like "You are a assistant", nothing else known): the roster's
+    records with a null or empty id are not the room, whatever else they have in common with it; only a record with an id can be it."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            window.ZoomMtg.getCurrentUser = (o) => o.success({result: {currentUser: {userId: null, userName: "You are a assistant", muted: null, audio: null, isHost: null, isGuest: null, isHold: false}}});
+            window.ZoomMtg.getAttendeeslist = (o) => o.success({result: {attendeesList: [{userId: null, userName: "A"}, {userId: "", userName: "B"}, {userId: 7, userName: "C"}]}});
+            window.crystalMeet.userId = null;
+        }""")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert [p["me"] for p in m["participants"]] == [False, False, False]
+
+
 async def test_a_reconnect_does_not_mute_the_room_again():
     """The join's mic-off default is armed once per join: when Zoom reconnects, an unmute the table made since stands."""
     async with PageRun({"micOn": False}) as run:
@@ -2505,13 +2519,14 @@ async def test_the_title_is_the_title_nodes_words_without_a_button_that_sits_in_
     ("Recording has started This meeting is being recorded.", "", "Recording has started", "This meeting is being recorded."),
     ("  Recording   has started \n This meeting is being recorded.  ", "", "Recording has started", "This meeting is being recorded."),
     ("Recording has started", "", "Recording has started", ""),                                          # nothing but the title: no words
-    ("Host request", "", "Unmute?", "Host request"),                                                     # not "<title> <description>": the words are never lost
+    ("Host request", "", "Unmute?", ""),                                                                 # not "<title> <description>": a developer's name for the modal, no words
     ("Aria words", "The words it has.", "Unmute?", "The words it has."),                                 # words of its own: the label is not wanted
 ])
 async def test_a_dialog_with_no_words_of_its_own_has_its_aria_label_for_them(label, words, title, expected):
     """The consent banner has its description only in its aria-label ("<title> <description>"): when the text nodes give no words, the
-    words are the label with the title taken off its start, tidied; a label that does not begin with the title is the words whole,
-    so what a policy matches on is never lost."""
+    words are the label with the title taken off its start, tidied. A label that does not begin with the title is not that: a
+    body-less react-modal's label is a developer's name for it ("remove all pinned videos", "Mute Video Modal"), and it must not
+    become the dialog's words, which a policy matches on and the table shows."""
     async with PageRun() as run:
         await run.wait_for("connected")
         await run.page.evaluate("""([label, words, title]) => {

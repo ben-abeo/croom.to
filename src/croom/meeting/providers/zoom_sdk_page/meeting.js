@@ -666,7 +666,8 @@
   // Its title, its words and its buttons, as the client has them now. The title is the words of the title node without a button's: the
   // consent banner holds its OK button inside its title node. The words are the other text nodes, not a button's, a script's or a
   // style's, nor the footer's (a checkbox, a link); the banner has none, its description is only in its aria-label ("<title>
-  // <description>"), which, with the title taken off its start, is the words when the text nodes give none.
+  // <description>"), which, with the title taken off its start, is the words when the text nodes give none. A label that does not
+  // begin with the title is no description: a modal with no body has a developer's name for its label ("Mute Video Modal").
   function dialogInfo(el, id) {
     const heading = Array.from(el.querySelectorAll("h1, h2, h3, [class*='title']")).find((h) => !h.closest("button"));
     const wordsUnder = (root) => {
@@ -682,7 +683,7 @@
     let text = wordsUnder(el).filter((n) => !(heading && heading.contains(n)) && !footerOf(n)).map((n) => clean(n.nodeValue)).filter(Boolean).join(" ");
     if (!text) {
       const label = clean(el.getAttribute("aria-label"));
-      text = title && label.startsWith(title) ? clean(label.slice(title.length)) : label;
+      text = title && label.startsWith(title) ? clean(label.slice(title.length)) : "";
     }
     return { id: id, title: title, text: text.slice(0, 400), buttons: dialogButtons(el).map((b) => clean(labelOf(b))) };
   }

@@ -78,6 +78,27 @@ def test_readme_describes_the_room_page_in_two_modes():
     assert "Sound panel" not in text and "Camera panel" not in text and "Camera panels" not in text
 
 
+def test_readme_describes_the_on_screen_keyboard_and_its_key_click():
+    """The room page row says what the keyboard is and where its click is switched; the decisions say how it works and where the choice
+    is kept; the features table links its spec."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "docs/superpowers/specs/2026-10-13-on-screen-keyboard-design.md",
+        "Key click",
+        # the room page row: the layers, Shift once or locked, fast typing with two thumbs, the pop, and the switch
+        "three layers like an iPad's (letters, **123** for numbers and the symbols a link or a passcode needs, and **#+=**)",
+        "Shift gives one capital and a double tap locks it",
+        "so two thumbs typing fast lose nothing",
+        "**Key click off** is chosen under **Options**, then **Keyboard**",
+        # the decisions: a touch acts as it lands, no key under a finger is replaced, the click and where its choice is kept
+        "never on the click a browser adds after a lift",
+        "no key under a finger is ever replaced",
+        "`key_click`",
+        "`/api/settings`",
+    ):
+        assert needle in text, needle
+
+
 def test_the_rooms_readme_counts_what_to_replace_as_the_room_templates_do():
     """Each template's header says three REPLACE values and an optional location; the folder's README says the same."""
     readme = " ".join((REPO / "deploy" / "rooms" / "README.md").read_text(encoding="utf-8").split())   # the file is wrapped at 80 columns

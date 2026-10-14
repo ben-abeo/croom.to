@@ -128,14 +128,14 @@ def test_readme_describes_the_redesigned_door_sign():
         "`POST /api/settings` changes `sign_background` and `sign_scores`, and refuses a bad value with words.",
         # what is not known yet
         "The football scores come from a public ESPN feed that ESPN does not document for this use",
-        "On a door screen only 480 to 500 px high a room name that takes two lines (Conference Room Twelve) with a location under it can push the bottom of the status, "
-        "or of the strip, past the bottom of the screen: at 1280 by 480 and 1366 by 500 by 1 and 6 px with the strip up, and by 14 and 21 px with no strip and a booking "
-        "title of two lines under the label; in the ten minutes before a booking, a title of 27 characters or more in the label can push it up to 72 px "
-        "(800 by 480, strip up, a location of two lines). A name and a location of one line fit all six sizes measured "
-        "(800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480, 1366 by 500).",
+        "On a door screen only 480 to 500 px high a room name that takes three lines of the smaller type (31 characters or more at 800 to 1024 px wide, 41 or more at 1280) "
+        "can run past the bottom of the screen: at 800 by 480 by 8 px with the strip up, a location of two lines and the room free for the rest of the day; at 1280 by 480, "
+        "a name of 41 characters by 1 px with the strip up and by 14 px with no strip while a booking is under way; a name of four lines (55 characters) by 2 to 72 px. "
+        "A name of up to 26 characters fits all six sizes measured (800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480, 1366 by 500) in every status.",
     ):
         assert needle in text, needle
     # what the sign no longer is
     assert "| Green when free, amber ten minutes before a booking, red while in use or booked. |" not in text
+    assert "a room name that takes two lines (Conference Room Twelve) with a location under it can push" not in text     # the limit before the chip lost its title
     for gone in ("tinted Austin scenery", "four backgrounds chosen from the table", "Longhorns scoreboard", "chosen from the table"):
         assert gone not in text, gone

@@ -140,6 +140,7 @@ def test_guide_says_what_the_door_sign_shows_and_how_its_status_reads():
         "a coloured bar down the left edge, a coloured label under the room's name that says it in words, and a ring round the booking in progress",
         "Green is free (Free until 1:00 PM). Amber is the ten minutes before a booking (Customer call starts in 8 minutes).",
         "Red is in use or booked (In use until 2:00 PM while the room is in a meeting, Booked until 2:00 PM while a booking is under way).",
+        "On a screen 560 pixels high or less the label before a booking leaves out the booking's title and says Starts in 8 minutes: Today shows the title beside it.",
         "The photograph itself is never tinted.",
         "A sign that cannot reach the device goes grey and says Sign not connected.",
         "To show another, type sudo nano /etc/croom/config.yaml and look under room:. If there is a company: line, change the name inside its quotes; if not, "
@@ -210,7 +211,8 @@ def test_guide_gives_the_short_screen_rules_the_stylesheet_has():
     text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
     for needle in (
         "A booking's title is cut after two lines with an ellipsis, in Today as in the week, and after one line in Today on a screen 560 pixels high or less.",
-        "A room name that would take more than two lines is set in smaller type, as one of more than 24 characters is, so it is never cut.",
+        "A room name that would take more than two lines is set in smaller type, as one of more than 24 characters is, so it is never cut; "
+        "on a screen 560 pixels high or less, one that would take two lines is too.",
         "At 560 pixels high or less the week view leaves out the line under the status label and each day's date, with football scores on or off.",
         "up to 700 pixels high the week view leaves out the line under the status label and the room's location and makes the room's name smaller, "
         "and at 560 pixels or less, in Today, the status leaves out the line under its label too.",
@@ -252,13 +254,18 @@ def test_guide_troubleshooting_covers_the_football_strip_the_settings_file_and_t
         "are saved in control-settings.json in the device's data folder, /var/lib/croom",
         "the screen still shows the switch on, a chosen background holds only until the next restart, and the strip never comes.",
         "says \"Could not save the room settings\" and why",
-        "A long name does not fit a very short screen",
-        "If the bottom of the sign is cut off on a screen only 480 to 500 pixels high, shorten the room's name to one line (Boardroom, not Conference Room Twelve).",
-        "Measured at 800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500: a name on one line, with a location on one line, fits all of them "
-        "whatever the booking titles and with the football strip up or down.",
-        "A name on two lines with a location under it runs past the bottom of the screen at 1280 by 480 and 1366 by 500, by 1 and 6 pixels with the strip up and, "
-        "with no strip and a booking title that takes two lines under the label, by 14 and 21 pixels.",
-        "In the ten minutes before a booking the label carries its title: with a title of 27 characters or more a two-line name runs past the bottom by up to "
-        "72 pixels (at 800 by 480 with a title of 60 characters, the strip up and a location of two lines).",
+        "A very long name does not fit a very short screen",
+        "If the bottom of the sign is cut off on a screen only 480 to 500 pixels high, shorten the room's name.",
+        "A name of up to 26 characters, two lines of the smaller type, fits at 800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500, "
+        "in every status, with the football strip up or down.",
+        "A name of three lines (31 characters or more at 800 to 1024 pixels wide, 41 or more at 1280) can run past the bottom of the screen: at 800 by 480 by 8 pixels, "
+        "with the strip up, a location of two lines and the room free for the rest of the day; at 1280 by 480 a name of 41 characters by 1 pixel with the strip up "
+        "and by 14 with no strip while a booking is under way.",
+        "A name of four lines (55 characters) runs past by 2 to 72 pixels.",
     ):
         assert needle in text, needle
+    # the first card said a two-line name and a title in the label were the trouble: the chip now carries no title on a short screen and the name takes the smaller type
+    for gone in ("A long name does not fit a very short screen", "shorten the room's name to one line (Boardroom, not Conference Room Twelve)",
+                 "A name on two lines with a location under it runs past the bottom of the screen at 1280 by 480 and 1366 by 500",
+                 "In the ten minutes before a booking the label carries its title"):
+        assert gone not in text, gone

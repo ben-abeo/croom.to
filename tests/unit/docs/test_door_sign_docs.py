@@ -50,6 +50,9 @@ def test_the_spec_says_what_a_long_title_and_a_long_room_name_do():
     text = " ".join(SPEC.read_text(encoding="utf-8").split())
     for needle in (
         "A name of more than 24 characters, or one that would take more than two lines at 5.4 rem",
+        "(more than one on a sign 560 px high or less; \"Sales Conference Room\" takes three on a 1280 px sign)",
+        "On a sign 560 px high or less (the Raspberry Pi's 7-inch 800 by 480 panel is one) the chip says only the status, without the booking's title, "
+        "which the Today list shows beside it (\"Starts in 8 minutes\", \"Starting now\").",
         "is set in smaller type, 3.6 rem at most, so it is never cut and a short sign keeps its chip",
         "the lines are measured on the sign after layout, and again when the name, the sign's size or the view changes and when a font arrives",
         "a title cut after two lines with an ellipsis (after one on a sign 560 px high or less, and the week's bookings after two, one in portrait)",
@@ -139,6 +142,8 @@ def test_the_docs_state_the_numbers_the_code_has():
     stacked_below = int(re.search(r"@media\(max-width:(\d+)px\)\{\.score\{flex-direction:column", css).group(1)) + 1
     soon_minutes = js_constant("SOON_MS") // 60000
     config = re.search(r'^CONFIG_DIR="([^"]+)"', installer, re.M).group(1) + "/config.yaml"
+    short_sign = re.search(r'matchMedia\("\(max-height: (\d+)px\)"\)', (SIGN / "sign.js").read_text(encoding="utf-8")).group(1)
+    assert f"@media(max-height:{short_sign}px){{" in css                                   # the script's short sign is the stylesheet's
     large = re.search(r"\.room\{[^}]*font-size:clamp\([^,]+,[^,]+,([\d.]+)rem\)", css).group(1)           # the room name's largest type, in rem
     smaller = re.search(r"\.room\.long\{font-size:clamp\([^,]+,[^,]+,([\d.]+)rem\)", css).group(1)
     assert INTERVAL_S % 60 == 0 and all(wait % 60 == 0 for wait in waits[1:])
@@ -166,6 +171,8 @@ def test_the_docs_state_the_numbers_the_code_has():
         ("how many bookings Today lists", guide, f"next {WORDS[js_constant('TODAY_ROWS')]} bookings"),
         ("when a booking is about to start", guide, f"the {WORDS[soon_minutes]} minutes before a booking"),
         ("where the config file is", guide, config),
+        ("what a short sign is", spec, f"{short_sign} px high or less"),
+        ("what a short sign is", guide, f"{short_sign} pixels high or less"),
         ("the length of a room name that takes the smaller type", guide, f"as one of more than {js_constant('LONG_NAME')} characters is"),
         ("how many lines a room name may take in the large type", guide, f"would take more than {WORDS[js_constant('NAME_LINES')]} lines"),
         ("the length of a room name that takes the smaller type", spec, f"A name of more than {js_constant('LONG_NAME')} characters"),

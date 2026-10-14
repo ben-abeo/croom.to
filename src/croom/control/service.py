@@ -21,9 +21,20 @@ from croom.control.settings import SettingsStore
 from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
-from croom.meeting.providers.base import MeetingState
+from croom.meeting.providers.base import MeetingControlError, MeetingState
 
 logger = logging.getLogger(__name__)
+
+
+def _a_bool(label: str) -> Callable[[Any], Any]:
+    """A check for a setting that is on or off: the bool, or ValueError saying what is allowed. Only true and false are taken: a
+    string such as "no" or a number is refused, not guessed at."""
+    def check(value: Any) -> Any:
+        if not isinstance(value, bool):
+            raise ValueError(f"The {label} setting must be true or false, not {value!r}")
+        return value
+    return check
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY_BYTES = 4096
@@ -79,6 +90,7 @@ def _some_of(label: str, options: Tuple[str, ...]) -> Callable[[Any], Any]:
 # The room settings the page may change through /api/settings: each key's default and the check that turns what was sent
 # into what is kept (or raises ValueError, in words). Only these keys are served or changed; the settings file holds more.
 ROOM_SETTINGS: Dict[str, Tuple[Any, Callable[[Any], Any]]] = {
+    "key_click": (True, _a_bool("key click")),
     "sign_background": ("skyline", _one_of("door sign background", SIGN_BACKGROUNDS)),
     "sign_scores": ([], _some_of("school", SIGN_SCHOOLS)),
 }
@@ -92,6 +104,12 @@ def read_setting(store, key: str) -> Any:
         return check(store.get(key, default))
     except ValueError:
         return check(default)
+
+
+def first_line(error: BaseException) -> str:
+    """An exception's words for the table: its first line, never a stack or a second line."""
+    text = str(error).strip()
+    return text.splitlines()[0].strip() if text else type(error).__name__
 
 
 def _register_font_types() -> None:
@@ -253,6 +271,7 @@ class ControlService(Service):
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
         app.router.add_post("/api/meeting/camera", self._handle_camera)
+        app.router.add_get("/api/meeting/diagnostics", self._handle_diagnostics)
         app.router.add_get("/api/screensaver", self._handle_screensaver)
         app.router.add_post("/api/screensaver", self._handle_set_screensaver)
         app.router.add_get("/api/settings", self._handle_settings)
@@ -477,7 +496,7 @@ class ControlService(Service):
         return web.json_response(self._screensaver_payload())
 
     # ------------------------------------------------------------------
-    # Room settings: the door sign's background and schools (spec 2026-10-13)
+    # Room settings: the keyboard's click and the door sign's background and schools (spec 2026-10-13)
     # ------------------------------------------------------------------
 
     def _load_settings(self) -> Dict[str, Any]:
@@ -852,7 +871,14 @@ class ControlService(Service):
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
-        muted = await self._meeting.toggle_mute()
+        try:
+            muted = await self._meeting.toggle_mute()
+        except MeetingControlError as e:
+            logger.info(f"The microphone was not changed: {first_line(e)}")
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            logger.warning(f"Could not change the microphone: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not change the microphone: {first_line(e)}", 409)
         return web.json_response({"muted": bool(muted)})
 
     async def _handle_camera(self, request: web.Request) -> web.Response:
@@ -863,5 +889,26 @@ class ControlService(Service):
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
-        camera_on = await self._meeting.toggle_camera()
+        try:
+            camera_on = await self._meeting.toggle_camera()
+        except MeetingControlError as e:
+            logger.info(f"The camera was not switched: {first_line(e)}")
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            logger.warning(f"Could not switch the camera: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not switch the camera: {first_line(e)}", 409)
         return web.json_response({"camera_on": bool(camera_on)})
+
+    async def _handle_diagnostics(self, request: web.Request) -> web.Response:
+        """What the meeting page sees (Zoom's field names, the client's buttons): for pinning real wording from a device."""
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        if self._meeting_state() != "connected":
+            return self._error_response("Not in a meeting", 409)
+        try:
+            return web.json_response(await self._meeting.diagnostics())
+        except MeetingControlError as e:
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - the meeting ending as the request came in, say: words, never a 500
+            logger.warning(f"Could not read the meeting page: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not read the meeting page: {first_line(e)}", 409)

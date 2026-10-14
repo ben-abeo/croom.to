@@ -78,6 +78,30 @@ def test_readme_describes_the_room_page_in_two_modes():
     assert "Sound panel" not in text and "Camera panel" not in text and "Camera panels" not in text
 
 
+def test_readme_describes_the_on_screen_keyboard_and_its_key_click():
+    """The room page row says what the keyboard is and where its click is switched; the decisions say how it works and where the choice
+    is kept; the features table links its spec."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "docs/superpowers/specs/2026-10-13-on-screen-keyboard-design.md",
+        "Key click",
+        # the room page row: the layers, Shift once or locked, fast typing with two thumbs, the pop, and the switch
+        "three layers like an iPad's (letters, **123** for numbers and the symbols a link or a passcode needs, and **#+=**)",
+        "Shift gives one capital and a double tap locks it",
+        "so two thumbs typing fast lose nothing",
+        "**Key click off** is chosen under **Options**, then **Keyboard**",
+        # the decisions: a touch acts as it lands, no key under a finger is replaced, the click and where its choice is kept
+        "never on the click a browser adds after a lift",
+        "no key under a finger is ever replaced",
+        "`key_click`",
+        "`/api/settings`",
+        # the features table's row says it in the README's own voice
+        "the preview pop, a key click that can be switched off under **Options**, then **Keyboard** |",
+    ):
+        assert needle in text, needle
+    assert "Options ›" not in text      # the README says "**Options**, then **Keyboard**", not the arrow
+
+
 def test_the_rooms_readme_counts_what_to_replace_as_the_room_templates_do():
     """Each template's header says three REPLACE values and an optional location; the folder's README says the same."""
     readme = " ".join((REPO / "deploy" / "rooms" / "README.md").read_text(encoding="utf-8").split())   # the file is wrapped at 80 columns
@@ -110,7 +134,7 @@ def test_readme_describes_the_redesigned_door_sign():
     text = README.read_text(encoding="utf-8")
     for needle in (
         "over a photograph of Austin under a navy overlay (nine backgrounds, chosen on the room page under **Options**, then **Door sign**)",
-        "and an **Options** button for **Camera framing**, the **Screensaver** and the **Door sign**)",      # the Room page row lists the Door sign among the Options
+        "and an **Options** button for **Camera framing**, the **Screensaver**, the **Door sign** and the keyboard's **Key click**)",      # the Room page row lists the Door sign and the Key click among the Options
         "The status is a coloured rail down the left edge, a solid chip under the room's name and a ring round the booking in progress: green when free, amber ten minutes before a booking, red while in use or booked.",
         "**This week** shows the next seven days.",
         "A strip of football scores for Texas, Michigan, Texas A&M and Missouri can run along the bottom (off by default; the device reads ESPN's public schedule feed for it).",

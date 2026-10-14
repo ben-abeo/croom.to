@@ -240,6 +240,8 @@
   const joinEventAgain = (id, passcode) => act(() => post("/api/meeting/join", withPasscode({ event_id: id }, passcode)).then(() => joinAccepted(model.lastLink, id)));
   const leave = () => { forgetJoin(); return act(() => post("/api/meeting/leave")); };   // Cancel, Dismiss and Leave give the join up
   const toggle = (kind) => act(() => post("/api/meeting/" + kind));
+  // The keyboard's key click is the room's setting (spec 2026-10-13, 3.3): the service keeps it, and every status carries it.
+  const setKeyClick = (on) => act(() => post("/api/settings", { key_click: on }));
   const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
   const setSettings = (changes) => act(() => post("/api/settings", changes).then((data) => { model.settings = data; }));   // the answer is every setting
 
@@ -404,12 +406,14 @@
       document.querySelector(".door-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;
+      document.querySelector(".keyboard-section").hidden = true;
       return;
     }
     document.querySelector(".screen-section").hidden = false;
     document.querySelector(".door-section").hidden = false;
     document.querySelector(".sound-section").hidden = false;
     document.querySelector(".camera-section").hidden = false;
+    document.querySelector(".keyboard-section").hidden = false;
 
     el("offline-note").hidden = true;
     const s = model.status;
@@ -476,10 +480,18 @@
     }
 
     renderEvents(cal);
+    renderKeyClick(s);
     renderPicker();
     renderDoorSign();
     for (const fn of renderHooks) fn(s);
     if (landing && kiosk && view() === "idle") focusPasscode();
+  }
+
+  // Options > Keyboard: the two buttons show the room's setting, on until a status says otherwise (keyboard.js reads the same one).
+  function renderKeyClick(s) {
+    const on = !s.settings || s.settings.key_click !== false;
+    el("key-click-on").setAttribute("aria-pressed", on ? "true" : "false");
+    el("key-click-off").setAttribute("aria-pressed", on ? "false" : "true");
   }
 
   function renderPicker() {
@@ -615,6 +627,8 @@
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
+  el("key-click-on").addEventListener("click", () => setKeyClick(true));
+  el("key-click-off").addEventListener("click", () => setKeyClick(false));
 
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,

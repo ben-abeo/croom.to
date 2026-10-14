@@ -272,3 +272,21 @@ def test_guide_troubleshooting_covers_the_football_strip_the_settings_file_and_t
                  "A very long name does not fit a very short screen", "A name of three lines (31 characters or more at 800 to 1024 pixels wide",
                  "A name of four lines (55 characters) runs past by 2 to 72 pixels"):
         assert gone not in text, gone
+
+
+def test_guide_describes_the_on_screen_keyboard_its_layers_shift_lock_and_key_click():
+    """The table screen's keyboard in the words of the spec's section 3: three layers, shift once or locked, every finger at once, and the
+    click with the switch under Options that turns it off. Plain words: the keys are named as they look, in lower case, and the labels
+    are written as the screen shows them."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+    for needle in (
+        "Type on the table screen.",
+        "It has three layers, like an iPad's: letters first, then 123 for numbers and the symbols a link or a passcode needs, then #+= for the rest; ABC goes back to the letters.",
+        "Tap the shift key (the up arrow) once for one capital, or twice quickly to lock capitals on, as caps lock does, and a dot shows under its arrow; tap it again to let go.",
+        "Every key answers the moment a finger lands, so both thumbs can type at once, and holding the delete key keeps deleting.",
+        "To turn the click off, tap Options, then Key click off under Keyboard; Key click on brings it back.",
+        "The room remembers the choice, for every screen that opens its page.",
+    ):
+        assert needle in text, needle
+    assert "Shift key" not in text and "Delete key" not in text and "Key Click" not in text

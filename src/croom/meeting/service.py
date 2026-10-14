@@ -203,6 +203,13 @@ class MeetingService(Service):
             return True
         return await self._active_provider.toggle_mute()
 
+    async def diagnostics(self) -> Dict[str, Any]:
+        """What the active provider's page sees, for pinning the platform's wording; empty without a meeting."""
+        if not self._active_provider:
+            return {}
+        reader = getattr(self._active_provider, "diagnostics", None)
+        return await reader() if reader is not None else {}
+
     async def set_camera(self, on: bool) -> bool:
         """Set camera state."""
         if not self._active_provider:

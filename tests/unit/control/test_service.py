@@ -1818,6 +1818,35 @@ class TestTvRequestsInFlight:
             with pytest.raises(aiohttp.ClientError):       # the page is let go of; it is not told that a Turn on was done
                 await asked
 
+    async def test_stopping_the_service_lets_go_of_a_pairing_that_waits_for_a_person_cleanly(self, tmp_path):
+        """With the real TV service: the pairing is cancelled with its request, the TV is hung up on, no key is kept, and the next
+        tap on Pair is not told that a pairing is already waiting."""
+        from tests.unit.tv.fake_client import FakeTvClient, PromptingTvClient
+        from tests.unit.tv.helpers import build_service as build_tv_service, prompt_is_up
+        FakeTvClient.instances.clear()                     # (the fake keeps its instances on the class; the TV tests clear them)
+        tv = build_tv_service(tmp_path, PromptingTvClient, key=None)
+        service = make_service(tv=tv)
+        await service.start()
+        try:
+            async with aiohttp.ClientSession() as http:
+                asked = asyncio.ensure_future(self.post(http, f"http://127.0.0.1:{service.bound_port}/api/tv/pair", {}))
+                await wait_until(prompt_is_up)
+                await asyncio.wait_for(service.stop(), 3.0)
+                with pytest.raises(aiohttp.ClientError):
+                    await asked
+            client = FakeTvClient.instances[-1]
+            assert ("disconnect",) in client.calls and client.connected is False
+            assert tv._pairing is False and tv._client is None and not (tmp_path / "tv-client-key").exists()
+            assert tv.status()["paired"] is False and tv.status()["reachable"] is False
+            again = asyncio.ensure_future(tv.pair())       # the person taps Pair again, on a page that is back
+            await wait_until(lambda: len(FakeTvClient.instances) == 2 and prompt_is_up())
+            FakeTvClient.instances[-1].accept()
+            await asyncio.wait_for(again, 2.0)
+            assert tv.status()["paired"] is True
+        finally:
+            await tv.stop()
+            FakeTvClient.instances.clear()
+
     async def test_stopping_the_service_does_not_wait_for_the_controls_queued_behind_a_turn_on(self):
         tv = StubTv()
         tv.gate = asyncio.Event()

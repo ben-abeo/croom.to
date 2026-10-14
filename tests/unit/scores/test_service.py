@@ -13,7 +13,7 @@ from croom.core.service import Service
 from croom.scores.espn import SCHOOLS, ScheduleUnavailable, parse_schedule
 from croom.scores.service import ScoresService
 from tests.unit.control.test_service import make_service
-from tests.unit.scores.schedules import CENTRAL, Clock, Feed, texas_sample
+from tests.unit.scores.schedules import CENTRAL, Clock, Feed, game, schedule, texas_sample
 
 TEXAS_ID, MICHIGAN_ID, TEXAS_AM_ID, MISSOURI_ID = (SCHOOLS[key][0] for key in ("texas", "michigan", "texas_am", "missouri"))
 TEXAS = {"school": "texas", "name": "Texas",                                  # the spec's own example, from the saved schedule
@@ -212,16 +212,125 @@ async def test_one_schools_failure_does_not_stop_the_others_being_read(central):
     assert by_school["texas"] == TEXAS and by_school["michigan"]["last"] is None and by_school["missouri"]["last"]["home"] == "Missouri"
 
 
-async def test_a_problem_is_said_again_when_it_changes_and_a_recovery_once(central, caplog):
+async def a_step(service, feed, clock, wait):
+    """One look `wait` seconds after the last: a second short it asks for nothing, on the dot it asks once."""
+    before = len(feed.asked)
+    clock.advance(wait - 1)
+    await service.refresh()
+    assert len(feed.asked) == before, f"asked {wait - 1} seconds on"
+    clock.advance(1)
+    await service.refresh()
+    assert len(feed.asked) == before + 1, f"not asked {wait} seconds on"
+
+
+async def test_failed_reads_back_off_a_minute_two_five_and_ten_and_a_success_starts_over(central):
+    """A feed that stays down is asked 6 times an hour by the end, not 60: a minute after the first failure, two after the second, five, then ten."""
+    service, feed, clock = make(["texas"])
+    feed.down = ScheduleUnavailable("ESPN answered 503")
+    await service.refresh()                                                  # the first failure
+    for wait in (60, 120, 300, 600, 600, 600):                                # and each further one waits longer, up to ten minutes
+        await a_step(service, feed, clock, wait)
+    feed.down = None
+    await a_step(service, feed, clock, 600)                                   # a success
+    assert service.current() == [TEXAS]
+    feed.down = ScheduleUnavailable("ESPN answered 503")
+    await a_step(service, feed, clock, 600)                                   # after a good read the next is ten minutes on, as ever; this one fails ...
+    await a_step(service, feed, clock, 60)                                    # ... and the wait starts again at a minute, not at ten
+    await a_step(service, feed, clock, 120)
+
+
+async def test_the_backoff_is_each_schools_own_and_is_never_longer_than_the_interval(central):
+    service, feed, clock = make(["texas", "michigan"])
+    feed.down_for = {MICHIGAN_ID: ScheduleUnavailable("ESPN answered 500")}
+    await service.refresh()
+    assert feed.asked == [TEXAS_ID, MICHIGAN_ID]
+    clock.advance(60)
+    await service.refresh()
+    assert feed.asked == [TEXAS_ID, MICHIGAN_ID, MICHIGAN_ID]                # Michigan's minute is up; Texas, read well, waits its ten
+    clock.advance(120)                                                       # 180 seconds in: Michigan's two minutes are up
+    await service.refresh()
+    assert feed.asked.count(MICHIGAN_ID) == 3 and feed.asked.count(TEXAS_ID) == 1
+    clock.advance(300)                                                       # 480: its five minutes are up too
+    await service.refresh()
+    assert feed.asked.count(MICHIGAN_ID) == 4 and feed.asked.count(TEXAS_ID) == 1
+    clock.advance(120)                                                       # 600: Texas's ten minutes are up, and Michigan's ten (from 480) are not
+    await service.refresh()
+    assert feed.asked.count(TEXAS_ID) == 2 and feed.asked.count(MICHIGAN_ID) == 4
+    short, short_feed, short_clock = make(["texas"], interval_s=100)         # a steady read every 100 seconds: no failure waits longer than that
+    short_feed.down = ScheduleUnavailable("ESPN answered 503")
+    await short.refresh()
+    for wait in (60, 100, 100, 100):
+        await a_step(short, short_feed, short_clock, wait)
+
+
+NO_GAME_PAYLOADS = {
+    "an empty object": {},
+    "an error object": {"code": 500, "message": "the feed is having a bad day"},
+    "no events": {"events": []},
+    "events with no game in them": {"events": [{"competitions": [{}]}, None, 5]},
+    "only a game in progress": schedule("Texas", [game("Texas", "Rice", "2026-10-10T19:30Z", home_score=3, away_score=0, state="in")]),
+}
+
+
+@pytest.mark.parametrize("payload", NO_GAME_PAYLOADS.values(), ids=NO_GAME_PAYLOADS.keys())
+async def test_a_read_with_no_game_in_it_is_a_failed_read_that_keeps_the_last_answer(central, caplog, payload):
+    """A feed that answers, with nothing the sign could draw (an error object in a 200, a schedule with no games), has not told the room that
+    the school has no scores: the last good answer stays, the problem is said once in words, and the read is tried again in a minute."""
     service, feed, clock = make(["texas"])
     await service.refresh()
+    assert service.current() == [TEXAS]
+    feed.answers[TEXAS_ID] = payload
+    clock.advance(600)
+    await service.refresh()
+    assert service.current() == [TEXAS]                                       # kept, not replaced by nothing
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(said) == 1 and "Texas" in said[0] and "ESPN" in said[0] and "no game in it" in said[0] and "keeping the last" in said[0]
+    assert len(feed.asked) == 2
+    clock.advance(59)
+    await service.refresh()
+    assert len(feed.asked) == 2
+    clock.advance(1)
+    await service.refresh()
+    assert len(feed.asked) == 3                                               # a minute on, not ten
+    feed.answers[TEXAS_ID] = texas_sample()                                   # and a schedule with games in it is an answer again
+    feed.answers[TEXAS_ID]["events"][3]["competitions"][0]["competitors"][0]["score"] = {"value": 52.0, "displayValue": "52"}
+    clock.advance(120)
+    await service.refresh()
+    assert service.current()[0]["last"]["home_score"] == 52
+
+
+async def test_a_school_whose_first_read_has_no_game_in_it_has_nothing_to_show_and_says_why_once(central, caplog):
+    service, feed, clock = make(["texas", "michigan"])
+    feed.answers[TEXAS_ID] = {"events": []}
+    await service.refresh()
+    assert service.current()[0] == {"school": "texas", "name": "Texas", "last": None, "next": None} and service.current()[1] == MICHIGAN
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(said) == 1 and "Texas" in said[0] and "no game in it" in said[0] and "shows no scores for it until it can" in said[0]
+
+
+async def test_a_school_that_starts_failing_is_warned_about_once_a_new_reason_is_told_at_info_and_the_recovery_at_info(central, caplog):
+    caplog.set_level(logging.DEBUG, logger="croom.scores.service")
+    service, feed, clock = make(["texas"])
+    await service.refresh()                                                   # a good read: nothing to say
     for failure in (ScheduleUnavailable("ESPN answered 503"), ScheduleUnavailable("ESPN answered 503"), ScheduleUnavailable("ESPN did not answer within 10 seconds"),
-                    RuntimeError("boom"), RuntimeError("boom")):
+                    RuntimeError("boom"), RuntimeError("boom"), ScheduleUnavailable("ESPN answered 503")):
         feed.down = failure
         clock.advance(600)
         await service.refresh()
-    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(said) == 3 and "503" in said[0] and "10 seconds" in said[1] and "RuntimeError: boom" in said[2]        # each new problem once, in its own words
+    sorted_by_level = lambda level, word="Could not read": [r.getMessage() for r in caplog.records if r.levelno == level and word in r.getMessage()]
+    warned, told, quiet = sorted_by_level(logging.WARNING), sorted_by_level(logging.INFO), sorted_by_level(logging.DEBUG)
+    assert len(warned) == 1 and "503" in warned[0]                           # once, when the school starts failing
+    assert len(told) == 3 and "10 seconds" in told[0] and "RuntimeError: boom" in told[1] and "503" in told[2]      # each change of reason, at INFO
+    assert len(quiet) == 2                                                    # a reason said again, quietly
+    feed.down = None
+    clock.advance(600)
+    await service.refresh()
+    again = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "again" in r.getMessage()]
+    assert again == ["Football scores for Texas are being read from ESPN again"]       # the recovery, once
+    feed.down = ScheduleUnavailable("ESPN answered 503")                      # and a school that fails once more is a new transition: warned about again
+    clock.advance(600)
+    await service.refresh()
+    assert len(sorted_by_level(logging.WARNING)) == 2
 
 
 async def test_a_school_turned_on_is_read_at_the_loops_next_look_and_not_ten_minutes_later(central):

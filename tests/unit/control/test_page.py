@@ -1878,7 +1878,7 @@ def test_a_game_lost_on_the_road_reads_with_the_school_first_and_the_next_one_wi
         page.close()
 
 
-def test_the_strip_hides_when_its_data_goes_and_a_feed_that_fails_keeps_the_last_score_up(browser, central_time):
+def test_the_strip_keeps_the_last_score_through_a_feed_that_fails_or_has_nothing_to_say_and_goes_with_the_schools(browser, central_time):
     with PageServer(schedules=every_school()) as server:
         choose(server, sign_scores=["texas"])
         scoreboard_has(server, ["texas"])
@@ -1886,22 +1886,27 @@ def test_the_strip_hides_when_its_data_goes_and_a_feed_that_fails_keeps_the_last
         errors = []
         page.on("pageerror", lambda e: errors.append(str(e)))
         strip_is_up(page)
-        asked = len(server.feed.asked)
-        server.feed.down = ScheduleUnavailable("ESPN answered 503")          # the feed goes down: the scoreboard keeps what it has, and so does the strip
-        wait_for("failed reads", lambda: len(server.feed.asked) >= asked + 3)
+
+        def reads_after(change):
+            asked = len(server.feed.asked)
+            change()
+            wait_for("three more reads", lambda: len(server.feed.asked) >= asked + 3)
+
+        reads_after(lambda: setattr(server.feed, "down", ScheduleUnavailable("ESPN answered 503")))     # the feed goes down: the scoreboard keeps what it has ...
         assert status_of(server)["scores"][0]["last"]["home_score"] == 45
         poll(page)
-        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]    # ... and so does the strip
         server.feed.down = None
-        server.schedules[251] = {"events": []}                               # the feed answers, with no games in it: nothing to show
-        scoreboard_has(server, [])
+        reads_after(lambda: server.schedules.__setitem__(251, {"events": []}))                         # the feed answers, with no games in it: that is no news about Texas
         poll(page)
-        assert page.locator("#score").is_hidden() and fits(page)
-        server.schedules[251] = texas_sample()                               # and the data comes back
-        scoreboard_has(server, ["texas"])
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT] and fits(page)
+        changed = texas_sample()                                                                       # and a schedule with games in it is an answer again, with a new score
+        changed["events"][3]["competitions"][0]["competitors"][0]["score"] = {"value": 52.0, "displayValue": "52"}
+        server.schedules[251] = changed
+        wait_for("the new score", lambda: status_of(server)["scores"][0]["last"]["home_score"] == 52)
         poll(page)
-        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]
-        choose(server, sign_scores=[])                                       # every school off: the strip goes, and nothing is read after
+        assert strip_text(page) == ["Texas (#4) 52 \u2013 Texas A&M 42", TEXAS_NEXT]
+        choose(server, sign_scores=[])                                                                 # every school off: the strip goes, and nothing is read after
         poll(page)
         assert page.locator("#score").is_hidden() and "scores" not in status_of(server)
         asked = len(server.feed.asked)

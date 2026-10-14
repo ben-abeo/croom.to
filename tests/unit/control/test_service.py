@@ -740,6 +740,7 @@ class TestPage:
         client = await client_factory(make_service())
         for path, content_type in (
             ("/static/crystalpm-logo-white.svg", "image/svg+xml"),
+            ("/static/icons.svg", "image/svg+xml"),
             ("/static/fonts/lexend-400.woff2", "font/woff2"),
             ("/static/fonts/lexend-600.woff2", "font/woff2"),
             ("/static/fonts/OFL.txt", "text/plain"),

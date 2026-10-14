@@ -26,14 +26,23 @@
 
   // Icons: one sprite of Lucide symbols (icons.svg), fetched once and kept in the document, so <use href="#icon-..."> resolves
   // without a request per button. A page without the sprite keeps its labels (the fetch may fail offline).
-  const iconsReady = fetch("/static/icons.svg").then((r) => (r.ok ? r.text() : "")).then((svg) => {
-    if (!svg) return false;
+  const iconsReady = fetch("/static/icons.svg").then((r) => {
+    if (!r.ok) throw new Error("the server answered " + r.status);
+    return r.text();
+  }).then((svg) => {
+    if (!svg) throw new Error("the file is empty");
     const holder = document.createElement("div");
     holder.hidden = true;
     holder.innerHTML = svg;
     document.body.prepend(holder);
     return true;
-  }).catch(() => false);
+  }).catch((e) => {
+    console.warn("The icon sprite did not load, so the buttons show their words alone:", e);   // once: the page keeps working
+    return false;
+  }).then((ok) => {
+    document.body.classList.toggle("no-icons", !ok);   // style.css: no empty icon boxes, the words in the middle again, a glyph on the keyboard button
+    return ok;
+  });
   // The browser's own HTML parser makes the picture, so that no namespace address is written in this file (the service's
   // test of the page's files looks for any web address in them); the name goes in as an attribute, never as markup.
   function icon(name) {
@@ -44,14 +53,24 @@
     return svg;
   }
   // A button's content: its icon, if it has one, then its label. The icon is hidden from a screen reader: the label is the name
-  // (a button with an icon and no label, the keyboard toggle, is named by its aria-label).
+  // (a button with an icon and no label, the keyboard toggle, is named by its aria-label). What does not change is not replaced: a
+  // finger that went down on the icon or on the words must find them still there at the lift, or the browser drops the tap, and the
+  // speaker button is drawn again at every volume change, Save at every camera change. A new label or icon is changed in place.
   function labelWithIcon(node, label, name) {
-    node.replaceChildren();
-    if (name) node.append(icon(name));
-    if (!label) return;
-    const text = document.createElement("span");
-    text.textContent = label;
-    node.append(text);
+    let picture = null, words = null;
+    for (const child of Array.from(node.childNodes)) {
+      if (!picture && child.nodeType === 1 && child.matches("svg.icon")) picture = child;
+      else if (!words && child.nodeType === 1 && child.tagName === "SPAN") words = child;
+      else child.remove();   // the plain text the markup gave the button, or anything else that is not ours
+    }
+    if (name) {
+      if (!picture) { picture = icon(name); node.prepend(picture); }
+      else if (picture.querySelector("use").getAttribute("href") !== "#icon-" + name) picture.querySelector("use").setAttribute("href", "#icon-" + name);
+    } else if (picture) picture.remove();
+    if (label) {
+      if (!words) { words = document.createElement("span"); node.append(words); }
+      if (words.textContent !== label) words.textContent = label;
+    } else if (words) words.remove();
   }
 
   const view = () => document.body.dataset.view;

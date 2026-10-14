@@ -500,6 +500,47 @@ def test_the_speaker_icon_shows_the_state_and_its_label_the_action(browser):
         page.close()
 
 
+@pytest.mark.parametrize("button, redraw", [
+    ("#speaker-mute", "window.croomPage.model.status.audio.level += 5"),             # a volume change draws the speaker button again
+    ("#preset-save-mode", "window.croomPage.model.status.camera.zoom.level += 25"),  # a camera change draws Save again
+])
+def test_a_tap_is_not_lost_when_the_page_draws_the_button_again_with_the_same_words_and_icon(browser, button, redraw):
+    """The browser drops a tap whose finger went down on a part of the button (the icon, the words) that is gone at the lift. A button
+    the page draws again with nothing changed must keep its parts: the speaker button is drawn at every volume change, Save at every
+    camera change."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page) if button == "#speaker-mute" else open_camera_screen(page)
+        page.evaluate("window.croomPage.iconsReady")
+        page.evaluate("(s) => { window.__taps = 0; document.querySelector(s).addEventListener('click', () => { window.__taps += 1; }); }", button)
+        icon = page.locator(f"{button} svg.icon").bounding_box()
+        page.mouse.move(icon["x"] + icon["width"] / 2, icon["y"] + icon["height"] / 2)
+        page.mouse.down()                                                    # the finger lands on the picture
+        page.evaluate(f"() => {{ window.__icon = document.querySelector('{button} svg.icon'); {redraw}; window.croomPage.render(); }}")
+        assert page.evaluate(f"document.querySelector('{button} svg.icon') === window.__icon"), "the picture under the finger was replaced"
+        page.mouse.up()
+        page.wait_for_function(f"document.querySelector('{button}').getAttribute('aria-pressed') === 'true'", timeout=5000)   # the tap did its work
+        assert page.evaluate("window.__taps") == 1
+        page.close()
+
+
+def test_a_button_drawn_again_changes_only_what_changed(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.evaluate("window.croomPage.iconsReady")
+        seen = page.evaluate("""() => { const P = window.croomPage, b = P.button('Mute', 'quiet', () => {}, false, 'mic');
+            const parts = () => [b.querySelector('svg'), b.querySelector('span')], first = parts(), same = () => parts().map((p, i) => p === first[i]);
+            P.labelWithIcon(b, 'Mute', 'mic');                      const untouched = same(), text0 = b.textContent;
+            P.labelWithIcon(b, 'Unmute', 'mic');                    const words = [same(), b.textContent];     // only the words: the span stays, its text changes
+            P.labelWithIcon(b, 'Unmute', 'mic-off');                const picture = [same(), b.querySelector('use').getAttribute('href')];   // only the picture: the use stays, its href changes
+            P.labelWithIcon(b, '', 'mic-off');                      const alone = [b.querySelectorAll('span').length, b.querySelectorAll('svg').length];
+            P.labelWithIcon(b, 'Mute', '');                         const plain = [b.querySelectorAll('span').length, b.querySelectorAll('svg').length, b.textContent];
+            const raw = document.createElement('button'); raw.textContent = 'Options'; P.labelWithIcon(raw, 'Options', 'settings');   // the markup's own text is replaced, not kept beside
+            return [untouched, text0, words, picture, alone, plain, raw.textContent, raw.childNodes.length]; }""")
+        assert seen == [[True, True], "Mute", [[True, True], "Unmute"], [[True, True], "#icon-mic-off"], [0, 1], [1, 0, "Mute"], "Options", 2]
+        page.close()
+
+
 # Each icon showing, with its symbol, its size in ems, and the height of its button with it and for a moment without it.
 ICON_BOXES = """() => [...document.querySelectorAll('svg.icon')].filter(s => s.getClientRects().length).map(s => {
     const use = s.querySelector('use'), shapes = use.getBBox(), box = s.getBoundingClientRect(), b = s.closest('button');
@@ -522,6 +563,12 @@ def shown_icons(page):
     return [icon["name"] for icon in found]
 
 
+def assert_includes(shown, wanted):
+    """Every wanted symbol is showing, in this order, with room between them for others: Options and the meeting screen get more buttons on other branches."""
+    rest = iter(shown)
+    assert all(name in rest for name in wanted), f"{wanted} are not all showing, in this order, among {shown}"
+
+
 @pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1200), (390, 844)])
 def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_height(browser, width, height):
     def settled(page):
@@ -539,7 +586,7 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         assert shown_icons(page) == bar + ["#icon-keyboard", "#icon-video"]  # and the keyboard button and Join beside the link box
         settled(page)
         page.click("#open-options")
-        assert shown_icons(page) == bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-volume", "#icon-volume-x"]   # the last two are Key click on and off
+        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-volume", "#icon-volume-x"])   # the last two are Key click on and off
         settled(page)
         page.click("#open-camera-setup")
         assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-save"]
@@ -554,7 +601,7 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         page.click("#back-from-screensaver")
         page.click("#back-from-options")
         join_by_id(page)
-        assert shown_icons(page) == ["#icon-mic", "#icon-video", "#icon-phone-off", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-move", "#icon-calendar"]
+        assert_includes(shown_icons(page), ["#icon-mic", "#icon-video", "#icon-phone-off", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-move", "#icon-calendar"])
         settled(page)
         page.click("#open-camera-live")
         assert shown_icons(page) == ["#icon-back", "#icon-zoom-out", "#icon-zoom-in"]    # a meeting's camera screen has no Save or Set up
@@ -566,17 +613,20 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         page.close()
 
 
-def test_a_phones_top_bar_keeps_the_room_name_on_one_line(browser):
-    """The bar is already full at 390 px: an icon in Options would take 32 px from the name, and "Lab" would break as "La" and "b"."""
-    with PageServer() as server:
-        page = browser.new_page(viewport={"width": 390, "height": 844})
+@pytest.mark.parametrize("width, room", [(390, "Lab"), (600, "Conference Room Alpha"), (640, "Executive Boardroom East")])
+def test_a_narrow_top_bar_keeps_the_room_name_on_one_line_because_options_drops_its_icon(browser, width, room):
+    """The icon in Options takes 32 px from the name beside it. Up to 640 px the bar is too full for that: "Lab" would break as "La" and
+    "b" at 390, "Conference Room Alpha" takes two lines at 600 with the icon and one without. Options keeps to its word there."""
+    with PageServer(room_name=room) as server:
+        page = browser.new_page(viewport={"width": width, "height": 900})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.evaluate("window.croomPage.iconsReady")
         assert page.locator("#open-options svg.icon").is_hidden() and page.locator("#open-options").inner_text().strip() == "Options"
         assert page.locator("#room-name").bounding_box()["height"] < 30     # one line of the name
-        page.set_viewport_size({"width": 800, "height": 1280})              # a tablet standing up has the room: the icon is back
+        page.set_viewport_size({"width": 641, "height": 900})               # from 641 px the bar has the room: the icon is back, and the name still has its line
         assert page.locator("#open-options svg.icon").is_visible()
+        assert page.locator("#room-name").bounding_box()["height"] < 30
         page.close()
 
 
@@ -584,6 +634,8 @@ def test_the_icon_helpers_are_there_for_the_other_scripts(browser):
     with PageServer() as server:
         page = open_page(browser, server)
         assert page.evaluate("window.croomPage.iconsReady") is True
+        assert not page.evaluate("document.body.classList.contains('no-icons')")
+        assert page.evaluate("getComputedStyle(document.getElementById('keyboard-toggle'), '::after').content") != '"\u2328"'   # the picture is there: no glyph beside it
         made = page.evaluate("""() => { const P = window.croomPage, b = P.button('Raise hand', 'quiet', () => {}, false, 'hand');
             const bare = P.button('Bounce', 'quiet', () => {}, false);
             return [b.textContent, b.querySelector('svg.icon use').getAttribute('href'), b.querySelector('svg').getAttribute('aria-hidden'),
@@ -596,8 +648,9 @@ def test_the_icon_helpers_are_there_for_the_other_scripts(browser):
 def test_a_page_whose_icon_sprite_does_not_come_keeps_its_labels(browser, answer):
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
-        errors = []
+        errors, warnings = [], []
         page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
         page.route("**/static/icons.svg", (lambda route: route.abort()) if answer == "fails" else (lambda route: route.fulfill(status=404, body="no")))
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
@@ -605,8 +658,16 @@ def test_a_page_whose_icon_sprite_does_not_come_keeps_its_labels(browser, answer
         assert page.locator("#open-options").inner_text().strip() == "Options"
         assert page.locator("#link-form button[type=submit]").inner_text().strip() == "Join"
         assert page.get_by_role("button", name="Show keyboard", exact=True).count() == 1   # the keyboard button is its name alone, and is still there
+        assert len(warnings) == 1 and "icon" in warnings[0].lower(), warnings              # the page says once why it has no pictures
+        assert page.evaluate("getComputedStyle(document.getElementById('keyboard-toggle'), '::after').content") == '"\u2328"'   # the keyboard button has the glyph it had before the icons
         join_by_id(page)
         assert page.locator("#meeting-actions .button").all_inner_texts() == ["Mute", "Turn camera off", "Leave"]
+        assert page.evaluate("document.body.classList.contains('no-icons')")
+        assert page.evaluate("[...document.querySelectorAll('svg.icon')].filter(s => s.getClientRects().length).length") == 0, "an empty icon box still takes room"
+        for selector in ("#meeting-actions .button", "#link-form button[type=submit]"):    # the words sit in the middle of their buttons again
+            off = page.evaluate("""(s) => [...document.querySelectorAll(s)].map(b => { const w = b.querySelector('span').getBoundingClientRect(), r = b.getBoundingClientRect();
+                return Math.abs((w.left + w.right) / 2 - (r.left + r.right) / 2); })""", selector)
+            assert off and max(off) < 1.5, (selector, off)
         assert errors == []
         page.close()
 

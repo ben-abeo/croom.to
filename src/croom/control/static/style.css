@@ -173,6 +173,13 @@ body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the pa
 .button[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute (Save, on the camera screen) */
 .button .icon { width: 1.3em; height: 1.3em; flex: 0 0 auto; }
 .button.menu-item .icon { width: 1.6em; height: 1.6em; }
+.no-icons .icon { display: none; }   /* the sprite did not come (app.js): no empty boxes, and the words are in the middle of their buttons again */
+@media (max-width: 640px) {
+  /* The top bar is already full below this: the logo, the name, the clock and Options share one row, and the icon's 32 px would
+     squeeze the name ("Lab" breaks as "La" and "b" at 390 px; "Conference Room Alpha" takes two lines at 600 px). Options keeps to
+     its word there; every other button keeps its icon. */
+  .button.nav .icon { display: none; }
+}
 .button:hover { background: var(--blue-700); }
 .button.quiet { background: transparent; border-color: var(--periwinkle-300); color: inherit; }
 .button.quiet:hover { background: rgba(255, 255, 255, 0.08); }
@@ -223,7 +230,8 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
 /* The passcode field: a row of its own under the link box, its keyboard button and Join (a basis of the whole form cannot
    share a line with them). Shown only for a Zoom meeting whose link carries no passcode; hidden, it takes no room. */
 .link-form #passcode-input { flex: 1 1 100%; }
-.keyboard-toggle { padding: 0 16px; font-size: 1.4rem; line-height: 1; }
+.keyboard-toggle { padding: 0 16px; font-size: 1.4rem; line-height: 1; }   /* the font size sizes the icon (1.3em of it); with no sprite, the glyph below */
+.no-icons .keyboard-toggle::after { content: "\2328"; }   /* the glyph the button had before the icons */
 
 /* The page's own keyboard (spec 2026-10-13, section 3): iPad-style key caps on the room's tray colour, fixed to the bottom
    while open; the page gets room above it. A key is 52 px tall at the kiosk's scale, 44 px on a phone. */
@@ -336,9 +344,4 @@ body.keyboard-open .schedule { display: none; }
   .top:has(.next-warning:not([hidden])) { flex-wrap: wrap; row-gap: 12px; }
   .top:has(.next-warning:not([hidden])) .top-right { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
   .top:has(.next-warning:not([hidden])) .next-warning { flex: 1 1 100%; }
-}
-@media (max-width: 480px) {
-  /* A phone's top bar is already full: the logo, the name, the clock and Options share one row, and the icon's 32 px would squeeze
-     the name to a letter a line. Options keeps to its word there; every other button keeps its icon. */
-  .button.nav .icon { display: none; }
 }

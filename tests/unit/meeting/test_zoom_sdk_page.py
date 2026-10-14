@@ -155,3 +155,51 @@ async def test_used_join_token_is_reported():
         await run.page.goto(run.site.url() + "#" + token, wait_until="load")  # the same token again
         await run.wait_for("error")
         assert "join parameters expired" in [d for s, d in run.events if s == "error"][0]
+
+
+CLIENT_LABELS = STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'client';"   # the way Zoom's web client names its buttons
+
+
+async def test_the_bridge_reads_mute_and_video_from_zoom():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true; window.ZoomMtg._behaviour.videoOffOnEntry = true;") as run:
+        await run.wait_for("connected")
+        state = await run.page.evaluate("window.crystalMeet.readState()")
+        assert state["muted"] is True and state["videoOn"] is False
+        assert state["isHost"] is False and state["raisedHand"] is False
+        assert "bVideoOn" in state["keys"]                      # the raw field names, for the diagnostics
+
+
+async def test_the_video_button_is_found_by_what_it_is_not_by_one_label():
+    """Zoom's web client says "start my video" in the accessibility name and "Start Video" on the button; the old
+    exact match found neither, so the camera could never be turned on (the fault seen in the test meeting)."""
+    async with PageRun(stub=CLIENT_LABELS) as run:
+        await run.wait_for("connected")
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": True, "label": "stop my video"}
+        assert await run.page.evaluate("window.crystalMeet.setVideo(false)") is False
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": False, "label": "start my video"}
+        assert await run.page.evaluate("window.crystalMeet.setVideo(false)") is False   # already off: no press
+        assert await run.page.evaluate("window.__videoClicks") == 1
+        assert await run.page.evaluate("window.crystalMeet.setVideo(true)") is True
+        assert await run.page.evaluate("window.__videoClicks") == 2
+
+
+async def test_without_a_toolbar_the_video_is_unknown_and_a_press_says_so():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        await run.wait_for("connected")
+        assert await run.page.evaluate("window.crystalMeet.video()") == {"on": None, "label": None}
+        with pytest.raises(Exception) as failure:
+            await run.page.evaluate("window.crystalMeet.setVideo(true)")
+        assert "camera button" in str(failure.value)
+
+
+async def test_a_change_the_host_makes_reaches_the_device_as_a_state_event():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.ZoomMtg._setMuted(true)")
+        await run.wait_for("state")
+        detail = next(d for s, d in run.events if s == "state")
+        assert '"muted": true' in detail.replace('":', '": ')
+        assert sum(1 for s, _ in run.events if s == "state") == 1       # only the change is reported, not every event
+        await run.page.evaluate("window.ZoomMtg._fire('onUserUpdate', {userId: 1})")   # someone else's change
+        await asyncio.sleep(0.3)
+        assert sum(1 for s, _ in run.events if s == "state") == 1

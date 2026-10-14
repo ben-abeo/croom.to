@@ -12,7 +12,7 @@ import pytest
 playwright = pytest.importorskip("playwright.async_api")
 
 from croom.core.config import Config  # noqa: E402
-from croom.meeting.providers.base import MeetingState  # noqa: E402
+from croom.meeting.providers.base import MeetingControlError, MeetingState  # noqa: E402
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED, ZoomSdkProvider  # noqa: E402
 from croom.meeting.zoom_auth import ZoomAuthError, ZoomCredentials  # noqa: E402
 from tests.unit.meeting.zoom_stub import STUB_JS  # noqa: E402
@@ -247,14 +247,74 @@ class TestReviewFixes:
         finally:
             await shutdown(provider)
 
-    async def test_entry_state_is_read_from_zoom_not_assumed(self):
+    async def test_the_wanted_mic_and_camera_are_applied_at_join_in_both_directions(self):
+        """A meeting that starts the room muted with video off (the host's settings) gets the room's wanted state:
+        the fault seen in the test meeting, where the room joined muted and dark and the table said otherwise."""
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true; window.ZoomMtg._behaviour.videoOffOnEntry = true;")
         try:
             info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
-            assert info.is_muted is True and info.is_camera_on is False
-            assert await provider.toggle_camera() is True
+            assert info.is_muted is False and info.is_camera_on is True
             assert await provider._page.get_attribute("#stub-video", "aria-label") == "Stop Video"
-            assert await provider.toggle_mute() is False
+            assert [c["mute"] for c in await provider._page.evaluate("window.__zoomCalls.filter(c => c[0] === 'mute').map(c => c[1])")] == [False]
+        finally:
+            await shutdown(provider)
+
+    async def test_entry_state_is_read_from_zoom_not_assumed(self):
+        """When Zoom will not turn the video on, the status says off: what Zoom has, never what the room wanted."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.videoOffOnEntry = true; window.ZoomMtg._behaviour.videoStuckOff = true;")
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
+            assert info.is_camera_on is False
+            assert await provider._page.evaluate("window.__videoClicks") == 1
+        finally:
+            await shutdown(provider)
+
+    async def test_zooms_own_button_labels_work_for_the_camera(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'client'; window.ZoomMtg._behaviour.videoOffOnEntry = true;")
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True)
+            assert info.is_camera_on is True
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "stop my video"
+            assert await provider.toggle_camera() is False
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "start my video"
+        finally:
+            await shutdown(provider)
+
+    async def test_the_host_muting_the_room_shows_on_the_status(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            assert provider.current_meeting.is_muted is False
+            await provider._page.evaluate("window.ZoomMtg._setMuted(true)")
+            for _ in range(40):
+                if provider.current_meeting.is_muted:
+                    break
+                await asyncio.sleep(0.05)
+            assert provider.current_meeting.is_muted is True and provider.state == MeetingState.CONNECTED
+            assert await provider.toggle_mute() is False                  # the next tap unmutes: the table and Zoom agree
+        finally:
+            await shutdown(provider)
+
+    async def test_a_camera_press_without_a_toolbar_says_so_and_keeps_the_meeting(self):
+        """No button to press: the state is what Zoom's record says, the press fails in words, the meeting goes on."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true; window.ZoomMtg._behaviour.videoOffOnEntry = true;")
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True)
+            assert provider.state == MeetingState.CONNECTED and info.is_camera_on is False
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.toggle_camera()
+            assert "camera button" in str(failure.value)
+            assert provider.state == MeetingState.CONNECTED and info.is_camera_on is False
+        finally:
+            await shutdown(provider)
+
+    async def test_diagnostics_name_zooms_fields_and_buttons(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'client';")
+        try:
+            await provider.join_meeting(LINK)
+            data = await provider.diagnostics()
+            assert "bVideoOn" in data["user_keys"] and data["state"]["muted"] is False
+            assert {"label": "stop my video", "text": "Stop Video"} in data["buttons"]
         finally:
             await shutdown(provider)
 
@@ -458,8 +518,8 @@ class WordsPage:
         self.words, self.toolbar = words, toolbar
 
     async def evaluate(self, script, *args):
-        if args:                                                        # _camera_is_on asks for the video button by its selector
-            return "Stop Video" if self.toolbar else None
+        if "crystalMeet.video" in script:                               # the bridge's reading of the client's video button
+            return {"on": True, "label": "Stop Video"} if self.toolbar else {"on": None, "label": None}
         return self.words
 
 

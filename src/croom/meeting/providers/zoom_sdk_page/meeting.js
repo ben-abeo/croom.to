@@ -52,12 +52,92 @@
     });
   };
 
+  // ---- State as Zoom has it: the current user's record and the client's own buttons ----
+  const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined) return obj[n]; } return undefined; };
+  function currentUser() {
+    return new Promise((resolve) => {
+      ZoomMtg.getCurrentUser({
+        success: (result) => resolve((result && result.result && result.result.currentUser) || null),
+        error: () => resolve(null),
+      });
+    });
+  }
+  // Zoom's web client names the video button "start my video" / "stop my video"; other builds say "Start Video".
+  // Any button whose name or text speaks of video and of starting or stopping is the one.
+  function videoButton() {
+    for (const b of document.querySelectorAll("button")) {
+      const name = ((b.getAttribute("aria-label") || "") + " " + (b.textContent || "")).toLowerCase();
+      if (name.includes("video") && (name.includes("start") || name.includes("stop"))) return b;
+    }
+    return null;
+  }
+  bridge.video = function () {
+    const b = videoButton();
+    if (!b) return { on: null, label: null };
+    const label = (b.getAttribute("aria-label") || b.textContent || "").trim();
+    return { on: label.toLowerCase().includes("stop"), label: label };
+  };
+  // Press the button only when Zoom's state differs from the wanted one; settle on what the button says afterwards.
+  bridge.setVideo = function (on) {
+    return new Promise((resolve, reject) => {
+      const before = bridge.video();
+      if (before.on === null) { reject(new Error("Zoom's camera button is not on the screen yet; try again in a moment")); return; }
+      if (before.on === !!on) { resolve(before.on); return; }
+      videoButton().click();
+      let tries = 0;
+      const settle = () => {
+        const now = bridge.video();
+        if (now.on === !!on || tries++ >= 20) { resolve(now.on === null ? before.on : now.on); return; }
+        setTimeout(settle, 100);
+      };
+      setTimeout(settle, 100);
+    });
+  };
+  bridge.readState = async function () {
+    const user = await currentUser();
+    const video = bridge.video();
+    const muted = pick(user, ["muted", "bMuted", "isMuted"]);
+    const videoOn = video.on !== null ? video.on : pick(user, ["bVideoOn", "videoOn", "isVideoOn"]);
+    if (muted !== undefined) bridge.muted = !!muted;
+    return {
+      muted: muted === undefined ? bridge.muted : !!muted,
+      videoOn: videoOn === undefined ? null : !!videoOn,
+      isHost: !!pick(user, ["isHost", "bHost"]),
+      isCoHost: !!pick(user, ["isCoHost", "isCohost", "bCoHost"]),
+      raisedHand: !!pick(user, ["bRaiseHand", "raiseHand", "isHandRaised", "bHandRaised"]),
+      keys: user ? Object.keys(user) : [],
+    };
+  };
+  // What the page sees, for pinning Zoom's real field names and button wording from a device.
+  bridge.diagnostics = async function () {
+    const state = await bridge.readState();
+    const buttons = Array.from(document.querySelectorAll("button")).map((b) => ({
+      label: (b.getAttribute("aria-label") || "").trim(), text: (b.textContent || "").trim().slice(0, 40),
+    })).filter((b) => b.label || b.text);
+    return { user_keys: state.keys, state: state, buttons: buttons, page: document.title };
+  };
+  // A change Zoom makes (the host muting the room, video stopped by the host) reaches the device as a "state" event:
+  // read on every participant update and every five seconds, reported only when something about this room changed.
+  let lastSeen = null;
+  async function syncState() {
+    if (bridge.state !== "connected") return;
+    const now = await bridge.readState();
+    const key = JSON.stringify([now.muted, now.videoOn, now.isHost, now.isCoHost, now.raisedHand]);
+    if (key === lastSeen) return;
+    const first = lastSeen === null;
+    lastSeen = key;
+    if (!first && typeof window.crystalMeetEvent === "function") {
+      try { window.crystalMeetEvent("state", JSON.stringify(now)); } catch (e) { /* the device is not listening */ }
+    }
+  }
+
   // Connected is reported once the current user is known, so mute works right away.
   function connected(params) {
     if (bridge.state === "connected") return;
     const finish = () => {
       report("connected", "");
       if (params.micOn === false && bridge.userId !== null) bridge.mute(true).catch(() => {});
+      syncState().then(() => setInterval(syncState, 5000));
     };
     ZoomMtg.getCurrentUser({
       success: (result) => {
@@ -97,6 +177,7 @@
       report(state, "");
     });
     ZoomMtg.inMeetingServiceListener("onUserIsInWaitingRoom", () => report("waiting", "Waiting for the host to let the room in"));
+    ZoomMtg.inMeetingServiceListener("onUserUpdate", () => { syncState(); });
     report("joining", "");
     ZoomMtg.init({
       leaveUrl: "/left",

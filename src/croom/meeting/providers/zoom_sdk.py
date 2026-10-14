@@ -7,6 +7,7 @@ hosted by other Zoom accounts can be joined too.
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -14,7 +15,7 @@ from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, urlparse
 
 from croom.core.config import Config
-from croom.meeting.providers.base import MeetingInfo, MeetingProvider, MeetingState
+from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingProvider, MeetingState
 from croom.meeting.providers.zoom import ZoomProvider
 from croom.meeting.providers.zoom_sdk_site import SDK_VERSION, ZoomSdkSite
 from croom.meeting.zoom_auth import (
@@ -42,8 +43,6 @@ class ZoomSdkProvider(MeetingProvider):
     LOBBY_TIMEOUT_S = 300
     LEAVE_TIMEOUT_S = 5
     CLOSE_TIMEOUT_S = 5
-    BUTTON_TIMEOUT_MS = 3000
-    VIDEO_BUTTON = '[aria-label*="Start Video" i], [aria-label*="Stop Video" i]'
 
     def __init__(self, credentials: ZoomCredentials, room_name: str = "Conference Room",
                  api: Optional[ZoomApi] = None, display=None,
@@ -201,8 +200,7 @@ class ZoomSdkProvider(MeetingProvider):
             await self._page.goto(self._site.url("/meeting") + "#" + token, wait_until="load")
             await self._wait_for_connection()
             await self._read_state_from_zoom()
-            if not camera_on and self._camera_on:
-                await self._press_video_button_quietly()
+            await self._apply_wanted_state(camera_on, mic_on)
             self._current_meeting.is_muted = self._muted
             self._current_meeting.is_camera_on = self._camera_on
             self._watcher = asyncio.create_task(self._watch_meeting())
@@ -228,7 +226,7 @@ class ZoomSdkProvider(MeetingProvider):
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                if await self._camera_is_on() is not None:
+                if await self._toolbar_up():
                     logger.warning("Zoom reported no status, but its meeting controls are on screen; treating the join as connected")
                     return
                 # Zoom may refuse a passcode with a dialog of its own ("Join parameters: password are invalid!") and no
@@ -272,6 +270,12 @@ class ZoomSdkProvider(MeetingProvider):
         """After connecting: the host ending the meeting, or the SDK reporting an error, returns the room to idle."""
         while True:
             state, detail = await self._events.get()
+            if state == "state":   # a change Zoom made: the host muting the room, video stopped
+                try:
+                    self._take_state(json.loads(detail))
+                except ValueError:
+                    logger.debug(f"Unreadable state event from the page: {detail!r}")
+                continue
             if state == "left":
                 logger.info("Zoom meeting ended")
                 await self._blank_page()
@@ -287,6 +291,14 @@ class ZoomSdkProvider(MeetingProvider):
                 self._set_state(MeetingState.ERROR)
                 return
 
+    async def _toolbar_up(self) -> bool:
+        """Whether the client's own video button is on the screen: the surest sign of a meeting in progress."""
+        try:
+            video = await self._page.evaluate("() => window.crystalMeet.video()")
+        except Exception:  # noqa: BLE001
+            return False
+        return isinstance(video, dict) and video.get("on") is not None
+
     async def _page_words(self) -> str:
         try:
             return await self._page.evaluate("() => document.body.innerText.replace(/\\s+/g, ' ').trim().slice(0, 240)")
@@ -298,33 +310,59 @@ class ZoomSdkProvider(MeetingProvider):
     # ------------------------------------------------------------------
 
     async def _read_state_from_zoom(self) -> None:
-        """Mute and camera as Zoom has them after joining: meetings often start muted or with video off."""
+        """Mute and camera as Zoom has them: the current user's record and the client's own video button. Meetings
+        often start the room muted or with video off, and the host can change either at any time."""
         try:
-            self._muted = bool(await self._page.evaluate("() => !!(window.crystalMeet && window.crystalMeet.muted)"))
-        except Exception:  # noqa: BLE001
-            pass
-        camera = await self._camera_is_on()
-        if camera is not None:
-            self._camera_on = camera
+            state = await self._page.evaluate("() => window.crystalMeet.readState()")
+        except Exception as e:  # noqa: BLE001
+            logger.debug(f"Could not read the meeting state from the page: {e}")
+            return
+        self._take_state(state)
 
-    async def _camera_is_on(self) -> Optional[bool]:
-        """From the Client View's toolbar: 'Stop Video' means on, 'Start Video' means off; None when the button is absent."""
+    def _take_state(self, state: Any) -> None:
+        if not isinstance(state, dict):
+            return
+        if isinstance(state.get("muted"), bool):
+            self._muted = state["muted"]
+        if isinstance(state.get("videoOn"), bool):
+            self._camera_on = state["videoOn"]
+        if self._current_meeting is not None:
+            self._current_meeting.is_muted = self._muted
+            self._current_meeting.is_camera_on = self._camera_on
+
+    async def _apply_wanted_state(self, camera_on: bool, mic_on: bool) -> None:
+        """The room's own defaults, in both directions: a meeting may start the room muted or dark (the host's
+        settings), or with the camera on when the room wants it off. What Zoom has afterwards is what counts."""
+        if self._muted == mic_on:   # muted with the mic wanted on, or live with it wanted off
+            try:
+                await self._page.evaluate("(muted) => window.crystalMeet.mute(muted)", not mic_on)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Could not set the microphone at join: {e}")
+        if self._camera_on != camera_on:
+            try:
+                await self._set_video(camera_on)
+            except Exception as e:  # noqa: BLE001
+                logger.warning(f"Could not set the camera at join: {e}")
+        await self._read_state_from_zoom()
+
+    async def _set_video(self, on: bool) -> bool:
+        """Press the client's video button when Zoom's state differs; the page says when the button is not there."""
         try:
-            label = await self._page.evaluate(
-                "(selector) => { const b = document.querySelector(selector); "
-                "return b ? (b.getAttribute('aria-label') || b.textContent || '') : null; }",
-                self.VIDEO_BUTTON,
-            )
-        except Exception:  # noqa: BLE001
-            return None
-        if label is None:
-            return None
-        text = str(label).lower()
-        if "stop video" in text:
-            return True
-        if "start video" in text:
-            return False
-        return None
+            result = await self._page.evaluate("(on) => window.crystalMeet.setVideo(on)", on)
+        except Exception as e:  # noqa: BLE001
+            text = str(e).splitlines()[0] if str(e) else type(e).__name__
+            if "camera button" in text:
+                raise MeetingControlError("Zoom's camera button is not on the screen yet; try again in a moment") from e
+            raise MeetingControlError(f"Could not switch the camera: {text}") from e
+        return bool(result)
+
+    async def diagnostics(self) -> Dict[str, Any]:
+        """What the page sees: Zoom's field names and the client's buttons, for pinning the real wording."""
+        self._require_meeting()
+        try:
+            return await self._page.evaluate("() => window.crystalMeet.diagnostics()")
+        except Exception as e:  # noqa: BLE001
+            raise MeetingControlError(f"Could not read the meeting page: {str(e).splitlines()[0]}") from e
 
     # ------------------------------------------------------------------
     # Controls
@@ -353,7 +391,11 @@ class ZoomSdkProvider(MeetingProvider):
 
     async def toggle_mute(self) -> bool:
         self._require_meeting()
-        muted = await self._page.evaluate("(muted) => window.crystalMeet.mute(muted)", not self._muted)
+        await self._read_state_from_zoom()   # the host may have muted the room since the last look
+        try:
+            muted = await self._page.evaluate("(muted) => window.crystalMeet.mute(muted)", not self._muted)
+        except Exception as e:  # noqa: BLE001
+            raise MeetingControlError(f"Could not change the microphone: {str(e).splitlines()[0]}") from e
         self._muted = bool(muted)
         if self._current_meeting:
             self._current_meeting.is_muted = self._muted
@@ -361,26 +403,8 @@ class ZoomSdkProvider(MeetingProvider):
 
     async def toggle_camera(self) -> bool:
         self._require_meeting()
-        await self._press_video_button()
-        camera = await self._camera_is_on()
-        self._camera_on = (not self._camera_on) if camera is None else camera
+        await self._read_state_from_zoom()
+        self._camera_on = await self._set_video(not self._camera_on)
         if self._current_meeting:
             self._current_meeting.is_camera_on = self._camera_on
         return self._camera_on
-
-    async def _press_video_button(self) -> None:
-        """The SDK has no own-video call; press the Client View's toolbar button."""
-        button = await self._page.query_selector(self.VIDEO_BUTTON)
-        if button is None:
-            raise RuntimeError("Zoom's video button was not found")
-        await button.click(timeout=self.BUTTON_TIMEOUT_MS)
-
-    async def _press_video_button_quietly(self) -> None:
-        """At join time a missing or slow toolbar must not fail a connected meeting."""
-        try:
-            await self._press_video_button()
-        except Exception as e:  # noqa: BLE001
-            logger.warning(f"Could not set the camera at join: {e}")
-        camera = await self._camera_is_on()
-        if camera is not None:
-            self._camera_on = camera

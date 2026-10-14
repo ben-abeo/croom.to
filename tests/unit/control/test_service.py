@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.core.config import Config
 from croom.core.service import Service
-from croom.meeting.providers.base import MeetingInfo, MeetingState, detect_platform
+from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, detect_platform
 from croom.control.service import ControlService
 
 
@@ -89,10 +89,15 @@ class StubMeeting:
         return self.muted
 
     async def toggle_camera(self):
+        if getattr(self, "fail_camera", None) is not None:
+            raise self.fail_camera
         self.camera_on = not self.camera_on
         if self.current_meeting:
             self.current_meeting.is_camera_on = self.camera_on
         return self.camera_on
+
+    async def diagnostics(self):
+        return {"user_keys": ["userId", "muted"], "buttons": [], "state": {"muted": self.muted}}
 
 
 class StubCalendar:
@@ -612,6 +617,28 @@ class TestLeaveMuteCamera:
         assert data["meeting"]["muted"] is True
         assert data["meeting"]["camera_on"] is False
         assert await (await client.post("/api/meeting/mute", json={})).json() == {"muted": False}
+
+    async def test_a_camera_fault_answers_with_its_words_not_a_500(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_camera = MeetingControlError("Zoom's camera button is not on the screen yet; try again in a moment")
+        resp = await client.post("/api/meeting/camera", json={})
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Zoom's camera button is not on the screen yet; try again in a moment"
+        meeting.fail_camera = RuntimeError("Target page, context or browser has been closed")
+        resp = await client.post("/api/meeting/camera", json={})
+        assert resp.status == 409 and "camera" in (await resp.json())["error"]
+
+    async def test_meeting_diagnostics_are_served_in_a_meeting(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.get("/api/meeting/diagnostics")).status == 409
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        resp = await client.get("/api/meeting/diagnostics")
+        assert resp.status == 200 and (await resp.json())["user_keys"] == ["userId", "muted"]
 
     async def test_without_meeting_service_controls_are_unavailable(self, client_factory):
         client = await client_factory(make_service())

@@ -20,7 +20,7 @@ from croom.control.settings import SettingsStore
 from croom.core.config import Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
-from croom.meeting.providers.base import MeetingState
+from croom.meeting.providers.base import MeetingControlError, MeetingState
 
 logger = logging.getLogger(__name__)
 
@@ -194,6 +194,7 @@ class ControlService(Service):
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
         app.router.add_post("/api/meeting/camera", self._handle_camera)
+        app.router.add_get("/api/meeting/diagnostics", self._handle_diagnostics)
         app.router.add_get("/api/screensaver", self._handle_screensaver)
         app.router.add_post("/api/screensaver", self._handle_set_screensaver)
         app.router.add_get("/api/audio/volume", self._handle_volume)
@@ -706,7 +707,13 @@ class ControlService(Service):
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
-        muted = await self._meeting.toggle_mute()
+        try:
+            muted = await self._meeting.toggle_mute()
+        except MeetingControlError as e:
+            return self._error_response(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            logger.warning(f"Could not change the microphone: {e}")
+            return self._error_response(f"Could not change the microphone: {e}", 409)
         return web.json_response({"muted": bool(muted)})
 
     async def _handle_camera(self, request: web.Request) -> web.Response:
@@ -717,5 +724,22 @@ class ControlService(Service):
             return self._error_response("Meeting service not available", 503)
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
-        camera_on = await self._meeting.toggle_camera()
+        try:
+            camera_on = await self._meeting.toggle_camera()
+        except MeetingControlError as e:
+            return self._error_response(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            logger.warning(f"Could not switch the camera: {e}")
+            return self._error_response(f"Could not switch the camera: {e}", 409)
         return web.json_response({"camera_on": bool(camera_on)})
+
+    async def _handle_diagnostics(self, request: web.Request) -> web.Response:
+        """What the meeting page sees (Zoom's field names, the client's buttons): for pinning real wording from a device."""
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        if self._meeting_state() != "connected":
+            return self._error_response("Not in a meeting", 409)
+        try:
+            return web.json_response(await self._meeting.diagnostics())
+        except MeetingControlError as e:
+            return self._error_response(str(e), 409)

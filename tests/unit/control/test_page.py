@@ -2829,6 +2829,25 @@ def test_a_leave_waiting_for_its_second_tap_does_not_outlive_the_call(browser):
         page.close()
 
 
+def test_a_camera_fault_shows_its_words_on_the_meeting_screen(browser):
+    """The test meeting's "error 500": a control Zoom cannot carry out answers in words, and the table shows them."""
+    from croom.meeting.providers.base import MeetingControlError
+    with PageServer() as server:
+        meeting = server.meeting
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        join_by_id(page)
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        meeting.fail_camera = MeetingControlError("Zoom's camera button is not on the screen yet; try again in a moment")
+        page.locator("#meeting-actions button", has_text="camera").click()
+        page.wait_for_function("document.getElementById('meeting-message').textContent.includes('camera button')", timeout=5000)
+        assert page.locator("#meeting-actions button", has_text="camera").inner_text() == "Turn camera off"   # Zoom's state, unchanged
+        meeting.fail_camera = None
+        page.locator("#meeting-actions button", has_text="camera").click()
+        page.wait_for_function("document.getElementById('meeting-message').textContent === ''", timeout=5000)
+        page.close()
+
+
 TWELVE_HOUR = r"^\d{1,2}:\d{2}\u00a0[AP]M$"   # the no-break space is the pin: a time never splits across lines on the sign or the TV
 AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
 

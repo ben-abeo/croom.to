@@ -128,6 +128,16 @@ class DisplayConfig:
 
 
 @dataclass
+class TvConfig:
+    """The room's LG webOS TV (spec 2026-10-13 TV remote)."""
+    enabled: bool = False
+    host: str = ""          # the TV's address; Find TVs on the table fills it
+    mac: str = ""           # for Wake-on-LAN (Mobile TV On must be enabled on the TV)
+    pi_input: str = "HDMI_1"   # the input the room Pi is on
+    keep_on: bool = True    # wake the TV at start, before a join, and after an unexpected off
+
+
+@dataclass
 class DashboardConfig:
     """Management dashboard connection configuration."""
     enabled: bool = True
@@ -175,6 +185,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     video: VideoConfig = field(default_factory=VideoConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
+    tv: TvConfig = field(default_factory=TvConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
@@ -220,6 +231,9 @@ class Config:
 
         if "display" in data:
             config.display = DisplayConfig(**data["display"])
+
+        if "tv" in data:
+            config.tv = TvConfig(**data["tv"])
 
         if "dashboard" in data:
             config.dashboard = DashboardConfig(**data["dashboard"])
@@ -293,6 +307,13 @@ class Config:
                 "power_on_boot": self.display.power_on_boot,
                 "power_off_shutdown": self.display.power_off_shutdown,
                 "touch_enabled": self.display.touch_enabled,
+            },
+            "tv": {
+                "enabled": self.tv.enabled,
+                "host": self.tv.host,
+                "mac": self.tv.mac,
+                "pi_input": self.tv.pi_input,
+                "keep_on": self.tv.keep_on,
             },
             "dashboard": {
                 "enabled": self.dashboard.enabled,

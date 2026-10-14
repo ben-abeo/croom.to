@@ -18,6 +18,7 @@ from croom.core.config import (
     AudioConfig,
     VideoConfig,
     DisplayConfig,
+    TvConfig,
     DashboardConfig,
     UpdateConfig,
     SecurityConfig,
@@ -340,6 +341,23 @@ class TestRoomDeviceConfig:
         assert again.audio.output_device == "HDMI"
         assert again.video.device == "/dev/video2" and again.video.ptz_travel_seconds == 6.5
         assert again.control.camera_presets == ["Room", "Desk", "Board"]
+
+
+class TestTvConfig:
+    """The tv section configures the room's LG webOS TV (spec 2026-10-13 TV remote and touchpad, section 6)."""
+
+    def test_defaults(self):
+        config = Config()
+        assert config.tv.enabled is False
+        assert config.tv.host == "" and config.tv.mac == ""
+        assert config.tv.pi_input == "HDMI_1" and config.tv.keep_on is True
+
+    def test_round_trips_through_dict(self):
+        tv = {"enabled": True, "host": "10.0.0.41", "mac": "aa:bb", "pi_input": "HDMI_2", "keep_on": False}
+        config = Config.from_dict({"tv": tv})
+        assert config.tv == TvConfig(**tv)
+        assert config.to_dict()["tv"] == tv
+        assert Config.from_dict(config.to_dict()).tv == config.tv
 
 
 class TestRoomLocationPlaceholder:

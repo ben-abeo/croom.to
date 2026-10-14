@@ -45,6 +45,8 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     "google-auth>=2.23.0",
     "google-auth-httplib2>=0.1.1",
+    "aiowebostv>=0.9",
+    "wakeonlan>=3.0",
 ]
 
 [project.optional-dependencies]

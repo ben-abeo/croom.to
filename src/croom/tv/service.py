@@ -149,10 +149,25 @@ def _first(obj: Any, *names: str) -> Any:
 def _name_of(tv_info: Any) -> str:
     """What to call the TV: the name it gives itself, else its model. The library's WebOsTvInfo keeps the TV's hello
     and system info as `hello` and `system`; the test fake calls them `hello_info` and `system_info`. The TV chooses its name, and
-    it is shown on the table and printed on a terminal: one printable line (names.one_line)."""
+    it is shown on the table and printed on a terminal: one printable line (names.one_line), and a name with nothing printable
+    in it is no name: the model stands in."""
     hello = _first(tv_info, "hello_info", "hello") or {}
     system = _first(tv_info, "system_info", "system") or {}
-    return one_line(hello.get("deviceName") or system.get("modelName"))
+    return one_line(hello.get("deviceName")) or one_line(system.get("modelName"))
+
+
+def _line(value: Any) -> Any:
+    """What the TV calls one of its things (an input, the app on its screen, a channel), when it is words: one printable line,
+    as its name is. It reaches the table's page and a terminal, and is the TV's to choose. Anything else (nothing, a number)
+    stays what it is: only words are tidied. `<` and `&` stay too: the page shows these as text."""
+    return one_line(value) if isinstance(value, str) else value
+
+
+def _listed(key: str, item: Dict[str, Any]) -> Dict[str, str]:
+    """An input of the TV's list as the table shows it: its id, and the label the TV gives it (the id, when the label is
+    nothing worth showing), each on one line. The id is the one `input` and the list agree on: the same rule is applied to both."""
+    ident = _line(item.get("id", key))
+    return {"id": ident, "label": _line(item.get("label")) or ident}
 
 
 class TvService(Service):
@@ -212,13 +227,16 @@ class TvService(Service):
 
     def status(self) -> Dict[str, Any]:
         """What the room page draws from (spec section 6). Reachable is asked now, not as of the last try: a
-        connection that has just closed is not reachable, and a TV that cannot be reached is not known to be on."""
+        connection that has just closed is not reachable, and a TV that cannot be reached is not known to be on. Refused
+        says that the TV declined the key it was paired with, which the person puts right (Forget TV, then Pair) and
+        which a TV that is only off or away is not: the page tells the two apart by it. (Read it with `paired`: it
+        stays set after Forget TV, until the next pairing or start.)"""
         shown = dict(self._shown)
         shown["inputs"] = list(shown["inputs"])
         shown["reachable"] = self._answering()
         shown["on"] = shown["on"] and shown["reachable"]
         return dict(configured=self.configured, paired=self._keys.read() is not None, keep_on=self._config.keep_on,
-                    held_off=self._held_off, **shown)
+                    held_off=self._held_off, refused=self._refused, **shown)
 
     async def start(self) -> None:
         self._started = True
@@ -503,10 +521,10 @@ class TvService(Service):
         elif field == "muted" and isinstance(answer, bool):
             self._shown["muted"] = answer
         elif field == "app" and isinstance(answer, str) and answer:
-            self._shown["app"] = answer
-            self._shown["input"] = _input_of(client.tv_state, answer)
+            self._shown["app"] = _line(answer)
+            self._shown["input"] = _line(_input_of(client.tv_state, answer))
         elif field == "channel" and isinstance(answer, dict) and answer.get("channelNumber"):
-            self._shown["channel"] = answer["channelNumber"]
+            self._shown["channel"] = _line(answer["channelNumber"])
         elif field == "power":
             on = _power_says_on(answer)
             if on is not None:
@@ -941,8 +959,8 @@ class TvService(Service):
             on=bool(is_on) if is_on is not None else power.get("state") == "Active",
             volume=getattr(tv_state, "volume", None),
             muted=bool(getattr(tv_state, "muted", None)),
-            input=current_input,
-            inputs=[{"id": item.get("id", key), "label": item.get("label") or item.get("id", key)} for key, item in known.items()],
-            app=app,
-            channel=channel,
+            input=_line(current_input),
+            inputs=[_listed(key, item) for key, item in known.items()],
+            app=_line(app),
+            channel=_line(channel),
         )

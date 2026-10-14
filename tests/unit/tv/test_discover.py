@@ -133,11 +133,22 @@ async def test_the_header_names_may_be_in_any_case_and_the_target_too():
     + b"\r\nLOCATION: " + LG_LOCATION.encode() + b"\r\n\r\n",
     b"NOTIFY * HTTP/1.1\r\nST: " + SEARCH_TARGET.encode() + b"\r\nLOCATION: " + LG_LOCATION.encode() + b"\r\n\r\n",
     ssdp_answer(LG_LOCATION).replace(b"200 OK", b"404 Not Found"), ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK\r\n", b""),
+    ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK", b"HTTP/1.0 404 Not Found"),           # (an error is an error in any 1.x)
+    ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK", b"HTTP/2 200 OK"),                    # and SSDP speaks no HTTP/2
+    ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK", b"HTTP/1.1"),                         # nor a status line with no status
 ])
 async def test_what_does_not_answer_the_search_for_a_webos_tv_is_ignored(datagram):
     fetch = serving({LG_LOCATION: description()})
     assert await discover_tvs(send=answering((datagram, LG)), fetch=fetch) == []
     assert fetch.asked == []
+
+
+@pytest.mark.parametrize("status_line", ["HTTP/1.0 200 OK", "HTTP/1.1 200 OK", "HTTP/1.1 200", "HTTP/1.0 200"])
+async def test_an_answer_is_a_200_in_http_1_0_or_1_1_with_or_without_a_reason_phrase(status_line):
+    """UPnP 1.0 devices answer in HTTP/1.0, and the reason after the status is only words."""
+    answer = ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK", status_line.encode())
+    found = await discover_tvs(send=answering((answer, LG)), fetch=serving({LG_LOCATION: description()}))
+    assert found == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 @pytest.mark.parametrize("how", ["bare newlines", "spaces before the colons", "both"])
@@ -534,12 +545,13 @@ async def test_the_real_fetch_takes_nothing_but_a_200_for_a_description(web, sta
     assert str(status) in str(failure.value)
 
 
-async def test_the_real_fetch_does_not_decompress_what_a_device_sends(web):
+async def test_the_real_fetch_does_not_decompress_what_a_device_sends_and_does_not_ask_for_it_either(web):
     """A description is plain XML: a body that says it is compressed is not unpacked on the way (a few kilobytes can unpack to
-    gigabytes), and is not a description either."""
+    gigabytes), and is not a description either. aiohttp asks for gzip by itself unless it is told otherwise, and a device that
+    compresses on request would lose its name: the request says that the body is wanted as it is."""
     web.respond([description().encode()])
     await discover._get(LG_LOCATION)
-    assert web.session_args == {"auto_decompress": False}
+    assert web.session_args == {"auto_decompress": False, "headers": {"Accept-Encoding": "identity"}}
 
 
 async def test_the_real_search_and_the_real_fetch_are_what_discover_tvs_uses_unless_it_is_told_otherwise(endpoint, web):

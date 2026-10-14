@@ -74,10 +74,11 @@ async def discover_tvs(timeout: float = 3.0, send: Optional[Send] = None, fetch:
 
 def _location_of(datagram: bytes) -> Optional[str]:
     """The LOCATION in an answer from a webOS TV ("" when it names none); None when the datagram is not such an answer (another
-    device, an announcement, noise). An answer is `HTTP/1.1 200` and headers, and its ST header says what it answers for: the ST
-    of a search or an announcement, or of an error, is not an answer."""
+    device, an announcement, noise). An answer is `HTTP/1.x 200` and headers (a UPnP 1.0 device answers in HTTP/1.0), and its ST
+    header says what it answers for: the ST of a search or an announcement, or of an error, is not an answer."""
     lines = datagram.decode("utf-8", errors="replace").splitlines()
-    if (lines[0].split()[:2] if lines else []) != ["HTTP/1.1", "200"]:
+    status_line = lines[0].split() if lines else []
+    if len(status_line) < 2 or not status_line[0].startswith("HTTP/1.") or status_line[1] != "200":
         return None
     headers: Dict[str, str] = {}
     for line in lines[1:]:
@@ -177,10 +178,11 @@ async def _multicast(request: bytes, on_answer: Answer, window: float) -> None:
 async def _get(url: str) -> str:
     """The real `fetch`: the page at this address as text, as far as MAX_DESCRIPTION_BYTES of it (ValueError when there is
     more). Only a 200 is a description: a redirect is not followed, and neither it nor an error page is read. What the device
-    sends is not decompressed on the way (a few kilobytes can unpack to gigabytes), a description being plain XML. aiohttp is
-    imported here, as the other services do."""
+    sends is not decompressed on the way (a few kilobytes can unpack to gigabytes), a description being plain XML, and it is
+    asked for as it is: aiohttp offers gzip unless the request says otherwise, and a device that compresses on request would
+    lose its name. aiohttp is imported here, as the other services do."""
     import aiohttp
-    async with aiohttp.ClientSession(auto_decompress=False) as session:
+    async with aiohttp.ClientSession(auto_decompress=False, headers={"Accept-Encoding": "identity"}) as session:
         async with session.get(url, allow_redirects=False) as response:
             if response.status != 200:
                 raise ValueError(f"the page at {url} answered {response.status}")

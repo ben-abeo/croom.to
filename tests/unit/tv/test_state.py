@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 from croom.tv.errors import TvError
 from tests.unit.tv.fake_client import FakeTvClient
-from tests.unit.tv.helpers import build_service
+from tests.unit.tv.helpers import DoingTv, build_service
 
 
 class LibraryShapedClient(FakeTvClient):
@@ -44,6 +44,9 @@ async def test_the_state_is_read_in_the_names_the_real_library_uses(tmp_path):
     ({"deviceName": "Salle de réunion"}, {}, "Salle de réunion"),
     ({"deviceName": "Board\x1b[2Jroom\n  TV"}, {}, "Board[2Jroom TV"),         # the TV chooses its name: one printable line
     ({}, {"modelName": "OLED65C6\x07"}, "OLED65C6"),                          # and its model, which stands in for it
+    ({"deviceName": "\x1b\x07"}, {"modelName": "OLED65C6"}, "OLED65C6"),       # a name with nothing printable in it is no name
+    ({"deviceName": "   "}, {"modelName": "OLED65C6"}, "OLED65C6"),
+    ({"deviceName": "\x1b\x07"}, {"modelName": "\x07"}, ""),
     ({"deviceName": "x" * 300}, {}, "x" * 100),
     ({}, {}, ""),
 ])
@@ -56,6 +59,75 @@ async def test_the_name_the_tv_gives_is_one_printable_line(tmp_path, hello, syst
     await service.start()
     try:
         assert service.status()["name"] == name
+    finally:
+        await service.stop()
+
+
+async def test_what_the_tv_calls_its_inputs_apps_and_channels_is_one_printable_line(tmp_path):
+    """The status goes to the table's page and, by `croom --check-tv`, to a terminal: what the TV calls its things is text, on
+    one line, and never an escape. What the page is sent is data, not markup: `<` and `&` are the TV's words and are kept."""
+    def odd(host, key):
+        client = FakeTvClient(host, key)
+        client.tv_state.inputs = {
+            "com.webos.app.hdmi1": {"id": "HDMI\x07_1", "label": "Board\x1b[2Jroom\n   PC"},
+            "com.webos.app.hdmi2": {"id": "HDMI_2", "label": "\x1b\x07"},                  # no name worth showing: the id stands in
+            "com.webos.app.hdmi3": {"id": "HDMI_3", "label": "Tom & Jerry <TV>"},
+        }
+        client.tv_state.current_input = "HDMI\x07_1"
+        client.tv_state.current_app_id = "com.webos.app.hdmi1\x1b[2J"
+        client.tv_state.channel_number = "11\x1b[0m"
+        return client
+    service = build_service(tmp_path, odd)
+    await service.start()
+    try:
+        s = service.status()
+        assert s["inputs"] == [{"id": "HDMI_1", "label": "Board[2Jroom PC"}, {"id": "HDMI_2", "label": "HDMI_2"},
+                               {"id": "HDMI_3", "label": "Tom & Jerry <TV>"}]
+        assert s["input"] == "HDMI_1" and s["app"] == "com.webos.app.hdmi1[2J" and s["channel"] == "11[0m"
+        client = FakeTvClient.instances[-1]
+        await client.update(current_app_id="com.webos.app.livetv\x00", channel_number="12\u200b")      # the same when the TV tells of a change
+        assert service.status()["app"] == "com.webos.app.livetv" and service.status()["channel"] == "12"
+    finally:
+        await service.stop()
+
+
+async def test_what_the_tv_says_when_it_is_asked_after_a_control_is_one_printable_line_too(tmp_path):
+    class OddReads(DoingTv):
+        """A TV whose answers to the read-backs carry what a terminal would act on."""
+        async def set_input(self, input_id):
+            await super().set_input(input_id)
+            self.tv_state.current_input = "HDMI\x07_1"             # (the fake names its current input itself, as the library does not)
+
+        async def get_input(self):
+            return "com.webos.app.hdmi1\x1b[2J"
+
+        async def get_current_app(self):
+            return "com.x\x1b[2J.app"
+
+        async def get_current_channel(self):
+            return {"channelNumber": "11\x1b[0m"}
+    service = build_service(tmp_path, OddReads)
+    await service.start()
+    try:
+        s = await service.control("input", "HDMI_1")
+        assert s["app"] == "com.webos.app.hdmi1[2J" and s["input"] == "HDMI_1"
+        assert (await service.control("app", "com.x.app"))["app"] == "com.x[2J.app"
+        assert (await service.control("channel_up"))["channel"] == "11[0m"
+    finally:
+        await service.stop()
+
+
+async def test_a_channel_that_is_a_number_and_an_input_that_is_nothing_stay_what_they_are(tmp_path):
+    """Only words are tidied: a channel the TV gives as a number is a number, and no input is None and not an empty string."""
+    def numbered(host, key):
+        client = FakeTvClient(host, key)
+        client.tv_state.channel_number, client.tv_state.current_input, client.tv_state.current_app_id = 11, None, "com.webos.app.livetv"
+        return client
+    service = build_service(tmp_path, numbered)
+    await service.start()
+    try:
+        s = service.status()
+        assert s["channel"] == 11 and s["input"] is None and s["app"] == "com.webos.app.livetv"
     finally:
         await service.stop()
 

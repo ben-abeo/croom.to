@@ -6,7 +6,7 @@ import pytest
 from croom.tv.errors import TvError
 from croom.tv.keystore import KeyStore
 from tests.unit.tv.fake_client import DeafPromptingTvClient, FakeTvClient, PromptingTvClient
-from tests.unit.tv.helpers import build_service, connects, prompt_is_up, until, within, yielding_sleep
+from tests.unit.tv.helpers import build_service, connects, prompt_is_up, silent_tv, until, within, yielding_sleep
 
 KEY = "tv-client-key"
 
@@ -322,6 +322,31 @@ async def test_pairing_without_forgetting_also_puts_a_refused_tv_right(tmp_path)
         client = FakeTvClient.instances[-1]
         await client.drop()
         await until(lambda: service.status()["reachable"])    # and the loop is running again
+    finally:
+        await service.stop()
+
+
+async def test_the_status_says_when_the_tv_declined_this_table_so_that_pair_again_is_not_not_answering(tmp_path):
+    """The table's page tells "pair again" from "not answering": both are a TV that is not reachable, and only the first
+    is the person's to put right."""
+    service = build_service(tmp_path, forgetful_tv, loop_sleep=yielding_sleep())
+    assert service.status()["refused"] is False                  # nothing has been refused before the first try
+    await service.start()
+    try:
+        await until(service._task.done)
+        s = service.status()
+        assert s["refused"] is True and s["paired"] is True and s["reachable"] is False
+        await service.pair()                                     # the person accepts the prompt this time
+        assert service.status()["refused"] is False and service.status()["reachable"] is True
+    finally:
+        await service.stop()
+
+
+async def test_a_tv_that_is_merely_off_has_not_refused_anything(tmp_path):
+    service = build_service(tmp_path, silent_tv)
+    await service.start()                                        # (the first look at a TV that is off is over at once)
+    try:
+        assert service.status()["reachable"] is False and service.status()["refused"] is False
     finally:
         await service.stop()
 

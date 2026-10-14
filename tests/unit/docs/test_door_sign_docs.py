@@ -55,6 +55,7 @@ def test_the_spec_says_what_a_long_title_and_a_long_room_name_do():
         "which the Today list shows beside it (\"Starts in 8 minutes\", \"Starting now\").",
         "is set in smaller type, 3.6 rem at most, so it is never cut and a short sign keeps its chip",
         "the lines are measured on the sign after layout, and again when the name, the sign's size or the view changes and when a font arrives",
+        "on a sign 560 px high or less a name that still takes more than two lines goes on down in 0.1 rem steps to 1.3 rem, until it takes two",
         "a title cut after two lines with an ellipsis (after one on a sign 560 px high or less, and the week's bookings after two, one in portrait)",
     ):
         assert needle in text, needle
@@ -123,6 +124,11 @@ def test_the_installers_stock_config_explains_the_company_line():
 WORDS = {1: "one", 2: "two", 3: "three", 5: "five", 8: "eight", 10: "ten", 20: "twenty", 30: "thirty"}
 
 
+def js_decimal(name):
+    """A `const NAME = 1.3;` of sign.js."""
+    return float(re.search(rf"const {name} = ([\d.]+);", (SIGN / "sign.js").read_text(encoding="utf-8")).group(1))
+
+
 def js_constant(name):
     """A `const NAME = 30 * 1000;` of sign.js, as the number it is."""
     expression = re.search(rf"const {name} = ([\d* ]+);", (SIGN / "sign.js").read_text(encoding="utf-8")).group(1)
@@ -172,6 +178,10 @@ def test_the_docs_state_the_numbers_the_code_has():
         ("when a booking is about to start", guide, f"the {WORDS[soon_minutes]} minutes before a booking"),
         ("where the config file is", guide, config),
         ("what a short sign is", spec, f"{short_sign} px high or less"),
+        ("how far a name goes down on a short sign", spec, f"in {js_decimal('NAME_STEP_REM'):g} rem steps to {js_decimal('NAME_FLOOR_REM'):g} rem"),
+        ("how far a name goes down on a short sign", guide, f"goes on down {js_decimal('NAME_STEP_REM'):g} rem at a time, to {js_decimal('NAME_FLOOR_REM'):g} rem"),
+        ("how far a name goes down on a short sign", guide, f"goes down to {js_decimal('NAME_FLOOR_REM'):g} rem and no further"),
+        ("how far a name goes down on a short sign", readme, f"goes down to {js_decimal('NAME_FLOOR_REM'):g} rem and no further"),
         ("what a short sign is", guide, f"{short_sign} pixels high or less"),
         ("the length of a room name that takes the smaller type", guide, f"as one of more than {js_constant('LONG_NAME')} characters is"),
         ("how many lines a room name may take in the large type", guide, f"would take more than {WORDS[js_constant('NAME_LINES')]} lines"),

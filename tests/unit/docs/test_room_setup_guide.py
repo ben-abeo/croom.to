@@ -212,7 +212,8 @@ def test_guide_gives_the_short_screen_rules_the_stylesheet_has():
     for needle in (
         "A booking's title is cut after two lines with an ellipsis, in Today as in the week, and after one line in Today on a screen 560 pixels high or less.",
         "A room name that would take more than two lines is set in smaller type, as one of more than 24 characters is, so it is never cut; "
-        "on a screen 560 pixels high or less, one that would take two lines is too.",
+        "on a screen 560 pixels high or less, one that would take two lines is too, and one that still takes more than two goes on down 0.1 rem at a time, "
+        "to 1.3 rem, until it takes two.",
         "At 560 pixels high or less the week view leaves out the line under the status label and each day's date, with football scores on or off.",
         "up to 700 pixels high the week view leaves out the line under the status label and the room's location and makes the room's name smaller, "
         "and at 560 pixels or less, in Today, the status leaves out the line under its label too.",
@@ -254,18 +255,20 @@ def test_guide_troubleshooting_covers_the_football_strip_the_settings_file_and_t
         "are saved in control-settings.json in the device's data folder, /var/lib/croom",
         "the screen still shows the switch on, a chosen background holds only until the next restart, and the strip never comes.",
         "says \"Could not save the room settings\" and why",
-        "A very long name does not fit a very short screen",
-        "If the bottom of the sign is cut off on a screen only 480 to 500 pixels high, shorten the room's name.",
-        "A name of up to 26 characters, two lines of the smaller type, fits at 800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500, "
-        "in every status, with the football strip up or down.",
-        "A name of three lines (31 characters or more at 800 to 1024 pixels wide, 41 or more at 1280) can run past the bottom of the screen: at 800 by 480 by 8 pixels, "
-        "with the strip up, a location of two lines and the room free for the rest of the day; at 1280 by 480 a name of 41 characters by 1 pixel with the strip up "
-        "and by 14 with no strip while a booking is under way.",
-        "A name of four lines (55 characters) runs past by 2 to 72 pixels.",
+        "A name too long even at the smallest size",
+        "On a screen only 480 to 500 pixels high a room name goes down to 1.3 rem and no further.",
+        "At the narrowest of the six sizes measured, 800 by 480, a name of up to 67 characters takes two lines at that size, "
+        "and one of 87 to 147 characters takes three to five lines and still fits, in every status, with the football strip up or down; "
+        "900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500 take no more lines.",
+        "A name of 184 characters, seven lines at 800 by 480, runs past the bottom of the screen by 6 pixels with the strip up and a location of two lines, "
+        "and by 39 when the room is free for the rest of the day.",
     ):
         assert needle in text, needle
     # the first card said a two-line name and a title in the label were the trouble: the chip now carries no title on a short screen and the name takes the smaller type
     for gone in ("A long name does not fit a very short screen", "shorten the room's name to one line (Boardroom, not Conference Room Twelve)",
                  "A name on two lines with a location under it runs past the bottom of the screen at 1280 by 480 and 1366 by 500",
-                 "In the ten minutes before a booking the label carries its title"):
+                 "In the ten minutes before a booking the label carries its title",
+                 # the round-1b card: a name of three lines still ran off, by 1 to 14 px, and four lines by 2 to 72
+                 "A very long name does not fit a very short screen", "A name of three lines (31 characters or more at 800 to 1024 pixels wide",
+                 "A name of four lines (55 characters) runs past by 2 to 72 pixels"):
         assert gone not in text, gone

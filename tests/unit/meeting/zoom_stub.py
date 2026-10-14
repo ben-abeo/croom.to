@@ -69,14 +69,17 @@ Behaviour flags, window.ZoomMtg._behaviour = {...}:
   waiting), recording and refuseHostCalls: the rest of the meeting. refuseHostCalls false lets a participant's calls through.
 - The SDK's calls as its own wrapper treats them (muteAll, record, lockMeeting, putOnHold, expel, mute, endMeeting, rename). A
   call it drops is answered false, and nothing is called back; a call it takes is answered through its callbacks. It drops a
-  call with a key its method does not take, or without one it does (muteAll {muteAll}, record {record}, lockMeeting
-  {lockMeeting}, putOnHold {userId, hold}, expel {userId}, mute {userId, mute}, endMeeting {}, rename {userId, oldName,
-  newName}), and a call made again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and
-  lockMeeting 5 s; putOnHold 0.1 s). The room's own mute shares the mute window with another participant's. The windows run on
-  a clock of the stub's own, which only window.ZoomMtg._later(ms) moves: time goes by without the test waiting for it, and
-  without the machine's speed deciding. Every call is recorded in window.__zoomCalls as [name, args], the keys it was given
-  with the callbacks left out; window.__dropped holds the ones dropped. A call that is taken is answered after it has returned
-  (a microtask later), as the SDK answers, so what a call returns is not what its callbacks have said.
+  call with a key its method does not take (muteAll {muteAll}, record {record}, lockMeeting {lockMeeting}, putOnHold {userId,
+  hold}, expel {userId}, mute {userId, mute}, endMeeting {}, rename {userId, oldName, newName}): its gate looks only at the keys
+  given, so a key left out is no drop, and the call goes ahead with it undefined (lockMeeting({}) unlocks). It drops, too, a call
+  made again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and lockMeeting 5 s; putOnHold
+  0.1 s), and putOnHold's drop alone is silent: with callbacks given the API answers undefined, as it does to a call it takes, so
+  nothing says it was dropped. The room's own mute shares the mute window with another participant's. The windows run on a clock
+  of the stub's own, which only window.ZoomMtg._later(ms) moves: time goes by without the test waiting for it, and without the
+  machine's speed deciding (a test of the page's own waiting puts _now on the real clock). Every call is recorded in
+  window.__zoomCalls as [name, args], the keys it was given with the callbacks left out; window.__dropped holds the ones
+  dropped. A call that is taken is answered after it has returned (a microtask later), as the SDK answers, so what a call
+  returns is not what its callbacks have said; rename, record and endMeeting are answered inside the call.
 - The host's calls (muteAll, record, lockMeeting, putOnHold, expel, endMeeting, and mute for anyone but the room) are refused
   for a participant as the SDK refuses: error({errorCode: 1, errorMessage: "Current user is neither host nor cohost"}).
   endMeeting is the host's alone: a co-host is refused too, with {errorCode: 3003, errorMessage: null}. A call it carries out
@@ -446,35 +449,38 @@ window.ZoomMtg = {
   // The windows run on the stub's clock, which only _later moves.
   _now() { return this._skew; },
   _later(ms) { this._skew += ms; },
-  // A call of the SDK is recorded as asked, and is dropped, answered false with nothing called back, when it has a key its method
-  // does not take (or lacks one it does) or is made again inside the window kept for its method. A call that is taken starts the
-  // window; one that is dropped does not.
-  _taken(name, opts) {
+  // A call of the SDK is recorded as asked, and is dropped, with nothing called back, when it has a key its method does not take
+  // (a key left out is no drop: the gate looks only at the keys given, and the call goes ahead with it undefined) or is made again
+  // inside the window kept for its method. A call that is taken starts the window; one that is dropped does not. Answers null for
+  // a call that is taken; for one that is dropped, what the API hands back: false, but undefined for putOnHold's window, which is
+  // silent (with callbacks given the API answers undefined, as it does to a call it takes).
+  _gate(name, opts) {
     const args = {};
     for (const key of Object.keys(opts)) if (key !== "success" && key !== "error") args[key] = opts[key];
     window.__zoomCalls.push([name, args]);
-    const takes = this._takes[name], keys = Object.keys(args);
-    let taken = keys.length === takes.length && takes.every((key) => keys.includes(key));
-    if (taken) {
+    let drop = Object.keys(args).some((key) => !this._takes[name].includes(key)) ? { answer: false } : null;
+    if (!drop) {
       const now = this._now(), last = this._lastCall[name];
-      if (last !== undefined && now - last < this._windowMs[name]) taken = false; else this._lastCall[name] = now;
+      if (last !== undefined && now - last < this._windowMs[name]) drop = { answer: name === "putOnHold" ? undefined : false };
+      else this._lastCall[name] = now;
     }
-    if (!taken) window.__dropped.push([name, args]);
-    return taken;
+    if (drop) window.__dropped.push([name, args]);
+    return drop;
   },
-  // A call the SDK takes is answered after the call has returned, not inside it.
-  _answer(fn) { queueMicrotask(fn); },
+  // A call the SDK takes is answered after the call has returned, not inside it; rename, record and endMeeting are answered inside.
+  _answer(name, fn) { if (["rename", "record", "endMeeting"].includes(name)) fn(); else queueMicrotask(fn); },
   // A call only a host or a co-host may make. The SDK refuses a participant in its words with code 1; endMeeting is the host's
   // alone, and refuses a co-host too, with a code and no words. A call it carries out does its work, then is answered.
   _hostCall(name, opts, work) {
-    if (!this._taken(name, opts)) return false;
+    const drop = this._gate(name, opts);
+    if (drop) return drop.answer;
     const b = this._behaviour;
     if (b.refuseHostCalls && (name === "endMeeting" ? b.role !== "host" : b.role === "participant")) {
-      this._answer(() => opts.error && opts.error(name === "endMeeting" ? { errorCode: 3003, errorMessage: null } : { errorCode: 1, errorMessage: "Current user is neither host nor cohost" }));
+      this._answer(name, () => opts.error && opts.error(name === "endMeeting" ? { errorCode: 3003, errorMessage: null } : { errorCode: 1, errorMessage: "Current user is neither host nor cohost" }));
       return;
     }
     work();
-    this._answer(() => opts.success && opts.success());
+    this._answer(name, () => opts.success && opts.success());
   },
   // The room's own mute is any participant's to make, another's is a host's.
   mute(opts) {
@@ -484,9 +490,10 @@ window.ZoomMtg = {
       this._fire("onUserUpdate", { userId: opts.userId, muted: !!opts.mute });
     };
     if (opts.userId !== 16777216) return this._hostCall("mute", opts, work);
-    if (!this._taken("mute", opts)) return false;
+    const drop = this._gate("mute", opts);
+    if (drop) return drop.answer;
     work();
-    this._answer(() => opts.success && opts.success());
+    this._answer("mute", () => opts.success && opts.success());
   },
   // muteAll false asks everyone to unmute: they stay muted until they choose to unmute.
   muteAll(opts) { return this._hostCall("muteAll", opts, () => { if (opts.muteAll) this._attendees.forEach((a) => { a.muted = true; }); }); },
@@ -503,10 +510,11 @@ window.ZoomMtg = {
   // and told by success. Any participant may rename themselves: the room's name follows, and Zoom says so as it does of every
   // change of a user.
   rename(opts) {
-    if (!this._taken("rename", opts)) return false;
+    const drop = this._gate("rename", opts);
+    if (drop) return drop.answer;
     const participant = this._behaviour.role === "participant";
     if (participant || opts.userId === 16777216) { this._name = opts.newName; this._fire("onUserUpdate", { userId: 16777216, userName: this._name }); }
-    this._answer(() => {
+    this._answer("rename", () => {
       if (participant) opts.error && opts.error({ errorCode: 1, errorMessage: "Current user is neither host nor cohost" });
       opts.success && opts.success();
     });

@@ -2189,43 +2189,81 @@ async def test_a_call_zoom_drops_is_refused_at_once_in_words_and_does_not_hold_t
         await control(run, "host.mute_one", 16777218)
 
 
+async def test_a_second_hold_waits_out_the_tenth_of_a_second_zoom_drops_it_inside():
+    """Zoom drops a putOnHold made again inside 0.1 s and says nothing of it: its API answers undefined, as it does to a call it takes
+    (it has callbacks), and calls nothing back, so a pair of taps (Hold, then Admit) would be a call nobody answers, holding every
+    control behind it for the twelve seconds. The page remembers when it last asked and waits out the rest of the tenth of a second
+    before it asks again. Here the stub's window runs on the real clock, the one the wait is measured on."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        await run.page.evaluate("() => { window.ZoomMtg._now = () => performance.now(); }")
+        results, took = await asyncio.wait_for(run.page.evaluate("""(async () => {
+            const t = performance.now();
+            const r = await Promise.allSettled([window.crystalMeet.control('host.hold', 16777217), window.crystalMeet.control('host.admit', 16777217)]);
+            return [r.map((x) => x.status === "fulfilled" ? "fulfilled" : x.reason.message), performance.now() - t];
+        })()"""), timeout=8)
+        assert results == ["fulfilled", "fulfilled"], results
+        assert took < 3000, took                                                          # not the twelve seconds of a call nobody answers
+        assert await run.page.evaluate("window.__dropped") == []
+        assert [c[1] for c in await run.calls("putOnHold")] == [{"userId": 16777217, "hold": True}, {"userId": 16777217, "hold": False}]
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert [p["waiting"] for p in m["participants"] if p["id"] == 16777217] == [False]        # the second took effect: Ann was admitted again
+
+
 async def test_the_stub_drops_what_the_sdk_drops():
     """What the tests above rely on: Zoom's API answers false, and calls nothing back, to a call with a key its method does not take
-    (or without one it does) and to one made again inside the window it keeps for its method; the windows run on the stub's clock.
-    A call it takes returns nothing and is answered after it has returned, as the SDK answers."""
+    and to one made again inside the window it keeps for its method, except putOnHold, whose drop is silent (it answers undefined,
+    as it does to a call it takes, since it has callbacks); the windows run on the stub's clock. A key left out is no drop: the SDK's
+    gate looks only at the keys given, and the call goes ahead with it undefined (lockMeeting({}) unlocks). A call it takes returns
+    nothing and is answered after it has returned, as the SDK answers, except rename, record and endMeeting, which it answers inside
+    the call."""
     async with PageRun(stub=client(role="host")) as run:
         await run.wait_for("connected")
 
         async def ask(name, args):
-            """[dropped or taken, what had been called back when the call returned, and a moment after]"""
+            """[what the call returned, what had been called back when it returned, and a moment after]"""
             return await run.page.evaluate("""async ([name, args]) => {
                 const answered = [];
                 const r = window.ZoomMtg[name](Object.assign({}, args, { success: () => answered.push("success"), error: () => answered.push("error") }));
                 const inside = answered.slice();
                 await null;
-                return [r === false ? "dropped" : "taken", inside, answered];
+                return [String(r), inside, answered];
             }""", [name, args])
 
+        def taken(name):
+            return ["undefined", ["success"] if name in ("rename", "record", "endMeeting") else [], ["success"]]
+
+        dropped = ["false", [], []]
         keys = {"muteAll": {"muteAll": True}, "record": {"record": True}, "lockMeeting": {"lockMeeting": True}, "putOnHold": {"userId": 16777217, "hold": True},
                 "expel": {"userId": 16777218}, "mute": {"userId": 16777217, "mute": True}, "rename": {"userId": 16777216, "oldName": "Room 1", "newName": "Room 2"}}
         windows = {"muteAll": 5000, "record": 5000, "lockMeeting": 5000, "expel": 5000, "rename": 5000, "mute": 1000, "putOnHold": 100}
         for name, args in keys.items():
-            assert await ask(name, args) == ["taken", [], ["success"]]
+            assert await ask(name, args) == taken(name)
             await later(run, windows[name] - 1)
-            assert await ask(name, args) == ["dropped", [], []]                               # a moment too soon: dropped, and nothing called back
+            assert await ask(name, args) == (["undefined", [], []] if name == "putOnHold" else dropped)      # a moment too soon: dropped, and nothing called back
             await later(run, 1)
-            assert await ask(name, args) == ["taken", [], ["success"]]                        # the window is over
-        for name, args in [("lockMeeting", {"lockMeeting": True, "note": "x"}), ("endMeeting", {"end": True}), ("muteAll", {"mute": True}), ("record", {}),
-                           ("putOnHold", {"userId": 16777217}), ("mute", {"userId": 16777217, "mute": True, "all": True}), ("expel", {"userId": 16777218, "reason": "x"})]:
+            assert await ask(name, args) == taken(name)                                       # the window is over
+        for name, args in [("lockMeeting", {"lockMeeting": True, "note": "x"}), ("endMeeting", {"end": True}), ("muteAll", {"mute": True}),
+                           ("putOnHold", {"userId": 16777217, "hold": True, "all": True}), ("mute", {"userId": 16777217, "mute": True, "all": True}),
+                           ("expel", {"userId": 16777218, "reason": "x"})]:
             await later(run)
-            assert await ask(name, args) == ["dropped", [], []]                               # a key it does not take, or one it needs missing
+            assert await ask(name, args) == dropped                                           # a key it does not take, whatever the method
         await later(run)
-        assert await ask("mute", {"userId": 16777216, "mute": True}) == ["taken", [], ["success"]]              # the room's own mute shares the window with another's
-        assert await ask("mute", {"userId": 16777217, "mute": True}) == ["dropped", [], []]
-        assert await ask("mute", {"userId": 16777216, "mute": False}) == ["dropped", [], []]
+        assert await ask("lockMeeting", {"lockMeeting": True}) == taken("lockMeeting")
+        assert await run.page.evaluate("window.ZoomMtg._locked") is True
+        await later(run)
+        assert await ask("lockMeeting", {}) == taken("lockMeeting")                           # a key left out goes ahead as undefined: it unlocks
+        assert await run.page.evaluate("window.ZoomMtg._locked") is False
+        for name, args in [("record", {}), ("putOnHold", {"userId": 16777217}), ("muteAll", {}), ("mute", {"userId": 16777217}), ("expel", {})]:
+            await later(run)
+            assert await ask(name, args) == taken(name)
+        await later(run)
+        assert await ask("mute", {"userId": 16777216, "mute": True}) == taken("mute")         # the room's own mute shares the window with another's
+        assert await ask("mute", {"userId": 16777217, "mute": True}) == dropped
+        assert await ask("mute", {"userId": 16777216, "mute": False}) == dropped
         await later(run, 1000)
-        assert await ask("mute", {"userId": 16777216, "mute": False}) == ["taken", [], ["success"]]
-        assert await ask("endMeeting", {}) == ["taken", [], ["success"]]
+        assert await ask("mute", {"userId": 16777216, "mute": False}) == taken("mute")
+        assert await ask("endMeeting", {}) == taken("endMeeting")
 
 
 async def test_a_refusal_with_no_words_is_named_by_the_call():
@@ -2241,6 +2279,22 @@ async def test_a_refusal_with_no_words_is_named_by_the_call():
         assert "Zoom refused lockMeeting" in str(failure.value) and "(code" not in str(failure.value)
         m = await control(run, "host.mute_all")                                                                # a co-host may do the rest
         assert all(p["muted"] for p in m["participants"] if not p["me"])
+
+
+async def test_zooms_own_timeout_is_said_in_words_and_not_as_the_json_it_sends():
+    """The SDK waits ten seconds for its store to confirm a call and then ends it with an error whose message is the JSON of
+    {type: "OPERATION_TIMEOUT", errorCode: 1}: that reads "Zoom did not confirm <call> in time", whichever way the error comes
+    (an Error, an errorMessage, or the object itself), and not as the blob. It is not the page's own bound for a call nobody answers."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        blob = "JSON.stringify({ type: 'OPERATION_TIMEOUT', errorCode: 1 })"
+        for what, error in [("an Error", f"new Error({blob})"), ("an errorMessage", f"{{ errorCode: 1, errorMessage: {blob} }}"),
+                            ("the object", "{ type: 'OPERATION_TIMEOUT', errorCode: 1 }")]:
+            await run.page.evaluate(f"() => {{ window.ZoomMtg.lockMeeting = (o) => o.error({error}); }}")
+            with pytest.raises(Exception) as failure:
+                await control(run, "host.lock")
+            assert "Zoom did not confirm lockMeeting in time" in str(failure.value) and "OPERATION_TIMEOUT" not in str(failure.value), what
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["locked"] is False                # a call Zoom did not confirm is not kept as done
 
 
 async def test_recording_is_answered_once_zoom_has_confirmed_it_and_says_so_when_it_does_not():

@@ -6,6 +6,7 @@ errors, the ZAK path, mute, camera, leave, and joining again.
 
 import asyncio
 import json
+import logging
 
 import pytest
 
@@ -746,8 +747,9 @@ class TestPasscodeWordsDuringTheWait:
 class BridgePage:
     """A page whose bridge answers with Zoom's state as given and records what it was asked to do (no browser)."""
 
-    def __init__(self, muted, video_on):
+    def __init__(self, muted, video_on, mute_failure=None):
         self.state = {"muted": muted, "videoOn": video_on}
+        self.mute_failure = mute_failure   # what the page says when its mute is refused
         self.calls = []
 
     async def evaluate(self, script, arg=None):
@@ -755,6 +757,8 @@ class BridgePage:
             return dict(self.state)
         if ".mute(" in script:
             self.calls.append(("mute", arg))
+            if self.mute_failure:
+                raise RuntimeError(f"Page.evaluate: Error: {self.mute_failure}\n    at window.crystalMeet.mute (http://127.0.0.1/static/meeting.js:50:15)")
             self.state["muted"] = bool(arg)
             return bool(arg)
         if "setVideo" in script:
@@ -785,6 +789,25 @@ class TestTheRoomsDefaultsAtJoin:
     ])
     async def test_the_microphone_is_set_towards_muted_only(self, zoom_muted, mic_on, calls):
         assert await self.applied(zoom_muted, True, mic_on, True) == calls
+
+    @pytest.mark.parametrize("failure, level", [
+        ("Zoom ignored mute (it takes one a few seconds after the last); try again in a moment", logging.DEBUG),
+        ("Zoom has not listed the room in the meeting yet; try again in a moment", logging.WARNING),
+    ])
+    async def test_a_second_mute_zoom_ignores_at_join_is_not_a_warning_and_any_other_failure_still_is(self, failure, level, caplog):
+        """The page's own mic-off default mutes the room first. When Zoom's record still lags that mute, the join's own look finds the
+        room live and asks again inside the second Zoom keeps for a mute, and Zoom drops that one: the room is muted all the same, so
+        that is a line for the debug level. The provider still asks (the page's default may not have run), and a mute that failed for
+        another reason is still a warning."""
+        caplog.set_level(logging.DEBUG, logger="croom.meeting.providers.zoom_sdk")
+        provider = ZoomSdkProvider(SDK_ONLY)
+        provider._page = BridgePage(False, True, mute_failure=failure)
+        zoom = await provider._read_state_from_zoom()
+        await provider._apply_wanted_state(zoom, camera_on=True, mic_on=False)
+        assert provider._page.calls == [("mute", True)]                       # the provider's own mute is still asked for
+        said = [r for r in caplog.records if "mute" in r.getMessage().lower()]
+        assert [r.levelno for r in said] == [level], [r.getMessage() for r in caplog.records]
+        assert failure in said[0].getMessage()                                # either way the line carries Zoom's words
 
     @pytest.mark.parametrize("zoom_video, camera_on, calls", [
         (False, True, [("setVideo", True)]),

@@ -34,7 +34,8 @@
 
   const UNLISTED = "Zoom has not listed the room in the meeting yet; try again in a moment";
   // Zoom's API answers false, and calls nothing back, to a call it drops: one made again inside the window it keeps for its method
-  // (a second for mute), or with a key its method does not take. That is said at once, not waited for.
+  // (a second for mute), or with a key its method does not take. That is said at once, not waited for. (putOnHold's drop is
+  // silent: see sdk().)
   const ignored = (method) => new Error("Zoom ignored " + method + " (it takes one a few seconds after the last); try again in a moment");
   bridge.mute = function (muted) {
     return new Promise((resolve, reject) => {
@@ -523,26 +524,42 @@
   // the inventory, until the page was reloaded, so a call ends after SDK_MS, in words, and the next control goes on. SDK_MS is
   // longer than the ten seconds the SDK itself waits for its store, whose own error says why.
   const SDK_MS = 12000;
+  // The SDK's own wait for its store ends, after ten seconds, with an error whose message is the JSON of {type: "OPERATION_TIMEOUT",
+  // errorCode: 1} (it may come as an Error, as an errorMessage, or as the object itself): not Zoom refusing, Zoom not saying.
+  const timedOut = (e) => !!e && [e.type, e.errorMessage, e.reason, e.message, e].some((t) => typeof t === "string" && t.includes("OPERATION_TIMEOUT"));
+  // Zoom drops a putOnHold made again inside 100 ms and says nothing of it: with callbacks given its API answers undefined, as it
+  // does to a call it takes, and calls nothing back, so the drop can not be told from a call nobody answers. A tap on Hold and then
+  // on Admit is such a pair. The page remembers when it last asked, and waits out the rest of the window (and a few ms over, for a
+  // timer that fires early) before it asks again.
+  const SPACED_MS = { putOnHold: 100 }, SPACED_OVER_MS = 10;
+  const askedAt = Object.create(null);
   const sdk = (method, args) => new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error("Zoom did not answer " + method + " in time")), SDK_MS);
     const over = (end, value) => { clearTimeout(timer); end(value); };
     // Zoom's words; a refusal with none (endMeeting's, for a co-host, is {errorCode: 3003, errorMessage: null}) is named by the call.
     const refusal = (e) => {
+      if (timedOut(e)) return "Zoom did not confirm " + method + " in time";
       if (e && (e.errorMessage || e.reason || e.message)) return words(e);
       return "Zoom refused " + method + (e && known(e.errorCode) ? " (code " + e.errorCode + ")" : "");
     };
-    try {
-      const taken = ZoomMtg[method](Object.assign({}, args, {
-        success: () => over(resolve, true),
-        // Zoom 6.5.0 calls error, then success, for a participant renaming themselves (its host check answers before the rename
-        // goes on, with their own id): a refusal is passed on a moment later, and an answer in the same call is the answer.
-        error: (e) => { Promise.resolve().then(() => over(reject, new Error(refusal(e)))); },
-      }));
-      // Its API answers false, and calls nothing back, to a call it drops: one with a key its method does not take, or one made
-      // again inside the window it keeps for its method (mute 1 s; muteAll, rename, expel, record and lockMeeting 5 s; putOnHold
-      // 0.1 s). A pair of ordinary taps does that, so it is said at once and not left to the bound.
-      if (taken === false) over(reject, ignored(method));
-    } catch (e) { over(reject, e); }
+    const ask = () => {
+      askedAt[method] = performance.now();
+      try {
+        const taken = ZoomMtg[method](Object.assign({}, args, {
+          success: () => over(resolve, true),
+          // Zoom 6.5.0 calls error, then success, for a participant renaming themselves (its host check answers before the rename
+          // goes on, with their own id): a refusal is passed on a moment later, and an answer in the same call is the answer.
+          error: (e) => { Promise.resolve().then(() => over(reject, new Error(refusal(e)))); },
+        }));
+        // Its API answers false, and calls nothing back, to a call it drops: one with a key its method does not take (its gate looks
+        // only at the keys given: a key left out goes ahead undefined), or one made again inside the window it keeps for its method
+        // (mute 1 s; muteAll, rename, expel, record and lockMeeting 5 s). A pair of ordinary taps does that, so it is said at once
+        // and not left to the bound. (putOnHold's 0.1 s is waited out above, not answered.)
+        if (taken === false) over(reject, ignored(method));
+      } catch (e) { over(reject, e); }
+    };
+    const wait = SPACED_MS[method] && askedAt[method] !== undefined ? askedAt[method] + SPACED_MS[method] + SPACED_OVER_MS - performance.now() : 0;
+    if (wait > 0) setTimeout(ask, wait); else ask();
   });
   // The participant a host call acts on: the id Zoom lists them by, a whole number, which may come as digits in text. An id that is
   // missing, or is not one, is refused before anything is asked of Zoom.

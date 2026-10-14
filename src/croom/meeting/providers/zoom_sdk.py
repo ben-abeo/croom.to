@@ -33,6 +33,8 @@ PASSCODE_REFUSAL = re.compile(r"pass(?:word|code)|\bcode 3004\b", re.IGNORECASE)
 PASSCODE_ASKED = "Zoom needs the meeting passcode"
 # How Playwright reports an Error the page's own code threw: "Page.evaluate: Error: <the page's words>".
 PAGE_REFUSAL = re.compile(r"^(?:Page\.evaluate: )?Error: (?P<words>.+)$")
+# How the page begins its words when Zoom drops a mute made again inside the second it keeps for one (meeting.js, ignored()).
+MUTE_IGNORED = "Zoom ignored mute"
 
 
 def page_failure(error: BaseException, doing: str) -> str:
@@ -374,7 +376,12 @@ class ZoomSdkProvider(MeetingProvider):
             try:
                 await self._page_call("(muted) => window.crystalMeet.mute(muted)", True, "Could not mute the microphone")
             except MeetingControlError as e:
-                logger.warning(f"The microphone was not muted at join: {e}")
+                if str(e).startswith(MUTE_IGNORED):
+                    # The page's own mic-off default has just muted the room, and Zoom's record can lag that mute, so this look found
+                    # the room live: Zoom drops a second mute inside the second it keeps for one, and the room is muted all the same.
+                    logger.debug(f"The join's own mute was a second one, which Zoom ignores: {e}")
+                else:
+                    logger.warning(f"The microphone was not muted at join: {e}")
         video = zoom.get("videoOn")
         if isinstance(video, bool) and video != camera_on:
             try:

@@ -45,6 +45,12 @@ EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
 STYLES = ("info", "quiet", "brand", "bounce")
 
 
+def first_line(error: BaseException) -> str:
+    """An exception's words for the table: its first line, never a stack or a second line."""
+    text = str(error).strip()
+    return text.splitlines()[0].strip() if text else type(error).__name__
+
+
 def _register_font_types() -> None:
     """Serve the bundled fonts with their real media type (aiohttp's table lacks woff2)."""
     mimetypes.add_type("font/woff2", ".woff2")
@@ -710,10 +716,11 @@ class ControlService(Service):
         try:
             muted = await self._meeting.toggle_mute()
         except MeetingControlError as e:
-            return self._error_response(str(e), 409)
+            logger.info(f"The microphone was not changed: {first_line(e)}")
+            return self._error_response(first_line(e), 409)
         except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
-            logger.warning(f"Could not change the microphone: {e}")
-            return self._error_response(f"Could not change the microphone: {e}", 409)
+            logger.warning(f"Could not change the microphone: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not change the microphone: {first_line(e)}", 409)
         return web.json_response({"muted": bool(muted)})
 
     async def _handle_camera(self, request: web.Request) -> web.Response:
@@ -727,10 +734,11 @@ class ControlService(Service):
         try:
             camera_on = await self._meeting.toggle_camera()
         except MeetingControlError as e:
-            return self._error_response(str(e), 409)
+            logger.info(f"The camera was not switched: {first_line(e)}")
+            return self._error_response(first_line(e), 409)
         except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
-            logger.warning(f"Could not switch the camera: {e}")
-            return self._error_response(f"Could not switch the camera: {e}", 409)
+            logger.warning(f"Could not switch the camera: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not switch the camera: {first_line(e)}", 409)
         return web.json_response({"camera_on": bool(camera_on)})
 
     async def _handle_diagnostics(self, request: web.Request) -> web.Response:
@@ -742,4 +750,7 @@ class ControlService(Service):
         try:
             return web.json_response(await self._meeting.diagnostics())
         except MeetingControlError as e:
-            return self._error_response(str(e), 409)
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - the meeting ending as the request came in, say: words, never a 500
+            logger.warning(f"Could not read the meeting page: {first_line(e)}", exc_info=True)
+            return self._error_response(f"Could not read the meeting page: {first_line(e)}", 409)

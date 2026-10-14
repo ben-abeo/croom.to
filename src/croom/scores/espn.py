@@ -7,7 +7,7 @@ Crystal Meet talks to ESPN: a different source is a different file with the same
 import asyncio
 import math
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import aiohttp
 
@@ -61,6 +61,10 @@ def _object(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
+def _list(value: Any) -> List[Any]:
+    return value if isinstance(value, list) else []
+
+
 def _whole_number(value: Any) -> Optional[int]:
     """A score or a rank as a whole number; None for what ESPN leaves out (a game not played has no score) or sends as nothing like one."""
     if isinstance(value, dict):                                  # a score is {"value": 45.0, "displayValue": "45"}
@@ -72,8 +76,11 @@ def _whole_number(value: Any) -> Optional[int]:
             value = float(value)
         except ValueError:
             return None
-    if isinstance(value, (int, float)) and math.isfinite(value):
-        return int(value)
+    try:
+        if isinstance(value, (int, float)) and math.isfinite(value):
+            return int(value)
+    except OverflowError:                                          # an integer too big for a float is no score and no rank
+        pass
     return None
 
 
@@ -83,7 +90,7 @@ def _start(text: Any) -> Optional[datetime]:
         return None
     try:
         moment = datetime.fromisoformat(text.strip().replace("Z", "+00:00"))
-    except ValueError:
+    except (ValueError, OverflowError):
         return None
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
@@ -116,7 +123,7 @@ def _game(event: Any, school_id: Optional[str]) -> Optional[Dict[str, Any]]:
     competitions = event.get("competitions")
     competition = _object(competitions[0]) if isinstance(competitions, list) and competitions else {}
     sides: Dict[str, Dict[str, Any]] = {}
-    for competitor in competition.get("competitors") or []:
+    for competitor in _list(competition.get("competitors")):
         competitor = _object(competitor)
         side = competitor.get("homeAway")
         if side in ("home", "away"):
@@ -127,6 +134,11 @@ def _game(event: Any, school_id: Optional[str]) -> Optional[Dict[str, Any]]:
     names = {side: _name(_object(competitor.get("team"))) for side, competitor in sides.items()}
     if start is None or not all(names.values()):
         return None
+    timed = competition.get("timeValid", event.get("timeValid", True)) is not False
+    try:
+        day = _day(start, timed)
+    except (OverflowError, OSError, ValueError):                   # a date the device's zone cannot be applied to (the year 1, the year 9999)
+        return None
     kind = _object(_object(competition.get("status")).get("type"))
     if kind.get("completed") is True:
         phase = "played"
@@ -134,12 +146,11 @@ def _game(event: Any, school_id: Optional[str]) -> Optional[Dict[str, Any]]:
         phase = "coming"
     else:
         phase = None      # in progress, postponed, cancelled: neither the last game nor the next
-    timed = competition.get("timeValid", event.get("timeValid", True)) is not False
     ids = {side: str(competitor.get("id") or _object(competitor.get("team")).get("id") or "") for side, competitor in sides.items()}
     return {
         "phase": phase,
         "start": start,
-        "day": _day(start, timed),
+        "day": day,
         "home": names["home"], "home_rank": _rank(sides["home"]), "home_score": _whole_number(sides["home"].get("score")),
         "away": names["away"], "away_rank": _rank(sides["away"]), "away_score": _whole_number(sides["away"].get("score")),
         "school_home": None if school_id is None or school_id not in ids.values() else ids["home"] == school_id,
@@ -160,7 +171,7 @@ def parse_schedule(data: Any) -> Dict[str, Optional[Dict[str, Any]]]:
     """
     data = _object(data)
     school_id = _object(data.get("team")).get("id")
-    games = [game for game in (_game(event, None if school_id is None else str(school_id)) for event in data.get("events") or []) if game]
+    games = [game for game in (_game(event, None if school_id is None else str(school_id)) for event in _list(data.get("events"))) if game]
     played = [g for g in games if g["phase"] == "played" and g["home_score"] is not None and g["away_score"] is not None]
     coming = [g for g in games if g["phase"] == "coming"]
     last = max(played, key=lambda g: g["start"], default=None)

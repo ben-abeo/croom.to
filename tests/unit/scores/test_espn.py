@@ -4,7 +4,9 @@ fetcher against a local aiohttp app standing in for ESPN. Nothing here reaches t
 """
 
 import asyncio
+import copy
 import random
+import re
 
 import aiohttp
 import pytest
@@ -121,6 +123,8 @@ def test_ranks_present_and_absent(device_zone):
 @pytest.mark.parametrize("rank, shown", [({"current": 1}, 1), ({"current": 25}, 25), ({"current": 4.0}, 4), ({"current": "7"}, 7),
                                          ({"current": 26}, None), ({"current": 99}, None), ({"current": 0}, None), ({"current": -3}, None),
                                          ({"current": None}, None), ({"current": "x"}, None), ({"current": True}, None), ({"current": [4]}, None),
+                                         (pytest.param({"current": 10 ** 400}, None, id="a rank of 10**400")), (pytest.param({"current": -10 ** 400}, None, id="a rank of -10**400")),
+                                         (pytest.param({"current": "1" + "0" * 400}, None, id="a rank of 401 digits, as a string")),
                                          ({}, None), (None, None), (4, None), ("4", None), ([4], None)])
 def test_a_rank_is_a_place_in_the_top_25_and_anything_else_is_none(device_zone, rank, shown):
     device_zone(CENTRAL)
@@ -154,6 +158,9 @@ def test_no_next_game_at_the_end_of_the_season_and_no_last_game_before_it_begins
 
 
 @pytest.mark.parametrize("data", [None, [], "schedule", 7, {}, {"events": None}, {"events": "none"}, {"events": {}}, {"events": [None, 5, "x", [], {}]},
+                                  {"events": 5}, {"events": 2.5}, {"events": True}, {"events": {"a": 1}},
+                                  {"events": [{"competitions": [{"competitors": 7}]}]}, {"events": [{"competitions": [{"competitors": {"a": 1}}]}]},
+                                  {"events": [{"competitions": [{"competitors": "ab"}]}]}, {"events": [{"competitions": 7}]},
                                   {"events": [{"competitions": None}, {"competitions": []}, {"competitions": [None]}, {"competitions": [{}]},
                                               {"competitions": [{"competitors": None}]}, {"competitions": [{"competitors": []}]}]}])
 def test_a_schedule_with_nothing_usable_in_it_is_survived(data):
@@ -166,6 +173,14 @@ def no_date(event):
 
 def a_date_that_is_not_one(event):
     set_start(event, "soon")
+
+
+def a_date_the_devices_zone_cannot_be_applied_to(event):
+    set_start(event, "0001-01-01T00:00Z")                  # the year 1, which a clock west of Greenwich calls the year 0: no date at all
+
+
+def competitors_that_are_no_list(event):
+    event["competitions"][0]["competitors"] = 7
 
 
 def no_home_side(event):
@@ -197,7 +212,8 @@ def no_status(event):
     del event["competitions"][0]["status"]
 
 
-EVENT_BREAKAGES = [no_date, a_date_that_is_not_one, no_home_side, one_team_only, no_team, a_team_with_no_name, no_status]
+EVENT_BREAKAGES = [no_date, a_date_that_is_not_one, a_date_the_devices_zone_cannot_be_applied_to, competitors_that_are_no_list, no_home_side, one_team_only,
+                   no_team, a_team_with_no_name, no_status]
 
 
 @pytest.mark.parametrize("spoil", EVENT_BREAKAGES + [no_scores, one_score_only], ids=lambda f: f.__name__)
@@ -216,6 +232,15 @@ def test_a_game_to_come_that_cannot_be_drawn_is_skipped_too(device_zone, spoil):
     assert parse_schedule(data) == {"last": LAST, "next": THEN_FLORIDA}
 
 
+@pytest.mark.parametrize("zone, start", [(CENTRAL, "0001-01-01T00:00Z"), (CENTRAL, "0001-01-01T00:00+14:00"), (AUCKLAND, "9999-12-31T23:30Z")])
+def test_a_date_at_the_edge_of_time_that_the_devices_zone_cannot_be_applied_to_costs_that_game_only(device_zone, zone, start):
+    device_zone(zone)
+    data = texas_sample()
+    set_start(event_of(data, TEXAS_AM), start)
+    result = parse_schedule(data)
+    assert result["last"]["home"] == "Tennessee" and result["next"]["home"] == "Missouri"      # that game is skipped; the others are read
+
+
 @pytest.mark.parametrize("score, shown", [({"value": 45.0, "displayValue": "45"}, 45), ({"value": 45}, 45), ({"displayValue": "45"}, 45), (45, 45), (45.0, 45), ("45", 45),
                                           ({"value": "45"}, 45), (0, 0), ({"value": 0.0}, 0)])
 def test_a_score_is_a_whole_number_however_espn_writes_it(device_zone, score, shown):
@@ -225,7 +250,9 @@ def test_a_score_is_a_whole_number_however_espn_writes_it(device_zone, score, sh
     assert parse_schedule(data)["last"]["home_score"] == shown
 
 
-@pytest.mark.parametrize("score", [None, "", "none", True, float("nan"), float("inf"), [45], {}, {"value": None}])
+@pytest.mark.parametrize("score", [None, "", "none", True, float("nan"), float("inf"), [45], {}, {"value": None},
+                                   pytest.param(10 ** 400, id="10**400"), pytest.param(-10 ** 400, id="-10**400"), pytest.param({"value": 10 ** 400}, id="value 10**400"),
+                                   pytest.param("1" + "0" * 400, id="401 digits, as a string"), "1e999"])
 def test_a_score_that_is_no_number_makes_the_game_unusable_as_the_last_one(device_zone, score):
     device_zone(CENTRAL)
     data = texas_sample()
@@ -256,6 +283,49 @@ def test_the_schools_own_side_is_found_by_its_id_and_is_none_when_the_schedule_d
         data = texas_sample()
         data["team"] = team
         assert parse_schedule(data)["last"]["school_home"] is None         # no team, or one that played in neither game
+
+
+def every_place_in(node, path=()):
+    """The path to every value in a JSON document, the document itself (the empty path) first."""
+    yield path
+    if isinstance(node, dict):
+        for key, value in node.items():
+            yield from every_place_in(value, path + (key,))
+    elif isinstance(node, list):
+        for index, value in enumerate(node):
+            yield from every_place_in(value, path + (index,))
+
+
+JUNK = [None, True, False, 0, -1, 7, 2.5, 10 ** 400, float("nan"), float("inf"), "", "x", "0001-01-01T00:00Z", "9999-12-31T23:59Z", "2026-13-45T99:99Z",
+        [], [None], [7], {}, {"value": None}, {"current": "x"}, {"type": []}]
+
+
+@pytest.mark.parametrize("zone", [CENTRAL, AUCKLAND])
+def test_no_single_value_of_the_saved_schedule_can_make_the_parser_raise_or_answer_with_something_the_sign_cannot_draw(device_zone, zone):
+    """The parser never raises, whatever ESPN sends: each place in the saved schedule in turn is given each kind of junk, and what comes out
+    is always {"last", "next"} with names, whole scores, ranks in the Top 25 or None, and dates as "YYYY-MM-DD"."""
+    device_zone(zone)
+    sample = texas_sample()
+    for path in every_place_in(sample):
+        for junk in JUNK:
+            data = copy.deepcopy(sample)
+            if path:
+                parent = data
+                for step in path[:-1]:
+                    parent = parent[step]
+                parent[path[-1]] = junk
+            else:
+                data = junk
+            result = parse_schedule(data)
+            assert set(result) == {"last", "next"}, (path, junk)
+            last, upcoming = result["last"], result["next"]
+            for drawn in (last, upcoming):
+                if drawn is None:
+                    continue
+                assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", drawn["date"]) and drawn["home"] and drawn["away"], (path, junk, drawn)
+                assert all(drawn[key] is None or (type(drawn[key]) is int and 1 <= drawn[key] <= 25) for key in ("home_rank", "away_rank")), (path, junk, drawn)
+            if last is not None:
+                assert type(last["home_score"]) is int and type(last["away_score"]) is int and last["school_home"] in (True, False, None), (path, junk, last)
 
 
 # --- the fetcher, against a local app in ESPN's place ---

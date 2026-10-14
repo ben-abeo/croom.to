@@ -313,8 +313,8 @@ class TestReviewFixes:
         try:
             await provider.join_meeting(LINK)
             data = await provider.diagnostics()
-            assert "bVideoOn" in data["user_keys"] and data["state"]["muted"] is False
-            assert {"label": "stop my video", "text": "Stop Video"} in data["buttons"]
+            assert "video" in data["user_keys"] and data["state"]["muted"] is False
+            assert {"label": "stop my video", "text": "Video"} in data["buttons"]
         finally:
             await shutdown(provider)
 

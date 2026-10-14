@@ -122,3 +122,123 @@ def test_guide_says_a_passcode_field_appears_for_a_zoom_meeting_id():
     ):
         assert needle in text, needle
     assert "Zoom needs the passcode inside the link" not in text
+
+
+def visible_text(html):
+    """The page as a reader sees it: tags dropped, entities decoded, white space collapsed."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+
+
+def test_guide_says_what_the_door_sign_shows_and_how_its_status_reads():
+    """The door sign section says what is on the screen and gives the status three ways, with the words each state puts under the room's name."""
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "A photograph of Austin fills the screen under a navy overlay.",
+        "the practice's name beside the logo, the time and the date, the room's name and where it is, and today's next three bookings",
+        "a coloured bar down the left edge, a coloured label under the room's name that says it in words, and a ring round the booking in progress",
+        "Green is free (Free until 1:00 PM). Amber is the ten minutes before a booking (Customer call starts in 8 minutes).",
+        "Red is in use or booked (In use until 2:00 PM while the room is in a meeting, Booked until 2:00 PM while a booking is under way).",
+        "The photograph itself is never tinted.",
+        "A sign that cannot reach the device goes grey and says Sign not connected.",
+        "add a company line under room: (for example company: \"Lone Star Eye Care\"), save, and type sudo systemctl restart croom. A company: \"\" line leaves the logo on its own.",
+        # step 4 points at the section, and no longer says the whole screen turns a colour
+        "with a bar down the left edge and a label under the room's name that are green when the room is free, amber when a meeting is about to start, and red while the room is in use or booked",
+        "the door sign's bar and label green",
+    ):
+        assert needle in text, needle
+    assert "It shows green when the room is free, amber when a meeting is about to start, and red while the room is in use or booked." not in text
+    assert "the door sign green" not in text
+
+
+def test_guide_names_the_nine_backgrounds_and_how_to_choose_one_on_the_table_screen():
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "On the table screen tap Options, then Door sign. Under Door sign background are nine buttons: Austin skyline (the default), Capitol, UT Tower, "
+        "Pennybacker Bridge, Hamilton Pool, Texas star, Hill Country, DKR stadium and Plain, which leaves the navy on its own.",
+        "The door sign changes within a few seconds. The choice is kept on the device, so it survives a restart, and every door sign of the room follows it.",
+    ):
+        assert needle in text, needle
+
+
+def test_guide_describes_the_week_view():
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "Tap This week beside today's bookings. The sign shows the next seven days, today first, each with its name, its date and its bookings "
+        "(the time, the title and Zoom or Google Meet); a day with nothing booked says Nothing booked.",
+        "The seven days run across the screen, or one under another on a sign standing upright.",
+        "A booking is listed once, on the day it starts, and an all-day booking shows 12:00 AM.",
+        "The sign never scrolls: where a day has more bookings than fit, it shows the first ones and +3 more.",
+        "The week is read from the device when you open it, so open it again to see a change.",
+        "Back, or thirty seconds without a tap, returns to Today.",
+        "If the week cannot be read the sign says The week could not be loaded. and Back still works.",
+        "the door screen needs to be a touch screen to use it",
+    ):
+        assert needle in text, needle
+
+
+def test_guide_says_how_the_football_scores_are_turned_on_and_where_they_come_from():
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "Football scores, off by default. On the table screen tap Options, then Door sign, and under Football scores switch on any of Texas, Michigan, Texas A&M and Missouri",
+        "On its left is the school's last result, with the school's own score first whether it played at home or away (Texas (#4) 45 \u2013 Texas A&M 42).",
+        "On its right is the next game, the visiting team first (Next: 10/19 \u00b7 Texas (#4) @ Missouri (#9); a game at a neutral site reads vs in place of @).",
+        "With more than one school on, the strip shows one at a time and moves to the next every 8 seconds, with the school's name at the start of the line "
+        "(Michigan: Michigan (#12) 31 \u2013 Ohio State 24).",
+        "Switch every school off and the strip goes.",
+        "The strip never wraps: a name too long for its line ends in \"\u2026\", and on a screen narrower than 1100 pixels the last result sits above the next game.",
+        # where the scores come from, and what the device needs
+        "The device, not the door screen, asks ESPN's public schedule feed at site.api.espn.com for each chosen school every ten minutes, and asks for nothing while every school is off.",
+        "There is nothing to set up: no account and no key.",
+        "The device needs to reach site.api.espn.com over the internet on HTTPS (port 443); nothing else on the door sign needs the internet.",
+        "ESPN does not document this feed or promise to keep it: it can change or stop, and the strip then keeps showing the last result it read until Crystal PM updates the software.",
+    ):
+        assert needle in text, needle
+
+
+def test_guide_gives_the_short_screen_rules_the_stylesheet_has():
+    """The thresholds in the guide are the ones in sign.css, so the one cannot change without the other."""
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "up to 700 pixels high the week view leaves out the line under the status label and the room's location and makes the room's name smaller, "
+        "and at 560 pixels or less the Today list leaves out the line under the label too.",
+        "With the scores on or off, at 560 pixels high or less the week view leaves out the line under the label and each day's date.",
+    ):
+        assert needle in text, needle
+    css = (REPO / "src" / "croom" / "control" / "static" / "sign.css").read_text(encoding="utf-8")
+    assert "@media (max-height: 700px) {\n  body[data-view=\"week\"][data-strip] .detail" in css
+    assert "@media (max-height: 560px) {\n  body[data-view=\"week\"] .detail, body[data-view=\"week\"] .day-date" in css
+    assert "@media (max-height: 560px) {\n  body[data-strip] .detail" in css
+
+
+def test_guide_repeats_the_photograph_credits_of_every_background():
+    """The spec has the room guide repeat what CREDITS.md says: each background's author and licence, in the guide's table."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    credits = (REPO / "src" / "croom" / "control" / "static" / "backgrounds" / "CREDITS.md").read_text(encoding="utf-8")
+    entries = re.findall(r"^- `(\w+)\.jpg`: .* by (.+?), (CC0|CC BY(?:-SA)? [\d.]+|Public domain), https://", credits, re.M)
+    assert len(entries) == 8, entries
+    rows = {(unescape(author), unescape(licence)) for _, author, licence in re.findall(r"<tr><td>(.*?)</td><td>(.*?)</td><td>(.*?)</td></tr>", html)}
+    for key, author, licence in entries:
+        assert (author.removeprefix("User:"), licence) in rows, (key, author, licence)
+    assert "The eight photographs are from Wikimedia Commons." in visible_text(html)
+
+
+def test_guide_troubleshooting_covers_the_football_strip_the_settings_file_and_the_short_screens():
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "The football strip does not appear",
+        "A school you switch on shows within a few seconds. If nothing comes, the device is not getting an answer from ESPN.",
+        "prints 200 when it can",
+        "a firewall or web filter that blocks site.api.espn.com on HTTPS",
+        "the device tries again after 1, 2 and 5 minutes and then every 10, and the strip comes back by itself when a read works.",
+        "While ESPN cannot be reached the strip keeps the last result it read, so a game played since can still show as next.",
+        "The switch is on but the strip never comes",
+        "are saved in control-settings.json in the device's data folder, /var/lib/croom",
+        "the screen still shows the switch on, a chosen background holds only until the next restart, and the strip never comes.",
+        "says \"Could not save the room settings\" and why",
+        "The door sign is plain navy",
+        "A photograph that has not loaded after 20 seconds is given up on, and the sign stays navy",
+        "A long name does not fit a very short screen",
+        "a long room name at 1280 by 480 and at 1366 by 500, a long booking title with the strip up at 800 by 480 and 1024 by 480. "
+        "Keep room names and booking titles short on a screen that short, or turn the football scores off.",
+    ):
+        assert needle in text, needle

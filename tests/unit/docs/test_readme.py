@@ -102,3 +102,35 @@ def test_readme_says_where_a_zoom_meetings_passcode_comes_from():
     assert "Zoom links need their passcode in the link" not in text
     # the Meet half of the bullet stays
     assert "A failed Meet join logs what Meet showed" in text
+
+
+def test_readme_describes_the_redesigned_door_sign():
+    """The door sign line says what the sign shows (status in a rail, a chip and a ring, over a photograph), the features row names what was built,
+    and the config table has the practice's name and the two room settings."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "over a photograph of Austin under a navy overlay (nine backgrounds, chosen on the room page under **Options**, then **Door sign**)",
+        "The status is a coloured rail down the left edge, a solid chip under the room's name and a ring round the booking in progress: green when free, amber ten minutes before a booking, red while in use or booked.",
+        "**This week** shows the next seven days.",
+        "A strip of football scores for Texas, Michigan, Texas A&M and Missouri can run along the bottom (off by default; the device reads ESPN's public schedule feed for it).",
+        # the features row
+        "the status as a rail, a solid chip and a ring on the current booking, photographs of Austin under a navy overlay (nine backgrounds, eight photographs and plain, chosen from the table), the company name, a week view, optional football scores for four schools (off by default)",
+        # the config table: the practice's name, and the two settings that are not in the config file
+        "| `room` | `name`, `location`, `timezone`, `company` |",
+        "`company` is the practice's name beside the logo on the door sign: \"Crystal Practice Management\" unless you change it, and `company: \"\"` shows the logo alone.",
+        "| Door sign settings (not in the config file) | `sign_background` | Chosen on the room page under **Options**, then **Door sign**: `skyline` (the default), `capitol`, `tower`, `bridge`, `pool`, `star`, `hills`, `stadium` or `plain` (the navy alone).",
+        "Kept in `control-settings.json` under the data directory, with the screensaver's choice, and read by the sign from `/api/status`, so every door sign of the room follows it.",
+        "| Door sign settings (not in the config file) | `sign_scores` | The schools whose football scores run along the bottom of the sign, any of `texas`, `michigan`, `texas_am` and `missouri`; empty, the default, is off.",
+        "the agent reads each school's schedule from ESPN's public feed (`site.api.espn.com`, no account or key) every ten minutes, so the device needs outbound HTTPS to it.",
+        # the routes the sign uses
+        "`/api/calendar/week` (the next seven days, today first, each `{date, label, events}` by the device's local day)",
+        "`POST /api/settings` changes `sign_background` and `sign_scores`, and refuses a bad value with words.",
+        # what is not known yet
+        "The football scores come from a public ESPN feed that ESPN does not document for this use",
+        "A room name long enough for two lines does not quite fit a very short, wide door screen (1280 by 480, 1366 by 500).",
+    ):
+        assert needle in text, needle
+    # what the sign no longer is
+    assert "| Green when free, amber ten minutes before a booking, red while in use or booked. |" not in text
+    for gone in ("tinted Austin scenery", "four backgrounds chosen from the table", "Longhorns scoreboard"):
+        assert gone not in text, gone

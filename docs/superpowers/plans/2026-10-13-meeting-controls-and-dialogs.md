@@ -343,7 +343,7 @@ async def test_button_controls_press_the_clients_buttons_and_settle_on_the_new_s
     async with PageRun() as run:
         await run.wait_for("connected")
         m = await run.page.evaluate("window.crystalMeet.control('raise_hand')")
-        assert m["buttons"]["raise_hand"] == {"on": True} and m["me"]["raisedHand"] is False   # the stub's record lags the button; the button is the truth
+        assert m["buttons"]["raise_hand"] == {"on": True} and m["me"]["raisedHand"] is True    # the button and the room's record agree
         m = await run.page.evaluate("window.crystalMeet.control('captions')")
         assert m["buttons"]["captions"] == {"on": True}
         m = await run.page.evaluate("window.crystalMeet.control('hide_self')")

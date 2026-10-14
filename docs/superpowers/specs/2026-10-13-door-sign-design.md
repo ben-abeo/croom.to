@@ -42,19 +42,11 @@ A tap on **This week** replaces the Today list with seven columns, today first, 
 
 ### 2.4 Backgrounds
 
-Nine, chosen from the touchscreen under Options › Door sign, each a stylised silhouette drawn from Ben's photos and tinted in the status colour (amended 2026-10-14 after his review of the first set: the lone tower read as a finger and the first skyline did not match Austin's):
+Photographs, not drawings (amended 2026-10-14 00:40 after Ben's review of the drawn set: "try a more realistic approach"). The sign fills its whole surface with a photograph of Austin and lays a navy overlay over it, heavier on the left where the words are (from 94 % navy at the left edge to 55 % at the right, and darker again along the bottom), so the room name, the chip and the bookings read as before while the place shows through. The status rail, the solid chip and the ringed current booking carry the status colour; the photograph itself is not tinted.
 
-- **Austin skyline** (the default): the towers as they stand from Lady Bird Lake, left to right: the pointed-cap tower, the Independent's stacked blocks, Frost Bank Tower's crown, the Austonian's cap, the Fairmont, 44 East and Natiivo, the Google tower's sail, 70 Rainey; the tree line; the lake with the skyline's faint reflection.
-- **Capitol**: the dome on its drum with the lantern and the statue, the wings with their colonnades, trees at the sides.
-- **UT Tower**: the tower rising from the Main Building, the campus roofs beside it, the clock.
-- **Pennybacker Bridge**: the 360 bridge's arch and hangers over Lake Austin, the hills behind.
-- **Hamilton Pool**: the grotto's overhang, the fall into the pool, the trees beyond, the rocks.
-- **Hill Country**: three ridges and a road that winds between them.
-- **Texas star**: the Bullock museum's star against the glass of the tower behind it.
-- **DKR stadium**: the bowl from above, the field, the end zones.
-- **Plain**: no scenery; a soft glow in the status colour at the bottom right.
+The set, chosen from the touchscreen under Options › Door sign: **Austin skyline** (the default, the towers from Lady Bird Lake at dusk), **Capitol**, **UT Tower**, **Pennybacker Bridge**, **Hamilton Pool**, **Texas star** (the Bullock museum), and when photographs are found for them **Hill Country** and **DKR stadium**; **Plain** keeps the navy alone. The choice is a room setting (`sign_background`) kept by the control service beside the screensaver style and read by the sign from `/api/status`, so it survives reloads and applies to every sign of the room.
 
-The choice is a room setting (`sign_background`) kept by the control service beside the screensaver style and read by the sign from `/api/status`, so it survives reloads and applies to every sign of the room. The silhouettes are inline SVG in the sign page (the mockup `docs/superpowers/mockups/2026-10-13-door-sign-mockup.html` holds the drawings), tinted through CSS, no images to load.
+The photographs ship with the page as `src/croom/control/static/backgrounds/<key>.jpg` (1920 px wide, progressive JPEG, about 200–400 KB each), with `CREDITS.md` beside them naming each photograph's author and licence. The first set comes from Wikimedia Commons under CC BY and CC BY-SA licences, which allow this use with attribution; the room guide repeats the credits. Any photograph may be swapped for one Ben licenses or takes, or one generated for the purpose, by replacing the file and its credit line.
 
 ### 2.5 The college football scoreboard
 
@@ -81,7 +73,7 @@ Tokens from the Crystal brand: navy `#001636` base, panels at 6 % white, blue `#
 ## 5. Decisions made here
 
 - The status colour moves from the whole background to a rail, a solid chip and the tinted scenery (Ben: cleaner, professional, still colour-coded).
-- Nine backgrounds drawn from Ben's photos, settable from the touchscreen, Austin skyline by default (Ben: skyline, UT, the signature landscapes, a list to choose from; the first skyline and the lone tower were redrawn after his review).
+- Photographs under a navy overlay, settable from the touchscreen, Austin skyline by default (Ben: skyline, UT, the signature landscapes, a list to choose from; the drawn silhouettes were dropped after his review).
 - The scoreboard is built now but off by default, with Texas, Michigan, Texas A&M and Missouri each switchable from the touchscreen (Ben: eventually, optional, not on by default; the four schools, configurable).
 - The company name is configurable with the Crystal PM default.
 - The design uses the Crystal brand tokens; the plugin link Ben gave (plugin_01Vkx3KVjWNESJpXEVjrxKpy) is not among the plugins visible to this session, so the house style came from the crystal-brand-docs skill on this machine.

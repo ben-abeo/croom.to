@@ -39,12 +39,21 @@ depends on Zoom's behaviour it mirrors Zoom 6.5.0 as its own bundle has it:
   bridge to leave alone. Like the popovers it is a node its owner removes with removeChild on its own parent, as React's
   unmount does, which throws if anything else took it out first: window.__reactErrors collects each such throw, and
   _unmountBystander() is the owner's unmount of the box (window.__unmounted says "ok" or the error).
-- A dialog, window.ZoomMtg._showDialog(title, text, buttons), is Zoom's modal: div#stub-dialog-N.zm-modal[role="dialog"] on the
-  body with an h2 for the title, a paragraph and a <button> for each label (given none, it is a banner). It is the client's node,
-  as the popovers are: its owner takes it out, with removeChild on the body, in a microtask after a button is pressed or when Zoom
-  closes it (_closeDialog(id)), and anything else that took it out first makes that throw (window.__reactErrors). A press is
-  logged as ["dialog", title, label] in window.__zoomCalls and as [id, label] in window.__presses. _chat(from, text) fires
-  onReceiveChatMsg as the SDK does.
+- A dialog, window.ZoomMtg._showDialog(title, text, buttons), is Zoom's legacy modal as react-modal draws it: div.ReactModalPortal
+  on the body > div.ReactModal__Overlay > div.ReactModal__Content[role="dialog"] (the node that has the id, div#stub-dialog-N: the
+  role is on the OUTER node) > div.zm-modal.zm-modal-legacy > div.zm-modal-body (a div for the title, not a heading, and
+  div.zm-modal-body-content with a paragraph) and div.zm-modal-footer > div.zm-modal-footer-default >
+  div.zm-modal-footer-default-actions with a ZoomButton (button.zm-btn.zm-btn-legacy) for each label, in the order given. The
+  client's own footer draws cancel first and OK last, so a consent reads ["Leave Meeting", "Got it"]. A label may be {label,
+  disabled: true}: a ZoomButton has no disabled attribute, only the class zm-btn--disabled, and ignores a press then. With no
+  label at all it is a modal with nothing to press. _showBanner(title, text) is the unified consent notice drawn at the top of the
+  meeting: div#zoom2modal.top > div.consent-banner[role="banner"] (never role="dialog") with div.disclaimer-content__title[role="alert"],
+  its words and button.ok-button "OK" (aria-label "OK"). Both are the client's nodes, as the popovers are: their owner takes them
+  out with removeChild, in a microtask after a button that is not disabled is pressed or when Zoom closes them (_closeDialog(id)),
+  and anything else that took any of it out first makes that throw (window.__reactErrors). A press is logged as [id, label] in
+  window.__presses, and a press the button took as ["dialog", title, label] in window.__zoomCalls. _chat(from, text) and
+  _chatFile(from, fileName) fire onReceiveChatMsg as 6.5.0's SDK does: {sender: <name>, timestamp: "10:32 AM" (a time of day, no
+  date), type: "text", content: {text, t: <epoch ms>}}, and for a file type "file" and content: {file: {fileName}, t}.
 - window.__presses logs every press of a button or an item as [id, label]; window.__maxOpen is the most popovers drawn at
   once; window.__zoomCalls gets ["reaction", "thumbs_up"] (the name, lower case) for a reaction.
 
@@ -141,7 +150,7 @@ window.ZoomMtg = {
   _windowMs: { mute: 1000, muteAll: 5000, rename: 5000, expel: 5000, record: 5000, lockMeeting: 5000, putOnHold: 100 },
   _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
   _open: { picker: false, view: false }, _shown: { picker: null, view: null }, _where: { picker: null, view: null },
-  _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null, _dialogs: 0, _dialogNodes: {},
+  _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null, _dialogs: 0, _banners: 0, _messages: 0, _owned: {},
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
   _setMuted(muted) { this._muted = !!muted; this._fire("onUserUpdate", { userId: 16777216, muted: this._muted }); },
   _setAttendee(id, patch) { const a = this._attendees.find((x) => x.userId === id); if (a) Object.assign(a, patch); this._fire("onUserUpdate", { userId: id }); },
@@ -369,34 +378,87 @@ window.ZoomMtg = {
     try { this._bystanderWhere.removeChild(this._bystander); window.__unmounted = "ok"; }
     catch (e) { window.__unmounted = String(e.message || e); window.__reactErrors.push(window.__unmounted); }
   },
-  // A modal of the client's, drawn over the meeting on the body. A press of its button is logged, and Zoom closes it as React unmounts
-  // a node: in a microtask after the press (or dialogClosesAfterMs later, or never with dialogStays), with removeChild on its parent.
+  // A modal of the client's as Zoom's legacy Modal draws it with react-modal (6.5.0): div.ReactModalPortal on the body >
+  // div.ReactModal__Overlay > div.ReactModal__Content[role="dialog"][aria-label] (the node that has the id: the role is on the OUTER
+  // node) > div.zm-modal.zm-modal-legacy > div.zm-modal-body (div.zm-modal-body-title, a div and not a heading, and
+  // div.zm-modal-body-content with a paragraph) and div.zm-modal-footer > div.zm-modal-footer-default >
+  // div.zm-modal-footer-default-actions with a ZoomButton for each label, in the order given (the client's own footer draws cancel
+  // first and OK last). A label is a string or {label, disabled: true}: a ZoomButton has no disabled attribute, only the class
+  // zm-btn--disabled, and its onClick ignores a press then.
   _showDialog(title, text, buttons) {
-    const id = "stub-dialog-" + (++this._dialogs), b = this._behaviour;
-    const d = document.createElement("div"); d.id = id; d.setAttribute("role", "dialog"); d.className = "zm-modal";
-    const h = document.createElement("h2"); h.textContent = title; d.appendChild(h);
-    const p = document.createElement("p"); p.textContent = text; d.appendChild(p);
-    const footer = document.createElement("div");
-    for (const label of buttons) {
-      const btn = document.createElement("button"); btn.textContent = label;
-      btn.addEventListener("click", () => {
-        this._press(id, label);
-        window.__zoomCalls.push(["dialog", title, label]);
-        if (b.dialogStays) return;
-        if (b.dialogClosesAfterMs) setTimeout(() => this._closeDialog(id), b.dialogClosesAfterMs); else queueMicrotask(() => this._closeDialog(id));
-      });
-      footer.appendChild(btn);
-    }
-    d.appendChild(footer); document.body.appendChild(d); this._dialogNodes[id] = d;
+    const id = "stub-dialog-" + (++this._dialogs);
+    const make = (cls, tag) => { const e = document.createElement(tag || "div"); e.className = cls; return e; };
+    const portal = make("ReactModalPortal"), overlay = make("ReactModal__Overlay ReactModal__Overlay--after-open");
+    const content = make("ReactModal__Content ReactModal__Content--after-open");
+    content.id = id; content.setAttribute("role", "dialog"); content.setAttribute("aria-label", title); content.tabIndex = -1;
+    const modal = make("zm-modal zm-modal-legacy"), body = make("zm-modal-body");
+    const heading = make("zm-modal-body-title"); heading.textContent = title; body.appendChild(heading);
+    const said = make("zm-modal-body-content"), p = document.createElement("p"); p.textContent = text; said.appendChild(p); body.appendChild(said);
+    const footer = make("zm-modal-footer"), holder = make("zm-modal-footer-default"), actions = make("zm-modal-footer-default-actions");
+    buttons.forEach((spec, i) => {
+      const label = typeof spec === "string" ? spec : spec.label, disabled = typeof spec !== "string" && !!spec.disabled;
+      const btn = make("zm-btn zm-btn--" + (i === buttons.length - 1 ? "primary" : "default") + " zm-btn-legacy zm-btn__outline--blue" + (disabled ? " zm-btn--disabled" : ""), "button");
+      const loading = make("loading", "span"); loading.style.display = "none";
+      btn.type = "button"; btn.tabIndex = disabled ? -1 : 0; btn.appendChild(document.createTextNode(label)); btn.appendChild(loading);
+      btn.addEventListener("click", () => this._pressed(id, title, label, btn));
+      actions.appendChild(btn);
+    });
+    holder.appendChild(actions); footer.appendChild(holder); modal.appendChild(body); modal.appendChild(footer);
+    content.appendChild(modal); overlay.appendChild(content); portal.appendChild(overlay); document.body.appendChild(portal);
+    this._owned[id] = { root: portal, parent: document.body, links: [[overlay, portal], [content, overlay], [modal, content], [portal, document.body]] };
     return id;
   },
-  // Its owner's unmount: removeChild on the parent it put it in. It throws, as React's does, when something else took it out.
-  _closeDialog(id) {
-    const d = this._dialogNodes[id]; if (!d) return;
-    delete this._dialogNodes[id];
-    try { document.body.removeChild(d); } catch (e) { window.__reactErrors.push(String(e.message || e)); }
+  // The unified consent notice the client draws at the top of the meeting once the room can use audio and video (recording started,
+  // captions, AI Companion): div#zoom2modal.top > div.consent-banner[role="banner"] (never role="dialog") with a title
+  // (div.disclaimer-content__title[role="alert"]), its words and a button.ok-button "OK" (aria-label "OK", as Zoom's button does).
+  _showBanner(title, text) {
+    const id = "stub-banner-" + (++this._banners);
+    const make = (cls, tag) => { const e = document.createElement(tag || "div"); e.className = cls; return e; };
+    let top = document.getElementById("zoom2modal");
+    if (!top) { top = make("top"); top.id = "zoom2modal"; document.body.appendChild(top); }
+    const banner = make("consent-banner MuiPaper-root MuiAlert-root MuiAlert-standard"); banner.id = id; banner.setAttribute("role", "banner");
+    const message = make("MuiAlert-message"), head = make("disclaimer-content__title"), words = make("disclaimer-content__text");
+    head.setAttribute("role", "alert"); head.textContent = title; words.textContent = text; message.appendChild(head); message.appendChild(words);
+    const action = make("MuiAlert-action"), ok = make("MuiButtonBase-root MuiButton-root ok-button", "button");
+    ok.type = "button"; ok.setAttribute("aria-label", "OK"); ok.textContent = "OK";
+    ok.addEventListener("click", () => this._pressed(id, title, "OK", ok));
+    action.appendChild(ok); banner.appendChild(message); banner.appendChild(action); top.appendChild(banner);
+    this._owned[id] = { root: banner, parent: top, links: [[banner, top]] };
+    return id;
   },
-  _chat(from, text) { this._fire("onReceiveChatMsg", { sender: { name: from }, content: text, timestamp: Date.now() }); },
+  // A button of a dialog or a notice was pressed: it is logged (a press is logged whether or not the button takes it). A button
+  // that is disabled (the class zm-btn--disabled, or aria-disabled) ignores it; any other is logged as ["dialog", title, label], and
+  // Zoom closes what the button belongs to as React unmounts a node: in a microtask after the press (dialogClosesAfterMs later, or
+  // never with dialogStays).
+  _pressed(id, title, label, btn) {
+    const b = this._behaviour;
+    this._press(id, label);
+    if (btn.classList.contains("zm-btn--disabled") || btn.getAttribute("aria-disabled") === "true") return;
+    window.__zoomCalls.push(["dialog", title, label]);
+    if (b.dialogStays) return;
+    if (b.dialogClosesAfterMs) setTimeout(() => this._closeDialog(id), b.dialogClosesAfterMs); else queueMicrotask(() => this._closeDialog(id));
+  },
+  // Its owner's unmount: it takes out what it drew with removeChild on the node it drew it into, which throws, as React's does, when
+  // someone else took any of it out first (window.__reactErrors).
+  _closeDialog(id) {
+    const owned = this._owned[id]; if (!owned) return;
+    delete this._owned[id];
+    try {
+      for (const [child, parent] of owned.links) if (child.parentNode !== parent) throw new Error("The client's node " + (child.id || child.className) + " was taken out by someone else");
+      owned.parent.removeChild(owned.root);
+    } catch (e) { window.__reactErrors.push(String(e.message || e)); }
+  },
+  // A chat message as 6.5.0's SDK hands it to onReceiveChatMsg: the sender's name as text, `timestamp` only a time of day in the
+  // client's language (no date), and the words, the raw stamp t (milliseconds) and the rest in content; a file has its name in
+  // content.file.fileName and no text.
+  _chat(from, text, t) {
+    this._fire("onReceiveChatMsg", { sender: from, senderId: 16777217, senderGuid: "stub-guid", timestamp: "10:32 AM", receiver: "Everyone", receiverId: 0, type: "text",
+                                     content: { text: text, messageId: "stub-message-" + (++this._messages), chatType: 0, messageType: 0, t: t === undefined ? Date.now() : t } });
+  },
+  _chatFile(from, fileName, t) {
+    this._fire("onReceiveChatMsg", { sender: from, senderId: 16777217, senderGuid: "stub-guid", timestamp: "10:33 AM", receiver: "Everyone", receiverId: 0, type: "file",
+                                     content: { messageId: "stub-message-" + (++this._messages), file: { chatType: 0, messageType: 0, fileName: fileName }, t: t === undefined ? Date.now() : t, isEdited: "" } });
+  },
   _drawFooter() {
     const b = this._behaviour;
     const footer = document.createElement("div"); footer.id = "wc-footer"; footer.className = "footer";

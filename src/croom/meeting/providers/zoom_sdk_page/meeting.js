@@ -199,14 +199,18 @@
   function labelOf(b) { return ((b.getAttribute("aria-label") || b.textContent || "")).trim(); }
   // What the client draws when a button is pressed: its reactions picker, the View widget's dropdown, and menus (role="menu").
   const POPOVERS = '.reaction-picker, .dropdown-menu, [role="menu"]';
+  // What it draws over the meeting that can be answered (the Dialogs section below), whose buttons are never the client's own: the
+  // content of react-modal, which has the role (Zoom's legacy modal, div.zm-modal.zm-modal-legacy, is inside it), and the consent
+  // notice at the top of the meeting, div.consent-banner[role="banner"], which is never a dialog by its role.
+  const DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"], .zm-modal, .zm-modal-legacy, .consent-banner';
   // Zoom's own footer first, then the rest of the page (the View widget is outside the footer); never a button that is an item
-  // of a popover.
+  // of a popover or one of a dialog.
   function findButton(name) {
     const spec = BUTTONS[name];
     const footer = document.getElementById("wc-footer");
     for (const scope of [footer, spec.footer ? null : document].filter(Boolean)) {
       for (const b of scope.querySelectorAll("button")) {
-        if (b.closest(POPOVERS)) continue;
+        if (b.closest(POPOVERS) || b.closest(DIALOG_SELECTOR)) continue;
         const label = labelOf(b).toLowerCase();
         if (spec.not && spec.not.some((w) => label.includes(w))) continue;
         if (spec.words.some((all) => all.every((w) => label.includes(w)))) return b;
@@ -290,7 +294,7 @@
     const found = new Set(document.querySelectorAll(".full-screen-icon button"));
     const view = findButton("layout");
     if (view) found.add(view);
-    return Array.from(found).filter((b) => !b.closest("#wc-footer") && !b.closest(POPOVERS));
+    return Array.from(found).filter((b) => !b.closest("#wc-footer") && !b.closest(POPOVERS) && !b.closest(DIALOG_SELECTOR));
   }
   bridge.diagnostics = async function () {
     const inventory = popoverInventory();      // among the controls, in the order asked: queued now, not after the read
@@ -378,7 +382,9 @@
   const said = (name) => name === "hide_self" ? "self view" : name.replace("_", " ");
   const noButton = (name) => new Error("Zoom's " + said(name) + " button is not on the screen yet; try again in a moment");
   const notReady = (name) => new Error("Zoom's " + said(name) + " button is not ready yet; try again in a moment");
-  const unready = (b) => b.disabled === true || b.getAttribute("aria-disabled") === "true";
+  // Zoom's own button (ZoomButton) has no disabled attribute: it is the class zm-btn--disabled, and its onClick ignores a press. The
+  // client's other buttons say aria-disabled.
+  const unready = (b) => b.disabled === true || b.getAttribute("aria-disabled") === "true" || b.classList.contains("zm-btn--disabled");
   async function handIsUp() { return handUp(await currentUser()); }
   // Names are compared in lower case with everything but letters and digits left out, so "Thumbs Up", "thumbs_up" and
   // " THUMBSUP " are one name. An item has its aria-label, its tooltip and its text to be named by: the picker's reactions
@@ -414,8 +420,8 @@
       const before = new Set(document.querySelectorAll(CLICKABLE));
       button.click();
       const opened = await settle(() => {
-        const now = findButton(opener);      // the client may draw its opener again when it is pressed: that is not an item
-        items = Array.from(document.querySelectorAll(CLICKABLE)).filter((e) => !before.has(e) && e !== now);
+        const now = findButton(opener);      // the client may draw its opener again when it is pressed: that is not an item, nor is a dialog it draws
+        items = Array.from(document.querySelectorAll(CLICKABLE)).filter((e) => !before.has(e) && e !== now && !e.closest(DIALOG_SELECTOR));
         return items.length > 0;
       }, OPEN_MS);
       if (!opened) throw new Error("Zoom's " + (opener === "layout" ? "view" : "reactions") + " menu did not open; try again in a moment");
@@ -648,23 +654,24 @@
   // The page is watched with a MutationObserver, not a timer, and a burst of changes is looked at once, DIALOG_LOOK_MS after the first
   // of them. A dialog is reported once, with an id of its own that is not used again, and reported closed when its element goes. That
   // starts when the room is in the meeting: the device follows nothing before it, so what is open when the room comes in is said
-  // then, and what came and went before is not said at all. A dialog is a modal with a button to press: a banner has nothing to
-  // answer from the table and is not one, and a dialog that has lost its buttons is closed.
-  const DIALOG_SELECTOR = '[role="dialog"], [role="alertdialog"], .zm-modal, .zm-modal-legacy';
+  // then, and what came and went before is not said at all. A dialog is a modal with a button to press (the consent notice at the top
+  // of the meeting is one, DIALOG_SELECTOR names it): a banner with none has nothing to answer from the table and is not one, and a
+  // dialog that has lost its buttons is closed.
   const DIALOG_LOOK_MS = 50, DIALOG_MS = 2000;
   const dialogs = new Map();      // element -> id, for the dialogs that are open and have been reported
   let dialogIds = 0;
   const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
   const dialogButtons = (el) => Array.from(el.querySelectorAll("button")).filter((b) => clean(labelOf(b)));
   const isOpen = (el) => el.isConnected && el.matches(DIALOG_SELECTOR) && dialogButtons(el).length > 0;
-  // Its title, and the rest of its words as its text nodes say them (the buttons' words are theirs), as the client has them now.
+  // Its title, and the rest of its words as its text nodes say them (the buttons' words are theirs, and so are the footer's: a checkbox, a
+  // link), as the client has them now.
   function dialogInfo(el, id) {
     const heading = Array.from(el.querySelectorAll("h1, h2, h3, [class*='title']")).find((h) => !h.closest("button"));
     const parts = [];
     const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
-      const node = walker.currentNode, owner = node.parentElement, button = owner && owner.closest("button");
-      if (!owner || /^(script|style)$/i.test(owner.tagName) || (heading && heading.contains(node)) || (button && el.contains(button))) continue;
+      const node = walker.currentNode, owner = node.parentElement, apart = owner && owner.closest("button, .zm-modal-footer");
+      if (!owner || /^(script|style)$/i.test(owner.tagName) || (heading && heading.contains(node)) || (apart && el.contains(apart))) continue;
       if (clean(node.nodeValue)) parts.push(clean(node.nodeValue));
     }
     return { id: id, title: heading ? clean(heading.textContent) : "", text: parts.join(" ").slice(0, 400), buttons: dialogButtons(el).map((b) => clean(labelOf(b))) };
@@ -711,18 +718,26 @@
   bridge.answerDialog = (id, label) => alone(() => answerNow(id, label));
 
   // ---- Chat: every message the client receives is reported; the chat panel is not opened or drawn here ----
-  // The moment a message came is a number of milliseconds (as text too) or a date as text; with any other it is dated by its arrival.
-  const isoOf = (stamp) => {
-    for (const when of [new Date(Number(stamp)), new Date(stamp)]) {
-      if (stamp && Number.isFinite(when.getTime())) return when.toISOString();
-    }
-    return new Date().toISOString();
+  // The moment a message came, from a stamp: milliseconds as a number or as text, seconds as ten digits (or fewer) of text, or a date as
+  // ISO text. A stamp that is no date this century is no moment ("10.32" read as a number is 10 ms of 1970, and Zoom's own `timestamp`
+  // is only a time of day), and neither is text that is not an ISO date, whatever a lenient parser makes of it (V8 reads "Nov 5" as
+  // November 5, 2001).
+  const momentOf = (stamp) => {
+    const n = Number(stamp);
+    const ms = Number.isFinite(n) ? (n < 1e11 ? n * 1000 : n) : (typeof stamp === "string" && /^\d{4}-\d\d-\d\d/.test(stamp) ? Date.parse(stamp) : NaN);
+    return ms >= Date.UTC(2000, 0, 1) && ms <= 8.64e15 ? new Date(ms).toISOString() : null;
   };
   function chatListener(data) {
     const sender = pick(data, ["sender"]);
     const from = pick(data, ["senderName", "from", "userName"]) || (typeof sender === "string" ? sender : sender && (sender.name || sender.userName || sender.displayName)) || "";
-    const text = pick(data, ["content", "message", "text", "msg"]) || "";
-    reportJson("chat", { from: String(from), text: String(text), at: isoOf(pick(data, ["timestamp", "timeStamp", "time"])) });
+    // Zoom 6.5.0 sends {sender: "Ann", timestamp: "10:32 AM", type: "text", content: {text, t: epoch ms}}, and for a file type "file" and
+    // content: {file: {fileName}, t}: the words are content.text (a file's are its name) and the moment is content.t, not `timestamp`.
+    // Other builds send the words themselves, as content, message, text or msg.
+    const body = pick(data, ["content", "message", "text", "msg"]);
+    const record = body !== null && typeof body === "object" ? body : null;
+    const text = record ? (record.text || (record.file && record.file.fileName) || "") : (body || "");
+    const stamps = [record && record.t, pick(data, ["timestamp", "timeStamp", "time"])];
+    reportJson("chat", { from: String(from), text: String(text), at: stamps.map(momentOf).find(Boolean) || new Date().toISOString() });
   }
 
   // The join's mic-off default goes out as soon as the room's id is known: at once, or when a later read first finds it (Zoom

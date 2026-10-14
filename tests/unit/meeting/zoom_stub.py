@@ -16,20 +16,46 @@ depends on Zoom's behaviour it mirrors Zoom 6.5.0 as its own bundle has it:
 - The Client View's footer is <div id="wc-footer"><div id="foot-bar">, and its video button is
   button.send-video-container__btn (id stub-video here), whose visible text is always "Video". labelStyle "client" (the
   default) names it as Zoom's web client does: the aria-label is "start my video" or "stop my video". labelStyle "sdk"
-  names it the way other builds do: "Start Video" or "Stop Video". aria-disabled is always set. After it come the
-  client's hand, reactions (a menu), captions, view (a menu) and self-view buttons; window.__presses logs their presses.
+  names it the way other builds do: "Start Video" or "Stop Video". aria-disabled is always set.
+- After it come the footer's Reactions slot and the captions button, and, outside the footer, the View widget, drawn as the
+  6.5.0 bundle draws them (react-bootstrap and Zoom's own popovers; no React here). The Reactions button (id stub-reactions,
+  aria-label "Reactions") toggles the picker div#reactionPicker.reaction-picker[role="presentation"] inside its slot: six
+  buttons named by aria-label and data-tooltip (Clap, Thumbs Up, Joy, Open Mouth, Heart, Tada, in that order: an icon and
+  no text, and no emoji anywhere in the client), a More button, and two rows of visible text, "Raise Hand" / "Lower Hand"
+  and "Be Right Back". The View button (id stub-view, aria-label "View") toggles div.dropdown-menu.show.dark-dropdown.
+  full-screen-widget__pop-menu inside div.full-screen-viev-dropdown on the body: a.dropdown-item[role="button"] items
+  "Speaker View" and "Gallery View" (the selected one has the class full-screen-widget__pop-menu--checked) and "Hide Self
+  View" / "Show Self View"; the button's own label never changes. Neither popover has role="menu", both close when their
+  opener is pressed again, and a pick closes them. Captions is a footer button whose label says its state.
+- A popover is drawn, and taken out, in a microtask after the press that opened or closed it, as React 18 renders what a click
+  did: what looks at the page in the click's own task sees it as it was.
+- A box with role="menu" (Zoom's Leave options; the client has other role="menu" nodes too) belongs to the stub for the
+  bridge to leave alone. Like the popovers it is a node its owner removes with removeChild on its own parent, as React's
+  unmount does, which throws if anything else took it out first: window.__reactErrors collects each such throw, and
+  _unmountBystander() is the owner's unmount of the box (window.__unmounted says "ok" or the error).
+- window.__presses logs every press of a button or an item as [id, label]; window.__maxOpen is the most popovers drawn at
+  once; window.__zoomCalls gets ["reaction", "thumbs_up"] (the name, lower case) for a reaction.
 
 Behaviour flags, window.ZoomMtg._behaviour = {...}:
 - waiting, errorFor, errorCode, errorMessage, neverConnect, delayMs, endAfterMs, pageSays, silentConnect, statusField: the
   join's course. Join fails with {errorCode, errorMessage} for the meeting number errorFor, and pageSays is text join puts
   on the page, as Zoom's own dialogs do.
 - mutedOnEntry and videoOffOnEntry: the room's state when the meeting starts.
-- noToolbar leaves the footer out. videoStuckOff makes the video button ignore clicks.
+- noToolbar leaves the footer out, and with it the View widget and the Leave box: the client's buttons are all drawn with
+  it. videoStuckOff makes the video button ignore clicks. An opener with aria-disabled="true" or disabled ignores a press
+  (the press is still logged); every other button only carries the attribute.
 - videoStartsAfterMs keeps the video button aria-disabled="true" for that long after connect and after each press it
   takes (the camera switches at the end), and the button ignores clicks meanwhile, as Zoom's onClick does while its video
   encoder starts or an action is in progress.
 - videoUnusable is Zoom without a usable camera (none found, permission denied, video disabled by the host): the
   button's aria-label and text are just "Video", the record's video is false, and a click does nothing.
+- handInFooter is the uncommon build that draws the hand as a footer button of its own ("Raise Hand" / "Lower Hand") in place
+  of the Reactions slot. handIgnored (the picker's hand row closes the picker and does nothing), selfViewIgnored (the self
+  view item takes the press, does nothing and leaves the dropdown open) and openerIgnored (the openers do nothing) are
+  presses the client does not act on. popoverOpensAfterMs draws a popover that long after its opener's press, popoverStays
+  leaves it open after a pick, popoverClosesAfterMs has Zoom close it that long after a pick (window.__closedByZoom says it
+  did), paddedLabels puts whitespace around and inside the items' labels and text, and openersRedrawn has the client draw
+  an opener again (a new node) every time it is pressed.
 - role (participant, co-host, host), attendees (the other participants, in the stub's own flags bVideoOn, bRaiseHand and
   waiting), recording and refuseHostCalls: the rest of the meeting. Host calls (muteAll, record, lockMeeting, putOnHold,
   expel, endMeeting) are recorded in window.__zoomCalls and refused for a participant.
@@ -54,17 +80,23 @@ STUB_JS = r"""
 window.__zoomCalls = [];
 window.__videoClicks = 0;
 window.__presses = [];
+window.__reactErrors = [];
+window.__maxOpen = 0;
 window.ZoomMtg = {
   _listeners: {},
   _behaviour: { waiting: false, errorFor: "999", errorCode: 3712, errorMessage: "This meeting ID is not valid",
                 neverConnect: false, delayMs: 50, endAfterMs: 0, pageSays: "",
                 mutedOnEntry: false, videoOffOnEntry: false, silentConnect: false, statusField: "meetingStatus",
                 labelStyle: "client", noToolbar: false, videoStuckOff: false, videoStartsAfterMs: 0, videoUnusable: false,
+                handInFooter: false, handIgnored: false, selfViewIgnored: false, openerIgnored: false, popoverOpensAfterMs: 0,
+                popoverStays: false, popoverClosesAfterMs: 0, paddedLabels: false, openersRedrawn: false,
                 role: "participant", recording: false, refuseHostCalls: true, silentAttendees: false, rosterAfterMs: 0,
                 attendees: [{ userId: 16777217, userName: "Ann Lee", muted: false, bVideoOn: true, bRaiseHand: false, isHost: true },
                             { userId: 16777218, userName: "Raj Patel", muted: true, bVideoOn: false, bRaiseHand: true, isHost: false }] },
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
   _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
+  _open: { picker: false, view: false }, _shown: { picker: null, view: null }, _where: { picker: null, view: null },
+  _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null,
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
   _setMuted(muted) { this._muted = !!muted; this._fire("onUserUpdate", { userId: 16777216, muted: this._muted }); },
   _setAttendee(id, patch) { const a = this._attendees.find((x) => x.userId === id); if (a) Object.assign(a, patch); this._fire("onUserUpdate", { userId: id }); },
@@ -98,20 +130,166 @@ window.ZoomMtg = {
     this._paintVideo();
     setTimeout(() => { this._videoBusy = false; if (then) then(); this._paintVideo(); }, ms);
   },
+  _press(id, label) { window.__presses.push([id, label]); },
   _button(bar, id, label, onClick) {
     const b = document.createElement("button"); b.id = id; b.setAttribute("aria-label", label); b.textContent = label;
-    b.addEventListener("click", () => { window.__presses.push([id, b.getAttribute("aria-label")]); onClick(b); });
+    b.addEventListener("click", () => { this._press(id, b.getAttribute("aria-label")); onClick(b); });
     bar.appendChild(b); return b;
   },
-  _menu(id, items, onPick) {
-    const menu = document.createElement("div"); menu.id = id; menu.setAttribute("role", "menu");
-    for (const [value, label] of items) {
-      const item = document.createElement("button"); item.dataset[id === "stub-view-menu" ? "view" : "reaction"] = value;
-      item.setAttribute("role", "menuitem"); item.textContent = label;
-      item.addEventListener("click", () => { onPick(value); menu.remove(); });
-      menu.appendChild(item);
+  // Zoom fires onUserUpdate for a hand, from inside its reducer, as it does for every change of a user.
+  _toggleHand() { this._hand = !this._hand; this._fire("onUserUpdate", { userId: 16777216, raiseHand: this._hand }); },
+  _svg() {
+    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    svg.setAttribute("width", "16"); svg.setAttribute("height", "16"); svg.setAttribute("viewBox", "0 0 24 24");
+    return svg;
+  },
+  // A label as the client may draw it: with paddedLabels, whitespace around it and inside it.
+  _said(text) { return this._behaviour.paddedLabels ? "\n  " + text.replace(" ", "   ") + "\t \n" : text; },
+  // A popover is drawn when its opener is pressed and is gone when the opener is pressed again (the client's own toggle) or an
+  // item is picked. It is the client's node: its owner takes it out with removeChild on the parent it put it in, as React's
+  // unmount does, so anything else that took it out first makes that throw (window.__reactErrors).
+  _render(key) {
+    const pop = this._pop[key];
+    if (this._open[key] && !this._shown[key]) {
+      this._where[key] = pop.parent(); this._shown[key] = pop.draw(); this._where[key].appendChild(this._shown[key]);
+      if (key === "view") this._paintView();
+    } else if (!this._open[key] && this._shown[key]) {
+      const node = this._shown[key]; this._shown[key] = null;
+      try { this._where[key].removeChild(node); } catch (e) { window.__reactErrors.push(String(e.message || e)); }
     }
-    document.body.appendChild(menu);
+    if (key === "view") pop.opener.setAttribute("aria-expanded", String(!!this._shown[key]));
+    window.__maxOpen = Math.max(window.__maxOpen, Object.keys(this._shown).filter((k) => this._shown[k]).length);
+  },
+  _toggle(key) {
+    const b = this._behaviour, opener = this._pop[key].opener;
+    if (b.openerIgnored || opener.getAttribute("aria-disabled") === "true" || opener.disabled) return;
+    this._open[key] = !this._open[key];
+    if (this._open[key] && b.popoverOpensAfterMs) setTimeout(() => this._render(key), b.popoverOpensAfterMs);
+    else queueMicrotask(() => this._render(key));      // React 18 renders what a click did in a microtask after it, not in the click
+  },
+  // An item was picked and has acted: the popover goes with it, at once or when the behaviour says, or stays.
+  _picked(key) {
+    const b = this._behaviour;
+    if (key === "view") this._paintView();
+    if (b.popoverStays) return;
+    const close = () => { this._open[key] = false; this._render(key); };
+    if (b.popoverClosesAfterMs) setTimeout(() => { if (this._open[key]) { window.__closedByZoom = true; close(); } }, b.popoverClosesAfterMs);
+    else queueMicrotask(close);
+  },
+  // A client that draws its opener again every time it is pressed: the same button, a new node. The old node is dead, as a
+  // node React has dropped is: a press of it reaches nothing.
+  _redraw(key, handler) {
+    const pop = this._pop[key];
+    if (!this._behaviour.openersRedrawn) return;
+    const fresh = pop.opener.cloneNode(true); fresh.addEventListener("click", handler);
+    pop.opener.removeEventListener("click", handler); pop.opener.replaceWith(fresh); pop.opener = fresh;
+  },
+  // The footer's reaction slot: the Reactions button and, while it is open, the picker beside it inside the slot.
+  _reactionSlot() {
+    const slot = document.createElement("div"); slot.className = "footer__button-wrap"; slot.setAttribute("feature-type", "reaction");
+    const wrap = document.createElement("div"); slot.appendChild(wrap);
+    const opener = document.createElement("button"); opener.id = "stub-reactions"; opener.type = "button";
+    opener.className = "footer-button-base__button ax-outline footer-button__button footer-button__button--no-opacity";
+    opener.setAttribute("aria-label", "Reactions");
+    const label = document.createElement("div"); label.className = "footer-button-base__button-label"; label.textContent = "Reactions";
+    opener.appendChild(label); wrap.appendChild(opener);
+    const press = () => { this._press("stub-reactions", "Reactions"); this._toggle("picker"); this._redraw("picker", press); };
+    opener.addEventListener("click", press);
+    this._pop.picker = { opener, parent: () => slot, draw: () => this._drawPicker() };
+    return slot;
+  },
+  _drawPicker() {
+    const b = this._behaviour;
+    const outer = document.createElement("div"); outer.style.cssText = "position:absolute;left:0;top:0;width:100%";
+    const picker = document.createElement("div"); picker.id = "reactionPicker"; picker.className = "reaction-picker"; picker.setAttribute("role", "presentation");
+    const inner = document.createElement("div");
+    const container = document.createElement("div"); container.className = "reaction-simple-picker__container"; container.tabIndex = 0;
+    const row = (last) => {
+      const r = document.createElement("div"); r.className = "reaction-simple-picker__row" + (last ? " reaction-simple-picker__row--last" : "");
+      container.appendChild(r); return r;
+    };
+    // One block of the picker: an icon and, in the rows that have it, visible text; its name, if it has one, is in attributes.
+    const block = (into, kind, attrs, text, onClick) => {
+      const btn = document.createElement("button"); btn.type = "button"; btn.tabIndex = 0;
+      btn.className = "reaction-simple-picker__block reaction-simple-picker__block--" + kind + " ax-outline";
+      for (const name of Object.keys(attrs)) btn.setAttribute(name, attrs[name]);
+      const tip = document.createElement("div"); tip.className = "reaction-simple-picker__tooltip-wrapper";
+      if ("data-tooltip" in attrs) tip.setAttribute("data-tooltip", attrs["data-tooltip"]);
+      const content = document.createElement("div"); content.className = "reaction-simple-picker__content-wrapper";
+      content.appendChild(this._svg()); content.appendChild(document.createTextNode(text));
+      tip.appendChild(content); btn.appendChild(tip); btn.addEventListener("click", onClick); into.appendChild(btn);
+    };
+    const first = row();
+    for (const name of ["Clap", "Thumbs Up", "Joy", "Open Mouth", "Heart", "Tada"]) {        // the bundle's order
+      block(first, "reaction", { "aria-label": this._said(name), "data-tooltip": this._said(name) }, "", () => {
+        this._press("stub-reaction", name);
+        window.__zoomCalls.push(["reaction", name.toLowerCase().replace(" ", "_")]);
+        this._picked("picker");
+      });
+    }
+    block(first, "reaction", { "data-tooltip": "More" }, "", () => this._press("stub-more", "More"));
+    const hand = this._hand ? "Lower Hand" : "Raise Hand";
+    block(row(), "raise-hand", {}, this._said(hand), () => {
+      this._press("stub-hand", hand);
+      if (!b.handIgnored) this._toggleHand();
+      this._picked("picker");
+    });
+    block(row(true), "be-right-back", {}, "Be Right Back", () => { this._press("stub-brb", "Be Right Back"); this._picked("picker"); });
+    inner.appendChild(container); picker.appendChild(inner); outer.appendChild(picker);
+    return outer;
+  },
+  // The View widget, outside the footer: a button and, portalled into a div on the body, its dropdown.
+  _viewWidget() {
+    const widget = document.createElement("div"); widget.className = "full-screen-icon full-screen-icon-widget";
+    const holder = document.createElement("div"); holder.className = "dropdown"; widget.appendChild(holder);
+    const opener = document.createElement("button"); opener.id = "stub-view"; opener.type = "button"; opener.className = "full-screen-widget__button";
+    opener.setAttribute("aria-label", "View"); opener.setAttribute("aria-haspopup", "true"); opener.setAttribute("aria-expanded", "false");
+    opener.appendChild(this._svg()); holder.appendChild(opener);
+    const portal = document.createElement("div"); portal.className = "full-screen-viev-dropdown"; document.body.appendChild(portal);
+    const press = () => { this._press("stub-view", "View"); this._toggle("view"); this._redraw("view", press); };
+    opener.addEventListener("click", press);
+    this._pop.view = { opener, parent: () => portal, draw: () => this._drawView() };
+    return widget;
+  },
+  _drawView() {
+    const b = this._behaviour;
+    const menu = document.createElement("div"); menu.className = "dropdown-menu show dark-dropdown full-screen-widget__pop-menu";
+    const item = (id, onPick) => {
+      const a = document.createElement("a"); a.setAttribute("role", "button"); a.setAttribute("href", "#"); a.tabIndex = 0; a.className = "dropdown-item";
+      a.setAttribute("data-rr-ui-dropdown-item", ""); a.appendChild(document.createTextNode("")); a.appendChild(this._svg());
+      a.addEventListener("click", (e) => { e.preventDefault(); this._press(id, a.getAttribute("aria-label")); onPick(); });
+      menu.appendChild(a); return a;
+    };
+    this._viewItems = {
+      speaker: item("stub-view-item", () => { this._layout = "speaker"; this._picked("view"); }),
+      gallery: item("stub-view-item", () => { this._layout = "gallery"; this._picked("view"); }),
+    };
+    const divider = document.createElement("hr"); divider.className = "dropdown-divider"; divider.setAttribute("role", "separator"); menu.appendChild(divider);
+    this._viewItems.self = item("stub-self", () => { if (b.selfViewIgnored) return; this._selfHidden = !this._selfHidden; this._picked("view"); });
+    return menu;
+  },
+  // The items say what is so now: the selected view is checked, and self view says what it would do.
+  _paintView() {
+    const items = this._viewItems;
+    const say = (a, text) => { a.setAttribute("aria-label", this._said(text)); a.firstChild.data = this._said(text); };
+    say(items.speaker, "Speaker View"); say(items.gallery, "Gallery View");
+    say(items.self, this._selfHidden ? "Show Self View" : "Hide Self View");
+    items.speaker.classList.toggle("full-screen-widget__pop-menu--checked", this._layout === "speaker");
+    items.gallery.classList.toggle("full-screen-widget__pop-menu--checked", this._layout === "gallery");
+  },
+  // Another part of the client that carries role="menu" (its Leave options): not the bridge's to find, press or close.
+  _drawBystander() {
+    const box = document.createElement("div"); box.className = "leave-meeting-options"; box.setAttribute("role", "menu");
+    const inner = document.createElement("div"); inner.className = "leave-meeting-options__inner";
+    const leave = document.createElement("button"); leave.type = "button"; leave.textContent = "Leave Meeting";
+    leave.addEventListener("click", () => this._press("stub-leave", "Leave Meeting"));
+    inner.appendChild(leave); box.appendChild(inner); document.body.appendChild(box);
+    this._bystander = box; this._bystanderWhere = document.body;
+  },
+  // Its owner's unmount: removeChild on the parent it put it in. It throws, as React's does, when something else took it out.
+  _unmountBystander() {
+    try { this._bystanderWhere.removeChild(this._bystander); window.__unmounted = "ok"; }
+    catch (e) { window.__unmounted = String(e.message || e); window.__reactErrors.push(window.__unmounted); }
   },
   _drawFooter() {
     const b = this._behaviour;
@@ -128,15 +306,16 @@ window.ZoomMtg = {
       });
     });
     bar.appendChild(video);
-    this._button(bar, "stub-hand", "Raise Hand", (btn) => { this._hand = !this._hand; btn.setAttribute("aria-label", this._hand ? "Lower Hand" : "Raise Hand"); btn.textContent = btn.getAttribute("aria-label"); });
-    this._button(bar, "stub-reactions", "Reactions", () => this._menu("stub-reaction-menu",
-      [["thumbsup", "👍"], ["clap", "👏"], ["heart", "❤️"], ["joy", "😂"], ["open_mouth", "😮"], ["tada", "🎉"]],
-      (value) => window.__zoomCalls.push(["reaction", value])));
+    if (b.handInFooter) {     // the uncommon build: the hand is a footer button of its own, in place of the Reactions slot
+      this._button(bar, "stub-hand", "Raise Hand", (btn) => {
+        if (!b.handIgnored) this._toggleHand();
+        btn.setAttribute("aria-label", this._hand ? "Lower Hand" : "Raise Hand"); btn.textContent = btn.getAttribute("aria-label");
+      });
+    } else bar.appendChild(this._reactionSlot());
     this._button(bar, "stub-captions", "Show Captions", (btn) => { this._captions = !this._captions; btn.setAttribute("aria-label", this._captions ? "Hide Captions" : "Show Captions"); btn.textContent = btn.getAttribute("aria-label"); });
-    this._button(bar, "stub-view", "View", () => this._menu("stub-view-menu", [["speaker", "Speaker"], ["gallery", "Gallery"]],
-      (value) => { this._layout = value; }));
-    this._button(bar, "stub-self", "Hide Self View", (btn) => { this._selfHidden = !this._selfHidden; btn.setAttribute("aria-label", this._selfHidden ? "Show Self View" : "Hide Self View"); btn.textContent = btn.getAttribute("aria-label"); });
     document.body.appendChild(footer);
+    document.body.appendChild(this._viewWidget());
+    this._drawBystander();
     this._busyVideo(b.videoStartsAfterMs);   // the encoder starts after connect
   },
   setZoomJSLib(path, av) { window.__zoomCalls.push(["setZoomJSLib", path, av]); },

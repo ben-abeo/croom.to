@@ -63,7 +63,8 @@ The agent describes what the table may do right now, and the table draws from th
 ```
 
 - `available` is false when the client has no such button on screen or the role does not allow it; the table hides what is unavailable and never guesses.
-- `on`/`value` are what the platform has, re-read after every action and on every event, never the last thing the table pressed.
+- `on`/`value` are what the platform has, re-read after every action and on every event, never the last thing the table pressed (the view and self view on Zoom are the exception: the client's buttons do not say them, so they are the last seen in its open menu or the last picked).
+- `reactions.choices` are emoji, the table's own words. Zoom's client shows no emoji, only icons named Clap, Thumbs Up, Joy, Open Mouth, Heart and Tada, so the bridge maps each emoji to its name (the config may also hold the names).
 - `host.role` is `participant`, `co-host` or `host`; the host block's items are available only for a role that allows them (Zoom refuses otherwise, and the refusal would be the table's error line).
 - `participants.list` is capped at 50 entries on the wire (the count is always exact); the table shows the list on its own sub-screen.
 - `chat.messages` holds the last 20 incoming messages of this meeting; `unread` counts those since the table last opened the chat sub-screen (the table tells the agent with `POST /api/meeting/chat/seen`).
@@ -99,14 +100,14 @@ The client names its buttons for accessibility. The bridge finds each by what it
 | Control | Pattern on `aria-label` or text (case-insensitive) | State from the label |
 |---|---|---|
 | camera | "video" with "start" or "stop" | "stop" → on |
-| raise_hand | "raise hand" / "lower hand" | "lower" → raised |
-| reactions | "reactions" (opens a menu; the reaction is then the menu item whose label names it) | — |
+| raise_hand | the row "Raise Hand" / "Lower Hand" (text) of the picker the Reactions button opens; a footer button of that name instead, in the uncommon build that draws one | the room's own record (`raiseHand`): no button says it |
+| reactions | "reactions", the footer's button; it toggles the picker (`div#reactionPicker`), whose items are icon buttons named by `aria-label` and `data-tooltip` (Clap, Thumbs Up, Joy, Open Mouth, Heart, Tada; names, not emoji) | — |
 | captions | "captions" or "closed caption" with "show" / "hide" | "hide" → on |
-| layout | "view" (opens a menu with "Speaker" / "Gallery") | the item marked selected |
-| hide_self | "hide self view" / "show self view" | "show" → hidden |
+| layout | "view", the View widget's button (outside the footer); it toggles a dropdown (`div.dropdown-menu` in `div.full-screen-viev-dropdown`) whose items are `a[role=button]` "Speaker View" / "Gallery View" | the item with the class `full-screen-widget__pop-menu--checked`, read while the menu is open for a pick; else the last pick (default speaker) |
+| hide_self | the item "Hide Self View" / "Show Self View" of that same dropdown | "show" → hidden, read while the menu is open for a pick; else the last pick (default shown) |
 | pin | in the participant's own menu: "pin" | — |
 
-The patterns are confirmed before they are pinned: the diagnostics inventory (section 7) lists every button on the device during a real meeting, and the final table and its tests use the labels the device reported. A button the finder cannot see makes its control `available: false`, never an error; a press that finds no button answers "not on the screen yet; try again in a moment", as the camera does today. Where a control opens a menu (reactions, layout), the bridge opens it, picks, and closes it, within one call, so the TV never sits with a menu open.
+The patterns are confirmed before they are pinned: the diagnostics inventory (section 7) lists every button on the device during a real meeting, and the final table and its tests use the labels the device reported. A button the finder cannot see makes its control `available: false`, never an error; a press that finds no button answers "not on the screen yet; try again in a moment", as the camera does today, a disabled one answers "is not ready yet", and a press that changes nothing (the button's label, or for the hand the room's record) answers "Zoom did not …", as the camera does. The reaction picker and the View dropdown are the client's own and toggle on their opener: the bridge snapshots what is clickable, presses the opener, uses only the elements that appeared (never a search of the page, and never `role="menu"`, which in 6.5.0 belongs to other parts of the client), picks, and closes the popover by pressing its opener again if Zoom has not, within one call, so the TV never sits with a popover open; it never takes a node of the client out of the page. Names are compared in lower case with only letters and digits kept; a missing value is refused before anything is pressed. Controls run one at a time, and an identical control while one is in flight is that same press.
 
 ### 4.4 Host actions
 
@@ -167,7 +168,7 @@ Nothing else is configurable: host controls appear by role, and every control ap
 
 ## 9. Testing
 
-- **Stub SDK** (`tests/unit/meeting/zoom_stub.py`) learns: an attendee list with mute, video, hand, host, waiting flags; `_behaviour.role` (participant, co-host, host); client buttons for hand, reactions (a menu), captions, view (a menu), self view, with Zoom's label style; `muteAll`, `record`, `lockMeeting`, `putOnHold`, `expel`, `endMeeting`, `rename` recorded in `__zoomCalls` and refused when the role does not allow; `_showDialog(title, text, buttons)` that draws a modal and records which button was pressed; `_chat(from, text)` firing `onReceiveChatMsg`; `_recording(on)` firing `onRecordingChange`.
+- **Stub SDK** (`tests/unit/meeting/zoom_stub.py`) learns: an attendee list with mute, video, hand, host, waiting flags; `_behaviour.role` (participant, co-host, host); the client's buttons as Zoom 6.5.0 draws them (the Reactions slot with its toggling picker and the hand row, captions, the View widget with its toggling dropdown of the views and self view), with Zoom's label style; `muteAll`, `record`, `lockMeeting`, `putOnHold`, `expel`, `endMeeting`, `rename` recorded in `__zoomCalls` and refused when the role does not allow; `_showDialog(title, text, buttons)` that draws a modal and records which button was pressed; `_chat(from, text)` firing `onReceiveChatMsg`; `_recording(on)` firing `onRecordingChange`.
 - **Page tests**: `readMeeting()` reports every field; each `control()` presses the right button or makes the right call and settles on the new state; menus open and close within a call; a dialog is reported with its buttons and answered by label; no dialog is pressed by the page on its own.
 - **Provider tests**: the model in the status; every `control()` through the provider; the acknowledge policy (list, one-button rule, `ask_everything`), the waiting dialog in the status, `dialog-closed`, the notice line; host items available only by role; a Zoom refusal in words; chat and unread counting; state re-read after each action and each event.
 - **Control service tests**: the routes, their 400/404/409 answers, the status shape, chat seen.

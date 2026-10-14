@@ -60,6 +60,7 @@
   // ---- State as Zoom has it: the current user's record and the client's own buttons ----
   const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined) return obj[n]; } return undefined; };
   const known = (value) => value !== undefined && value !== null && value !== "";
+  const handUp = (user) => !!pick(user, ["raiseHand", "bRaiseHand", "isHandRaised", "bHandRaised"]);
   // The room's id and name from Zoom's record, once Zoom lists the room (before that the record has neither).
   function takeUser(user) {
     if (!user) return;
@@ -172,22 +173,27 @@
     }, ASK_AGAIN_MS);
   }
   // The client's buttons the table may press, each found by what it says. The inventory run on the device
-  // (spec section 7) confirms these words; a button not found is simply not offered.
+  // (spec section 7) confirms these words; a button not found is simply not offered. In Zoom 6.5.0 the hand is a button of
+  // its own only in an uncommon build, and then only in the footer (other panels of the client have hand buttons too); it is
+  // otherwise a row of the picker the Reactions button opens, and self view is an item of the menu of the View widget's button
+  // (layout), so neither has a button to find here.
   const BUTTONS = {
-    raise_hand: { words: [["raise hand"], ["lower hand"]], on: (label) => label.includes("lower") },
-    reactions: { words: [["reaction"]], on: null },
+    raise_hand: { words: [["raise hand"], ["lower hand"]], footer: true },
+    reactions: { words: [["reaction"]] },
     captions: { words: [["caption", "show"], ["caption", "hide"], ["closed caption"]], on: (label) => label.includes("hide") },
-    layout: { words: [["view"]], not: ["self view"], on: null },
-    hide_self: { words: [["self view"]], on: (label) => label.includes("show") },
+    layout: { words: [["view"]], not: ["self view"] },
   };
   function labelOf(b) { return ((b.getAttribute("aria-label") || b.textContent || "")).trim(); }
-  // Zoom's own footer first, then the rest of the page; never a button that is an item of a menu.
+  // What the client draws when a button is pressed: its reactions picker, the View widget's dropdown, and menus (role="menu").
+  const POPOVERS = '.reaction-picker, .dropdown-menu, [role="menu"]';
+  // Zoom's own footer first, then the rest of the page (the View widget is outside the footer); never a button that is an item
+  // of a popover.
   function findButton(name) {
     const spec = BUTTONS[name];
     const footer = document.getElementById("wc-footer");
-    for (const scope of footer ? [footer, document] : [document]) {
+    for (const scope of [footer, spec.footer ? null : document].filter(Boolean)) {
       for (const b of scope.querySelectorAll("button")) {
-        if (b.closest('[role="menu"]')) continue;
+        if (b.closest(POPOVERS)) continue;
         const label = labelOf(b).toLowerCase();
         if (spec.not && spec.not.some((w) => label.includes(w))) continue;
         if (spec.words.some((all) => all.every((w) => label.includes(w)))) return b;
@@ -197,19 +203,21 @@
   }
   // `videoOn` is what the user's record says of the camera, for a button that cannot say it itself. The camera is usable
   // while Zoom's button names a camera it can use and takes a press (not disabled: video starting, a switch in progress).
-  function buttonsSeen(videoOn) {
+  // `hand` is what the record says of the hand: neither the Reactions button nor a footer's hand button is read for it. The
+  // View button offers both the view and self view, which only its menu shows and which are kept as last seen or picked.
+  function buttonsSeen(videoOn, hand) {
     const out = {};
     const video = bridge.video();
     if (video.label !== null) {
       out.camera = video.usable && !video.disabled ? { on: video.on } : { on: video.on !== null ? video.on : videoOn, usable: false };
     }
-    for (const name of Object.keys(BUTTONS)) {
-      const b = findButton(name);
-      if (!b) continue;
-      const spec = BUTTONS[name];
-      if (name === "layout") out.layout = { value: bridge._layout || "speaker" };
-      else if (spec.on) out[name] = { on: spec.on(labelOf(b).toLowerCase()) };
-      else out[name] = {};
+    const reactions = findButton("reactions"), captions = findButton("captions"), view = findButton("layout");
+    if (reactions || findButton("raise_hand")) out.raise_hand = { on: !!hand };
+    if (reactions) out.reactions = {};
+    if (captions) out.captions = { on: BUTTONS.captions.on(labelOf(captions).toLowerCase()) };
+    if (view) {
+      out.layout = { value: bridge._layout || "speaker" };
+      out.hide_self = { on: !!bridge._selfHidden };
     }
     return out;
   }
@@ -232,7 +240,7 @@
       videoOn: video.on !== null ? video.on : (known(recorded) ? !!recorded : null),
       isHost: !!pick(user, ["isHost", "bHost"]),
       isCoHost: !!pick(user, ["isCoHost", "isCohost", "bCoHost"]),
-      raisedHand: !!pick(user, ["raiseHand", "bRaiseHand", "isHandRaised", "bHandRaised"]),
+      raisedHand: handUp(user),
     };
     const participants = list.map((a) => ({
       id: pick(a, ["userId"]), name: String(pick(a, ["userName", "displayName", "name"]) || ""),
@@ -242,12 +250,13 @@
     }));
     return {
       me: me, role: me.isHost ? "host" : (me.isCoHost ? "co-host" : "participant"),
-      buttons: buttonsSeen(me.videoOn), participants: participants, count: participants.length,
+      buttons: buttonsSeen(me.videoOn, me.raisedHand), participants: participants, count: participants.length,
       recording: !!bridge._recording, keys: user ? Object.keys(user) : [],
     };
   };
   bridge._recording = false;
   bridge._layout = null;
+  bridge._selfHidden = false;
   // The current user's own part of it, as the first version of the bridge answered: mute and video null when Zoom has not
   // said, never a guess.
   bridge.readState = async function () {
@@ -320,49 +329,147 @@
     if (pollTimer === null) pollTimer = setInterval(() => { syncState().catch(() => {}); }, 5000);
   }
 
-  // ---- Controls: the client's own buttons, pressed for the table ----
-  // The hand, reactions, captions, the view and self view have no SDK call: the bridge presses the client's own button, found
-  // by what it says (BUTTONS), gives the client a bounded moment to show the change, and answers with the meeting as Zoom then
-  // has it, never with the state the press was meant to reach. The camera goes through setVideo, which knows its button.
-  const settle = (done, ms) => new Promise((resolve) => {
-    let tries = 0;
-    const tick = () => { if (done() || tries++ >= Math.ceil(ms / 100)) resolve(); else setTimeout(tick, 100); };
-    setTimeout(tick, 100);
-  });
-  const noButton = (name) => new Error("Zoom's " + name.replace("_", " ") + " button is not on the screen yet; try again in a moment");
-  // Never leave a menu open on the TV.
-  function closeMenus() { for (const m of document.querySelectorAll('[role="menu"]')) m.remove(); }
+  // ---- Controls: the client's own buttons and popovers, pressed for the table ----
+  // The hand, reactions, captions, the view and self view have no SDK call: the bridge presses the client's own buttons, found
+  // by what they say (BUTTONS), gives the client a bounded moment to show the change, and answers with the meeting as Zoom then
+  // has it. Where there is something to see (captions, the hand, self view) a press that changes nothing is a failure in
+  // words, as it is for the camera, which goes through setVideo; a button that is disabled is not pressed. In Zoom 6.5.0 the
+  // reactions and the hand are in a picker the Reactions button opens, and the View widget's button opens a dropdown with the
+  // two views and self view. Both toggle on their opener and are the client's own nodes: a popover is opened, used and closed
+  // within one call, by its opener, and nothing of the client's is ever taken out of the page.
+  const PRESS_MS = 2000, OPEN_MS = 2000, CLOSE_MS = 1000;
+  // Says whether done() came true within ms: looked at as soon as the client has rendered, then every 100 ms. A look that fails
+  // is no answer, only not yet.
+  async function settle(done, ms) {
+    const end = Date.now() + ms;
+    await null;      // the client renders what a press did in a microtask: that is waited for, nothing longer
+    for (;;) {
+      try { if (await done()) return true; } catch (e) { /* not yet */ }
+      if (Date.now() >= end) return false;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+  }
+  const said = (name) => name === "hide_self" ? "self view" : name.replace("_", " ");
+  const noButton = (name) => new Error("Zoom's " + said(name) + " button is not on the screen yet; try again in a moment");
+  const notReady = (name) => new Error("Zoom's " + said(name) + " button is not ready yet; try again in a moment");
+  const unready = (b) => b.disabled === true || b.getAttribute("aria-disabled") === "true";
+  async function handIsUp() { return handUp(await currentUser()); }
+  // Names are compared in lower case with everything but letters and digits left out, so "Thumbs Up", "thumbs_up" and
+  // " THUMBSUP " are one name. An item has its aria-label, its tooltip and its text to be named by: the picker's reactions
+  // are an icon named in attributes, its hand row and the dropdown's items are text.
+  const norm = (s) => String(s || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const namesOf = (e) => [e.getAttribute("aria-label"), e.getAttribute("data-tooltip"), e.textContent].map(norm).filter(Boolean);
+  const named = (e, wanted) => namesOf(e).some((n) => wanted.includes(n));
+  // The client shows no emoji, only named icons: the table's own words (the spec's emoji) are mapped to Zoom's names.
+  const REACTIONS = { "\u{1F44D}": "thumbsup", "\u{1F44F}": "clap", "\u{1F602}": "joy", "\u{1F62E}": "openmouth", "\u{2764}": "heart", "\u{1F389}": "tada" };
+  const VIEWS = { speaker: "speakerview", gallery: "galleryview" };      // the table says speaker or gallery, Zoom says "... View"
+  const NOT_REACTIONS = ["raisehand", "lowerhand", "berightback", "more"];      // the rest of the picker: the hand, a status, More
+  const viewOf = (e) => { const n = norm(labelOf(e)); return n.startsWith("gallery") ? "gallery" : (n.startsWith("speaker") ? "speaker" : null); };
+  function need(value, what) {
+    const text = value === undefined || value === null ? "" : String(value).trim();
+    if (!text) throw new Error("Say which " + what);
+    return text;
+  }
+  const CLICKABLE = 'button, a, [role="button"], [role="menuitem"], [role="option"]';
+  // Press the opener of a popover, hand use() the clickable things that appeared because of it (what was on the page before
+  // is not looked at: no search of the page, no role to trust), and see the popover closed when use() is done. Zoom closes it
+  // after a pick; when it has not, or nothing was picked, the press a person would make closes it: the opener again, which
+  // toggles it.
+  async function withPopover(opener, control, use) {
+    const button = findButton(opener);
+    if (!button) throw noButton(control);
+    if (unready(button)) throw notReady(control);
+    const before = new Set(document.querySelectorAll(CLICKABLE));
+    let items = [];
+    button.click();
+    const opened = await settle(() => {
+      const now = findButton(opener);      // the client may draw its opener again when it is pressed: that is not an item
+      items = Array.from(document.querySelectorAll(CLICKABLE)).filter((e) => !before.has(e) && e !== now);
+      return items.length > 0;
+    }, OPEN_MS);
+    if (!opened) throw new Error("Zoom's " + (opener === "layout" ? "view" : "reactions") + " menu did not open; try again in a moment");
+    const gone = () => items.every((e) => !e.isConnected);
+    try {
+      await use(items);
+      await settle(gone, CLOSE_MS);
+    } finally {
+      if (!gone()) {
+        const again = findButton(opener);
+        if (again) again.click();
+        await settle(gone, CLOSE_MS);
+      }
+    }
+  }
+  // The View menu says what is so now: the selected view is the item marked checked, and the self view item says what it
+  // would do.
+  function readView(items) {
+    for (const i of items) {
+      if (viewOf(i) && i.classList.contains("full-screen-widget__pop-menu--checked")) bridge._layout = viewOf(i);
+      if (named(i, ["hideselfview"])) bridge._selfHidden = false;
+      else if (named(i, ["showselfview"])) bridge._selfHidden = true;
+    }
+  }
+  async function raiseHand() {
+    const own = findButton("raise_hand");      // a hand button of the footer's own: Zoom draws one only in an uncommon build
+    if (!own && !findButton("reactions")) throw noButton("raise_hand");
+    const was = await handIsUp();
+    if (own) {
+      if (unready(own)) throw notReady("raise_hand");
+      own.click();
+    } else {
+      await withPopover("reactions", "raise_hand", async (items) => {
+        const row = items.find((i) => named(i, ["raisehand", "lowerhand"]));
+        if (!row) throw new Error("Zoom offers no raise hand here");
+        if (unready(row)) throw notReady("raise_hand");
+        row.click();
+      });
+    }
+    // The room's own record says whether the hand is up: neither the Reactions button nor the picker's row does.
+    if (!await settle(async () => (await handIsUp()) !== was, PRESS_MS)) throw new Error("Zoom did not " + (was ? "lower" : "raise") + " the hand");
+  }
+  async function hideSelf() {
+    await withPopover("layout", "hide_self", async (items) => {
+      readView(items);
+      const item = items.find((i) => named(i, ["hideselfview", "showselfview"]));
+      if (!item) throw new Error("Zoom offers no self view here");
+      if (unready(item)) throw notReady("hide_self");
+      const hides = named(item, ["hideselfview"]);      // what the press does
+      item.click();
+      // Zoom taking the press shows as the dropdown closing with the item in it, or the item saying the opposite now.
+      if (!await settle(() => !item.isConnected || !named(item, [hides ? "hideselfview" : "showselfview"]), PRESS_MS)) {
+        throw new Error("Zoom did not " + (hides ? "hide" : "show") + " self view");
+      }
+      bridge._selfHidden = hides;
+    });
+  }
   async function pressButton(name) {
-    const b = findButton(name);
+    if (name === "raise_hand") return raiseHand();
+    if (name === "hide_self") return hideSelf();
+    const b = findButton(name);                // captions: the label says its state, and changes when it is pressed
     if (!b) throw noButton(name);
+    if (unready(b)) throw notReady(name);
     const before = labelOf(b);
     b.click();
-    await settle(() => labelOf(b) !== before, 2000);
-  }
-  // Open the menu, pick the item the value names (by its text, a data attribute or its label), and close the menu if the
-  // client has not. The client's buttons do not say which view is showing: the bridge keeps the last one it picked.
-  async function pickFromMenu(name, value) {
-    const b = findButton(name);
-    if (!b) throw noButton(name);
-    b.click();
-    await settle(() => document.querySelector('[role="menu"], [role="menuitem"]'), 2000);
-    const wanted = String(value).toLowerCase();
-    const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] button'));
-    const item = items.find((i) => {
-      const text = (i.textContent || "").trim().toLowerCase();
-      const data = Object.values(i.dataset || {}).map((v) => String(v).toLowerCase());
-      return text === wanted || data.includes(wanted) || (i.getAttribute("aria-label") || "").toLowerCase() === wanted;
-    });
-    if (!item) {
-      closeMenus();
-      throw new Error("Zoom offers no " + value + " here");
+    if (!await settle(() => { const now = findButton(name); return !!now && labelOf(now) !== before; }, PRESS_MS)) {
+      throw new Error("Zoom did not switch " + said(name));
     }
-    item.click();
-    await settle(() => !document.querySelector('[role="menu"]'), 1000);
-    closeMenus();
-    if (name === "layout") bridge._layout = String(value);
+  }
+  // Reactions and views: open the menu, pick the item the value names, close the menu. Only a view pick sets the view, and
+  // only a reaction is sent as one: the hand, self view and Zoom's other items are not picked here.
+  async function pickFromMenu(name, value) {
+    const text = need(value, name === "reactions" ? "reaction" : "view");
+    const wanted = [(name === "reactions" ? REACTIONS[text.replace(/\u{FE0F}/gu, "")] : VIEWS[norm(text)]) || norm(text)];
+    await withPopover(name, name, async (items) => {
+      if (name === "layout") readView(items);
+      const item = items.find((i) => named(i, wanted) && (name === "reactions" ? !named(i, NOT_REACTIONS) : viewOf(i)));
+      if (!item) throw new Error("Zoom offers no " + text + " here");
+      if (unready(item)) throw notReady(name);
+      item.click();
+      if (name === "layout") bridge._layout = viewOf(item);
+    });
   }
   bridge.control = async function (name, value) {
+    if (bridge.state !== "connected") throw new Error("not in a meeting");
     switch (name) {
       case "camera": await bridge.setVideo(!(bridge.video().on)); break;
       case "raise_hand": case "captions": case "hide_self": await pressButton(name); break;
@@ -370,8 +477,22 @@
       case "layout": await pickFromMenu("layout", value); break;
       default: throw new Error("Unknown control " + name);
     }
-    await syncState();
+    await syncState().catch(() => {});      // a read that fails does not undo a press that worked: the answer is read again
     return bridge.readMeeting();
+  };
+  // One control at a time, in the order they came: presses that overlapped would find each other's popovers. A control that
+  // is already waiting or running (the same name and value) is that same press: a double tap is one.
+  const controlNow = bridge.control;
+  let controlChain = Promise.resolve();
+  const controlsInFlight = new Map();
+  bridge.control = function (name, value) {
+    const key = name + "\u0000" + JSON.stringify(value === undefined ? null : value);
+    if (controlsInFlight.has(key)) return controlsInFlight.get(key);
+    const run = controlChain.then(() => controlNow(name, value));
+    controlChain = run.then(() => {}, () => {});
+    const tracked = run.finally(() => controlsInFlight.delete(key));
+    controlsInFlight.set(key, tracked);
+    return tracked;
   };
 
   // The join's mic-off default goes out as soon as the room's id is known: at once, or when a later read first finds it (Zoom

@@ -2075,33 +2075,74 @@ def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_strip(browser, cent
         page.close()
 
 
-def test_a_scores_list_with_junk_in_it_draws_what_it_can_and_throws_nothing(browser):
-    """The status is the room's own, but the sign never takes its shape on trust."""
-    junk = [None, 7, "texas", {}, {"school": "texas"}, {"school": "texas", "name": "Texas", "last": {"home": "Texas"}, "next": {"date": "soon", "home": "A", "away": "B"}},
-            {"school": "michigan", "name": "Michigan", "last": {"home": "Michigan", "home_score": 3, "home_rank": "x", "away": "Ohio State", "away_score": 0, "away_rank": 99.5},
-             "next": {"date": "2026-10-24", "home": "", "away": "Purdue"}}]
-    with PageServer() as server:
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
-        errors, served = [], {"scores": junk}
+def a_sign_served_this_status(browser, server, scores):
+    """A sign on a room whose status route is made to carry `scores` (whatever the test says: the scoreboard behind it is not asked); returns
+    the page, the list of what went wrong on it (page errors and console errors) and a function that serves something else at the next load."""
+    page = browser.new_page(viewport={"width": 1280, "height": 800})
+    problems, served = [], {"scores": scores}
 
-        def status(route):
-            body = route.fetch().json()
-            if served["scores"] is not None:
-                body["scores"] = served["scores"]
-            route.fulfill(json=body)
+    def status(route):
+        body = route.fetch().json()
+        if served["scores"] is not None:
+            body["scores"] = served["scores"]
+        route.fulfill(json=body)
 
-        page.on("pageerror", lambda e: errors.append(str(e)))
-        page.route("**/api/status", status)
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.on("console", lambda m: problems.append(m.text) if m.type == "error" else None)
+    page.route("**/api/status", status)
+
+    def load(scores_now):
+        served["scores"] = scores_now
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+
+    return page, problems, load
+
+
+def test_a_scores_list_with_junk_in_it_draws_what_it_can_and_throws_nothing(browser):
+    """The status is the room's own, but the sign never takes its shape on trust."""
+    def michigan(**ranks):
+        return {"school": "michigan", "name": "Michigan", "next": {"date": "2026-10-24", "home": "", "away": "Purdue"},
+                "last": {"home": "Michigan", "home_score": 3, "away": "Ohio State", "away_score": 0, **ranks}}
+
+    junk = [None, 7, "texas", {}, {"school": "texas"}, {"school": "texas", "name": "Texas", "last": {"home": "Texas"}, "next": {"date": "soon", "home": "A", "away": "B"}},
+            michigan(home_rank="x", away_rank=99.5)]
+    with PageServer() as server:
+        page, problems, load = a_sign_served_this_status(browser, server, junk)
+        load(junk)
         strip_is_up(page)
-        assert strip_text(page) == ["Michigan: Michigan 3 \u2013 Ohio State 0", ""]      # the one entry that holds a whole game; ranks that are no ranks are left out
+        assert strip_text(page) == ["Michigan: Michigan 3 \u2013 Ohio State 0", ""]      # the one entry that holds a whole game; a next game with no host is left out
+        for ranks, drawn in (({"home_rank": 25, "away_rank": 1}, "Michigan (#25) 3 \u2013 Ohio State (#1) 0"),                       # the Top 25 are ranks, ...
+                             ({"home_rank": 26, "away_rank": 99}, "Michigan 3 \u2013 Ohio State 0"),                               # ... and nothing past it is, 99 being ESPN's "no rank"
+                             ({"home_rank": 0, "away_rank": -3}, "Michigan 3 \u2013 Ohio State 0"),
+                             ({"home_rank": True, "away_rank": "7"}, "Michigan 3 \u2013 Ohio State 0"),
+                             ({"home_rank": 4.5, "away_rank": None}, "Michigan 3 \u2013 Ohio State 0")):
+            load([michigan(**ranks), None, 7])                                                    # one whole entry among the junk: no name leads
+            strip_is_up(page)
+            assert strip_text(page)[0] == drawn, ranks
         for nothing in ([None, 7, "x", {}], "texas", {"school": "texas"}, [], None):
-            served["scores"] = nothing                                         # nothing a strip can be drawn from
-            page.reload(wait_until="networkidle")
-            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            load(nothing)                                                      # nothing a strip can be drawn from
             assert page.locator("#score").is_hidden(), nothing
-        assert errors == []
+        assert problems == []
+        page.close()
+
+
+def test_a_team_name_with_markup_in_it_is_drawn_as_the_text_it_is_and_nothing_is_injected(browser):
+    """Names come from ESPN and are written to the sign's own page: a name with markup in it must show as typed and run nothing."""
+    onerror, script, bold, italic = '<img src=x onerror="window.pwned = 1">', "</span><script>window.pwned = 2</script>", "<b>Ohio State</b>", "a &amp; b <i>c</i>"
+    scores = [{"school": "michigan", "name": onerror,
+               "last": {"home": script, "home_score": 3, "away": bold, "away_score": 0},
+               "next": {"date": "2026-10-24", "home": "Purdue", "away": italic}},
+              {"school": "texas", "name": "<u>Texas</u>", "last": None, "next": {"date": "2026-10-19", "home": "Missouri", "away": "Texas"}}]
+    with PageServer() as server:
+        page, problems, load = a_sign_served_this_status(browser, server, scores)
+        load(scores)
+        strip_is_up(page)
+        assert strip_text(page) == [f"{onerror}: {script} 3 \u2013 {bold} 0", f"Next: 10/24 \u00b7 {italic} @ Purdue"]      # as typed, tags and entities and all
+        assert page.locator("#score img, #score script, #score b, #score i, #score u").count() == 0         # no element came of it
+        assert page.evaluate("window.pwned") is None
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.pwned") is None and problems == []                                   # and nothing ran, or failed to load, afterwards
         page.close()
 
 

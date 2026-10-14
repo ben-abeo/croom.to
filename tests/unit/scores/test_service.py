@@ -353,6 +353,26 @@ async def test_a_school_turned_on_is_read_at_the_loops_next_look_and_not_ten_min
         await service.stop()
 
 
+async def test_with_the_default_looks_a_school_turned_on_is_read_within_two_and_a_half_seconds_and_the_loop_does_not_spin(central):
+    """The loop's own pace (CHECK_S, two seconds), in real time: it looks once at start and not again for two seconds, and a school turned
+    on in between is read at that next look."""
+    asked_for, feed, chosen = [], Feed(), []
+
+    def schools():
+        asked_for.append(1)
+        return chosen
+
+    service = ScoresService(feed, schools)                                    # the real clock, the default pace
+    await service.start()
+    try:
+        await asyncio.sleep(0.5)
+        assert len(asked_for) == 1 and feed.asked == []                       # one look at start, none since: it does not spin
+        chosen.append("texas")
+        await wait_until(lambda: feed.asked == [TEXAS_ID], timeout=2.5)      # the next look, at two seconds, reads it
+    finally:
+        await service.stop()
+
+
 async def test_the_loops_first_read_is_at_start_and_stop_ends_it(central):
     chosen = ["texas"]
     service, feed, clock = make(chosen, check_s=3600)                        # a look an hour apart: the first one is not waited for

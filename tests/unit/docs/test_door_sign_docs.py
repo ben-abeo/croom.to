@@ -4,18 +4,32 @@ rulings and for what the scoreboard was built to, the Zoom Marketplace page and 
 installer's stock config.
 """
 
+import math
 import re
 from html import unescape
 from pathlib import Path
 
+from croom.scores.espn import SCHEDULE_URL, SCHOOLS, TOP_RANK
+from croom.scores.service import BACKOFF, CHECK_S, INTERVAL_S, RETRY_S
+
 REPO = Path(__file__).resolve().parents[3]
 SPEC = REPO / "docs" / "superpowers" / "specs" / "2026-10-13-door-sign-design.md"
 MARKETPLACE = REPO / "deploy" / "zoom-marketplace"
+GUIDE = REPO / "docs" / "guides" / "crystal-meet-room-setup" / "index.html"
+README = REPO / "README.md"
+SIGN = REPO / "src" / "croom" / "control" / "static"
 
 
 def visible_text(html):
     """The page as a reader sees it: tags dropped, entities decoded, white space collapsed."""
     return " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+
+
+def squash(css):
+    """A stylesheet's text with its comments gone, its white space made one space and none beside punctuation: a stylesheet laid out again says the same
+    to a needle that is squashed the same way."""
+    css = re.sub(r"/\*.*?\*/", " ", css, flags=re.S)
+    return re.sub(r"\s*([{};:,()])\s*", r"\1", re.sub(r"\s+", " ", css)).strip()
 
 
 def test_the_spec_says_the_week_is_seven_days_across_in_landscape_and_rows_in_portrait():
@@ -27,6 +41,18 @@ def test_the_spec_says_the_week_is_seven_days_across_in_landscape_and_rows_in_po
         "fetched once when the view opens",
         "each booking on the day it starts (an all-day booking shows 12:00 AM)",
         '"+N more" (the sign never scrolls)',
+    ):
+        assert needle in text, needle
+
+
+def test_the_spec_says_what_a_long_title_and_a_long_room_name_do():
+    """The layout's two rules for text that is too long for a sign, as built after the task 5 review."""
+    text = " ".join(SPEC.read_text(encoding="utf-8").split())
+    for needle in (
+        "A name of more than 24 characters, or one that would take more than two lines at 5.4 rem",
+        "is set in smaller type, 3.6 rem at most, so it is never cut and a short sign keeps its chip",
+        "the lines are measured on the sign after layout, and again when the name, the sign's size or the view changes and when a font arrives",
+        "a title cut after two lines with an ellipsis (after one on a sign 560 px high or less, and the week's bookings after two, one in portrait)",
     ):
         assert needle in text, needle
 
@@ -89,3 +115,62 @@ def test_the_marketplace_test_plan_says_what_the_sign_shows_while_in_a_meeting_a
 def test_the_installers_stock_config_explains_the_company_line():
     text = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
     assert '  # The practice\'s name beside the logo on the door sign; "" shows the logo alone.\n  company: "Crystal Practice Management"' in text
+
+
+WORDS = {1: "one", 2: "two", 3: "three", 5: "five", 8: "eight", 10: "ten", 20: "twenty", 30: "thirty"}
+
+
+def js_constant(name):
+    """A `const NAME = 30 * 1000;` of sign.js, as the number it is."""
+    expression = re.search(rf"const {name} = ([\d* ]+);", (SIGN / "sign.js").read_text(encoding="utf-8")).group(1)
+    return math.prod(int(factor) for factor in expression.split("*"))
+
+
+def test_the_docs_state_the_numbers_the_code_has():
+    """The numbers the docs give for the sign are read from the code they describe, and each must be where the docs say it: the schools' ids and the feed's
+    address in the spec and the guide, how often the scores are read and how they are tried again, how often the strip turns, how long the week and a
+    photograph wait, where the strip stacks, which rank counts, and where the config file is."""
+    spec, readme = (" ".join(path.read_text(encoding="utf-8").split()) for path in (SPEC, README))      # markdown: white space is all there is to undo
+    guide = visible_text(GUIDE.read_text(encoding="utf-8"))
+    css = squash((SIGN / "sign.css").read_text(encoding="utf-8"))
+    installer = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
+    minutes = INTERVAL_S // 60
+    waits = [RETRY_S * step for step in BACKOFF]                                          # 60, 120, 300 and 600 seconds
+    stacked_below = int(re.search(r"@media\(max-width:(\d+)px\)\{\.score\{flex-direction:column", css).group(1)) + 1
+    soon_minutes = js_constant("SOON_MS") // 60000
+    config = re.search(r'^CONFIG_DIR="([^"]+)"', installer, re.M).group(1) + "/config.yaml"
+    large = re.search(r"\.room\{[^}]*font-size:clamp\([^,]+,[^,]+,([\d.]+)rem\)", css).group(1)           # the room name's largest type, in rem
+    smaller = re.search(r"\.room\.long\{font-size:clamp\([^,]+,[^,]+,([\d.]+)rem\)", css).group(1)
+    assert INTERVAL_S % 60 == 0 and all(wait % 60 == 0 for wait in waits[1:])
+    facts = (
+        ("the schools and their ids in the feed", spec, ", ".join(f"{name} {team}" for team, name in SCHOOLS.values())),
+        ("the feed's address", spec, SCHEDULE_URL.removeprefix("https://").format(team_id="<id>")),
+        ("the feed's address for Texas, in the check", guide, SCHEDULE_URL.format(team_id=SCHOOLS["texas"][0])),
+        ("how often the scores are read", spec, f"every {WORDS[minutes]} minutes"),
+        ("how often the scores are read", guide, f"every {WORDS[minutes]} minutes"),
+        ("how often the scores are read", readme, f"every {WORDS[minutes]} minutes"),
+        ("how soon a school that is turned on is read", spec, f"read within {CHECK_S} seconds"),
+        ("how failed reads are tried again", spec,
+         f"retried after {waits[0]} seconds, {waits[1] // 60} minutes and {waits[2] // 60} minutes and then every {waits[3] // 60} minutes"),
+        ("how failed reads are tried again", guide, f"after {waits[0] // 60}, {waits[1] // 60} and {waits[2] // 60} minutes and then every {waits[3] // 60}"),
+        ("how often the strip turns to the next school", spec, f"every {js_constant('SCORE_EVERY_MS') // 1000} seconds"),
+        ("how often the strip turns to the next school", guide, f"every {js_constant('SCORE_EVERY_MS') // 1000} seconds"),
+        ("where the strip's two sides stack", spec, f"below {stacked_below} px"),
+        ("where the strip's two sides stack", guide, f"narrower than {stacked_below} pixels"),
+        ("the ranks that show", guide, f"the Top {TOP_RANK}"),
+        ("how long the week waits to go back", spec, f"{js_constant('WEEK_IDLE_MS') // 1000} idle seconds"),
+        ("how long the week waits to go back", guide, f"{WORDS[js_constant('WEEK_IDLE_MS') // 1000]} seconds without a tap"),
+        ("how long a photograph is waited for", spec, f"{WORDS[js_constant('PHOTO_TIMEOUT_MS') // 1000]} seconds"),
+        ("how long a photograph is waited for", guide, f"{js_constant('PHOTO_TIMEOUT_MS') // 1000} seconds"),
+        ("how many bookings Today lists", spec, f"the next {WORDS[js_constant('TODAY_ROWS')]} bookings"),
+        ("how many bookings Today lists", guide, f"next {WORDS[js_constant('TODAY_ROWS')]} bookings"),
+        ("when a booking is about to start", guide, f"the {WORDS[soon_minutes]} minutes before a booking"),
+        ("where the config file is", guide, config),
+        ("the length of a room name that takes the smaller type", guide, f"as one of more than {js_constant('LONG_NAME')} characters is"),
+        ("how many lines a room name may take in the large type", guide, f"would take more than {WORDS[js_constant('NAME_LINES')]} lines"),
+        ("the length of a room name that takes the smaller type", spec, f"A name of more than {js_constant('LONG_NAME')} characters"),
+        ("how many lines a room name may take in the large type", spec, f"more than {WORDS[js_constant('NAME_LINES')]} lines at {large} rem"),
+        ("the room name's smaller type", spec, f"{smaller} rem at most"),
+    )
+    for what, text, phrase in facts:
+        assert phrase in text, (what, phrase)

@@ -110,11 +110,12 @@ def test_readme_describes_the_redesigned_door_sign():
     text = README.read_text(encoding="utf-8")
     for needle in (
         "over a photograph of Austin under a navy overlay (nine backgrounds, chosen on the room page under **Options**, then **Door sign**)",
+        "and an **Options** button for **Camera framing**, the **Screensaver** and the **Door sign**)",      # the Room page row lists the Door sign among the Options
         "The status is a coloured rail down the left edge, a solid chip under the room's name and a ring round the booking in progress: green when free, amber ten minutes before a booking, red while in use or booked.",
         "**This week** shows the next seven days.",
         "A strip of football scores for Texas, Michigan, Texas A&M and Missouri can run along the bottom (off by default; the device reads ESPN's public schedule feed for it).",
         # the features row
-        "the status as a rail, a solid chip and a ring on the current booking, photographs of Austin under a navy overlay (nine backgrounds, eight photographs and plain, chosen from the table), the company name, a week view, optional football scores for four schools (off by default)",
+        "the status as a rail, a solid chip and a ring on the current booking, photographs of Austin under a navy overlay (nine backgrounds, eight photographs and plain, chosen on the room page), the company name, a week view, optional football scores for four schools (off by default)",
         # the config table: the practice's name, and the two settings that are not in the config file
         "| `room` | `name`, `location`, `timezone`, `company` |",
         "`company` is the practice's name beside the logo on the door sign: \"Crystal Practice Management\" unless you change it, and `company: \"\"` shows the logo alone.",
@@ -127,10 +128,14 @@ def test_readme_describes_the_redesigned_door_sign():
         "`POST /api/settings` changes `sign_background` and `sign_scores`, and refuses a bad value with words.",
         # what is not known yet
         "The football scores come from a public ESPN feed that ESPN does not document for this use",
-        "A room name long enough for two lines does not quite fit a very short, wide door screen (1280 by 480, 1366 by 500).",
+        "On a door screen only 480 to 500 px high a room name that takes two lines (Conference Room Twelve) with a location under it can push the bottom of the status, "
+        "or of the strip, past the bottom of the screen: at 1280 by 480 and 1366 by 500 by 1 and 6 px with the strip up, and by 14 and 21 px with no strip and a booking "
+        "title of two lines under the label; in the ten minutes before a booking, a title of 27 characters or more in the label can push it up to 72 px "
+        "(800 by 480, strip up, a location of two lines). A name and a location of one line fit all six sizes measured "
+        "(800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480, 1366 by 500).",
     ):
         assert needle in text, needle
     # what the sign no longer is
     assert "| Green when free, amber ten minutes before a booking, red while in use or booked. |" not in text
-    for gone in ("tinted Austin scenery", "four backgrounds chosen from the table", "Longhorns scoreboard"):
+    for gone in ("tinted Austin scenery", "four backgrounds chosen from the table", "Longhorns scoreboard", "chosen from the table"):
         assert gone not in text, gone

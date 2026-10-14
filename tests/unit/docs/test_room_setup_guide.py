@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.docs.test_door_sign_docs import squash
+
 REPO = Path(__file__).resolve().parents[3]
 GUIDE = REPO / "docs" / "guides" / "crystal-meet-room-setup"
 
@@ -140,13 +142,17 @@ def test_guide_says_what_the_door_sign_shows_and_how_its_status_reads():
         "Red is in use or booked (In use until 2:00 PM while the room is in a meeting, Booked until 2:00 PM while a booking is under way).",
         "The photograph itself is never tinted.",
         "A sign that cannot reach the device goes grey and says Sign not connected.",
-        "add a company line under room: (for example company: \"Lone Star Eye Care\"), save, and type sudo systemctl restart croom. A company: \"\" line leaves the logo on its own.",
+        "To show another, type sudo nano /etc/croom/config.yaml and look under room:. If there is a company: line, change the name inside its quotes; if not, "
+        "add a line under name: that begins with two spaces, company: \"Lone Star Eye Care\", so that it lines up with the lines around it. "
+        "Save, and type sudo systemctl restart croom. A company: \"\" line leaves the logo on its own.",
         # step 4 points at the section, and no longer says the whole screen turns a colour
         "with a bar down the left edge and a label under the room's name that are green when the room is free, amber when a meeting is about to start, and red while the room is in use or booked",
         "the door sign's bar and label green",
     ):
         assert needle in text, needle
     assert "It shows green when the room is free, amber when a meeting is about to start, and red while the room is in use or booked." not in text
+    # a stock room's config has no company line, and a line added at the wrong depth is not part of room: (the first wording said "add a company line under room:")
+    assert "add a company line under room: (for example company: \"Lone Star Eye Care\")" not in text
     assert "the door sign green" not in text
 
 
@@ -156,6 +162,10 @@ def test_guide_names_the_nine_backgrounds_and_how_to_choose_one_on_the_table_scr
         "On the table screen tap Options, then Door sign. Under Door sign background are nine buttons: Austin skyline (the default), Capitol, UT Tower, "
         "Pennybacker Bridge, Hamilton Pool, Texas star, Hill Country, DKR stadium and Plain, which leaves the navy on its own.",
         "The door sign changes within a few seconds. The choice is kept on the device, so it survives a restart, and every door sign of the room follows it.",
+        "If the sign is plain navy where a photograph should be, check first that Plain is not the one in use.",
+        "A photograph is loaded when the sign opens, so a first load, or a reload, shows navy for a moment (about a third of a second, a second or more on a slow connection).",
+        "A photograph that has not loaded after 20 seconds is given up on, and the sign stays navy, with a soft glow in the status colour in a corner, until the page is reloaded "
+        "or the sign has lost the device and found it again.",
     ):
         assert needle in text, needle
 
@@ -199,15 +209,22 @@ def test_guide_gives_the_short_screen_rules_the_stylesheet_has():
     """The thresholds in the guide are the ones in sign.css, so the one cannot change without the other."""
     text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
     for needle in (
+        "A booking's title is cut after two lines with an ellipsis, in Today as in the week, and after one line in Today on a screen 560 pixels high or less.",
+        "A room name that would take more than two lines is set in smaller type, as one of more than 24 characters is, so it is never cut.",
+        "At 560 pixels high or less the week view leaves out the line under the status label and each day's date, with football scores on or off.",
         "up to 700 pixels high the week view leaves out the line under the status label and the room's location and makes the room's name smaller, "
-        "and at 560 pixels or less the Today list leaves out the line under the label too.",
-        "With the scores on or off, at 560 pixels high or less the week view leaves out the line under the label and each day's date.",
+        "and at 560 pixels or less, in Today, the status leaves out the line under its label too.",
     ):
         assert needle in text, needle
-    css = (REPO / "src" / "croom" / "control" / "static" / "sign.css").read_text(encoding="utf-8")
-    assert "@media (max-height: 700px) {\n  body[data-view=\"week\"][data-strip] .detail" in css
-    assert "@media (max-height: 560px) {\n  body[data-view=\"week\"] .detail, body[data-view=\"week\"] .day-date" in css
-    assert "@media (max-height: 560px) {\n  body[data-strip] .detail" in css
+    assert "the Today list leaves out the line under the label too" not in text       # it is the status in Today that does, not the list
+    css = squash((REPO / "src" / "croom" / "control" / "static" / "sign.css").read_text(encoding="utf-8"))      # however the stylesheet is laid out
+    for rule in (
+        '@media (max-height: 700px) { body[data-view="week"][data-strip] .detail, body[data-view="week"][data-strip] .location { display: none; }',
+        '@media (max-height: 560px) { body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }',
+        '@media (max-height: 560px) { body[data-strip] .detail { display: none; } .event .title { -webkit-line-clamp: 1; }',
+        '.event .title { margin: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }',
+    ):
+        assert squash(rule) in css, rule
 
 
 def test_guide_repeats_the_photograph_credits_of_every_background():
@@ -235,10 +252,13 @@ def test_guide_troubleshooting_covers_the_football_strip_the_settings_file_and_t
         "are saved in control-settings.json in the device's data folder, /var/lib/croom",
         "the screen still shows the switch on, a chosen background holds only until the next restart, and the strip never comes.",
         "says \"Could not save the room settings\" and why",
-        "The door sign is plain navy",
-        "A photograph that has not loaded after 20 seconds is given up on, and the sign stays navy",
         "A long name does not fit a very short screen",
-        "a long room name at 1280 by 480 and at 1366 by 500, a long booking title with the strip up at 800 by 480 and 1024 by 480. "
-        "Keep room names and booking titles short on a screen that short, or turn the football scores off.",
+        "If the bottom of the sign is cut off on a screen only 480 to 500 pixels high, shorten the room's name to one line (Boardroom, not Conference Room Twelve).",
+        "Measured at 800 by 480, 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500: a name on one line, with a location on one line, fits all of them "
+        "whatever the booking titles and with the football strip up or down.",
+        "A name on two lines with a location under it runs past the bottom of the screen at 1280 by 480 and 1366 by 500, by 1 and 6 pixels with the strip up and, "
+        "with no strip and a booking title that takes two lines under the label, by 14 and 21 pixels.",
+        "In the ten minutes before a booking the label carries its title: with a title of 27 characters or more a two-line name runs past the bottom by up to "
+        "72 pixels (at 800 by 480 with a title of 60 characters, the strip up and a location of two lines).",
     ):
         assert needle in text, needle

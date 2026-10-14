@@ -31,8 +31,8 @@ Landscape (the Pi's 1280 by 800 and anything near it):
 ```
 
 - The brand row: the white Crystal PM logo and "Crystal Practice Management" (the company name is `room.company` in the config, default "Crystal Practice Management", so another practice could use the software).
-- The room name at 5.4 rem bold, the location under it, then the chip and one line of detail (the next booking's title, or the current one's).
-- Today: the next three bookings as rows (time, title, platform), the current one ringed in the status colour; **This week** opens the week view.
+- The room name at 5.4 rem bold, the location under it, then the chip and one line of detail (the next booking's title, or the current one's). A name of more than 24 characters, or one that would take more than two lines at 5.4 rem ("Sales Conference Room" takes three on a 1280 px sign), is set in smaller type, 3.6 rem at most, so it is never cut and a short sign keeps its chip: the lines are measured on the sign after layout, and again when the name, the sign's size or the view changes and when a font arrives.
+- Today: the next three bookings as rows (time, title, platform), the current one ringed in the status colour, a title cut after two lines with an ellipsis (after one on a sign 560 px high or less, and the week's bookings after two, one in portrait); **This week** opens the week view.
 - The clock and the date top right, as the room page shows them (12-hour, "Monday, October 13, 2026").
 - Portrait (a tablet by the door, 800 by 1280): the same, stacked; the photograph still fills the whole sign, cropped to the taller shape.
 

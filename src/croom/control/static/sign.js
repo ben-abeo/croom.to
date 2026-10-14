@@ -9,7 +9,8 @@
   const WEEK_IDLE_MS = 30 * 1000;   // the week view goes back to Today after this long without a tap inside it
   const SCORE_EVERY_MS = 8000;   // with several schools on, the scoreboard strip moves to the next one this often
 
-  const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css)
+  const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css) ...
+  const NAME_LINES = 2;   // ... and so does a shorter one that would take more lines than this at the large size (fitRoomName)
   const PHOTO_TIMEOUT_MS = 20 * 1000;   // a photograph not decoded by then counts as failed: a connection gone half open neither answers nor fails
 
   // The backgrounds are photographs the room serves, static/backgrounds/<key>.jpg; "plain" has none. The sign shows the one the
@@ -136,6 +137,29 @@
     for (const [key, photo] of photos) if (!photo) photos.delete(key);
   }
 
+  // The room's name takes the smaller type (.room.long) when it is longer than LONG_NAME characters, and also when it would take more than NAME_LINES
+  // lines at the large size: "Sales Conference Room" is three lines of it on a 1280 px sign, and on a short sign three lines push the chip, and the
+  // scoreboard strip, off the bottom. How many lines it takes is measured, with the smaller type taken off for a moment, in the layout it has now, so
+  // it is measured again when the name, the sign's size or the view changes (the week sets the name in a size of its own on a short sign) and when a
+  // font arrives (the first measure may have been in the fallback font). A poll that changes none of these measures nothing and writes nothing.
+  let nameFit = null;      // what the name was last fitted to
+  let fontsArrived = 0;    // how many times a font has finished loading, which is part of what it was fitted to
+
+  function fitRoomName() {
+    const room = el("room-name");
+    const name = room.textContent;
+    const data = document.body.dataset;
+    const fitted = [name, window.innerWidth, window.innerHeight, data.view, "strip" in data, fontsArrived].join("|");
+    if (fitted === nameFit) return;
+    nameFit = fitted;
+    let long = name.length > LONG_NAME;
+    if (!long) {
+      room.classList.remove("long");
+      long = Math.round(room.getBoundingClientRect().height / parseFloat(getComputedStyle(room).lineHeight)) > NAME_LINES;
+    }
+    room.classList.toggle("long", long);
+  }
+
   // The state (free, soon, occupied, offline, loading) colours the rail, the chip and the ring through the CSS;
   // the chip says it in words and the detail line adds what the room is for.
   function setStatus(state, chipText, detail) {
@@ -158,7 +182,7 @@
     }
     const s = model.status;
     setText(el("room-name"), s.room.name);
-    el("room-name").classList.toggle("long", s.room.name.length > LONG_NAME);
+    fitRoomName();
     setText(el("room-location"), s.room.location);
     el("room-location").hidden = !s.room.location;
     setText(el("company"), s.room.company || "");
@@ -268,6 +292,7 @@
     el("today").hidden = !connected || showWeek;
     el("week").hidden = !showWeek;
     setData("view", showWeek ? "week" : "today");
+    fitRoomName();
     if (showWeek) renderWeek(Date.now(), cal.current || ongoingEvent(Date.now()));
   }
 
@@ -397,6 +422,7 @@
     if (!usable.length) {
       if (!strip.hidden) strip.hidden = true;
       setData("strip", null);
+      fitRoomName();
       scoreShown = scoreKey = null;
       return;
     }
@@ -415,6 +441,7 @@
     }
     if (strip.hidden) strip.hidden = false;
     setData("strip", "");   // body[data-strip]: the strip is up, which a short sign's rules (sign.css) count in the height they have to share
+    fitRoomName();
   }
 
   function rotateScore() {
@@ -430,6 +457,8 @@
     el("date").textContent = fmtDate(new Date());
   }
 
+  window.addEventListener("resize", fitRoomName);
+  if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", () => { fontsArrived += 1; fitRoomName(); });
   el("this-week").addEventListener("click", openWeek);
   el("week-back").addEventListener("click", closeWeek);
   el("week").addEventListener("pointerdown", armWeekReturn);

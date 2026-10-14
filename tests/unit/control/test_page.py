@@ -500,10 +500,12 @@ def open_sign(browser, server, width=1280, height=800, state="free", **options):
     return page
 
 
-def sign_on_a_stopped_clock(browser, server, width=1280, height=800):
-    """The sign, loaded, with its timers stopped: its polls run only when the test calls page.clock.run_for."""
+def sign_on_a_stopped_clock(browser, server, width=1280, height=800, init_script=None):
+    """The sign, loaded, with its timers stopped: its polls run only when the test calls page.clock.run_for. `init_script` runs before the sign's own."""
     page = browser.new_page(viewport={"width": width, "height": height})
     page.clock.install()
+    if init_script:
+        page.add_init_script(init_script)
     page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
     page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
     page.clock.pause_at(datetime.now() + timedelta(seconds=2))
@@ -2364,6 +2366,256 @@ def test_the_short_sign_rules_come_and_go_with_the_strip(browser, central_time):
         assert [page.locator(selector).is_visible() for selector in ("#detail", "#room-location")] == [True, True]
         assert page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") == size and page.locator("#week .day").count() == 7
         page.close()
+
+
+# --- what a long booking title and a long room name do to a short sign (the task 5 review) ---
+
+BOOKING_TITLES = ("Customer call with Lone Star Eye Care", "Quarterly planning review with the regional leadership teams")   # 37 and 60 characters
+SHORT_SIGNS = ((800, 480), (900, 500), (1024, 480), (1024, 500), (1280, 480), (1366, 500))
+THREE_LINE_NAMES = ("Sales Conference Room", "Large Conference Room", "Executive Conference Roo")   # 21, 21 and 24 characters: three lines at the large size on a 1280 px sign
+
+
+def lines_of(page, selector):
+    """How many lines each element of the selector takes as it is drawn now, whatever is cut off."""
+    return page.evaluate("""(selector) => [...document.querySelectorAll(selector)].map((e) =>
+        Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)))""", selector)
+
+
+def room_name_is_long(page):
+    return page.locator("#room-name").evaluate("e => e.classList.contains('long')")
+
+
+def room_name_needs_the_smaller_type(page):
+    """Whether the name takes more than two lines at the large size, measured by taking the smaller type off for a moment."""
+    return page.evaluate("""() => { const r = document.getElementById('room-name'), had = r.classList.contains('long'); r.classList.remove('long');
+        const lines = Math.round(r.getBoundingClientRect().height / parseFloat(getComputedStyle(r).lineHeight)); r.classList.toggle('long', had); return lines > 2; }""")
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+@pytest.mark.parametrize("title", BOOKING_TITLES, ids=["37 characters", "60 characters"])
+def test_on_a_short_sign_a_long_booking_title_is_clamped_in_today_so_that_the_sign_fits_with_the_strip_up_or_down(browser, title, scores, central_time):
+    """A booking's title is two lines and an ellipsis in the Today list, and one line on a sign 560 px high or less, where the list has no height to
+    spare: with the strip up, three bookings whose titles take two lines (what a two-line clamp alone leaves) pushed the strip 33 to 58 px past the bottom
+    of an 800 by 480, 900 by 500, 1024 by 480 or 1024 by 500 sign. Every character is still in the page, and a sign with room to spare keeps two lines."""
+    skip_if_day_ends_within(3)
+    assert (len(BOOKING_TITLES[0]), len(BOOKING_TITLES[1])) == (37, 60)
+    bookings = [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        for width, height in (*SHORT_SIGNS, (1280, 800)):
+            page = open_sign(browser, server, width, height)
+            if scores:
+                strip_is_up(page)
+                strip = page.locator("#score").bounding_box()
+                assert strip["y"] >= 0 and strip["y"] + strip["height"] <= height + 0.5, ("the strip is not wholly on the sign", width, height, strip)
+            assert fits(page), (width, height)
+            assert page.locator("#events .title").all_text_contents() == [title] * 3, (width, height)        # the whole title is in the page, whatever is drawn of it
+            most = 1 if height <= 560 else 2
+            title_lines = lines_of(page, "#events .title")
+            assert max(title_lines) <= most, (width, height, title_lines)
+            if len(title) > 40 and height <= 560:                                # the long one fills the one line it has, and is cut after it
+                assert title_lines == [1] * 3 and page.locator("#events .title").first.evaluate("e => e.scrollHeight > e.clientHeight"), (width, height, title_lines)
+            page.close()
+
+
+def test_a_long_booking_title_is_two_lines_and_an_ellipsis_in_today_and_in_the_week_and_one_line_in_the_portrait_week(browser, central_time):
+    skip_if_day_ends_within(3)
+    title = "Quarterly planning review with the regional leadership team and the partners, the board and the finance group"   # long enough to be cut
+    bookings = [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor") as server:
+        for width, height, week_lines in ((1280, 800, 2), (800, 1280, 1)):
+            page = open_sign(browser, server, width, height)
+            assert page.locator("#events .title").all_text_contents() == [title] * 3                          # whole in the page, whatever is drawn
+            assert max(lines_of(page, "#events .title")) <= 2, (width, height)
+            if width > height:                                                    # beside the status the list is a narrow column: the title is cut after two lines
+                assert lines_of(page, "#events .title") == [2] * 3 and page.locator("#events .title").first.evaluate("e => e.scrollHeight > e.clientHeight")
+            open_the_week(page)
+            page.wait_for_timeout(200)
+            shown = "#week .slot:not([hidden]) .title"
+            assert page.locator(shown).count() >= 1 and set(lines_of(page, shown)) == {week_lines}, (width, height, lines_of(page, shown))
+            assert set(page.locator(shown).all_text_contents()) == {title}                                   # whole in the page
+            assert page.locator(shown).first.evaluate("e => e.scrollHeight > e.clientHeight"), (width, height)    # and cut where it does not fit
+            page.close()
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+@pytest.mark.parametrize("name", THREE_LINE_NAMES)
+def test_a_room_name_that_would_take_three_lines_takes_the_smaller_type_so_that_the_chip_stays_on_a_short_sign(browser, name, scores, central_time):
+    """"Sales Conference Room" is three lines at the large size on a 1280 px sign, and three lines of that type pushed the chip, the strip or both past
+    the bottom of a 1280 by 480, 1366 by 500, 1024 by 500 or (with the strip up) 800 by 480 sign by 7 to 100 px. A name that would take more than two
+    lines takes the smaller type that a name of 25 characters takes, and never more than two lines of it, so the chip is whole on every one of them."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name=name, room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        assert len(name) <= 24                                                    # it is not the length that makes them small
+        for width, height in SHORT_SIGNS:
+            page = open_sign(browser, server, width, height)
+            if scores:
+                strip_is_up(page)
+            assert fits(page), (width, height)
+            assert room_name_is_long(page) and lines_of(page, "#room-name") == [2], (width, height, lines_of(page, "#room-name"))
+            chip = page.locator(".chip").bounding_box()
+            floor = page.locator("#score").bounding_box()["y"] if scores else height
+            assert chip["y"] + chip["height"] <= floor + 0.5, ("the chip is not wholly on the sign", width, height, chip, floor)
+            assert page.locator("#room-name").inner_text() == name                # the name is whole: smaller, never cut
+            page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1280, 480), (1366, 500), (800, 480), (800, 1280), (1920, 1080)])
+def test_a_short_room_name_keeps_the_large_type_on_the_sign(browser, width, height):
+    root = min(max(16, 0.0125 * max(width, height)), 24)                          # the sign's rem: 16 px up to 1280, then growing with the long side
+    large = min(max(2.6 * root, 0.11 * width), 4.6 * root) if height > width else min(max(3 * root, 0.072 * width), 5.4 * root)
+    for name in ("Boardroom", "Room 1"):
+        with PageServer(room_name=name) as server:
+            page = open_sign(browser, server, width, height)
+            assert not room_name_is_long(page) and lines_of(page, "#room-name") == [1], (name, width, height)
+            assert page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") == pytest.approx(large), (name, width, height)
+            page.close()
+
+
+def test_a_room_name_is_fitted_again_when_the_sign_is_turned_or_its_width_or_height_alone_changes(browser, central_time):
+    """Two lines at the large size on a sign standing upright, three on one lying down: turned, the name takes the smaller type, and takes the large
+    one back when it is turned again, whether the width and the height both change or only one of them does."""
+    with PageServer(room_name="Sales Conference Room", room_location="2nd floor") as server:
+        # Nothing but the sign being resized may fit the name here: its polls are stopped, and the font events (which this Chromium fires again when the
+        # viewport changes) are switched off, so that the resize is what is tested and not a font that seems to arrive.
+        page = sign_on_a_stopped_clock(browser, server, 800, 1280, init_script="document.fonts.addEventListener = () => {};")
+        assert not room_name_is_long(page) and lines_of(page, "#room-name") == [2]
+        for width, height, long in ((1280, 800, True), (800, 1280, False), (1024, 500, True), (800, 1280, False),
+                                    (1280, 1000, True), (900, 1000, False),             # only the width changes, and the sign is turned
+                                    (1280, 800, True), (1280, 1400, False)):            # only the height changes, and the sign is turned
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                  # the page's own timers are stopped: this is the test's time
+            lines = lines_of(page, "#room-name")[0]
+            assert room_name_is_long(page) == long and lines <= 2 and (lines == 2 or not long) and fits(page), (width, height, lines)
+        page.close()
+
+
+def test_the_room_names_type_is_fitted_again_when_the_week_is_left_on_a_short_sign_with_the_strip_up(browser, central_time):
+    """In the week with the strip up, a short sign sets the name in a size of its own, in which "Sales Conference Room" takes one line: measured there,
+    it loses the smaller type that Today needs. Back in Today it has it again."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Sales Conference Room", room_location="2nd floor", schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, 1280, 480)
+        strip_is_up(page)
+        assert room_name_is_long(page) and fits(page)
+        open_the_week(page)
+        page.set_viewport_size({"width": 1281, "height": 480})                    # the name is measured again, at the size the week gives it
+        page.wait_for_function("!document.getElementById('room-name').classList.contains('long')", timeout=3000)
+        page.click("#week-back")
+        page.wait_for_function("document.body.dataset.view === 'today'", timeout=3000)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
+        page.close()
+
+
+def test_the_room_names_type_is_fitted_again_when_the_strip_goes_while_the_week_is_up(browser, central_time):
+    """With the strip up the week sets the name in a size of its own on a short sign, and without it the name is set as it is in Today: the one it
+    was fitted to a moment before is not the one it has now."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Sales Conference Room", room_location="2nd floor", schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, 1280, 480)
+        strip_is_up(page)
+        open_the_week(page)
+        assert not room_name_is_long(page)                                       # at the week's own size the name takes one line: the large type is fitted to it
+        choose(server, sign_scores=[])
+        page.wait_for_function("!('strip' in document.body.dataset)", timeout=8000)    # the next poll takes the strip away, and the week's own size with it
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
+        page.close()
+
+
+def test_a_room_names_type_is_fitted_again_when_the_signs_font_arrives(browser):
+    """Until Lexend arrives the name is set in a fallback font, whose lines are not Lexend's: a name that takes three lines in one and two in the other
+    must end with the type its lines in Lexend need. The font's files are held back, here, until the test lets them go. Which names wrap differently
+    depends on the fallback the machine has, so the first of a few that do on this one is used."""
+    for name in ("North Training Room", "Customer Success Room", "Project Review Room", "Client Meeting Room", "Small Meeting Room", "Partner Meeting Room",
+                 "Design Studio Room", "Conference Room Twelve", "Second Floor Conf Room 2", "Sales Conference Room", "Strategy Planning Room"):
+        with PageServer(room_name=name, room_location="") as server:
+            held = []
+            page = browser.new_page(viewport={"width": 1280, "height": 800})
+            try:
+                page.route("**/static/fonts/*.woff2", lambda route: held.append(route))
+                page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="domcontentloaded")
+                page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+                assert page.evaluate("document.fonts.status") == "loading" and held
+                in_fallback = room_name_is_long(page)
+                assert in_fallback == room_name_needs_the_smaller_type(page)           # fitted to what is on the screen now
+                while held:
+                    held.pop().continue_()
+                page.wait_for_function("document.fonts.status === 'loaded'", timeout=5000)
+                in_lexend = room_name_needs_the_smaller_type(page)
+                if in_lexend == in_fallback:
+                    continue                                                           # wraps alike in both on this machine: try another
+                page.wait_for_function(f"document.getElementById('room-name').classList.contains('long') === {str(in_lexend).lower()}", timeout=3000)
+                return
+            finally:
+                while held:                                                            # a failure before the files were let go leaves no request hanging
+                    held.pop().continue_()
+                page.close()
+    pytest.skip("no candidate wraps differently in this machine's fallback font and in Lexend")
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_signs_room_name(browser):
+    with PageServer(room_name="Sales Conference Room") as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || ''))))
+                .observe(document.getElementById('room-name'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == [] and room_name_is_long(page)      # the same name in the same place: neither measured nor written again
+        page.close()
+
+
+def test_the_limit_the_docs_state_for_a_very_short_sign_is_the_one_the_sign_has(browser, central_time):
+    """What the room guide and the README say remains on a screen 480 to 500 px high, after a long title is clamped and a name that would take three
+    lines is set smaller: a room name on one line with a location on one line fits all six sizes, whatever the booking titles and with the strip up or
+    down; a name on two lines (Conference Room Twelve) with a location under it runs past the bottom at 1280 by 480 and 1366 by 500 by 1 and 6 px with the
+    strip up, by 14 and 21 px with no strip when a booking's title takes two lines under the label, and in the ten minutes before a booking, with a title
+    of 60 characters in the label, by up to 72 px (800 by 480, strip up, a location of two lines). When one of these stops being so, the docs change."""
+    skip_if_day_ends_within(3)
+    place, two_lines = "2nd floor, by the kitchen", "2nd floor, by the kitchen, past the elevators"
+    short, long = "Customer call", BOOKING_TITLES[1]
+
+    def past_the_bottom(name, location, state, title, sizes):
+        """How far the sign runs past the bottom of the screen (0 when it fits), for each size with the strip down (False) and up (True)."""
+        bookings = ([event("now", title, -10, duration=50)] + [event(f"t{n}", "Later", 60 + 60 * n) for n in range(2)] if state == "occupied"
+                    else [event(f"t{n}", title, (8 if state == "soon" else 40) + 60 * n) for n in range(3)])
+        found = {}
+        with PageServer(calendar_events=bookings, room_name=name, room_location=location, schedules=every_school()) as server:
+            for scores in ([], ["texas"]):
+                choose(server, sign_scores=scores)
+                if scores:
+                    scoreboard_has(server, scores)
+                for width, height in sizes:
+                    page = open_sign(browser, server, width, height, state=state)
+                    if scores:
+                        strip_is_up(page)
+                    found[(bool(scores), width, height)] = max(0, page.evaluate("document.documentElement.scrollHeight") - height)
+                    page.close()
+        return found
+
+    for state, title in (("free", long), ("occupied", long), ("soon", short), ("soon", long)):
+        assert set(past_the_bottom("Boardroom", place, state, title, SHORT_SIGNS).values()) == {0}, (state, len(title))        # one line and one line: all six, strip up or down
+    two = past_the_bottom("Conference Room Twelve", place, "free", short, ((1280, 480), (1366, 500)))
+    assert [two[(False, 1280, 480)], two[(False, 1366, 500)]] == [0, 0]                                       # a short title, no strip: whole
+    assert abs(two[(True, 1280, 480)] - 1) <= 2 and abs(two[(True, 1366, 500)] - 6) <= 2, two                  # the strip up: 1 and 6
+    two_lines_under = past_the_bottom("Conference Room Twelve", place, "free", long, ((1280, 480), (1366, 500)))
+    assert abs(two_lines_under[(False, 1280, 480)] - 14) <= 3 and abs(two_lines_under[(False, 1366, 500)] - 21) <= 3, two_lines_under    # no strip: 14 and 21
+    soon = past_the_bottom("Conference Room Twelve", two_lines, "soon", long, ((800, 480),))
+    assert abs(soon[(True, 800, 480)] - 72) <= 3, soon                                                         # the label carrying the title, the strip up: 72
 
 
 def free_port():

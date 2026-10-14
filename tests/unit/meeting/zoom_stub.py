@@ -27,8 +27,14 @@ depends on Zoom's behaviour it mirrors Zoom 6.5.0 as its own bundle has it:
   "Speaker View" and "Gallery View" (the selected one has the class full-screen-widget__pop-menu--checked) and "Hide Self
   View" / "Show Self View"; the button's own label never changes. Neither popover has role="menu", both close when their
   opener is pressed again, and a pick closes them. Captions is a footer button whose label says its state.
+- A host's View menu has a section more, "Attendee View", after those (before them with attendeeViewFirst): a header and two
+  items, "Speaker View" (text "Speaker View", aria-label "<Attendee View>.Speaker View", checked while the attendees' view is
+  speaker) and "Follow Host's View". They set the attendees' view (window.ZoomMtg._attendeeView), never the host's own, and
+  are logged in window.__presses as stub-attendee-speaker and stub-attendee-follow.
 - A popover is drawn, and taken out, in a microtask after the press that opened or closed it, as React 18 renders what a click
-  did: what looks at the page in the click's own task sees it as it was.
+  did: what looks at the page in the click's own task sees it as it was. A pick takes the popover with it as React unmounts
+  it, the picked item in it: the item is not drawn again with new words first. Only a popover that stays open, or closes a
+  while after the pick (popoverStays, popoverClosesAfterMs), shows what the pick did.
 - A box with role="menu" (Zoom's Leave options; the client has other role="menu" nodes too) belongs to the stub for the
   bridge to leave alone. Like the popovers it is a node its owner removes with removeChild on its own parent, as React's
   unmount does, which throws if anything else took it out first: window.__reactErrors collects each such throw, and
@@ -55,10 +61,18 @@ Behaviour flags, window.ZoomMtg._behaviour = {...}:
   presses the client does not act on. popoverOpensAfterMs draws a popover that long after its opener's press, popoverStays
   leaves it open after a pick, popoverClosesAfterMs has Zoom close it that long after a pick (window.__closedByZoom says it
   did), paddedLabels puts whitespace around and inside the items' labels and text, and openersRedrawn has the client draw
-  an opener again (a new node) every time it is pressed.
+  an opener again (a new node) every time it is pressed. strayDropdown draws another dropdown of the client's, open, on the
+  body before the View widget's (div.dropdown-menu.show, as its audio options may be) with items named like the View's: it is
+  not the View menu, and a press of one of its items is logged as stub-stray. attendeeViewFirst puts a host's Attendee View
+  section before the host's own items.
 - role (participant, co-host, host), attendees (the other participants, in the stub's own flags bVideoOn, bRaiseHand and
-  waiting), recording and refuseHostCalls: the rest of the meeting. Host calls (muteAll, record, lockMeeting, putOnHold,
-  expel, endMeeting) are recorded in window.__zoomCalls and refused for a participant.
+  waiting), recording and refuseHostCalls: the rest of the meeting. The host's calls (muteAll, record, lockMeeting,
+  putOnHold, expel, endMeeting, and mute for anyone but the room) are recorded in window.__zoomCalls as [name, args] and
+  refused for a participant the way Zoom answers: error({errorCode: 1, errorMessage: "Not the host"}). One that is carried
+  out does its work, then is answered (window.ZoomMtg._locked is what lockMeeting last set). muteAll with muteAll false only
+  asks everyone to unmute: nobody's mute changes.
+  rename is any role's for the room: it is recorded with the old and the new name, and the room's name follows it (Zoom's
+  records of the room say the new one afterwards).
 - silentAttendees: getAttendeeslist never answers. rosterAfterMs: it stays silent until that long after join, and
   getCurrentUser gives the four-field record until then.
 
@@ -90,10 +104,12 @@ window.ZoomMtg = {
                 labelStyle: "client", noToolbar: false, videoStuckOff: false, videoStartsAfterMs: 0, videoUnusable: false,
                 handInFooter: false, handIgnored: false, selfViewIgnored: false, openerIgnored: false, popoverOpensAfterMs: 0,
                 popoverStays: false, popoverClosesAfterMs: 0, paddedLabels: false, openersRedrawn: false,
+                strayDropdown: false, attendeeViewFirst: false,
                 role: "participant", recording: false, refuseHostCalls: true, silentAttendees: false, rosterAfterMs: 0,
                 attendees: [{ userId: 16777217, userName: "Ann Lee", muted: false, bVideoOn: true, bRaiseHand: false, isHost: true },
                             { userId: 16777218, userName: "Raj Patel", muted: true, bVideoOn: false, bRaiseHand: true, isHost: false }] },
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
+  _attendeeView: "speaker", _name: "Room 1", _locked: false,
   _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
   _open: { picker: false, view: false }, _shown: { picker: null, view: null }, _where: { picker: null, view: null },
   _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null,
@@ -104,7 +120,7 @@ window.ZoomMtg = {
   // The SDK's public record of the room (its getCurrentUser maps the store's attendee to these names).
   _me() {
     const b = this._behaviour;
-    return { userId: 16777216, self: true, userName: "Room 1", muted: this._muted, audio: "computer", isHost: b.role === "host",
+    return { userId: 16777216, self: true, userName: this._name, muted: this._muted, audio: "computer", isHost: b.role === "host",
              isCoHost: b.role === "co-host" || "", isGuest: false, isHold: false, persistentID: "", participantUUID: "",
              customerKey: "", video: this._videoOn, raiseHand: this._hand, sharingStatus: 0, isBotUser: false,
              botBrandName: "", botAuthorizerName: "", isOriginhost: false, isAlternativeHost: false };
@@ -167,14 +183,17 @@ window.ZoomMtg = {
     if (this._open[key] && b.popoverOpensAfterMs) setTimeout(() => this._render(key), b.popoverOpensAfterMs);
     else queueMicrotask(() => this._render(key));      // React 18 renders what a click did in a microtask after it, not in the click
   },
-  // An item was picked and has acted: the popover goes with it, at once or when the behaviour says, or stays.
+  // An item was picked and has acted: the popover goes with it, at once or when the behaviour says, or stays. At once, it goes
+  // as React unmounts it, the picked item in it: nothing is drawn again first. One that stays on the screen says what the
+  // pick did.
   _picked(key) {
     const b = this._behaviour;
-    if (key === "view") this._paintView();
-    if (b.popoverStays) return;
     const close = () => { this._open[key] = false; this._render(key); };
-    if (b.popoverClosesAfterMs) setTimeout(() => { if (this._open[key]) { window.__closedByZoom = true; close(); } }, b.popoverClosesAfterMs);
-    else queueMicrotask(close);
+    if (b.popoverStays) { if (key === "view") this._paintView(); return; }
+    if (b.popoverClosesAfterMs) {
+      if (key === "view") this._paintView();
+      setTimeout(() => { if (this._open[key]) { window.__closedByZoom = true; close(); } }, b.popoverClosesAfterMs);
+    } else queueMicrotask(close);
   },
   // A client that draws its opener again every time it is pressed: the same button, a new node. The old node is dead, as a
   // node React has dropped is: a press of it reaches nothing.
@@ -260,22 +279,52 @@ window.ZoomMtg = {
       a.addEventListener("click", (e) => { e.preventDefault(); this._press(id, a.getAttribute("aria-label")); onPick(); });
       menu.appendChild(a); return a;
     };
-    this._viewItems = {
-      speaker: item("stub-view-item", () => { this._layout = "speaker"; this._picked("view"); }),
-      gallery: item("stub-view-item", () => { this._layout = "gallery"; this._picked("view"); }),
+    const divider = () => { const hr = document.createElement("hr"); hr.className = "dropdown-divider"; hr.setAttribute("role", "separator"); menu.appendChild(hr); };
+    this._viewItems = {};
+    const own = () => {
+      this._viewItems.speaker = item("stub-view-item", () => { this._layout = "speaker"; this._picked("view"); });
+      this._viewItems.gallery = item("stub-view-item", () => { this._layout = "gallery"; this._picked("view"); });
+      divider();
+      this._viewItems.self = item("stub-self", () => { if (b.selfViewIgnored) return; this._selfHidden = !this._selfHidden; this._picked("view"); });
     };
-    const divider = document.createElement("hr"); divider.className = "dropdown-divider"; divider.setAttribute("role", "separator"); menu.appendChild(divider);
-    this._viewItems.self = item("stub-self", () => { if (b.selfViewIgnored) return; this._selfHidden = !this._selfHidden; this._picked("view"); });
+    // A host's menu has a section more, for what the attendees see: its items name the views too, and are not the host's own.
+    const attendees = () => {
+      const head = document.createElement("div"); head.className = "dropdown-header"; head.setAttribute("role", "heading"); head.textContent = "Attendee View"; menu.appendChild(head);
+      this._viewItems.attendeeSpeaker = item("stub-attendee-speaker", () => { this._attendeeView = "speaker"; this._picked("view"); });
+      this._viewItems.attendeeFollow = item("stub-attendee-follow", () => { this._attendeeView = "follow"; this._picked("view"); });
+    };
+    if (b.role !== "host") own();
+    else if (b.attendeeViewFirst) { attendees(); divider(); own(); }
+    else { own(); divider(); attendees(); }
     return menu;
   },
   // The items say what is so now: the selected view is checked, and self view says what it would do.
   _paintView() {
     const items = this._viewItems;
-    const say = (a, text) => { a.setAttribute("aria-label", this._said(text)); a.firstChild.data = this._said(text); };
+    const say = (a, text, label) => { a.setAttribute("aria-label", this._said(label || text)); a.firstChild.data = this._said(text); };
     say(items.speaker, "Speaker View"); say(items.gallery, "Gallery View");
     say(items.self, this._selfHidden ? "Show Self View" : "Hide Self View");
     items.speaker.classList.toggle("full-screen-widget__pop-menu--checked", this._layout === "speaker");
     items.gallery.classList.toggle("full-screen-widget__pop-menu--checked", this._layout === "gallery");
+    if (items.attendeeSpeaker) {
+      say(items.attendeeSpeaker, "Speaker View", "<Attendee View>.Speaker View"); say(items.attendeeFollow, "Follow Host's View");
+      items.attendeeSpeaker.classList.toggle("full-screen-widget__pop-menu--checked", this._attendeeView === "speaker");
+      items.attendeeFollow.classList.toggle("full-screen-widget__pop-menu--checked", this._attendeeView === "follow");
+    }
+  },
+  // Another dropdown of the client's, open on the page (as its audio options may be): a div.dropdown-menu.show of the same kind as
+  // the View menu, in a portal of its own, with items named like the View's. It is not the View widget's, and not the bridge's
+  // to use, press or close; a press of one of its items is logged as stub-stray.
+  _drawStray() {
+    const portal = document.createElement("div"); portal.className = "audio-options-dropdown";
+    const menu = document.createElement("div"); menu.className = "dropdown-menu show dark-dropdown";
+    for (const name of ["Speaker View", "Gallery View", "Hide Self View"]) {
+      const a = document.createElement("a"); a.setAttribute("role", "button"); a.setAttribute("href", "#"); a.className = "dropdown-item";
+      a.setAttribute("aria-label", name); a.textContent = name;
+      a.addEventListener("click", (e) => { e.preventDefault(); this._press("stub-stray", name); });
+      menu.appendChild(a);
+    }
+    portal.appendChild(menu); document.body.appendChild(portal);
   },
   // Another part of the client that carries role="menu" (its Leave options): not the bridge's to find, press or close.
   _drawBystander() {
@@ -314,6 +363,7 @@ window.ZoomMtg = {
     } else bar.appendChild(this._reactionSlot());
     this._button(bar, "stub-captions", "Show Captions", (btn) => { this._captions = !this._captions; btn.setAttribute("aria-label", this._captions ? "Hide Captions" : "Show Captions"); btn.textContent = btn.getAttribute("aria-label"); });
     document.body.appendChild(footer);
+    if (b.strayDropdown) this._drawStray();
     document.body.appendChild(this._viewWidget());
     this._drawBystander();
     this._busyVideo(b.videoStartsAfterMs);   // the encoder starts after connect
@@ -376,25 +426,39 @@ window.ZoomMtg = {
     if (this._behaviour.silentAttendees || !this._listed()) return;
     opts.success && opts.success({ result: { attendeesList: [this._me()].concat(this._attendees.map((a) => this._record(a))) } });
   },
-  _hostCall(name, args, opts) {
+  // A call only a host or a co-host may make: recorded, refused for a participant in Zoom's shape, else carried out and answered.
+  _hostCall(name, args, opts, work) {
     window.__zoomCalls.push([name, args]);
-    if (this._behaviour.role === "participant" && this._behaviour.refuseHostCalls) { opts.error && opts.error({ errorCode: 1, errorMessage: "Not the host" }); return false; }
-    opts.success && opts.success(); return true;
-  },
-  mute(opts) {
-    window.__zoomCalls.push(["mute", { userId: opts.userId, mute: opts.mute }]);
-    if (opts.userId === 16777216) this._muted = !!opts.mute;
-    else { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.muted = !!opts.mute; }
-    this._fire("onUserUpdate", { userId: opts.userId, muted: !!opts.mute });
+    if (this._behaviour.role === "participant" && this._behaviour.refuseHostCalls) { opts.error && opts.error({ errorCode: 1, errorMessage: "Not the host" }); return; }
+    work();
     opts.success && opts.success();
   },
-  muteAll(opts) { if (this._hostCall("muteAll", { muteAll: opts.muteAll }, opts)) this._attendees.forEach((a) => { a.muted = !!opts.muteAll; }); },
-  record(opts) { if (this._hostCall("record", { record: opts.record }, opts)) this._setRecording(opts.record); },
-  lockMeeting(opts) { this._hostCall("lockMeeting", { lockMeeting: opts.lockMeeting }, opts); },
-  putOnHold(opts) { if (this._hostCall("putOnHold", { userId: opts.userId, hold: opts.hold }, opts)) { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.waiting = !!opts.hold; } },
-  expel(opts) { if (this._hostCall("expel", { userId: opts.userId }, opts)) this._attendees = this._attendees.filter((a) => a.userId !== opts.userId); },
-  endMeeting(opts) { if (this._hostCall("endMeeting", {}, opts)) setTimeout(() => this._status(3), 10); },
-  rename(opts) { window.__zoomCalls.push(["rename", { userId: opts.userId, newName: opts.newName }]); opts.success && opts.success(); },
+  // The room's own mute is any participant's to make, another's is a host's.
+  mute(opts) {
+    const args = { userId: opts.userId, mute: opts.mute };
+    const work = () => {
+      if (opts.userId === 16777216) this._muted = !!opts.mute;
+      else { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.muted = !!opts.mute; }
+      this._fire("onUserUpdate", { userId: opts.userId, muted: !!opts.mute });
+    };
+    if (opts.userId !== 16777216) { this._hostCall("mute", args, opts, work); return; }
+    window.__zoomCalls.push(["mute", args]);
+    work();
+    opts.success && opts.success();
+  },
+  // muteAll false asks everyone to unmute: they stay muted until they choose to unmute.
+  muteAll(opts) { this._hostCall("muteAll", { muteAll: opts.muteAll }, opts, () => { if (opts.muteAll) this._attendees.forEach((a) => { a.muted = true; }); }); },
+  record(opts) { this._hostCall("record", { record: opts.record }, opts, () => this._setRecording(opts.record)); },
+  lockMeeting(opts) { this._hostCall("lockMeeting", { lockMeeting: opts.lockMeeting }, opts, () => { this._locked = !!opts.lockMeeting; }); },
+  putOnHold(opts) { this._hostCall("putOnHold", { userId: opts.userId, hold: opts.hold }, opts, () => { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.waiting = !!opts.hold; }); },
+  expel(opts) { this._hostCall("expel", { userId: opts.userId }, opts, () => { this._attendees = this._attendees.filter((a) => a.userId !== opts.userId); }); },
+  endMeeting(opts) { this._hostCall("endMeeting", {}, opts, () => setTimeout(() => this._status(3), 10)); },
+  // Any participant may rename themselves: the room's name follows, and Zoom says so as it does of every change of a user.
+  rename(opts) {
+    window.__zoomCalls.push(["rename", { userId: opts.userId, oldName: opts.oldName, newName: opts.newName }]);
+    if (opts.userId === 16777216) { this._name = opts.newName; this._fire("onUserUpdate", { userId: 16777216, userName: this._name }); }
+    opts.success && opts.success();
+  },
   leaveMeeting(opts) { window.__zoomCalls.push(["leaveMeeting", { confirm: opts.confirm }]); opts.success && opts.success(); },
 };
 """

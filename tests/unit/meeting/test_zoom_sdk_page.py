@@ -1651,6 +1651,63 @@ async def test_the_stub_notices_a_node_of_the_clients_taken_out_by_anyone_but_it
         assert len(errors) == 2 and all("not a child" in e for e in errors) and await run.page.evaluate("window.__unmounted") != "ok"
 
 
+async def test_a_self_view_pick_that_leaves_with_its_menu_is_taken_though_the_item_never_says_the_opposite():
+    """React unmounts the dropdown with the item that was picked in it, and does not draw the item again with the opposite
+    words first: Zoom taking the press shows only as the item being gone, whichever way the press goes."""
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("document.addEventListener('click', (e) => { window.__picked = e.target.closest('a'); }, true)")
+        for hides, said in [(True, "Hide Self View"), (False, "Show Self View")]:
+            m = await run.page.evaluate("window.crystalMeet.control('hide_self')")
+            assert m["buttons"]["hide_self"] == {"on": hides} and await run.page.evaluate("window.ZoomMtg._selfHidden") is hides
+            assert await run.page.evaluate("[window.__picked.isConnected, window.__picked.getAttribute('aria-label')]") == [False, said]
+        await tidy(run)
+
+
+async def test_another_dropdown_that_is_open_elsewhere_on_the_page_is_not_the_view_menu():
+    """The client has other dropdowns of its own (div.dropdown-menu.show): the View menu is the one in the View widget's portal.
+    One that is open already, with items named like the View's, is neither used for a pick, nor pressed, nor closed, and the
+    View button still opens the real menu."""
+    async with PageRun(stub=client(strayDropdown=True)) as run:
+        await settled(run)
+        assert await run.page.evaluate("document.querySelectorAll('.dropdown-menu.show').length") == 1      # the premise: open, and not the View menu
+        m = await run.page.evaluate("window.crystalMeet.control('layout', 'gallery')")
+        assert m["buttons"]["layout"] == {"value": "gallery"} and await run.page.evaluate("window.ZoomMtg._layout") == "gallery"
+        m = await run.page.evaluate("window.crystalMeet.control('hide_self')")
+        assert m["buttons"]["hide_self"] == {"on": True} and await run.page.evaluate("window.ZoomMtg._selfHidden") is True
+        assert await presses(run) == ["stub-view", "stub-view-item", "stub-view", "stub-self"]              # the View's own items, none of the stray one's
+        assert await run.page.evaluate("document.querySelectorAll('.audio-options-dropdown .dropdown-menu.show a').length") == 3   # and it is open still
+        await tidy(run)
+
+
+async def test_a_hosts_view_menu_has_an_attendee_view_section_that_is_not_the_hosts_own_view():
+    """A host's View menu carries a section more, "Attendee View": its items say "Speaker View" (labelled "<Attendee View>.Speaker
+    View") and "Follow Host's View". A view is read from, and picked in, the items that begin with the view's name: the
+    attendees' Speaker View is neither the host's view when it is checked nor the item a pick finds first. Where the section
+    comes in the menu is not known, so it is tried both ways."""
+    for first in (False, True):
+        async with PageRun(stub=client(role="host", attendeeViewFirst=first)) as run:
+            await settled(run)
+            items = (await run.page.evaluate("window.crystalMeet.diagnostics()"))["popovers"]["view"]["items"]      # the premise: what the menu holds
+            labels = [i["label"] for i in items]
+            assert sorted(labels) == ["<Attendee View>.Speaker View", "Follow Host's View", "Gallery View", "Hide Self View", "Speaker View"]
+            assert (labels.index("<Attendee View>.Speaker View") < labels.index("Gallery View")) is first
+            assert [i["text"] for i in items if i["label"].startswith("<")] == ["Speaker View"]
+            assert sorted(i["label"] for i in items if "full-screen-widget__pop-menu--checked" in i["class"]) == ["<Attendee View>.Speaker View", "Speaker View"]
+            await run.page.evaluate("window.__presses.length = 0")
+            await run.page.evaluate("window.ZoomMtg._layout = 'gallery'")           # the host's own view; the attendees' is Speaker, checked in its section
+            m = await run.page.evaluate("window.crystalMeet.control('hide_self')")  # the menu is read while it is open
+            assert m["buttons"]["layout"] == {"value": "gallery"}
+            await run.page.evaluate("window.ZoomMtg._attendeeView = 'follow'")
+            m = await run.page.evaluate("window.crystalMeet.control('layout', 'speaker')")
+            assert m["buttons"]["layout"] == {"value": "speaker"} and await run.page.evaluate("window.ZoomMtg._layout") == "speaker"
+            m = await run.page.evaluate("window.crystalMeet.control('layout', 'gallery')")
+            assert m["buttons"]["layout"] == {"value": "gallery"} and await run.page.evaluate("window.ZoomMtg._layout") == "gallery"
+            assert await run.page.evaluate("window.ZoomMtg._attendeeView") == "follow"                                # the attendees' view was not touched
+            assert await presses(run) == ["stub-view", "stub-self", "stub-view", "stub-view-item", "stub-view", "stub-view-item"]
+            await tidy(run)
+
+
 # ---- Diagnostics: the device inventory looks into the popovers too ----
 
 
@@ -1779,3 +1836,274 @@ async def test_diagnostics_run_among_the_controls_and_never_between_their_presse
                                       "stub-reactions", "stub-reaction"]                  # in the order they were asked
         await tidy(run)
 
+
+# ---- Host calls, rename and the SDK's init flags (spec 2026-10-13, sections 4.2 and 4.4) ----
+
+
+async def test_host_calls_go_to_the_sdk_and_a_participant_gets_zooms_refusal():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';") as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('host.mute_all')")
+        assert all(p["muted"] for p in m["participants"] if not p["me"])
+        m = await run.page.evaluate("window.crystalMeet.control('host.record')")
+        assert m["recording"] is True
+        m = await run.page.evaluate("window.crystalMeet.control('host.remove', 16777218)")
+        assert [p["name"] for p in m["participants"]] == ["Room 1", "Ann Lee"]
+        await run.page.evaluate("window.crystalMeet.control('host.hold', 16777217)")
+        m = await run.page.evaluate("window.crystalMeet.control('host.admit', 16777217)")
+        assert m["participants"][1]["waiting"] is False
+        calls = [c[0] for c in await run.page.evaluate("window.__zoomCalls")]
+        assert calls[-5:] == ["muteAll", "record", "expel", "putOnHold", "putOnHold"]
+    async with PageRun() as run:                                                  # a participant
+        await run.wait_for("connected")
+        with pytest.raises(Exception) as failure:
+            await run.page.evaluate("window.crystalMeet.control('host.lock')")
+        assert "Not the host" in str(failure.value)
+
+
+async def test_end_for_everyone_ends_the_meeting():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';") as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.crystalMeet.control('host.end')")
+        await run.wait_for("left")
+
+
+async def test_init_asks_for_chat_captions_and_recording():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        [init] = await run.calls("init")
+        assert init[1]["isSupportChat"] is True and init[1]["isSupportCC"] is True and init[1]["disableRecord"] is False
+
+
+async def test_init_keeps_the_invite_function_hidden():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        [init] = await run.calls("init")
+        assert init[1]["disableInvite"] is True
+
+
+HOST_CALLS = ("muteAll", "record", "lockMeeting", "putOnHold", "expel", "mute", "endMeeting", "rename")
+
+
+def asked(calls):
+    """What the page has asked of Zoom's host calls and of rename, in the order it asked: [name, arguments]."""
+    return [c for c in calls if c[0] in HOST_CALLS]
+
+
+async def control(run, name, value=None):
+    return await run.page.evaluate("([name, value]) => window.crystalMeet.control(name, value)", [name, value])
+
+
+async def test_each_host_call_sends_zoom_the_arguments_it_takes():
+    """The first test sees which calls were made; each takes its own arguments, and a participant's id reaches Zoom as the number
+    Zoom lists it by. Recording and locking are asked for as the opposite of what the meeting has."""
+    async with PageRun(stub=client(role="host")) as run:
+        await run.wait_for("connected")
+        for name, value in [("host.mute_all", None), ("host.ask_unmute", None), ("host.record", None), ("host.record", None), ("host.lock", None),
+                            ("host.lock", None), ("host.admit", 16777217), ("host.hold", 16777217), ("host.remove", 16777218),
+                            ("host.mute_one", 16777217), ("host.end", None)]:
+            await control(run, name, value)
+        assert asked(await run.page.evaluate("window.__zoomCalls")) == [
+            ["muteAll", {"muteAll": True}], ["muteAll", {"muteAll": False}],
+            ["record", {"record": True}], ["record", {"record": False}],
+            ["lockMeeting", {"lockMeeting": True}], ["lockMeeting", {"lockMeeting": False}],
+            ["putOnHold", {"userId": 16777217, "hold": False}], ["putOnHold", {"userId": 16777217, "hold": True}],
+            ["expel", {"userId": 16777218}], ["mute", {"userId": 16777217, "mute": True}], ["endMeeting", {}]]
+
+
+async def test_the_meeting_says_whether_it_is_locked_and_recording_follows_what_zoom_says():
+    """Zoom's calls do not say whether the meeting is locked, so it is kept as the lock call last went, and the device hears of
+    it as a "state" event; whether it is recording is what Zoom says (its event), also when somebody else starts it."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["locked"] is False and m["recording"] is False
+        m = await control(run, "host.lock")
+        assert m["locked"] is True and await run.page.evaluate("window.ZoomMtg._locked") is True
+        assert (await states(run, 1, timeout=1.0))[-1]["locked"] is True
+        m = await control(run, "host.lock")
+        assert m["locked"] is False and await run.page.evaluate("window.ZoomMtg._locked") is False
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["locked"] is False
+        m = await control(run, "host.record")
+        assert m["recording"] is True and m["locked"] is False
+        await run.page.evaluate("window.ZoomMtg._setRecording(false)")             # stopped by somebody else: the next press starts it
+        m = await control(run, "host.record")
+        assert m["recording"] is True
+        await run.page.evaluate("window.ZoomMtg._setRecording(false)")
+        await run.page.evaluate("window.ZoomMtg._setRecording(true)")               # started by somebody else: the next press stops it
+        m = await control(run, "host.record")
+        assert m["recording"] is False
+        assert [c[1] for c in await run.calls("record")] == [{"record": True}, {"record": True}, {"record": False}]
+
+
+async def test_a_refused_host_call_changes_nothing_and_says_zooms_words():
+    async with PageRun() as run:                                                   # a participant: Zoom refuses every one
+        await settled(run)
+        for name, value in [("host.lock", None), ("host.record", None), ("host.mute_all", None), ("host.ask_unmute", None), ("host.admit", 16777217),
+                            ("host.hold", 16777217), ("host.remove", 16777218), ("host.mute_one", 16777217), ("host.end", None)]:
+            with pytest.raises(Exception) as failure:
+                await control(run, name, value)
+            assert "Not the host (code 1)" in str(failure.value)
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["locked"] is False and m["recording"] is False and m["count"] == 3                        # not kept as done
+        assert [p["muted"] for p in m["participants"]] == [False, False, True] and not any(p["waiting"] for p in m["participants"])
+        assert await run.page.evaluate("window.crystalMeet.state") == "connected"
+        # a refusal does not hold the controls behind it
+        results = await run.page.evaluate("""Promise.allSettled([window.crystalMeet.control('host.lock'), window.crystalMeet.control('captions')])
+                                              .then((r) => r.map((x) => x.status))""")
+        assert results == ["rejected", "fulfilled"] and await run.page.evaluate("window.ZoomMtg._captions") is True
+
+
+async def test_rename_sends_zoom_the_rooms_id_and_the_name_zoom_has_for_it():
+    async with PageRun() as run:                                                   # a participant may rename themselves
+        await run.wait_for("connected")
+        m = await control(run, "rename", "  Boardroom 2 ")
+        assert [p["name"] for p in m["participants"] if p["me"]] == ["Boardroom 2"]                         # as Zoom says it now
+        m = await control(run, "rename", "Boardroom")
+        assert [p["name"] for p in m["participants"] if p["me"]] == ["Boardroom"]
+        assert [c[1] for c in await run.calls("rename")] == [
+            {"userId": 16777216, "oldName": "Room 1", "newName": "Boardroom 2"},
+            {"userId": 16777216, "oldName": "Boardroom 2", "newName": "Boardroom"}]
+
+
+async def test_the_room_cannot_be_renamed_before_zoom_lists_it():
+    async with PageRun(stub=NO_USER_YET) as run:
+        await run.wait_for("connected")
+        with pytest.raises(Exception) as failure:
+            await control(run, "rename", "Boardroom")
+        assert "Zoom has not listed the room in the meeting yet; try again in a moment" in str(failure.value)
+        assert await run.calls("rename") == []
+        await run.page.evaluate("window.__listed = true")
+        await run.page.evaluate("window.crystalMeet.readState()")                  # the read that finds the room's id and name
+        await control(run, "rename", "Boardroom")
+        assert [c[1] for c in await run.calls("rename")] == [{"userId": 16777216, "oldName": "Room 1", "newName": "Boardroom"}]
+
+
+async def test_a_host_call_without_a_participant_and_a_rename_without_a_name_are_refused_before_anything_is_sent():
+    async with PageRun(stub=client(role="host")) as run:
+        await run.wait_for("connected")
+        for name in ["host.admit", "host.hold", "host.remove", "host.mute_one"]:
+            for value in [None, "", "  ", "everyone", 0, -1, 1.5]:
+                with pytest.raises(Exception, match="Say which participant"):
+                    await control(run, name, value)
+        for value in [None, "", "   "]:
+            with pytest.raises(Exception, match="Say which name to use"):
+                await control(run, "rename", value)
+        assert asked(await run.page.evaluate("window.__zoomCalls")) == []
+        await control(run, "host.remove", "16777218")                                                       # an id that came as text is the number
+        assert asked(await run.page.evaluate("window.__zoomCalls")) == [["expel", {"userId": 16777218}]]
+
+
+async def test_the_names_every_object_has_are_not_controls():
+    async with PageRun(stub=client(role="host")) as run:
+        await run.wait_for("connected")
+        for name in ["constructor", "toString", "hasOwnProperty", "valueOf", "__proto__"]:
+            with pytest.raises(Exception, match=f"Unknown control {name}"):
+                await run.page.evaluate("(name) => window.crystalMeet.control(name)", name)
+        assert asked(await run.page.evaluate("window.__zoomCalls")) == [] and await run.page.evaluate("window.__presses") == []
+
+
+async def test_host_calls_and_rename_say_they_are_not_in_a_meeting_before_the_meeting_is_joined():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host'; window.ZoomMtg._behaviour.silentConnect = true;",
+                       params={"connectGraceMs": 4000}) as run:
+        await asyncio.sleep(0.4)
+        assert await run.page.evaluate("window.crystalMeet.state") == "joining"
+        for name, value in [("host.mute_all", None), ("host.remove", 16777218), ("host.end", None), ("rename", "Boardroom")]:
+            with pytest.raises(Exception) as failure:
+                await control(run, name, value)
+            assert "not in a meeting" in str(failure.value)
+        assert asked(await run.page.evaluate("window.__zoomCalls")) == []
+
+
+async def test_host_calls_wait_their_turn_among_the_controls_and_a_double_tap_is_one_call():
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        await run.page.evaluate("""() => {            // Zoom answers these a moment after they are asked
+            const Z = window.ZoomMtg;
+            for (const call of ["muteAll", "lockMeeting"]) {
+                const real = Z[call];
+                Z[call] = function (o) { window.__presses.push([call + " asked", ""]); setTimeout(() => { window.__presses.push([call + " answered", ""]); real.call(this, o); }, 300); };
+            }
+        }""")
+        results = await run.page.evaluate("""Promise.allSettled([window.crystalMeet.control('host.mute_all'), window.crystalMeet.control('captions'),
+                                              window.crystalMeet.control('host.lock')]).then((r) => r.map((x) => x.status))""")
+        assert results == ["fulfilled"] * 3
+        assert await presses(run) == ["muteAll asked", "muteAll answered", "stub-captions", "lockMeeting asked", "lockMeeting answered"]
+        assert await run.page.evaluate("""async () => {
+            const a = window.crystalMeet.control('host.record'), b = window.crystalMeet.control('host.record');
+            await Promise.all([a, b]);
+            return a === b;
+        }""") is True
+        assert [c[1] for c in await run.calls("record")] == [{"record": True}]                              # one call, not a start and a stop
+
+
+BOUNDS = """() => {
+    const set = window.setTimeout, clear = window.clearTimeout;
+    window.__bounds = new Map();           // the page's long timers, which are the bound on a call to Zoom: kept for the test to look at, and to fire
+    let count = 0;
+    window.setTimeout = function (fn, ms, ...rest) {
+        if (ms < 3000) return set.call(window, fn, ms, ...rest);
+        count += 1; window.__bounds.set("bound-" + count, { fn, ms }); return "bound-" + count;
+    };
+    window.clearTimeout = function (id) { if (!window.__bounds.delete(id)) clear.call(window, id); };
+}"""
+
+
+async def test_a_call_zoom_never_answers_ends_in_words_and_does_not_hold_the_controls_behind_it():
+    """Controls run one at a time, so a call Zoom never answered would hold every later control, and the inventory, until the page
+    was reloaded. It ends after ten seconds in words, and what waited behind it goes on. The ten seconds are not waited for: the
+    page's timer for them is taken, its delay is looked at, and the test lets it go off."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        await run.page.evaluate(BOUNDS)
+        await run.page.evaluate("() => { window.ZoomMtg.muteAll = (o) => { window.__zoomCalls.push(['muteAll', { muteAll: o.muteAll }]); }; }")   # Zoom never calls back
+
+        async def asked_of_zoom(count):
+            for _ in range(100):
+                if len(await run.calls("muteAll")) >= count:
+                    return
+                await asyncio.sleep(0.05)
+            raise AssertionError(f"Zoom was not asked {count} times")
+
+        async def ten_seconds_go_by():
+            assert await run.page.evaluate("[...window.__bounds.values()].map((b) => b.ms)") == [10000]       # one call waiting, for ten seconds
+            await run.page.evaluate("[...window.__bounds].forEach(([id, b]) => { window.__bounds.delete(id); b.fn(); })")      # it goes off, once
+
+        stuck = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.control('host.mute_all')"))
+        behind = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.control('captions')"))
+        inventory = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.diagnostics()"))
+        await asked_of_zoom(1)
+        await asyncio.sleep(0.3)
+        assert not stuck.done() and not behind.done() and not inventory.done()                              # they wait for it
+        await ten_seconds_go_by()
+        with pytest.raises(Exception) as failure:
+            await asyncio.wait_for(stuck, timeout=5)
+        assert "Zoom did not answer muteAll in time" in str(failure.value)
+        m = await asyncio.wait_for(behind, timeout=5)
+        assert m["buttons"]["captions"] == {"on": True}
+        assert (await asyncio.wait_for(inventory, timeout=5))["popovers"]["reactions"]["found"] is True
+        again = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.control('host.mute_all')"))    # no longer in flight: a new call, which ends the same way
+        await asked_of_zoom(2)
+        await ten_seconds_go_by()
+        with pytest.raises(Exception, match="Zoom did not answer muteAll in time"):
+            await asyncio.wait_for(again, timeout=5)
+
+
+async def test_a_call_that_ends_leaves_no_timer_behind_whichever_way_it_ends():
+    """The ten-second bound is a timer set with every call: it is cleared when Zoom answers, when it refuses and when it throws,
+    and Zoom's own words, whatever they are, are the call's error."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        await run.page.evaluate(BOUNDS)
+        await run.page.evaluate("""() => {
+            window.ZoomMtg.lockMeeting = (o) => o.error({ errorCode: 3023, errorMessage: "Locking is off for this account" });
+            window.ZoomMtg.expel = () => { throw new Error("Minified Redux error #3"); };
+        }""")
+        await control(run, "host.mute_all")
+        assert await run.page.evaluate("window.__bounds.size") == 0
+        with pytest.raises(Exception, match=r"Locking is off for this account \(code 3023\)"):
+            await control(run, "host.lock")
+        assert await run.page.evaluate("window.__bounds.size") == 0
+        with pytest.raises(Exception, match="Minified Redux error #3"):
+            await control(run, "host.remove", 16777218)
+        assert await run.page.evaluate("window.__bounds.size") == 0

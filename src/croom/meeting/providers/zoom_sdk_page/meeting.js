@@ -32,11 +32,12 @@
     return data.meetingStatus !== undefined ? data.meetingStatus : data.status;
   }
 
+  const UNLISTED = "Zoom has not listed the room in the meeting yet; try again in a moment";
   bridge.mute = function (muted) {
     return new Promise((resolve, reject) => {
       if (!known(bridge.userId)) {
         // Connected, but Zoom has not listed the room yet (its record of the current user is built from its roster).
-        reject(new Error(bridge.state === "connected" ? "Zoom has not listed the room in the meeting yet; try again in a moment" : "not in a meeting"));
+        reject(new Error(bridge.state === "connected" ? UNLISTED : "not in a meeting"));
         return;
       }
       ZoomMtg.mute({
@@ -251,10 +252,11 @@
     return {
       me: me, role: me.isHost ? "host" : (me.isCoHost ? "co-host" : "participant"),
       buttons: buttonsSeen(me.videoOn, me.raisedHand), participants: participants, count: participants.length,
-      recording: !!bridge._recording, keys: user ? Object.keys(user) : [],
+      recording: !!bridge._recording, locked: !!bridge._locked, keys: user ? Object.keys(user) : [],
     };
   };
   bridge._recording = false;
+  bridge._locked = false;      // Zoom's calls do not say whether the meeting is locked: it is kept as the lock call last went
   bridge._layout = null;
   bridge._selfHidden = false;
   // The current user's own part of it, as the first version of the bridge answered: mute and video null when Zoom has not
@@ -509,6 +511,47 @@
     return entry;
   }
   const popoverInventory = () => alone(async () => ({ reactions: await look("reactions"), view: await look("layout") }));
+
+  // ---- The host's calls and rename: Zoom's own calls, not its buttons ----
+  // They go through the same dispatch as the presses, so the guard, the chain that runs controls one at a time and the double
+  // tap are theirs too. Zoom answers each through its success or error callback, the error in its own words. The chain has no
+  // end of its own: a call Zoom never answered would hold every control after it, and the inventory, until the page was
+  // reloaded, so a call ends after SDK_MS, in words, and the next control goes on.
+  const SDK_MS = 10000;
+  const sdk = (method, args) => new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error("Zoom did not answer " + method + " in time")), SDK_MS);
+    const over = (end, value) => { clearTimeout(timer); end(value); };
+    try {
+      ZoomMtg[method](Object.assign({}, args, { success: () => over(resolve, true), error: (e) => over(reject, new Error(words(e))) }));
+    } catch (e) { over(reject, e); }
+  });
+  // The participant a host call acts on: the id Zoom lists them by, a whole number, which may come as text. An id that is missing,
+  // or is not one, is refused before anything is asked of Zoom.
+  const person = (id) => {
+    const n = typeof id === "string" && id.trim() !== "" ? Number(id) : id;
+    if (!Number.isInteger(n) || n <= 0) throw new Error("Say which participant");
+    return n;
+  };
+  // Renaming the room: Zoom is told who (the room's id, once Zoom has listed it) and what the room was called (its record's name).
+  function rename(name) {
+    const next = need(name, "name to use");
+    if (!known(bridge.userId)) throw new Error(UNLISTED);
+    return sdk("rename", { userId: bridge.userId, oldName: bridge.userName || "", newName: next });
+  }
+  // By the control's name, in a table with no prototype: no name an object has (constructor, toString) is a control. Recording
+  // is asked for as the opposite of what Zoom last said of it (its event), locking as the opposite of how it last went.
+  const HOST = Object.assign(Object.create(null), {
+    "host.mute_all": () => sdk("muteAll", { muteAll: true }),
+    "host.ask_unmute": () => sdk("muteAll", { muteAll: false }),
+    "host.record": () => sdk("record", { record: !bridge._recording }),
+    "host.lock": async () => { const lock = !bridge._locked; await sdk("lockMeeting", { lockMeeting: lock }); bridge._locked = lock; },
+    "host.admit": (id) => sdk("putOnHold", { userId: person(id), hold: false }),
+    "host.hold": (id) => sdk("putOnHold", { userId: person(id), hold: true }),
+    "host.remove": (id) => sdk("expel", { userId: person(id) }),
+    "host.mute_one": (id) => sdk("mute", { userId: person(id), mute: true }),
+    "host.end": () => sdk("endMeeting", {}),
+    "rename": rename,
+  });
   bridge.control = async function (name, value) {
     if (bridge.state !== "connected") throw new Error("not in a meeting");
     switch (name) {
@@ -516,14 +559,16 @@
       case "raise_hand": case "captions": case "hide_self": await pressButton(name); break;
       case "reactions": await pickFromMenu("reactions", value); break;
       case "layout": await pickFromMenu("layout", value); break;
-      default: throw new Error("Unknown control " + name);
+      default:
+        if (HOST[name]) { await HOST[name](value); break; }      // Zoom's own calls
+        throw new Error("Unknown control " + name);
     }
     await syncState().catch(() => {});      // a read that fails does not undo a press that worked: the answer is read again
     return bridge.readMeeting();
   };
-  // One at a time, in the order they came, the controls and the inventory's presses: presses that overlapped would find each
-  // other's popovers. A control that is already waiting or running (the same name and value) is that same press: a double tap
-  // is one.
+  // One at a time, in the order they came, the controls (the presses and Zoom's own calls) and the inventory's presses: presses
+  // that overlapped would find each other's popovers. A control that is already waiting or running (the same name and value) is
+  // that same press or call: a double tap is one.
   const controlNow = bridge.control;
   let controlChain = Promise.resolve();
   function alone(fn) {
@@ -622,9 +667,10 @@
       leaveUrl: "/left",
       disablePreview: true,
       disableInvite: true,
-      disableRecord: true,
+      disableRecord: false,
       showMeetingHeader: false,
-      isSupportChat: false,
+      isSupportChat: true,
+      isSupportCC: true,
       leaveOnPageUnload: true,
       patchJsMedia: true,
       disableCORP: !window.crossOriginIsolated,

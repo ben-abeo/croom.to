@@ -199,6 +199,13 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
 .score .last:empty + .next { margin-left: auto; }   /* a next game with no last one beside it stays on the right */
 .score .side { white-space: nowrap; }
 .score .rank { color: #FFB366; }
+/* A sign under 900 px wide stacks the last game over the next one for every school, however short its two lines are, and keeps the band
+   to the height of two lines: otherwise a school whose lines fit side by side (53 px) and one whose lines do not (80 px) would move the
+   strip's top edge, and the week's rows with it, by 27 px at every turn. Two lines, the gap between them and the band's padding and rule. */
+@media (max-width: 899px) {
+  .score { flex-direction: column; flex-wrap: nowrap; align-items: flex-start; justify-content: center; min-height: calc(33px + 2 * 1.485rem); }
+  .score .last:empty + .next { margin-left: 0; }
+}
 
 /* A short screen (a 7-inch panel, 800 by 480) has no height to spare in the week view: the status gives up its detail line, which the
    days need for what each leaves out ("+8 more"), and a day gives up its date, since its name says which day it is. */

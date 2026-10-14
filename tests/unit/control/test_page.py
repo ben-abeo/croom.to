@@ -1888,6 +1888,53 @@ def test_with_four_schools_on_the_strip_goes_round_them_in_the_settings_order(br
         page.close()
 
 
+@pytest.mark.parametrize("width, height", [(800, 1280), (800, 480)])
+def test_in_a_sign_under_900_px_wide_the_strip_is_two_lines_for_every_school_so_that_its_height_and_the_weeks_rows_never_change_on_a_turn(browser, width, height, central_time):
+    """Four schools whose lines differ: Texas's two fit side by side (53 px) in the lines it used to have, Michigan's and Texas A&M's did not (80 px),
+    and here Texas has only a last game (its season is over) and Michigan only a next one (its season has not begun)."""
+    skip_if_day_ends_within(3)
+    schedules = every_school()
+    schedules[251]["events"] = [e for e in schedules[251]["events"] if e["competitions"][0]["status"]["type"]["completed"]]
+    schedules[130]["events"] = [e for e in schedules[130]["events"] if not e["competitions"][0]["status"]["type"]["completed"]]
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=schedules) as server:
+        choose(server, sign_scores=EVERY_SCHOOL_ON)
+        scoreboard_has(server, EVERY_SCHOOL_ON)
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server, width, height)
+        turn = next_turn(page, set_at)
+        shapes, seen = [], []
+        for step in range(4):
+            if step:
+                run_to(page, turn)
+                turn += 8000
+            strip, last, following = (page.locator(selector).bounding_box() for selector in ("#score", "#score-last", "#score-next"))
+            if last and following:                                                  # a school with both lines: the next game is under the last one, never beside it
+                assert following["y"] >= last["y"] + last["height"] - 1, (step, last, following)
+            if following and not last:                                              # one with only a next game has it at the left, where the lines start, not pushed right
+                assert abs(following["x"] - page.locator("#room-name").bounding_box()["x"]) <= 1, (step, following)
+            shapes.append((round(strip["y"], 1), round(strip["height"], 1)))
+            seen.append(school_on_the_strip(page))
+        assert len(set(seen)) == 4                                                  # every school was drawn
+        assert len(set(shapes)) == 1, (seen, shapes)                                # and the strip's box is the same for each: no school is a line shorter
+        line = 1.1 * 16 * 1.35
+        assert abs(shapes[0][1] - (14 + 14 + 1 + 4 + 2 * line)) <= 1                 # two lines, a gap and the band's padding
+        open_the_week(page)
+        weeks = []
+        for step in range(4):
+            if step:
+                run_to(page, turn)
+                turn += 8000
+            weeks.append(page.locator("#week .day").evaluate_all("days => days.map((d) => { const b = d.getBoundingClientRect(); return [Math.round(b.top * 10) / 10, Math.round(b.height * 10) / 10]; })"))
+        assert all(rows == weeks[0] for rows in weeks), weeks                      # the seven days keep their rows across the turns
+        choose(server, sign_scores=["michigan"])                                    # one school on, with only a next game: no name leads and the next game has the strip to itself
+        scoreboard_has(server, ["michigan"])
+        poll(page)
+        assert page.locator("#score-last").evaluate("e => e.textContent") == ""
+        alone, strip = page.locator("#score-next").bounding_box(), page.locator("#score").bounding_box()
+        assert abs(alone["x"] - page.locator("#room-name").bounding_box()["x"]) <= 1, alone      # at the left, where the lines start, not pushed to the right
+        assert abs(strip["height"] - shapes[0][1]) <= 0.5, strip                    # and the band is as high as ever
+        page.close()
+
+
 def test_a_school_with_nothing_to_show_is_left_out_of_the_rotation_and_the_strip_goes_when_none_has_anything(browser, central_time):
     with PageServer(schedules={**every_school(), 130: {"events": []}}) as server:       # Michigan's feed has no games in it
         choose(server, sign_scores=["michigan", "texas"])

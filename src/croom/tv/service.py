@@ -567,6 +567,13 @@ class TvService(Service):
             raise TvError(f"The TV is not answering at {self._config.host}")
         return self._client
 
+    def pointer(self) -> TvClient:
+        """The client for the TV's cursor (the pointer socket of the library's client): the live connection when the TV can be told
+        something, else why not, as TvError in the words control() has for it. The cursor is not one of the controls. It sends many
+        messages a second, so it takes no turn behind them (the control service's lock) and reads nothing back; the pointer relay
+        (croom.tv.pointer) calls the client's move, click and scroll itself."""
+        return self._require_ready()
+
     # Keeping the TV on (spec section 3): woken as the agent starts, before every join, and after it went off by itself;
     # never against the table, which holds it off from a manual off until a manual on or the next join.
 

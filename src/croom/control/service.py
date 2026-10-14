@@ -8,6 +8,8 @@ whoever is in the room.
 """
 
 import asyncio
+import contextlib
+import json
 import logging
 import mimetypes
 import re
@@ -16,7 +18,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 from urllib.parse import urlsplit
 
-from aiohttp import web
+from aiohttp import WSCloseCode, WSMsgType, web
 
 from croom.control.settings import SettingsStore
 from croom.core.config import Config
@@ -24,8 +26,9 @@ from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 from croom.tv.discover import discover_tvs
-from croom.tv.errors import TvError
+from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
+from croom.tv.pointer import BAD_MESSAGE, PiMouse, PointerRelay
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +51,6 @@ PLATFORM_HOSTS = {
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
-TV_NOT_ENABLED = "The TV is not enabled on this device (tv.enabled in its config)"
 TV_REASON_LIMIT = 160   # how much of a failure's own text goes to the table (the TV service's words are never cut)
 
 
@@ -131,9 +133,12 @@ class ControlService(Service):
         store: the SettingsStore for the page's choices, or None to open settings_file.
         tv: the TvService for the room's TV, or None when the room has none enabled.
         discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
+        mouse: the room Pi's virtual mouse that the touchpad drives (a croom.tv.pointer.PiMouse, made when it is first used, unless a
+            test stands in for it).
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
+    POINTER_HEARTBEAT_S = 5.0   # a pointer socket that has been quiet this long is pinged: a page that does not answer is let go of
 
     def __init__(
         self,
@@ -144,6 +149,7 @@ class ControlService(Service):
         store=None,
         tv=None,
         discover=None,
+        mouse=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -166,6 +172,8 @@ class ControlService(Service):
         self._tv_busy = asyncio.Lock()                       # held by the control that is with the TV (see _handle_tv_control)
         self._search: Optional[asyncio.Task] = None          # the search for TVs that is running (see _handle_tv_discover)
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
+        self._mouse = mouse if mouse is not None else PiMouse()
+        self._pointers: Dict[web.WebSocketResponse, PointerRelay] = {}   # the pointer sockets that are open, each with its relay
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -236,6 +244,7 @@ class ControlService(Service):
         app.router.add_post("/api/tv/pair", self._handle_tv_pair)
         app.router.add_post("/api/tv/forget", self._handle_tv_forget)
         app.router.add_get("/api/tv/discover", self._handle_tv_discover)
+        app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
         app.on_shutdown.append(self._end_what_is_open)
@@ -270,15 +279,23 @@ class ControlService(Service):
             await self._runner.cleanup()
             self._runner = None
         self._task = self._join_task = self._search = None
+        self._mouse.close()
         logger.info("Room control page stopped")
 
     async def _end_what_is_open(self, app: web.Application) -> None:
         """The application's on_shutdown, which aiohttp runs after the listening sockets are closed and before it waits for the
         requests in flight: so no request can arrive while the tasks that are ended here are let go of, and none is left for the wait
-        to wait for. They are the join or the leave, the search for TVs, and the requests that are with the TV (a Turn on, a pairing
-        that waits for a person) or wait their turn behind them. None of them is given time to finish: the pages that asked are going
-        away with this service. It must not raise: an error here would end the listener's shutdown half way."""
-        await self._cancel(self._task, self._search, *self._tv_requests)
+        to wait for. They are the join or the leave, the search for TVs, the requests that are with the TV (a Turn on, a pairing that
+        waits for a person) or wait their turn behind them, and the pointer sockets, which are closed (going away) with the move that is
+        on its way to the TV. None of them is given time to finish: the pages that asked are going away with this service. It must not
+        raise: an error here would end the listener's shutdown half way."""
+        closing = [asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping"))
+                   for ws in self._pointers]
+        moves = [relay.sending for relay in self._pointers.values()]
+        await self._cancel(self._task, self._search, *self._tv_requests, *moves)
+        if closing:
+            # (a page that does not answer the close is not waited for longer: aiohttp ends that close itself, after its own timeout)
+            await asyncio.wait(closing, timeout=self.CANCEL_WAIT_S)
 
     async def _cancel(self, *tasks: Optional[asyncio.Task]) -> None:
         """Cancel the tasks that are running among these and wait until they are over, for CANCEL_WAIT_S in all: what has not ended
@@ -623,7 +640,7 @@ class ControlService(Service):
         return await self._device_call(request, camera, action)
 
     # ------------------------------------------------------------------
-    # The room's TV: its status, the controls, pairing and the search for TVs (spec 2026-10-13 TV remote and touchpad)
+    # The room's TV: its status, the controls, pairing, the search for TVs and the pointer (spec 2026-10-13 TV remote and touchpad)
     # ------------------------------------------------------------------
 
     NO_TV = {"configured": False, "paired": False}
@@ -763,6 +780,71 @@ class ControlService(Service):
         error = search.exception()
         if error is not None and not isinstance(error, TvError):
             logger.warning(f"The search for TVs failed: {type(error).__name__}: {error}", exc_info=error)
+
+    async def _handle_pointer(self, request: web.Request) -> web.StreamResponse:
+        """WS /ws/pointer: the touchpad's events from the table (spec section 5). Each JSON text frame is one message for the TV's
+        cursor or the room Pi's mouse, `{"target": "tv"|"pi", "type": "move"|"tap"|"right"|"scroll"|"down"|"up", "dx", "dy"}`, handed
+        to this socket's PointerRelay; what cannot be done is answered as a `{"error": words}` frame. A frame that is no use never closes
+        the socket (only one bigger than a request body does: aiohttp ends the connection for that). The cursor is not a control: it takes
+        no turn behind them. However the socket ends, a button that was held goes up.
+
+        A browser lets any page open a WebSocket to any address, and says where the page came from: only a page of this server may drive the
+        room's mouse and TV (the POSTs are kept from cross-site forms by wanting JSON; a WebSocket has no such request to refuse)."""
+        if not self._same_origin(request):
+            return self._error_response("The pointer is for the room's own page", 403)
+        ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
+        await ws.prepare(request)
+        relay = PointerRelay(self._tv, self._mouse)
+        self._pointers[ws] = relay
+        try:
+            async for frame in ws:
+                if frame.type == WSMsgType.TEXT:
+                    words = await self._pointer_message(relay, frame.data)
+                elif frame.type == WSMsgType.BINARY:
+                    words = BAD_MESSAGE
+                else:
+                    break
+                if words is not None:
+                    with contextlib.suppress(ConnectionError):         # (the page may have gone while it was answered)
+                        await ws.send_json({"error": words})
+        finally:
+            try:
+                await relay.release_all()
+            finally:
+                self._pointers.pop(ws, None)             # (not before: until the relay is done, stop() ends the move that it waits for)
+        return ws
+
+    async def _pointer_message(self, relay: PointerRelay, text: str) -> Optional[str]:
+        """Hand one frame to the relay: None when it was carried out, else the words to answer it with. Whatever goes wrong is words
+        and not the end of the socket: the relay's own refusals as they are, anything else (a bug, a library) as a reason on one line,
+        logged once for each distinct message, as the sockets send many frames a second."""
+        try:
+            message = json.loads(text)
+        except (ValueError, RecursionError):                           # (a parser that is given more brackets than it can count is no better)
+            return BAD_MESSAGE
+        try:
+            await relay.handle(message)
+        except TvError as e:
+            return str(e)
+        except Exception as e:  # noqa: BLE001 - whatever it was, the page is told in words and the socket goes on
+            failure = f"The pointer did not do that: {self._reason(e)}"
+            if failure != self._read_failures.get("pointer"):
+                self._read_failures["pointer"] = failure
+                logger.warning(f"The pointer could not carry out a message: {type(e).__name__}: {e}", exc_info=True)
+            return failure
+        return None
+
+    @staticmethod
+    def _same_origin(request: web.Request) -> bool:
+        """Whether the page that opens a WebSocket is one of this server's. A request with no Origin is not from a browser page (a
+        script, a test) and goes through."""
+        origin = request.headers.get("Origin")
+        if origin is None:
+            return True
+        try:
+            return urlsplit(origin).netloc.lower() == request.host.lower()
+        except ValueError:
+            return False
 
     # ------------------------------------------------------------------
     # Handlers

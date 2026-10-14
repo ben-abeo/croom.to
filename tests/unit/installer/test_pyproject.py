@@ -18,3 +18,13 @@ def test_the_tools_target_the_oldest_python_the_package_supports():
     assert config["tool"]["mypy"]["python_version"] == "3.11"
     assert config["tool"]["ruff"]["target-version"] == "py311"
     assert "py310" not in config["tool"]["black"]["target-version"]
+
+
+def test_the_tv_and_touchpad_libraries_are_dependencies_and_evdev_only_where_linux_has_it():
+    """aiowebostv talks to the TV, wakeonlan wakes it, and evdev makes the room Pi's virtual mouse (it builds only on Linux)."""
+    from packaging.requirements import Requirement
+    requirements = {requirement.name: requirement for requirement in map(Requirement, pyproject()["project"]["dependencies"])}
+    assert {"aiowebostv", "wakeonlan", "evdev"} <= set(requirements)
+    assert requirements["aiowebostv"].marker is None and requirements["wakeonlan"].marker is None
+    marker = requirements["evdev"].marker
+    assert marker is not None and marker.evaluate({"sys_platform": "linux"}) and not marker.evaluate({"sys_platform": "darwin"})

@@ -46,6 +46,7 @@ dependencies = [
     "google-auth-httplib2>=0.1.1",
     "aiowebostv>=0.9",
     "wakeonlan>=3.0",
+    "evdev>=1.6.0; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

@@ -10,6 +10,7 @@ import contextlib
 import json
 import logging
 import socket
+import sys
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
@@ -26,6 +27,7 @@ from croom.meeting.providers.base import MeetingInfo, MeetingState, detect_platf
 from croom.control.service import ControlService
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TvError
+from croom.tv.pointer import BAD_MESSAGE, BAD_TARGET, BAD_TYPE, PiMouse
 
 
 class StubMeeting:
@@ -303,6 +305,8 @@ class StubTv:
         self.fail_control = self.fail_pair = self.fail_forget = self.fail_status = None   # what each raises when it is asked
         self.gate = None          # an asyncio.Event that control() waits for: a control that takes a while, as a wake does
         self.pair_gate = None     # the same for pair(): the person at the TV has not accepted the prompt yet
+        self.cursor = StubCursor()
+        self.fail_pointer = None  # what pointer() raises: the TV cannot be told anything
 
     def status(self):
         if self.fail_status is not None:
@@ -339,6 +343,72 @@ class StubTv:
         if self.fail_forget is not None:
             raise self.fail_forget
         self.paired = False
+
+    def pointer(self):
+        """The client for the cursor (or why not, as TvService.pointer() says it): what it is told is in `cursor.calls`, not in `calls`,
+        which has what was asked of the controls."""
+        if self.fail_pointer is not None:
+            raise self.fail_pointer
+        return self.cursor
+
+
+class StubCursor:
+    """The TV's client as the cursor uses it: notes what it is told, as the library names it, and waits for `gate` (an asyncio.Event) in
+    a move when it has one, as a TV that does not take it. `cancelled` counts the moves that were ended while they waited."""
+
+    def __init__(self):
+        self.calls = []
+        self.gate = None
+        self.cancelled = 0
+
+    async def move(self, d_x, d_y, down=0):
+        self.calls.append(("move", d_x, d_y, down))
+        if self.gate is not None:
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+
+    async def click(self):
+        self.calls.append(("click",))
+
+    async def scroll(self, d_x, d_y):
+        self.calls.append(("scroll", d_x, d_y))
+
+
+class StubMouse:
+    """Behaves like PiMouse: notes what it is told, in `calls`, and raises `fail` (an error) when it has one, as a mouse that cannot be
+    made does. `closed` counts the times the service closed it."""
+
+    def __init__(self):
+        self.calls = []
+        self.fail = None
+        self.unavailable = None
+        self.closed = 0
+
+    def _note(self, *call):
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append(call)
+
+    def move(self, dx, dy):
+        self._note("move", dx, dy)
+
+    def press(self, button="left"):
+        self._note("press", button)
+
+    def release(self, button="left"):
+        self._note("release", button)
+
+    def click(self, button="left"):
+        self._note("click", button)
+
+    def scroll(self, dy):
+        self._note("scroll", dy)
+
+    def close(self):
+        self.closed += 1
 
 
 class StubSearch:
@@ -388,10 +458,10 @@ def skip_if_day_ends_within(hours: float) -> None:
         pytest.skip(f"less than {hours} hours left in the local day")
 
 
-def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, **config):
+def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
-    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover)
+    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse)
 
 
 @pytest.fixture(autouse=True)
@@ -1785,6 +1855,339 @@ class TestTvDiscover:
             search.gate.set()
         with pytest.raises(aiohttp.ClientError):           # the request that waited for it is let go of, not answered with a list
             await asked
+
+
+class TestPointerSocket:
+    """WS /ws/pointer: the touchpad's events from the table (spec 2026-10-13 TV remote and touchpad, section 5). A message is a JSON text
+    frame `{"target": "tv"|"pi", "type": "move"|"tap"|"right"|"scroll"|"down"|"up", "dx", "dy"}`. What cannot be done is answered as a
+    `{"error": words}` frame, and a frame that is no use never closes the socket."""
+
+    MOVE = {"target": "tv", "type": "move", "dx": 1, "dy": 0}
+
+    @staticmethod
+    async def says(ws):
+        return await asyncio.wait_for(ws.receive_json(), 2.0)
+
+    def test_the_stubs_have_the_calls_of_the_real_ones(self):
+        import inspect
+        from croom.tv.client import TvClient
+        from croom.tv.service import TvService
+
+        def shape(cls, name):
+            """What a call takes, by the names and defaults of its parameters (not self)."""
+            return [(p.name, p.default) for p in list(inspect.signature(getattr(cls, name)).parameters.values())[1:]]
+        for name in ("move", "click", "scroll"):
+            assert shape(StubCursor, name) == shape(TvClient, name)
+        for name in ("move", "press", "release", "click", "scroll", "close"):
+            assert shape(StubMouse, name) == shape(PiMouse, name)
+        assert shape(StubTv, "pointer") == shape(TvService, "pointer")
+
+    async def test_events_reach_the_tvs_cursor_and_the_room_pis_mouse(self, client_factory):
+        tv, mouse = StubTv(), StubMouse()
+        client = await client_factory(make_service(tv=tv, mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for message in ({"target": "tv", "type": "move", "dx": 5, "dy": -3}, {"target": "tv", "type": "tap"},
+                            {"target": "tv", "type": "scroll", "dy": 2},
+                            {"target": "pi", "type": "move", "dx": 1, "dy": 2}, {"target": "pi", "type": "tap"},
+                            {"target": "pi", "type": "right"}, {"target": "pi", "type": "scroll", "dy": -1},
+                            {"target": "pi", "type": "down"}, {"target": "pi", "type": "up"}):
+                await ws.send_json(message)
+            await wait_until(lambda: tv.cursor.calls == [("move", 5, -3, 0), ("click",), ("scroll", 0, 2)])
+            await wait_until(lambda: mouse.calls == [("move", 1, 2), ("click", "left"), ("click", "right"), ("scroll", -1),
+                                                     ("press", "left"), ("release", "left")])
+        assert tv.calls == []                                  # (the cursor is not a control)
+
+    async def test_a_drag_on_the_tv_is_moves_with_the_button_down_and_an_end(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv, mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for message in ({"target": "tv", "type": "down"}, {"target": "tv", "type": "move", "dx": 3, "dy": 4}, {"target": "tv", "type": "up"}):
+                await ws.send_json(message)
+            await wait_until(lambda: tv.cursor.calls == [("move", 3, 4, 1), ("move", 0, 0, 0)])
+
+    @pytest.mark.parametrize("frame, words", [
+        ("not json at all", BAD_MESSAGE), ("{", BAD_MESSAGE), ("", BAD_MESSAGE), ("[1, 2]", BAD_MESSAGE), ("3", BAD_MESSAGE),
+        ("null", BAD_MESSAGE), ('"move"', BAD_MESSAGE), ("[" * 4000, BAD_MESSAGE),
+        ('{"type": "move"}', BAD_TARGET), ('{"target": "x", "type": "move"}', BAD_TARGET),
+        ('{"target": "tv"}', BAD_TYPE), ('{"target": "tv", "type": "wiggle"}', BAD_TYPE),
+        ('{"target": "tv", "type": "move", "dx": "3"}', "dx is a number"), ('{"target": "pi", "type": "move", "dy": NaN}', "dy is a number"),
+        ('{"target": "tv", "type": "right"}', "The TV's cursor has no right button"),
+        ('{"target": "pi", "type": "keys", "text": "a"}', "Typing into the room Pi comes in a later version"),
+    ])
+    async def test_a_frame_that_is_no_use_is_answered_in_words_and_the_socket_goes_on(self, client_factory, frame, words):
+        tv, mouse = StubTv(), StubMouse()
+        client = await client_factory(make_service(tv=tv, mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str(frame)
+            assert await self.says(ws) == {"error": words}
+            assert not ws.closed
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])                          # and it still works
+        assert tv.cursor.calls == []
+
+    async def test_a_frame_nested_deeper_than_the_parser_takes_is_answered_in_words_and_the_socket_goes_on(self, client_factory, monkeypatch):
+        """Python 3.11's JSON parser stops with a RecursionError (not a ValueError) at about a thousand brackets, which a frame of up to
+        4 KiB can hold; 3.12's takes far more, so the parser is made to say it, as 3.11's does."""
+        def too_deep(text):
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array from a unicode string")
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        monkeypatch.setattr("croom.control.service.json", SimpleNamespace(loads=too_deep))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str("[" * 2000 + "]" * 2000)
+            assert await self.says(ws) == {"error": BAD_MESSAGE}
+            assert not ws.closed
+
+    async def test_a_binary_frame_is_answered_in_words_and_the_socket_goes_on(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_bytes(b'{"target": "pi", "type": "tap"}')
+            assert await self.says(ws) == {"error": BAD_MESSAGE}
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+    async def test_a_tv_that_cannot_be_told_anything_is_answered_once_for_each_frame_and_the_socket_stays_open(self, client_factory):
+        tv = StubTv()
+        tv.fail_pointer = TvError("Pair the TV under Options › TV")
+        client = await client_factory(make_service(tv=tv, mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for message in (self.MOVE, {"target": "tv", "type": "tap"}, self.MOVE):
+                await ws.send_json(message)
+            for _ in range(3):
+                assert await self.says(ws) == {"error": "Pair the TV under Options › TV"}
+            tv.fail_pointer = None                                              # the person pairs the TV
+            await ws.send_json({"target": "tv", "type": "tap"})
+            await wait_until(lambda: tv.cursor.calls == [("click",)])
+            assert not ws.closed
+
+    async def test_a_move_the_tv_refused_on_its_way_is_answered_by_the_next_frame(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv, mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            async def refusing_move(d_x, d_y, down=0):
+                raise ConnectionResetError("Cannot write to closing transport")
+            tv.cursor.move = refusing_move
+            await ws.send_json(self.MOVE)
+            await asyncio.sleep(0.05)                                           # (it is sent in the background: nothing is answered yet)
+            await ws.send_json(self.MOVE)
+            assert await self.says(ws) == {"error": "The TV did not accept that: Cannot write to closing transport"}
+            assert not ws.closed
+
+    async def test_a_mouse_that_cannot_be_made_is_answered_in_its_words_and_the_socket_stays_open(self, client_factory):
+        words = "The room Pi's mouse is not allowed to use /dev/uinput: the user the agent runs as is not in the input group"
+        mouse = StubMouse()
+        mouse.fail = TvError(words)
+        client = await client_factory(make_service(tv=StubTv(), mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 1})
+            assert await self.says(ws) == {"error": words} and await self.says(ws) == {"error": words}
+            mouse.fail = None
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+    async def test_without_a_mouse_of_its_own_the_service_has_the_real_one_and_says_what_it_lacks(self, client_factory, monkeypatch):
+        monkeypatch.setitem(sys.modules, "evdev", None)                          # (nothing here may make a device on this machine)
+        service = make_service(tv=StubTv())
+        assert isinstance(service._mouse, PiMouse) and isinstance(ControlService.from_config(Config())._mouse, PiMouse)
+        client = await client_factory(service)
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            assert "pip install evdev" in (await self.says(ws))["error"]
+            assert not ws.closed
+
+    async def test_a_room_without_a_tv_service_answers_for_the_tv_and_still_has_its_pi(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json(self.MOVE)
+            assert await self.says(ws) == {"error": TV_NOT_ENABLED}
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+    async def test_an_error_that_is_a_bug_is_answered_in_words_logged_once_and_the_socket_goes_on(self, client_factory, caplog):
+        mouse = StubMouse()
+        mouse.fail = RuntimeError("the mouse has a bug")
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for _ in range(3):
+                await ws.send_json({"target": "pi", "type": "tap"})
+            for _ in range(3):
+                assert await self.says(ws) == {"error": "The pointer did not do that: the mouse has a bug"}
+            assert not ws.closed
+        said = [r for r in caplog.records if r.levelname == "WARNING" and "the mouse has a bug" in r.getMessage()]
+        assert len(said) == 1 and said[0].exc_info is not None
+
+    async def test_the_cursor_does_not_wait_behind_a_control_that_is_with_the_tv(self, client_factory):
+        tv = StubTv()
+        tv.gate = asyncio.Event()                                              # a Turn on, which takes its time
+        service = make_service(tv=tv, mouse=StubMouse())
+        client = await client_factory(service)
+        turn_on = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+        try:
+            await wait_until(lambda: tv.order == [("start", "power")])
+            assert service._tv_busy.locked()
+            async with client.ws_connect("/ws/pointer") as ws:
+                await ws.send_json({"target": "tv", "type": "move", "dx": 3, "dy": 4})
+                await ws.send_json({"target": "tv", "type": "tap"})
+                await wait_until(lambda: tv.cursor.calls == [("move", 3, 4, 0), ("click",)])
+        finally:
+            tv.gate.set()
+            await turn_on
+        assert tv.calls == [("control", "power", "on")] and service._tv_requests == set()    # (the cursor is not a request that stop() looks for)
+
+    async def test_a_socket_that_closes_lets_a_held_button_go(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        ws = await client.ws_connect("/ws/pointer")
+        await ws.send_json({"target": "pi", "type": "down"})
+        await wait_until(lambda: mouse.calls == [("press", "left")])
+        await ws.close()                                                       # the page closed it
+        await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+
+    async def test_a_page_that_goes_quiet_without_a_word_is_let_go_of_and_its_button_released(self, client_factory, monkeypatch):
+        """A page whose network went away leaves the connection open at this end: the sockets are pinged, and one that does not answer
+        is closed (a button the page held would stay down on the room Pi's desktop for as long as it took the system to notice)."""
+        monkeypatch.setattr(ControlService, "POINTER_HEARTBEAT_S", 0.2)
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with aiohttp.ClientSession() as page:
+            ws = await page.ws_connect(client.make_url("/ws/pointer"), autoping=False)       # (and nobody is reading: no pong is sent)
+            await ws.send_json({"target": "pi", "type": "down"})
+            await wait_until(lambda: mouse.calls == [("press", "left")])
+            await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")], timeout=3.0)
+
+    async def test_the_socket_is_for_websockets_only(self, client_factory):
+        client = await client_factory(make_service(mouse=StubMouse()))
+        response = await client.get("/ws/pointer")
+        assert response.status == 400
+
+    async def test_a_socket_that_is_dropped_lets_a_held_button_go_too(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with aiohttp.ClientSession() as page:
+            ws = await page.ws_connect(client.make_url("/ws/pointer"))
+            await ws.send_json({"target": "pi", "type": "down"})
+            await wait_until(lambda: mouse.calls == [("press", "left")])
+        # closing the session cuts the connection with no close frame: the page is gone without a word, and the button goes up all the same
+        await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+
+    @pytest.mark.parametrize("how", ["closed", "dropped"])
+    async def test_on_the_real_listener_a_socket_that_ends_lets_a_held_button_go(self, how):
+        """The listener's handlers are not ended when their client goes away, as the test server's are: the socket's end is seen by
+        the handler as a frame (a close) or as the end of the stream."""
+        mouse = StubMouse()
+        service = make_service(mouse=mouse)
+        await service.start()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                await ws.send_json({"target": "pi", "type": "down"})
+                await wait_until(lambda: mouse.calls == [("press", "left")])
+                if how == "closed":
+                    await ws.close()
+            await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+            assert service._pointers == {}
+        finally:
+            await service.stop()
+
+    async def test_each_socket_holds_its_own_button(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        first, second = await client.ws_connect("/ws/pointer"), await client.ws_connect("/ws/pointer")
+        await first.send_json({"target": "pi", "type": "down"})
+        await wait_until(lambda: mouse.calls == [("press", "left")])
+        await second.send_json({"target": "pi", "type": "up"})                  # the other page had no button down: nothing is released
+        await second.close()
+        await asyncio.sleep(0.05)
+        assert mouse.calls == [("press", "left")]
+        await first.close()
+        await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+
+    async def test_stopping_the_service_closes_the_sockets_and_lets_go_of_what_is_held(self):
+        tv, mouse = StubTv(), StubMouse()
+        service = make_service(tv=tv, mouse=mouse)
+        await service.start()
+        async with aiohttp.ClientSession() as page:
+            ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+            await ws.send_json({"target": "pi", "type": "down"})
+            await wait_until(lambda: mouse.calls == [("press", "left")])
+            await asyncio.wait_for(service.stop(), 3.0)
+            closed = await asyncio.wait_for(ws.receive(), 2.0)
+            assert closed.type == aiohttp.WSMsgType.CLOSE and closed.data == 1001          # going away
+        assert mouse.calls == [("press", "left"), ("release", "left")] and mouse.closed == 1
+        assert service._pointers == {}
+
+    async def test_stopping_the_service_ends_a_move_that_the_tv_does_not_take(self):
+        tv = StubTv()
+        tv.cursor.gate = asyncio.Event()                                       # a TV that does not take what it is sent
+        service = make_service(tv=tv, mouse=StubMouse())
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                await ws.send_json(self.MOVE)
+                await wait_until(lambda: tv.cursor.calls == [("move", 1, 0, 0)])
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 1.0                                    # not the time the call is given (CALL_TIMEOUT_S)
+        finally:
+            tv.cursor.gate.set()
+        assert tv.cursor.cancelled == 1
+
+    async def test_stopping_the_service_ends_the_move_of_a_socket_that_has_just_closed_too(self):
+        """A socket that the page closed while a move was with the TV is let wait for that move (it finishes, as a dropped socket's does):
+        the service's stop does not wait for it."""
+        tv = StubTv()
+        tv.cursor.gate = asyncio.Event()
+        service = make_service(tv=tv, mouse=StubMouse())
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                await ws.send_json(self.MOVE)
+                await wait_until(lambda: tv.cursor.calls == [("move", 1, 0, 0)])
+                await ws.close()
+                await asyncio.sleep(0.1)                                         # the socket's end is waiting for the move that is with the TV
+                assert len(service._pointers) == 1
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 1.0
+        finally:
+            tv.cursor.gate.set()
+        assert tv.cursor.cancelled == 1 and service._pointers == {}
+
+    async def test_the_mouse_is_closed_when_the_service_stops_whether_or_not_a_page_used_it(self):
+        mouse = StubMouse()
+        service = make_service(mouse=mouse)
+        await service.start()
+        await service.stop()
+        assert mouse.closed == 1
+
+    async def test_a_frame_bigger_than_a_request_body_is_not_a_pointer_message_and_ends_the_connection(self, client_factory):
+        client = await client_factory(make_service(mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str("x" * 5000)
+            closed = await asyncio.wait_for(ws.receive(), 2.0)
+            assert closed.type == aiohttp.WSMsgType.CLOSE and closed.data == 1009            # too big: the protocol's own answer
+
+    async def test_a_page_from_another_site_cannot_drive_the_room_through_the_socket(self, client_factory):
+        """A browser lets any page open a WebSocket to any address, and tells the server where the page came from (Origin): a page from
+        anywhere but the room's own may not move the room's mouse (the POSTs are kept from cross-site forms the same way)."""
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        own = f"http://127.0.0.1:{client.port}"
+        for origin in ("http://evil.example", "http://127.0.0.1:1", f"http://127.0.0.1.evil.example:{client.port}", "null", ""):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect("/ws/pointer", headers={"Origin": origin})
+            assert refused.value.status == 403, origin
+        assert mouse.calls == []
+        async with client.ws_connect("/ws/pointer", headers={"Origin": own}) as ws:         # the room's own page, and tools that send none
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
 
 
 class TestTvRequestsInFlight:

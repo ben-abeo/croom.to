@@ -7,8 +7,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "installer" / "install.sh"
 
@@ -305,3 +303,40 @@ def test_a_sudoers_rule_that_validates_leaves_only_the_rule_behind(tmp_path):
     assert result.returncode == 0, result.stderr
     assert [path.name for path in sudoers.iterdir()] == ["croom"]      # the temporary file was moved, not copied
     assert oct((sudoers / "croom").stat().st_mode & 0o777) == "0o440"
+
+
+def test_the_room_pis_virtual_mouse_is_the_input_groups_to_use(tmp_path):
+    """The touchpad drives a virtual mouse on the room Pi through /dev/uinput: a udev rule gives the device to the input group, and the
+    uinput kernel module is loaded at every boot."""
+    rules, modules = tmp_path / "rules.d", tmp_path / "modules-load.d"
+    result = run_bash(f"source {SCRIPT}; UDEV_RULES_DIR={rules}; MODULES_LOAD_DIR={modules}; write_uinput_rules")
+    assert result.returncode == 0, result.stderr
+    (rule_file,) = rules.iterdir()
+    assert rule_file.suffix == ".rules"                                    # (udev reads no other file)
+    assert 'KERNEL=="uinput", GROUP="input", MODE="0660"' in rule_file.read_text().splitlines()
+    (module_file,) = modules.iterdir()
+    assert module_file.suffix == ".conf" and module_file.read_text().split() == ["uinput"]
+
+
+def test_the_rule_and_the_module_go_where_the_system_reads_them():
+    text = SCRIPT.read_text()
+    assert 'UDEV_RULES_DIR="${UDEV_RULES_DIR:-/etc/udev/rules.d}"' in text
+    assert 'MODULES_LOAD_DIR="${MODULES_LOAD_DIR:-/etc/modules-load.d}"' in text
+
+
+def test_the_agents_user_joins_the_input_group_and_the_module_is_loaded_now_with_the_rule_in_force():
+    body = SCRIPT.read_text().split("install_virtual_mouse() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'usermod -aG input "$CROOM_USER"' in body
+    rule, reload, load, trigger = (body.index(step) for step in ("write_uinput_rules", "udevadm control --reload-rules", "modprobe uinput",
+                                                                  "udevadm trigger"))
+    assert rule < reload < load < trigger                                  # the device is made under the rule, or has the rule applied to it
+
+
+def test_the_installer_sets_the_virtual_mouse_up_with_the_rest():
+    assert "install_virtual_mouse" in SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_the_installer_adds_what_building_evdev_needs():
+    """evdev has no wheel: pip compiles its C extension, which needs Python's headers and a compiler."""
+    body = SCRIPT.read_text().split("install_dependencies() {", 1)[1].split("\n}", 1)[0]
+    assert "python3-dev" in body.split() and "gcc" in body.split()

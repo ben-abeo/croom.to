@@ -687,7 +687,8 @@ def test_a_key_pressed_while_the_focus_is_on_the_keyboard_button_puts_it_back_in
 
 
 def test_a_press_hook_that_throws_costs_the_person_no_key(browser):
-    """Task 3's key click hangs on the press hooks: whatever one of them does, the key it is for is typed and let go."""
+    """A press hook (what a test hangs on onPress; the click is not one, onDown makes it) runs after the key: whatever one of them
+    does, the key it is for is typed and let go."""
     with PageServer() as server:
         page = open_kiosk_page(browser, server)
         errors = []
@@ -1325,9 +1326,36 @@ def test_the_click_makes_its_audio_on_the_first_key_and_piles_no_ticks_up_while_
         page.close()
 
 
+def test_a_finger_lifting_asks_the_held_back_audio_to_start_so_a_keyboard_that_opened_by_itself_is_heard_from_its_first_key(browser):
+    """Chromium counts a touch's lift, not its pointerdown, as the gesture that lets audio start. A keyboard that came up by itself
+    (a reload onto the passcode card brings it up for the code) has its context made by a press that no gesture has led to, and the
+    ask that press makes goes unanswered: the ask that comes with the lift is the one the browser answers. So the lift asks again,
+    and the next key is heard."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO + "window.__audio.state = 'suspended';")
+        touch(page, "#keyboard .key[data-key='a']", release=False)      # the finger lands: the context is made, and asked to start
+        asked = page.evaluate("window.__audio.resumed")
+        assert asked >= 1
+        lift(page, "#keyboard .key[data-key='a']")                      # and lifts: the browser's gesture, so it is asked again
+        assert page.evaluate("window.__audio.resumed") > asked
+        page.close()
+
+
+def test_a_finger_lifting_leaves_the_clicks_audio_alone_while_it_is_running(browser):
+    """The ask at the lift is for a context the browser holds back: one that is running is asked by neither the press nor the lift."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO)
+        touch(page, "#keyboard .key[data-key='a']", release=False)
+        lift(page, "#keyboard .key[data-key='a']")
+        assert page.evaluate("window.__audio.made") == 1                # there was a context to ask ...
+        assert page.evaluate("window.__audio.resumed") == 0             # ... and nobody did
+        page.close()
+
+
 def test_the_click_is_a_short_soft_burst_in_a_real_audio_graph(browser):
     """The tick as the browser's own audio graph makes it, rendered offline (no speaker needed): not silent, not loud, starting with
-    the key and over in 2 to 4 milliseconds. The tests with a recording stand-in cannot tell that a real graph accepts what the click
+    the key and over in 2 to 4 milliseconds, a sine that fades out and is not cut off (a cut, a square wave or a sawtooth is a harsh
+    click, and twice the level is not soft). The tests with a recording stand-in cannot tell that a real graph accepts what the click
     gives it (a ramp to zero, say, is refused by a real one)."""
     with PageServer() as server:
         page = open_kiosk_page_with(browser, server, "window.AudioContext = class extends OfflineAudioContext { constructor() { super(1, 4800, 48000); window.__context = this; } };")
@@ -1335,9 +1363,11 @@ def test_the_click_is_a_short_soft_burst_in_a_real_audio_graph(browser):
         samples = page.evaluate("window.__context.startRendering().then((buffer) => Array.from(buffer.getChannelData(0)))")   # 100 ms at 48 kHz
         peak = max(abs(s) for s in samples)
         audible = [i for i, s in enumerate(samples) if abs(s) > 0.001]  # louder than -60 dB
-        assert 0.03 <= peak <= 0.25, peak                               # a tick you can hear, and a quiet one
+        assert 0.05 <= peak <= 0.14, peak                               # a tick you can hear, and a quiet one (0.105 now)
         assert audible and audible[0] < 48, audible[:1]                 # it begins at the key (inside the first millisecond)
         assert 2 <= audible[-1] / 48 <= 4, audible[-1] / 48             # and is over in 2 to 4 milliseconds
+        assert max(abs(s) for s in samples[144:192]) <= 0.05 * peak     # faded out between 3 and 4 ms: no cut
+        assert max(abs(b - a) for a, b in zip(samples, samples[1:])) <= 0.3 * peak   # no hard corner (a 1.2 kHz sine makes 0.22)
         page.close()
 
 

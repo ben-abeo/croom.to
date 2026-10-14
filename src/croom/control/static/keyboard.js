@@ -157,7 +157,9 @@
   }
   function act(key) {
     perform(key);
-    for (const fn of listeners) {   // after the key: a hook that fails (the click, the buzz) costs the person nothing
+    // listeners is what a test has hung on onPress. The click and the buzz are not among them: onDown makes those, once for each
+    // finger that lands. The hooks run after the key, so one that fails costs the person nothing.
+    for (const fn of listeners) {
       try { fn(key); } catch (err) { console.error("croomKeyboard: a press hook failed", err); }
     }
   }
@@ -248,6 +250,11 @@
   }
   document.addEventListener("pointerup", onUp, true);
   document.addEventListener("pointercancel", onUp, true);
+  // Chromium counts a touch's lift, not its pointerdown, as the gesture that lets audio start. A keyboard that came up by itself
+  // (a reload onto the passcode card brings it up for the code) has made its context on a press that no gesture had led to, and
+  // that context stays held back until it is asked again from a lift: so every lift asks, and the next key is heard.
+  function wake() { if (!audio || !audio.state || audio.state === "running" || !audio.resume) return; const asked = audio.resume(); if (asked && asked.catch) asked.catch(() => {}); }
+  document.addEventListener("pointerup", wake, true);
   window.addEventListener("blur", letGoAll);   // no lift comes to a window nobody is looking at
   function aim(target) {
     if (target !== input) shift = "off";

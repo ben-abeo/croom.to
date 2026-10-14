@@ -987,6 +987,7 @@ def test_the_disclosure_is_the_first_sentence_that_holds_a_phrase_of_the_list_el
 @pytest.mark.parametrize("words", [
     "Your microphone has been muted by the host.", "You have been muted by the host", "The host unmuted you: you have been unmuted",
     "Recording has stopped.", "Transcription has stopped. Anyone with access may still view the transcript.",
+    "Click OK to continue. Your microphone has been muted by the host.", "Anyone may view it. Recording has stopped.",   # whichever sentence comes first
 ])
 def test_a_notice_that_only_says_a_state_changed_has_no_disclosure_line(words):
     """The room's mute shows on the Mute button, and a recording or a transcript that stopped is read from Zoom again: the line under the
@@ -1203,8 +1204,27 @@ class TestControlsAndDialogs:
             await provider._page.evaluate("() => { window.ZoomMtg.muteAll = () => {}; }")        # Zoom never calls back
             with pytest.raises(MeetingControlError) as failure:
                 await asyncio.wait_for(provider.control("host.mute_all"), timeout=5)
-            assert str(failure.value) == "Could not carry out host.mute_all: the meeting page did not answer within 0.5 seconds"
+            assert str(failure.value) == "Could not carry out host mute all: the meeting page did not answer within 0.5 seconds"
             assert provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_page_that_is_gone_names_the_control_in_words_not_by_its_key(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+
+            async def gone(*_args, **_kwargs):
+                raise RuntimeError("Page.evaluate: Target page, context or browser has been closed\n    at the stack")
+            real = provider._page.evaluate
+            provider._page.evaluate = gone
+            try:
+                for name, said in (("raise_hand", "raise hand"), ("host.mute_all", "host mute all"), ("...", "the control")):
+                    with pytest.raises(MeetingControlError) as failure:
+                        await provider.control(name)
+                    assert str(failure.value) == f"Could not carry out {said}: Target page, context or browser has been closed", name
+            finally:
+                provider._page.evaluate = real
         finally:
             await shutdown(provider)
 

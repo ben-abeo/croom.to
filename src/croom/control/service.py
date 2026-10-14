@@ -342,6 +342,7 @@ class ControlService(Service):
         from one shape."""
         state = self._meeting_state()
         current = self._meeting.current_meeting if self._meeting is not None else None
+        joined = current if state != "error" else None     # what the table draws from is the joined meeting's: an error leaves nothing of it
         error = self._last_error
         if error is None and state == "error" and current is not None and current.error_message:
             error = current.error_message
@@ -358,11 +359,11 @@ class ControlService(Service):
             "muted": bool(current.is_muted) if current is not None else False,
             "camera_on": bool(current.is_camera_on) if current is not None else False,
             "error": error,
-            "controls": dict(current.controls) if current is not None else {},
-            "participants": dict(current.people) if current is not None else {"count": 0, "list": []},
-            "chat": dict(current.chat) if current is not None else {"unread": 0, "messages": []},
-            "notice": current.notice if current is not None else "",
-            "dialog": dict(current.dialog) if current is not None and current.dialog else None,
+            "controls": dict(joined.controls) if joined is not None else {},
+            "participants": dict(joined.people) if joined is not None else {"count": 0, "list": []},
+            "chat": dict(joined.chat) if joined is not None else {"unread": 0, "messages": []},
+            "notice": joined.notice if joined is not None else "",
+            "dialog": dict(joined.dialog) if joined is not None and joined.dialog else None,
         }
 
     def _status(self) -> Dict[str, Any]:

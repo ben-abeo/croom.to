@@ -735,7 +735,8 @@ class ZoomSdkProvider(MeetingProvider):
             await self.toggle_camera()
             await self._read_state_from_zoom()   # the model says the camera as Zoom has it now
         else:
-            self._take_state(await self._page_call(CONTROL, [name, value], f"Could not carry out {name}", timeout=self.CONTROL_TIMEOUT_S))
+            self._take_state(await self._page_call(CONTROL, [name, value], f"Could not carry out {re.sub(r'[^A-Za-z0-9]+', ' ', name).strip() or 'the control'}",
+                                                   timeout=self.CONTROL_TIMEOUT_S))
         return info.controls
 
     async def _end_meeting_for_everyone(self) -> Dict[str, Any]:

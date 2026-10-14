@@ -179,9 +179,13 @@ class DialogPolicy:
         sentences = [sentence for sentence in sentences if sentence]
         if not sentences:
             return ""
-        about = next((sentence for sentence in sentences
-                      if not self._only_a_state(sentence) and any(p in sentence.lower() for p in self.acknowledge)), sentences[0])
-        return "" if self._only_a_state(about) else about + "."
+        named = [sentence for sentence in sentences if any(p in sentence.lower() for p in self.acknowledge)]
+        about = next((sentence for sentence in named if not self._only_a_state(sentence)), None)
+        if about is None:
+            # No sentence names the notice but a state that changed (a stop, a mute, in whatever order): no line. When none names it at
+            # all (the phrase was in the title), the first sentence, unless that only says a state changed.
+            about = "" if named else sentences[0]
+        return "" if not about or self._only_a_state(about) else about + "."
 
 
 class MeetingProvider(ABC):

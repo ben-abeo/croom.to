@@ -753,6 +753,26 @@ class TestMeetingControls:
         data = (await (await client.get("/api/status")).json())["meeting"]
         assert data["dialog"] is None and data["controls"] == {} and data["participants"] == {"count": 0, "list": []}
 
+    async def test_an_errored_meeting_shows_no_model_whatever_the_provider_still_holds(self, client_factory):
+        """What the table draws from is the joined meeting's: when the meeting errors, nothing of it is left to draw (the title and the error
+        stay, as they were)."""
+        client, meeting = await joined_meeting(client_factory)
+        info = meeting.current_meeting
+        info.controls = {"mute": {"available": True, "on": True}, "host": {"role": "host"}}
+        info.people = {"count": 2, "list": [{"id": 1, "name": "Ann"}]}
+        info.chat = {"unread": 1, "messages": [{"from": "Ann", "text": "hi", "at": "2026-10-13T20:00:00Z"}]}
+        info.notice = "This meeting is being recorded."
+        info.dialog = {"id": 3, "title": "Unmute?", "text": "The host would like you to unmute.", "buttons": ["Unmute", "Stay muted"]}
+        info.error_message = "The meeting page crashed"
+        meeting.set_state(MeetingState.ERROR)
+        data = (await (await client.get("/api/status")).json())["meeting"]
+        assert data["state"] == "error" and data["error"] == "The meeting page crashed" and data["platform"] == "zoom"
+        assert data["controls"] == {} and data["participants"] == {"count": 0, "list": []} and data["chat"] == {"unread": 0, "messages": []}
+        assert data["notice"] == "" and data["dialog"] is None
+        meeting.set_state(MeetingState.CONNECTED)                                    # and a meeting that is connected shows its own, as before
+        data = (await (await client.get("/api/status")).json())["meeting"]
+        assert data["controls"]["host"]["role"] == "host" and data["participants"]["count"] == 2 and data["dialog"]["id"] == 3
+
     async def test_a_control_is_carried_out_and_its_failure_answers_in_words(self, client_factory):
         meeting = StubMeeting()
         client = await client_factory(make_service(meeting=meeting))

@@ -79,3 +79,18 @@ def test_zoom_guide_says_how_a_meeting_gets_its_passcode():
     ):
         assert needle in text, needle
     assert "A bare meeting id cannot open a passcode-protected meeting" not in text
+
+
+def test_zoom_guide_says_how_the_room_joins_muted_or_dark():
+    """The troubleshooting card states the join-time ruling: the camera setting both ways, the microphone setting only towards
+    muted (a room Zoom has muted stays muted, Unmute one tap away), and a tap Zoom cannot carry out answers in words."""
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "At join the room's camera setting (camera_default_on in the room's config) applies both ways: Zoom's video is started or stopped to match it",
+        "The microphone setting (mic_default_on) applies only towards muted: a room set to join muted is muted",
+        "when the room is set to join with the microphone on and Zoom has it muted (the host's mute on entry, for example), "
+        "the room stays muted and the table shows Unmute, one tap away",
+        "answers in Zoom's words on the meeting screen, and the meeting goes on",
+        "http://<device>:8080/api/meeting/diagnostics",
+    ):
+        assert needle in text, needle

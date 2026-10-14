@@ -154,8 +154,10 @@ body[data-state="error"] .detail { color: var(--ink-900); }
 body[data-state="error"] .message { color: #A3260F; }
 body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the page's pale red would not read on it */
 
-/* Buttons */
+/* Buttons. An icon (icons.svg, drawn by app.js) goes before the label, in the label's own colour; it adds width to a
+   button, never height. */
 .button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
   min-height: 56px;
   padding: 0 26px;
   border-radius: var(--radius);
@@ -168,6 +170,9 @@ body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the pa
   cursor: pointer;
   touch-action: manipulation;
 }
+.button[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute (Save, on the camera screen) */
+.button .icon { width: 1.3em; height: 1.3em; flex: 0 0 auto; }
+.button.menu-item .icon { width: 1.6em; height: 1.6em; }
 .button:hover { background: var(--blue-700); }
 .button.quiet { background: transparent; border-color: var(--periwinkle-300); color: inherit; }
 .button.quiet:hover { background: rgba(255, 255, 255, 0.08); }
@@ -331,4 +336,9 @@ body.keyboard-open .schedule { display: none; }
   .top:has(.next-warning:not([hidden])) { flex-wrap: wrap; row-gap: 12px; }
   .top:has(.next-warning:not([hidden])) .top-right { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; row-gap: 8px; }
   .top:has(.next-warning:not([hidden])) .next-warning { flex: 1 1 100%; }
+}
+@media (max-width: 480px) {
+  /* A phone's top bar is already full: the logo, the name, the clock and Options share one row, and the icon's 32 px would squeeze
+     the name to a letter a line. Options keeps to its word there; every other button keeps its icon. */
+  .button.nav .icon { display: none; }
 }

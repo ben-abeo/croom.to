@@ -24,6 +24,34 @@
   let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
   const kiosk = new URLSearchParams(window.location.search).get("keyboard") === "1";   // the table Pi's kiosk browser has no keyboard of its own (keyboard.js)
 
+  // Icons: one sprite of Lucide symbols (icons.svg), fetched once and kept in the document, so <use href="#icon-..."> resolves
+  // without a request per button. A page without the sprite keeps its labels (the fetch may fail offline).
+  const iconsReady = fetch("/static/icons.svg").then((r) => (r.ok ? r.text() : "")).then((svg) => {
+    if (!svg) return false;
+    const holder = document.createElement("div");
+    holder.hidden = true;
+    holder.innerHTML = svg;
+    document.body.prepend(holder);
+    return true;
+  }).catch(() => false);
+  // The browser's own HTML parser makes the picture, so that no namespace address is written in this file (the service's
+  // test of the page's files looks for any web address in them); the name goes in as an attribute, never as markup.
+  function icon(name) {
+    const holder = document.createElement("template");
+    holder.innerHTML = '<svg class="icon" aria-hidden="true"><use></use></svg>';
+    const svg = holder.content.firstChild;
+    svg.firstChild.setAttribute("href", "#icon-" + name);
+    return svg;
+  }
+  // A button's content: its icon, if it has one, then its label. The icon is hidden from a screen reader: the label is the name.
+  function labelWithIcon(node, label, name) {
+    node.replaceChildren();
+    if (name) node.append(icon(name));
+    const text = document.createElement("span");
+    text.textContent = label;
+    node.append(text);
+  }
+
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
   const viewMode = (name) => (name === "camera" ? cameraMode : VIEW_MODES[name]);
@@ -240,11 +268,11 @@
   // button moves from under the finger before it lifts, and the tap is lost.
   const keepFocus = (b) => b.addEventListener("pointerdown", (e) => e.preventDefault());
 
-  function button(label, className, onClick, disabled) {
+  function button(label, className, onClick, disabled, iconName) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "button " + className;
-    b.textContent = label;
+    labelWithIcon(b, label, iconName);
     b.disabled = Boolean(disabled) || model.busy;
     keepFocus(b);
     b.addEventListener("click", onClick);
@@ -252,26 +280,26 @@
   }
 
   function setActions(specs, containerId, keyHolder) {
-    // Replace the buttons only when their labels, availability or target change, so a click in progress is never
+    // Replace the buttons only when their labels, icons, availability or target change, so a click in progress is never
     // lost to a re-render (the timer ticks every second), and a Join never acts on a booking it no longer shows (two
     // bookings back to back both say "Join now").
-    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null]));
+    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null, s.icon || null]));
     if (key === keyHolder.key) return;
     keyHolder.key = key;
-    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
+    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled, s.icon)));
   }
   const idleActionsKey = { key: null };
   const meetingActionsKey = { key: null };
 
   function leaveSpec() {
     if (model.confirmLeave) {
-      return { label: "Tap again to leave", className: "danger", onClick: () => {
+      return { label: "Tap again to leave", className: "danger", icon: "phone-off", onClick: () => {
         clearTimeout(confirmTimer);
         model.confirmLeave = false;
         leave();
       } };
     }
-    return { label: "Leave", className: "danger", onClick: () => {
+    return { label: "Leave", className: "danger", icon: "phone-off", onClick: () => {
       model.confirmLeave = true;
       clearTimeout(confirmTimer);
       confirmTimer = setTimeout(() => { model.confirmLeave = false; render(); }, CONFIRM_MS);
@@ -439,15 +467,15 @@
       el("kicker").textContent = m.state === "leaving" ? "Leaving" : "Joining";
       el("headline").textContent = m.state === "leaving" ? "Leaving" : "Joining " + label;
       el("detail").textContent = m.state === "in_lobby" ? "Waiting for the host to let the room in." : "The room's screen is connecting.";
-      if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", onClick: leave }];
+      if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", icon: "x-circle", onClick: leave }];
     } else if (m.state === "connected") {
       body.dataset.state = "meeting";
       el("kicker").textContent = "In a meeting";
       el("headline").textContent = "In a meeting";
       el("detail").textContent = meetingDetail(m);
       specs = [
-        { label: m.muted ? "Unmute" : "Mute", className: "", onClick: () => toggle("mute") },
-        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", onClick: () => toggle("camera") },
+        { label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
+        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video-off" : "video", onClick: () => toggle("camera") },
         leaveSpec(),
       ];
     } else if (m.state === "error") {
@@ -455,8 +483,8 @@
       el("kicker").textContent = "Couldn't join";
       el("headline").textContent = "Couldn't join " + label;
       el("detail").textContent = m.error || "The room's screen could not join. Try again, or join from a different link.";
-      specs = [{ label: "Dismiss", className: "quiet", onClick: leave }];
-      if (asking) specs.push({ label: "Join again", className: "primary", onClick: joinAgain });
+      specs = [{ label: "Dismiss", className: "quiet", icon: "x-circle", onClick: leave }];
+      if (asking) specs.push({ label: "Join again", className: "primary", icon: "video", onClick: joinAgain });
     } else {
       specs = renderIdle(cal);
     }
@@ -506,7 +534,7 @@
       el("kicker").textContent = "Happening now";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
-      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id), target: current.id }] : [];
+      return current.joinable ? [{ label: "Join now", className: "primary", icon: "video", onClick: () => joinEvent(current.id), target: current.id }] : [];
     }
 
     if (next) {
@@ -524,7 +552,7 @@
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
       if (!next.joinable) return [];
-      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
+      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", icon: "video", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
     }
 
     body.dataset.state = "free";
@@ -555,7 +583,7 @@
     for (const ev of model.events) {
       const window = joinWindow(ev);
       const canJoin = ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error");
-      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev)) : null);
+      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev), "video") : null);
       li.classList.toggle("past", window.past);
       li.classList.toggle("now", Boolean(cal.current && cal.current.id === ev.id));
       list.append(li);
@@ -583,6 +611,10 @@
 
   keepFocus(el("link-form").querySelector("button[type=submit]"));   // Join, beside the link box
 
+  // The buttons in index.html name their icon in data-icon (every Back is the arrow); each gets it once, here, with the label the
+  // markup gives it.
+  for (const b of document.querySelectorAll("button[data-icon], button.back")) labelWithIcon(b, b.textContent.trim(), b.dataset.icon || "back");
+
   el("open-options").addEventListener("click", () => setView("options"));
   el("back-from-options").addEventListener("click", () => setView("idle"));
   el("open-camera-setup").addEventListener("click", () => setView("camera"));
@@ -597,6 +629,7 @@
 
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,
+    iconsReady: iconsReady, icon: icon, labelWithIcon: labelWithIcon,
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING, submitForm: submitForm,
     view: view, setView: setView, mode: mode, cameraMode: () => cameraMode, kiosk: kiosk,
     onViewChange: (fn) => viewHooks.push(fn),

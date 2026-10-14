@@ -309,6 +309,259 @@ def test_the_screen_picker_posts_the_style_and_marks_the_current_one(browser):
         page.close()
 
 
+# --- icons: one Lucide sprite, and an icon before every button's label ---
+
+SPRITE_ICONS = ["mic", "mic-off", "video", "video-off", "hand", "smile", "captions", "layout", "user", "users", "message", "phone-off",
+                "record", "lock", "unlock", "door", "x-circle", "volume", "move", "monitor", "settings", "calendar", "back", "check"]
+TV_REMOTE_ICONS = ["tv", "power", "home", "menu", "up", "down", "left", "right", "volume-x", "hash", "info", "list", "play", "pause",
+                   "stop", "rewind", "fast-forward", "exit", "return", "pointer", "touchpad", "keyboard"]   # for the TV remote's buttons, which come with another branch
+DRAWABLE = {"path", "line", "circle", "rect", "polyline", "polygon", "ellipse"}
+
+
+def test_the_icon_sprite_holds_every_symbol_and_each_one_draws_something():
+    from xml.etree import ElementTree
+    from croom.control.service import STATIC_DIR
+    svg = "{http://www.w3.org/2000/svg}"
+    symbols = list(ElementTree.parse(STATIC_DIR / "icons.svg").getroot().iter(svg + "symbol"))
+    ids = [s.get("id") for s in symbols]
+    assert len(ids) == len(set(ids)), "a symbol is there twice"
+    assert {f"icon-{name}" for name in SPRITE_ICONS + TV_REMOTE_ICONS} <= set(ids)
+    for symbol in symbols:
+        who = symbol.get("id")
+        assert [symbol.get(a) for a in ("viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin")] == \
+            ["0 0 24 24", "none", "currentColor", "2", "round", "round"], who   # Lucide's own: drawn in the text's colour, whatever the size
+        shapes = [child.tag.replace(svg, "") for child in symbol]
+        assert shapes and set(shapes) <= DRAWABLE, f"{who} draws {shapes}"      # at least one shape, and nothing but shapes
+
+
+def test_the_icons_licence_says_where_they_come_from():
+    from croom.control.service import STATIC_DIR
+    text = (STATIC_DIR / "LICENSES.md").read_text(encoding="utf-8")
+    assert "Lucide" in text and "https://lucide.dev" in text and "ISC" in text and "lucide-react 0.303.0" in text
+
+
+def drawn_icons(page, scope):
+    """What each button inside the scope says and draws, in order: "Mute: #icon-mic" (a button with no icon draws nothing)."""
+    return page.evaluate("""(scope) => [...document.querySelectorAll(scope + ' .button')].map(b =>
+        b.textContent.trim() + ': ' + [...b.querySelectorAll('svg.icon use')].map(u => u.getAttribute('href')).join(' '))""", scope)
+
+
+def test_every_button_on_the_meeting_screen_has_an_icon_and_the_label_stays_its_name(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-actions .button svg use')", timeout=5000)
+        for b in page.locator("#meeting-actions .button").all():
+            assert b.locator("svg.icon use").count() == 1 and b.locator("svg").get_attribute("aria-hidden") == "true"
+            assert b.inner_text().strip() in ("Mute", "Unmute", "Turn camera off", "Turn camera on", "Leave")
+        assert page.locator("#open-options svg use").count() == 0 or page.locator("#open-options").is_hidden()
+        for name in ("Mute", "Turn camera off", "Leave"):                    # a screen reader still reads the label alone
+            assert page.get_by_role("button", name=name, exact=True).count() == 1, name
+        page.close()
+
+
+def test_the_idle_buttons_carry_icons_too(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.wait_for_function("document.querySelector('#open-options svg use')", timeout=5000)
+        assert page.locator("#open-options").inner_text().strip() == "Options"
+        assert page.locator("#link-form button[type=submit] svg use").count() == 1
+        page.close()
+
+
+def test_the_mute_camera_and_leave_icons_follow_their_buttons(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-actions .button svg use')", timeout=5000)
+        assert drawn_icons(page, "#meeting-actions") == ["Mute: #icon-mic", "Turn camera off: #icon-video-off", "Leave: #icon-phone-off"]
+        page.click("#meeting-actions button:has-text('Mute')")
+        page.wait_for_selector("#meeting-actions button:has-text('Unmute')", timeout=5000)
+        page.click("#meeting-actions button:has-text('Turn camera off')")
+        page.wait_for_selector("#meeting-actions button:has-text('Turn camera on')", timeout=5000)
+        assert drawn_icons(page, "#meeting-actions") == ["Unmute: #icon-mic-off", "Turn camera on: #icon-video", "Leave: #icon-phone-off"]
+        page.click("#meeting-actions button:has-text('Leave')")
+        assert drawn_icons(page, "#meeting-actions")[-1] == "Tap again to leave: #icon-phone-off"   # the second tap keeps its picture
+        page.close()
+
+
+def test_join_cancel_and_dismiss_carry_icons(browser):
+    skip_if_day_ends_within(1)                                               # the bookings start in 5 and 40 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Design review", 5), event("e2", "Retro", 40)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        page.wait_for_function("document.querySelector('#actions .button svg use')", timeout=5000)
+        assert drawn_icons(page, "#actions") == ["Join now: #icon-video"]
+        assert drawn_icons(page, "#events") == ["Join: #icon-video"]         # the row of the booking that is inside its ten minutes
+        server.meeting.fail_next_join = True
+        page.fill("#link-input", "98765432100")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.body.dataset.state === 'error'", timeout=5000)
+        assert drawn_icons(page, "#actions") == ["Dismiss: #icon-x-circle"]
+        page.click("#actions button:has-text('Dismiss')")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        join_by_id(page)
+        server.meeting.set_state(MeetingState.JOINING)
+        page.wait_for_function("document.querySelector('#meeting-actions button').innerText.trim() === 'Cancel'", timeout=5000)
+        assert drawn_icons(page, "#meeting-actions") == ["Cancel: #icon-x-circle"]
+        page.close()
+
+
+def test_join_again_and_a_join_that_waits_for_its_window_carry_icons(browser):
+    skip_if_day_ends_within(1)                                               # the booking starts in 40 minutes, and the service lists today's only
+    with PageServer(calendar_events=[event("e1", "Retro", 40)]) as server:
+        server.meeting.fail_before_joining = RuntimeError(PASSCODE_ASKED)
+        page = open_page(browser, server)
+        page.wait_for_function("document.querySelector('#actions .button svg use')", timeout=5000)
+        waiting = drawn_icons(page, "#actions")
+        assert len(waiting) == 1 and waiting[0].startswith("Join opens at ") and waiting[0].endswith(": #icon-video")
+        assert page.locator("#actions .button").is_disabled()                # the picture is there on a button that cannot be pressed yet
+        page.fill("#link-input", "5590000559")
+        submit_and_wait_for_the_card(page)
+        assert drawn_icons(page, "#actions") == ["Dismiss: #icon-x-circle", "Join again: #icon-video"]
+        page.close()
+
+
+# What index.html ships: each button's symbol, and the label it keeps.
+STATIC_BUTTON_ICONS = [
+    ("#open-options", "settings", "Options"), ("#open-camera-setup", "move", "Camera framing"), ("#open-screensaver", "monitor", "Screensaver"),
+    ("#open-camera-live", "move", "Camera"), ("#open-upcoming", "calendar", "Upcoming meetings"),
+    ("#link-form button[type=submit]", "video", "Join"),
+    ("#quieter", "volume", "Quieter"), ("#louder", "volume", "Louder"), ("#speaker-mute", "volume", "Mute speaker"),
+]
+
+
+def test_the_buttons_in_the_page_carry_their_icons_and_keep_their_labels(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.wait_for_function("document.querySelector('#open-options svg use')", timeout=5000)
+        for selector, name, label in STATIC_BUTTON_ICONS:
+            b = page.locator(selector)
+            assert b.count() == 1, selector
+            assert b.locator("svg.icon").count() == 1 and b.locator("svg.icon use").get_attribute("href") == f"#icon-{name}", selector
+            assert b.locator("svg.icon").get_attribute("aria-hidden") == "true", selector
+            assert b.text_content().strip() == label, selector
+        backs = page.locator(".back").all()
+        assert backs and all(b.locator("svg.icon use").get_attribute("href") == "#icon-back" and b.text_content().strip() == "Back" for b in backs)
+        page.close()
+
+
+def test_the_speaker_button_keeps_its_icon_when_it_changes_its_words(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#speaker-mute svg use')", timeout=5000)
+        page.click("#speaker-mute")
+        page.wait_for_function("document.getElementById('speaker-mute').innerText.trim() === 'Unmute speaker'", timeout=5000)
+        assert drawn_icons(page, ".sound-buttons")[-1] == "Unmute speaker: #icon-volume"
+        assert page.locator("#speaker-mute").get_attribute("aria-pressed") == "true"
+        page.close()
+
+
+# Each icon showing, with its symbol, its size in ems, and the height of its button with it and for a moment without it.
+ICON_BOXES = """() => [...document.querySelectorAll('svg.icon')].filter(s => s.getClientRects().length).map(s => {
+    const use = s.querySelector('use'), shapes = use.getBBox(), box = s.getBoundingClientRect(), b = s.closest('button');
+    const em = parseFloat(getComputedStyle(b).fontSize), parent = s.parentNode, next = s.nextSibling, tall = b.getBoundingClientRect().height;
+    s.remove();
+    const bare = b.getBoundingClientRect().height;
+    parent.insertBefore(s, next);
+    return { name: use.getAttribute('href'), drawn: shapes.width > 0 && shapes.height > 0, wanted: b.classList.contains('menu-item') ? 1.6 : 1.3,
+             em: [box.width / em, box.height / em], symbol: Boolean(document.querySelector(use.getAttribute('href'))), heights: [tall, bare] }; })"""
+
+
+def shown_icons(page):
+    """The symbols showing on this screen, in order, each checked: it draws, at the size of its text, and costs its button no height."""
+    page.evaluate("window.croomPage.iconsReady")
+    found = page.evaluate(ICON_BOXES)
+    for icon in found:
+        assert icon["symbol"] and icon["drawn"], f"{icon['name']} draws nothing: the sprite has no such symbol"
+        assert all(abs(size - icon["wanted"]) < 0.05 for size in icon["em"]), f"{icon['name']} is {icon['em']} em, not {icon['wanted']}"
+        assert abs(icon["heights"][0] - icon["heights"][1]) < 0.01, f"{icon['name']} made its button {icon['heights'][0]} px tall, not {icon['heights'][1]}"
+    return [icon["name"] for icon in found]
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1200), (390, 844)])
+def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_height(browser, width, height):
+    def settled(page):
+        """The kiosk's screens still fit without scrolling, and the phone's still do not scroll sideways."""
+        if width >= 1024:
+            assert fits(page)
+        else:
+            assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        bar = ["#icon-settings"] if width > 480 else []                      # Options, in the top bar of every idle screen: not on a phone, where the bar is full
+        assert shown_icons(page) == bar + ["#icon-video"]                    # and Join beside the link box
+        settled(page)
+        page.click("#open-options")
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-move", "#icon-monitor"]
+        settled(page)
+        page.click("#open-camera-setup")
+        assert shown_icons(page) == bar + ["#icon-back"]
+        settled(page)
+        page.click("#back-from-camera")
+        page.click("#open-screensaver")
+        assert shown_icons(page) == bar + ["#icon-back"]
+        settled(page)
+        page.click("#back-from-screensaver")
+        page.click("#back-from-options")
+        join_by_id(page)
+        assert shown_icons(page) == ["#icon-mic", "#icon-video-off", "#icon-phone-off", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-move", "#icon-calendar"]
+        settled(page)
+        page.click("#open-upcoming")
+        assert shown_icons(page) == ["#icon-back"]
+        settled(page)
+        page.close()
+
+
+def test_a_phones_top_bar_keeps_the_room_name_on_one_line(browser):
+    """The bar is already full at 390 px: an icon in Options would take 32 px from the name, and "Lab" would break as "La" and "b"."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.evaluate("window.croomPage.iconsReady")
+        assert page.locator("#open-options svg.icon").is_hidden() and page.locator("#open-options").inner_text().strip() == "Options"
+        assert page.locator("#room-name").bounding_box()["height"] < 30     # one line of the name
+        page.set_viewport_size({"width": 800, "height": 1280})              # a tablet standing up has the room: the icon is back
+        assert page.locator("#open-options svg.icon").is_visible()
+        page.close()
+
+
+def test_the_icon_helpers_are_there_for_the_other_scripts(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        assert page.evaluate("window.croomPage.iconsReady") is True
+        made = page.evaluate("""() => { const P = window.croomPage, b = P.button('Raise hand', 'quiet', () => {}, false, 'hand');
+            const bare = P.button('Bounce', 'quiet', () => {}, false);
+            return [b.textContent, b.querySelector('svg.icon use').getAttribute('href'), b.querySelector('svg').getAttribute('aria-hidden'),
+                    bare.textContent, bare.querySelectorAll('svg').length, typeof P.icon, typeof P.labelWithIcon]; }""")
+        assert made == ["Raise hand", "#icon-hand", "true", "Bounce", 0, "function", "function"]
+        page.close()
+
+
+@pytest.mark.parametrize("answer", ["fails", "is missing"])
+def test_a_page_whose_icon_sprite_does_not_come_keeps_its_labels(browser, answer):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/static/icons.svg", (lambda route: route.abort()) if answer == "fails" else (lambda route: route.fulfill(status=404, body="no")))
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.evaluate("window.croomPage.iconsReady") is False
+        assert page.locator("#open-options").inner_text().strip() == "Options"
+        assert page.locator("#link-form button[type=submit]").inner_text().strip() == "Join"
+        join_by_id(page)
+        assert page.locator("#meeting-actions .button").all_inner_texts() == ["Mute", "Turn camera off", "Leave"]
+        assert errors == []
+        page.close()
+
+
 # --- the page's own keyboard (the table Pi's kiosk browser has no keyboard of its own) ---
 
 def open_kiosk_page(browser, server, width=1280, height=800, touchscreen=False):

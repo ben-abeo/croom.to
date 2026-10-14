@@ -74,7 +74,7 @@
     el("volume-slider").value = audio.level;
     el("volume-level").textContent = String(audio.level);
     el("speaker-mute").setAttribute("aria-pressed", audio.muted ? "true" : "false");
-    el("speaker-mute").textContent = audio.muted ? "Unmute speaker" : "Mute speaker";
+    P.labelWithIcon(el("speaker-mute"), audio.muted ? "Unmute speaker" : "Mute speaker", el("speaker-mute").dataset.icon);   // the button keeps its icon beside its new words
   }
 
   const setVolume = (body) => deviceCall("audio", "/api/audio/volume", body);

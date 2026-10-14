@@ -2,7 +2,9 @@
 Room control page and API (spec docs/superpowers/specs/2026-09-24-room-control-page-design.md).
 
 Serves the room page and a small JSON API on the local network and drives the
-meeting and calendar services on behalf of whoever is in the room.
+meeting and calendar services, the room's devices and the room's TV (spec
+docs/superpowers/specs/2026-10-13-tv-remote-and-touchpad-design.md) on behalf of
+whoever is in the room.
 """
 
 import asyncio
@@ -21,6 +23,9 @@ from croom.core.config import Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
+from croom.tv.discover import discover_tvs
+from croom.tv.errors import TvError
+from croom.tv.names import one_line
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +48,8 @@ PLATFORM_HOSTS = {
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
+TV_NOT_ENABLED = "The TV is not enabled on this device (tv.enabled in its config)"
+TV_REASON_LIMIT = 160   # how much of a failure's own text goes to the table (the TV service's words are never cut)
 
 
 def _register_font_types() -> None:
@@ -88,6 +95,10 @@ def normalize_passcode(value: Any) -> Optional[str]:
     return passcode
 
 
+class _BadBody(Exception):
+    """A request body that is no use, in words for whoever sent it (a 400)."""
+
+
 @web.middleware
 async def _static_no_cache(
     request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -114,6 +125,8 @@ class ControlService(Service):
         calendar: the CalendarService instance, or None.
         devices: the room devices the page controls (sound and camera), or None.
         store: the SettingsStore for the page's choices, or None to open settings_file.
+        tv: the TvService for the room's TV, or None when the room has none enabled.
+        discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
     """
 
     def __init__(
@@ -123,6 +136,8 @@ class ControlService(Service):
         calendar=None,
         devices=None,
         store=None,
+        tv=None,
+        discover=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -140,6 +155,10 @@ class ControlService(Service):
         self._screensaver = self._load_style()
         self._meeting = meeting
         self._calendar = calendar
+        self._tv = tv
+        self._discover_tvs = discover or discover_tvs
+        self._tv_busy = asyncio.Lock()                       # held by the control that is with the TV (see _handle_tv_control)
+        self._search: Optional[asyncio.Task] = None          # the search for TVs that is running (see _handle_tv_discover)
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -152,7 +171,7 @@ class ControlService(Service):
 
     @classmethod
     def from_config(
-        cls, config: Config, meeting=None, calendar=None, devices=None, store=None
+        cls, config: Config, meeting=None, calendar=None, devices=None, store=None, tv=None
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         return cls(
@@ -169,6 +188,7 @@ class ControlService(Service):
             calendar=calendar,
             devices=devices,
             store=store,
+            tv=tv,
         )
 
     @property
@@ -205,6 +225,10 @@ class ControlService(Service):
         app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
         app.router.add_post("/api/camera/setup", self._handle_camera_setup)
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
+        app.router.add_post("/api/tv/control", self._handle_tv_control)
+        app.router.add_post("/api/tv/pair", self._handle_tv_pair)
+        app.router.add_post("/api/tv/forget", self._handle_tv_forget)
+        app.router.add_get("/api/tv/discover", self._handle_tv_discover)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
         return app
@@ -239,6 +263,11 @@ class ControlService(Service):
             except (asyncio.CancelledError, Exception):
                 pass
         self._task = self._join_task = None
+        search, self._search = self._search, None
+        if search is not None and not search.done():
+            # before the listener is cleaned up, which waits for the requests that are waiting for this
+            search.cancel()
+            await asyncio.wait({search})
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -334,6 +363,7 @@ class ControlService(Service):
             "screensaver": self._screensaver,
             "audio": self._audio_state(),
             "camera": self._camera_state(),
+            "tv": self._tv_status(),
         }
 
     # ------------------------------------------------------------------
@@ -570,6 +600,121 @@ class ControlService(Service):
             return camera.state()
 
         return await self._device_call(request, camera, action)
+
+    # ------------------------------------------------------------------
+    # The room's TV: its status, the controls, pairing and the search for TVs (spec 2026-10-13 TV remote and touchpad)
+    # ------------------------------------------------------------------
+
+    NO_TV = {"configured": False, "paired": False}
+
+    def _tv_status(self) -> Dict[str, Any]:
+        """The TV's block of the status: what the TV service shows, and a TV that is not set up when the room has no TV service.
+        The status must always answer: a TV service that fails to report is warned about, with its traceback, once for each
+        distinct message (as the devices are), and the meeting and the calendar are still told."""
+        if self._tv is None:
+            return dict(self.NO_TV)
+        try:
+            return self._tv.status()
+        except Exception as e:  # noqa: BLE001 - the status must always answer
+            message = f"Could not read the TV's status: {type(e).__name__}: {e}"
+            if message != self._read_failures.get("TV"):
+                self._read_failures["TV"] = message
+                logger.warning(message, exc_info=True)
+            return dict(self.NO_TV)
+
+    @staticmethod
+    def _reason(error: BaseException) -> str:
+        """Why something failed, in a few words on one printable line: the error's own text, else the name of its class."""
+        return one_line(str(error), TV_REASON_LIMIT) or type(error).__name__
+
+    async def _tv_call(self, request: web.Request, action: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]) -> web.Response:
+        """Run one thing asked of the TV service: JSON in, `{"tv": status}` out; `action(data)` asks the service and answers
+        with the status it leaves.
+
+        415 for a body that is not JSON, 503 in a room with no TV service, 400 for a body that is not an object or that the
+        action finds no use for (_BadBody), and 409, in words for the table, when the TV could not do it: the TV service's own
+        words for what it refuses (TvError), and a reason on one line for anything else (logged, as it is a bug or a library
+        failing). A cancellation is not a failure to answer for and is not caught: the TV service keeps its own from leaking
+        out, so what arrives here is this request's."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if self._tv is None:
+            return self._error_response(TV_NOT_ENABLED, 503)
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        try:
+            return web.json_response({"tv": await action(data)})
+        except _BadBody as e:
+            return self._error_response(str(e), 400)
+        except TvError as e:
+            return self._error_response(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - whatever it was, the table is told in words and not left with a 500
+            logger.warning(f"The TV did not carry out the request to {request.path}: {type(e).__name__}: {e}", exc_info=True)
+            return self._error_response("The TV did not do that: " + self._reason(e), 409)
+
+    async def _handle_tv_control(self, request: web.Request) -> web.Response:
+        """One control of the TV, {"name", "value"?}, answered with the TV's status after it.
+
+        One at a time: the TV service does not hold its controls apart (a second tap on Turn on during a wake would start a
+        second wake, and a key sent during one goes down the socket the wake is using), so a control that comes while another
+        is with the TV waits for it. There is no time limit of its own here: Turn on from the table waits for the TV to come
+        on, up to 23 seconds, and the page's request is made to wait for that."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            name = data.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise _BadBody('Send a JSON object with the "name" of the control, and its "value" when it has one')
+            async with self._tv_busy:
+                return await self._tv.control(name, data.get("value"))
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_pair(self, request: web.Request) -> web.Response:
+        """Pair with the TV. The TV shows its prompt and a person accepts it with the TV's own remote, so this request waits
+        for them (the TV service's own single-flight and timeouts apply: a second pairing is refused in words). It is not held
+        behind the controls' one-at-a-time, and holds none of them up."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            await self._tv.pair()
+            return self._tv.status()
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_forget(self, request: web.Request) -> web.Response:
+        """Let go of the TV: disconnect and delete the key."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            await self._tv.forget()
+            return self._tv.status()
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_discover(self, request: web.Request) -> web.Response:
+        """The LG TVs on the network. It answers in a room with no TV service as well: that is when it is needed.
+
+        One search at a time. A search is a datagram on the network and a page read from each TV that answers, five or six
+        seconds in all, so a request that comes while one is running waits for that one's answer and does not start another.
+        The wait is shielded: this request going away (the page closed, the connection lost) does not end the search that
+        others are waiting for."""
+        if self._search is None or self._search.done():
+            self._search = asyncio.create_task(self._discover_tvs())
+            self._search.add_done_callback(self._search_ended)
+        try:
+            tvs = await asyncio.shield(self._search)
+        except TvError as e:
+            return self._error_response(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - said in _search_ended; the table is told in words and not left with a 500
+            return self._error_response("The search for TVs did not finish: " + self._reason(e), 409)
+        return web.json_response({"tvs": tvs})
+
+    @staticmethod
+    def _search_ended(search: asyncio.Task) -> None:
+        """Said, once for a search however many requests waited for it, when it ends on an error that is not words for the table
+        (a TvError is): a bug, or a library failing."""
+        if search.cancelled():
+            return
+        error = search.exception()
+        if error is not None and not isinstance(error, TvError):
+            logger.warning(f"The search for TVs failed: {type(error).__name__}: {error}", exc_info=error)
 
     # ------------------------------------------------------------------
     # Handlers

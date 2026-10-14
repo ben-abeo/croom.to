@@ -175,8 +175,12 @@ class CroomAgent:
                     calendar=self.service_manager.get_service("calendar"),
                     devices=self.service_manager.get_service("devices"),
                     store=settings_store,
+                    tv=tv_service,   # the room page's TV (None when the room has none enabled): its status and its controls
                 )
-                self.service_manager.register(control_service, dependencies=["meeting", "calendar", "devices"])
+                self.service_manager.register(
+                    control_service,
+                    dependencies=["meeting", "calendar", "devices"] + (["tv"] if tv_service is not None else []),
+                )
                 logger.info("Room control page registered")
             except ImportError as e:
                 logger.warning(f"Room control page not available: {e}")

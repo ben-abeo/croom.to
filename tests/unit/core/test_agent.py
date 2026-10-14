@@ -190,6 +190,30 @@ class TestControlRegistration:
         order = agent.service_manager._start_order
         assert order.index("video") < order.index("devices") < order.index("control")
 
+    def test_the_tv_is_handed_to_the_control_page_and_starts_before_it(self, tmp_path, no_hardware):
+        config = make_config(tmp_path, control=True)
+        config.tv.enabled, config.tv.host = True, "10.0.0.41"
+        agent = make_agent(config)
+        agent._initialize_services()
+        tv = agent.service_manager.get_service("tv")
+        control = agent.service_manager.get_service("control")
+        assert tv is not None and control._tv is tv
+        order = agent.service_manager._start_order
+        assert order.index("tv") < order.index("control")
+
+    def test_a_room_without_a_tv_hands_the_control_page_none(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        assert agent.service_manager.get_service("tv") is None
+        assert agent.service_manager.get_service("control")._tv is None
+
+    def test_a_tv_that_is_switched_off_in_the_config_is_not_handed_to_the_control_page(self, tmp_path, no_hardware):
+        config = make_config(tmp_path, control=True)
+        config.tv.enabled, config.tv.host = False, "10.0.0.41"
+        agent = make_agent(config)
+        agent._initialize_services()
+        assert agent.service_manager.get_service("control")._tv is None
+
     def test_control_is_absent_when_disabled(self, tmp_path, no_hardware):
         agent = make_agent(make_config(tmp_path, control=False))
         agent._initialize_services()

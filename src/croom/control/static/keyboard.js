@@ -15,8 +15,17 @@
     more: [["[", "]", "{", "}", "#", "%", "^", "*", "+", "="], ["_", "\\", "|", "~", "<", ">", "\u20AC", "\u00A3", "\u00A5", "\u2022"],
            ["layer:symbols", ".", ",", "?", "!", "'", "backspace"], ["layer:letters", "space", "join", "hide"]],
   };
-  // The glyphs (shift, backspace and hide here; euro, pound, yen and bullet above) are escapes: the page's scripts are plain ASCII.
-  const LABELS = { shift: "\u21E7", backspace: "\u232B", space: "space", join: "Join", hide: "\u2304", "layer:symbols": "123", "layer:more": "#+=", "layer:letters": "ABC" };
+  // The euro, pound, yen and bullet above are escapes: the page's scripts are plain ASCII.
+  const LABELS = { space: "space", join: "Join", "layer:symbols": "123", "layer:more": "#+=", "layer:letters": "ABC" };
+  // The three keys that are a picture, not a word, are drawn (inline SVG, in the key's own colour) so that no font has to
+  // supply them; their buttons carry their names, for a screen reader.
+  const icon = (paths) => '<svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">' + paths + "</svg>";
+  const ICONS = {
+    shift: icon('<path d="M12 16V4"/><path d="M6 10l6-6 6 6"/><path d="M6 20h12"/>'),                    // an arrow up, over a flat base
+    backspace: icon('<path d="M9 5h11a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H9l-7-7z"/><path d="M13 9l6 6M19 9l-6 6"/>'),   // a key pointing left, with an x
+    hide: icon('<path d="M6 9l6 6 6-6"/>'),                                                                // a chevron down
+  };
+  const NAMES = { shift: "Shift", backspace: "Delete", hide: "Hide keyboard" };
   const WIDE = new Set(["shift", "backspace", "layer:symbols", "layer:more", "layer:letters", "hide"]);
   const REPEAT_AFTER_MS = 400, REPEAT_EVERY_MS = 83, DOUBLE_TAP_MS = 350, PREVIEW_LINGER_MS = 60;
   const kiosk = P.kiosk;
@@ -56,7 +65,10 @@
     b.dataset.key = key;
     const cap = document.createElement("span");
     cap.className = "cap";
-    cap.textContent = label(key);
+    if (ICONS[key]) {
+      cap.innerHTML = ICONS[key];
+      b.setAttribute("aria-label", NAMES[key]);
+    } else cap.textContent = label(key);
     b.append(cap);
     b.addEventListener("pointerdown", onDown);
     b.addEventListener("click", (e) => e.preventDefault());   // the browser's own click: the pointerdown already acted
@@ -80,7 +92,7 @@
     for (const r of rows) if (r.parentNode !== box) box.append(r);
   }
   function relabel() {
-    for (const b of box.querySelectorAll(".key")) b.querySelector(".cap").textContent = label(b.dataset.key);
+    for (const b of box.querySelectorAll(".key")) if (!ICONS[b.dataset.key]) b.querySelector(".cap").textContent = label(b.dataset.key);
     box.dataset.shift = shift;
     box.dataset.layer = layer();
   }
@@ -121,6 +133,7 @@
   function switchLayer(name) {
     layers.set(field(), name);
     shift = "off";
+    hidePreview();   // a held letter's pop would stay over keys that are not its: it goes with its layer, and the lift that comes later finds nothing to do
     if (!open) return;
     place(name);
     relabel();
@@ -172,7 +185,7 @@
     const r = button.getBoundingClientRect();
     const left = r.left + r.width / 2 - preview.offsetWidth / 2;
     preview.style.left = Math.max(4, Math.min(left, document.documentElement.clientWidth - preview.offsetWidth - 4)) + "px";
-    preview.style.top = r.top - preview.offsetHeight - 6 + "px";
+    preview.style.top = r.top - preview.offsetHeight - 2 + "px";
   }
   function hidePreview() { clearTimeout(previewTimer); previewOf = null; preview.hidden = true; }
   function lingerPreview(pointerId) { if (previewOf === pointerId) previewTimer = setTimeout(hidePreview, PREVIEW_LINGER_MS); }

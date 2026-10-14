@@ -737,9 +737,26 @@ LAYER_ROWS = {      # the iPad's layers, row by row, by data-key
 }
 
 
+LAYER_CAPS = {      # what the keys say, row by row: the iPad's caps (the three that are a picture, Shift, delete and hide, by their names in brackets)
+    "letters": ["q w e r t y u i o p", "a s d f g h j k l", "[Shift] z x c v b n m [Delete]", "123 . - / space Join [Hide keyboard]"],
+    "symbols": [LAYER_ROWS["symbols"][0], LAYER_ROWS["symbols"][1], "#+= . , ? ! ' [Delete]", "ABC space Join [Hide keyboard]"],
+    "more": [LAYER_ROWS["more"][0], LAYER_ROWS["more"][1], "123 . , ? ! ' [Delete]", "ABC space Join [Hide keyboard]"],
+}
+
+
 def keyboard_rows(page):
     """The keys of the layer in the tray, row by row, as their data-key values."""
     return page.evaluate("Array.from(document.querySelectorAll('#keyboard .row')).map(r => Array.from(r.querySelectorAll('.key')).map(k => k.dataset.key).join(' '))")
+
+
+def keyboard_caps(page):
+    """What the keys of the layer in the tray say, row by row: their text, and for the three that are a picture their accessible name in brackets."""
+    return page.evaluate("""Array.from(document.querySelectorAll('#keyboard .row')).map(r => Array.from(r.querySelectorAll('.key')).map(
+        k => k.querySelector('svg') ? '[' + k.getAttribute('aria-label') + ']' : k.querySelector('.cap').textContent).join(' '))""")
+
+
+def keys_showing_outside_the_tray(page):
+    return page.evaluate("Array.from(document.querySelectorAll('.key')).filter(k => !k.closest('#keyboard') && k.getClientRects().length > 0).length")
 
 
 def key_heights(page):
@@ -766,6 +783,63 @@ def test_the_three_layers_hold_the_ipad_keys_and_fit_the_kiosk(browser):
             assert keyboard["y"] + keyboard["height"] <= 800 and keyboard["height"] <= 290, layer   # on the screen, in the room the page leaves under its content
             assert page.evaluate("document.querySelector('#link-input').getBoundingClientRect().bottom <= document.querySelector('#keyboard').getBoundingClientRect().top"), layer
             assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), layer
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(390, 844), (1024, 700), (1280, 800), (1920, 1200)])
+def test_the_rows_of_every_layer_end_together_and_the_block_stays_in_the_middle(browser, width, height):
+    """Ten keys at their widest (118 px, 6 px apart) are the widest a row gets. Every row is as wide as the first, so the ends
+    line up (the letters' middle row, nine keys, is half a key in from each end, as on the iPad), and on a screen wider than
+    that the block sits in the middle of the tray. On a narrower one the rows run edge to edge."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server, width=width, height=height)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        block = min(width - 12, 10 * 118 + 9 * 6)                       # the tray pads its sides by 6 px
+        left = (width - block) / 2
+        for layer, key in (("letters", None), ("symbols", "layer:symbols"), ("more", "layer:more")):
+            if key:
+                touch(page, f"#keyboard .key[data-key='{key}']")
+            ends = page.evaluate("Array.from(document.querySelectorAll('#keyboard .row')).map(r => [r.firstElementChild.getBoundingClientRect().left, r.lastElementChild.getBoundingClientRect().right])")
+            for i, (start, end) in enumerate(ends):
+                inset = 62 if layer == "letters" and i == 1 and block == 1234 else 0   # nine letters of 118 px with their gaps: half a key in from each end
+                assert abs(start - (left + inset)) <= 1 and abs(end - (left + block - inset)) <= 1, (layer, i, ends)
+            if layer != "letters":                                       # no key is capped here: a row shares its width in the proportions it is given, a wide key being 1.5 keys
+                third = page.evaluate("Array.from(document.querySelectorAll('#keyboard .row')[2].querySelectorAll('.key')).map(k => k.getBoundingClientRect().width)")
+                assert abs(third[0] / third[1] - 1.5) <= 0.03, (layer, third)
+            assert page.evaluate("document.querySelector('#link-input').getBoundingClientRect().bottom <= document.querySelector('#keyboard').getBoundingClientRect().top"), layer
+        if width >= 1024:                                                # the fixed screen: once the keys are gone nothing may need to scroll
+            tap(page, "hide")
+            assert fits(page)
+        page.close()
+
+
+def test_the_keys_say_what_the_ipad_says_on_each_layer(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for layer, key in (("letters", None), ("symbols", "layer:symbols"), ("more", "layer:more")):
+            if key:
+                touch(page, f"#keyboard .key[data-key='{key}']")
+            assert keyboard_caps(page) == LAYER_CAPS[layer], layer
+        touch(page, "#keyboard .key[data-key='layer:symbols']")          # the layer keys of each layer lead where their caps say
+        assert page.evaluate("document.getElementById('keyboard').dataset.layer") == "symbols"
+        assert page.locator("#keyboard .key", has_text="ABC").get_attribute("data-key") == "layer:letters"
+        page.close()
+
+
+def test_the_layers_that_are_not_showing_do_not_show(browser):
+    """They wait on the shelf, out of the tray: not one of their keys is on the page, and the page is no taller for them."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for key in (None, "layer:symbols", "layer:more", "layer:letters"):
+            if key:
+                touch(page, f"#keyboard .key[data-key='{key}']")
+            assert keys_showing_outside_the_tray(page) == 0, key
+            assert page.evaluate("document.documentElement.scrollHeight <= document.documentElement.clientHeight"), key
         page.close()
 
 
@@ -818,7 +892,8 @@ def test_the_preview_sits_centred_above_its_key(browser):
             touch(page, f"#keyboard .key[data-key='{key}']", release=False)
             above, cap = page.locator("#key-preview").bounding_box(), page.locator(f"#keyboard .key[data-key='{key}']").bounding_box()
             assert abs((above["x"] + above["width"] / 2) - (cap["x"] + cap["width"] / 2)) <= 1, key   # centred on the key
-            assert above["y"] + above["height"] <= cap["y"] and above["y"] >= 0, key                  # above it, not over it, on the screen
+            assert above["width"] >= 80 and above["y"] >= 0, key                                      # a bubble wider than a key, on the screen
+            assert abs(cap["y"] - (above["y"] + above["height"]) - 2) <= 0.5, key                     # 2 px above the key: joined to it, as the iPad's is
             lift(page, f"#keyboard .key[data-key='{key}']")
             page.wait_for_function("document.getElementById('key-preview').hidden", timeout=2000)
         page.close()
@@ -899,6 +974,38 @@ def test_a_finger_lifting_leaves_the_preview_of_the_key_another_still_holds(brow
         page.close()
 
 
+def test_the_pop_of_the_second_finger_is_over_its_own_key_and_does_not_take_a_touch(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='a']", pointer_id=1, release=False)
+        touch(page, "#keyboard .key[data-key='l']", pointer_id=2, release=False)
+        above, cap = page.locator("#key-preview").bounding_box(), page.locator("#keyboard .key[data-key='l']").bounding_box()
+        assert pop(page) == "l" and abs((above["x"] + above["width"] / 2) - (cap["x"] + cap["width"] / 2)) <= 1   # over the key the latest finger is on
+        style = page.evaluate("(() => { const p = getComputedStyle(document.getElementById('key-preview')), t = getComputedStyle(document.getElementById('keyboard')); return [p.pointerEvents, Number(p.zIndex) > Number(t.zIndex)]; })()")
+        assert style == ["none", True]                                  # over the keys, and never in a finger's way
+        lift(page, "#keyboard .key[data-key='l']", pointer_id=2)
+        lift(page, "#keyboard .key[data-key='a']", pointer_id=1)
+        page.close()
+
+
+def test_a_second_finger_lands_through_the_pop_of_the_first(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='x']", pointer_id=1, release=False)       # its pop covers keys of the row above
+        above = page.locator("#key-preview").bounding_box()
+        under = page.evaluate("""(pop) => { for (const k of document.querySelectorAll('#keyboard .row:nth-child(2) .key')) { const r = k.getBoundingClientRect(), cx = r.x + r.width / 2, cy = r.y + r.height / 2;
+            if (cx > pop.x && cx < pop.x + pop.width && cy > pop.y && cy < pop.y + pop.height) return k.dataset.key; } return null; }""", above)
+        assert under, "no key of the second row under the pop"
+        touch(page, f"#keyboard .key[data-key='{under}']", pointer_id=2)
+        lift(page, "#keyboard .key[data-key='x']", pointer_id=1)
+        assert page.input_value("#link-input") == "x" + under
+        page.close()
+
+
 def test_the_preview_goes_at_once_with_the_keys(browser):
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server, kiosk=True)
@@ -908,6 +1015,25 @@ def test_the_preview_goes_at_once_with_the_keys(browser):
         assert pop(page) == "g"
         page.evaluate("croomKeyboard.hide()")                           # Hide, Join or a view change, the finger still down
         assert pop(page) is None                                        # not left over the page: nothing waited for, the clock being held
+        page.close()
+
+
+def test_a_layer_switched_under_a_held_letter_takes_its_pop_with_it(browser):
+    """The pop is the held key's, and the key goes to the shelf with its layer: it would be left over the new layer's keys until
+    the finger lifts. It goes with the layer, and the lift that comes later finds nothing to do."""
+    with PageServer() as server:
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server, stopped=True)
+        finger_tap(page, cdp, "#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        held = finger_down(page, cdp, "#keyboard .key[data-key='j']", finger_id=1)
+        assert pop(page) == "j"
+        finger_up(cdp, finger_down(page, cdp, "#keyboard .key[data-key='layer:symbols']", finger_id=2))
+        assert page.evaluate("document.getElementById('keyboard').dataset.layer") == "symbols"
+        assert page.evaluate("document.querySelectorAll('.key.down').length") == 1      # the first finger is still down, on the shelf's key
+        assert pop(page) is None
+        finger_up(cdp, held)
+        page.clock.run_for(200)
+        assert pop(page) is None and page.input_value("#link-input") == "j"
         page.close()
 
 
@@ -935,6 +1061,52 @@ def test_the_keys_wear_the_rooms_colours_and_show_pressed_and_shift_on(browser):
         assert "\N{BULLET}" not in style("#keyboard .key[data-key='shift'] .cap", "content", "::after")
         tap(page, "shift")                                                                    # the clock is held: a double tap, so a lock
         assert "\N{BULLET}" in style("#keyboard .key[data-key='shift'] .cap", "content", "::after")   # the lock mark
+        page.close()
+
+
+def test_the_keyboard_key_caps_have_the_specs_radius_gaps_edge_and_colours(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+
+        def style(selector, prop):
+            return page.evaluate("([s, p]) => getComputedStyle(document.querySelector(s))[p]", [selector, prop])
+
+        assert style("#keyboard .key[data-key='g']", "borderTopLeftRadius") == "8px"
+        assert style("#keyboard .row", "columnGap") == "6px" and style("#keyboard", "rowGap") == "6px"
+        assert "rgba(255, 255, 255, 0.08)" in style("#keyboard .key[data-key='g']", "boxShadow")        # the lighter top edge
+        assert style("#keyboard .key[data-key='g']", "fontSize") == "18.4px"                           # Lexend 1.15 rem
+        assert style("#keyboard .key[data-key='space']", "backgroundColor") == "rgb(31, 41, 55)"
+        assert style("#keyboard .key[data-key='shift']", "backgroundColor") == "rgb(23, 32, 51)"       # the function keys a shade down
+        page.close()
+
+
+def test_the_three_picture_keys_of_the_keyboard_are_drawn_in_the_keys_own_colour_and_named(browser):
+    """Shift, delete and hide are inline SVG, 24 px with a 2 px round stroke in the key's own colour (white on a dark key, dark
+    on the white Shift key), so that no font has to supply them; the buttons carry their names."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+
+        def picture(key):
+            return page.evaluate("""(key) => { const k = document.querySelector(`#keyboard .key[data-key='${key}']`), s = k.querySelector('.cap svg');
+                if (!s) return null;
+                const r = s.getBoundingClientRect(), b = k.getBoundingClientRect(), c = getComputedStyle(s);
+                return { size: [r.width, r.height], dx: r.x + r.width / 2 - (b.x + b.width / 2), dy: r.y + r.height / 2 - (b.y + b.height / 2),
+                         stroke: c.stroke, color: getComputedStyle(k).color, width: c.strokeWidth, cap: c.strokeLinecap,
+                         hidden: s.getAttribute('aria-hidden'), name: k.getAttribute('aria-label'), text: k.textContent }; }""", key)
+
+        for key, name in (("shift", "Shift"), ("backspace", "Delete"), ("hide", "Hide keyboard")):
+            drawn = picture(key)
+            assert drawn, key
+            assert drawn["size"] == [24, 24] and abs(drawn["dx"]) <= 1 and abs(drawn["dy"]) <= 1, (key, drawn)   # 24 px, in the middle of its key
+            assert drawn["width"] == "2px" and drawn["cap"] == "round", (key, drawn)
+            assert drawn["hidden"] == "true" and drawn["name"] == name and drawn["text"] == "", (key, drawn)        # drawn, not written; named for a screen reader
+            assert drawn["stroke"] == drawn["color"] == "rgb(255, 255, 255)", (key, drawn)                          # currentColor
+        tap(page, "shift")                                                                                          # Shift on: the key turns white
+        assert picture("shift")["stroke"] == "rgb(0, 22, 54)"                                                       # and its picture follows, dark (navy-900)
         page.close()
 
 

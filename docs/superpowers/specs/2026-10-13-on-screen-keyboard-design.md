@@ -37,10 +37,12 @@ q w e r t y u i o p
 - Letters; **123** gives numbers and the symbols a link or a passcode needs (`1 2 3 4 5 6 7 8 9 0` / `- / : ; ( ) $ & @ "` / `#+=` layer behind it with `[ ] { } # % ^ * + =` and `_ \ | ~ < > € £ ¥ •`), as iPadOS lays them.
 - The last row: the layer key, three link-friendly keys, Space, **Join** (blue, submits the form the way the form's own Join does) and a hide key (⌄).
 - Key caps: 52 px tall at the kiosk's 1.5x scale (a thumb's width), 6 px gaps, 8 px radius, a lighter top edge; the tray is the room page's tray colour.
+- Every row is as wide as the first (ten keys at their widest, 118 px with 6 px gaps), so the ends line up: the nine letters of the middle row sit half a key in from each end, the wide keys (Shift, delete, the layer keys, hide) and Space take what the rest of their row leaves, and on a screen wider than that the block of rows sits in the middle of the tray.
+- Shift, delete and hide are drawn as inline SVG (24 px, in the key's own colour) and named for a screen reader ("Shift", "Delete", "Hide keyboard"), not set as font glyphs: the fonts a Pi falls back to are not ours to count on. The sketch above shows them as glyphs only to show where they sit.
 
 ### 3.3 Feedback
 
-- Pressed: the key fills brighter within the same frame and shows its glyph in a small pop-up above the key (the iPad's "key preview") for letters and symbols, not for the wide keys.
+- Pressed: the key fills navy (navy-800, `#16244F`) within the same frame and shows its glyph in a small pop-up above the key (the iPad's "key preview") for letters and symbols, not for the wide keys. The pop is at least 80 px wide and sits centred 2 px above its key, joined to it as the iPad's bubble is; it follows the latest finger and goes 60 ms after that finger lifts.
 - **Key click**: an optional short tick through the browser's audio (Web Audio, a 12 ms sine burst at 1.2 kHz, no file, through the table Pi's audio output), on by default on the kiosk. **Options › Keyboard › Key click: On / Off** stores the choice in the room's settings file through the control service (`/api/settings`), like the screensaver style, so it holds across reloads and devices. The Vibration API is also called when present (the Forzola panel has no motor; a tablet may).
 
 ### 3.4 Design direction

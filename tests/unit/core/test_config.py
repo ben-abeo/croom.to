@@ -2,6 +2,7 @@
 Tests for croom.core.config module.
 """
 
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -409,11 +410,20 @@ class TestDialogAndControlConfig:
         assert config.meeting.dialogs == DialogsConfig(acknowledge=list(DEFAULT_ACKNOWLEDGE), ask_everything=True)
         assert config.meeting.controls == ControlsConfig()
 
-    def test_a_section_left_empty_in_the_file_is_the_default(self):
-        """A person who deletes the lines under `dialogs:` leaves the key with nothing: the file still loads, and means the defaults."""
+    def test_a_section_left_empty_in_the_file_is_the_default(self, caplog):
+        """A person who deletes the lines under `dialogs:` leaves the key with nothing: the file still loads, and means the defaults, with
+        nothing to say about it."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
         config = Config.from_dict({"meeting": {"dialogs": None, "controls": None}})
         assert config.meeting.dialogs == DialogsConfig() and config.meeting.controls == ControlsConfig()
         assert Config.from_dict(config.to_dict()).meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE
+        assert not caplog.records
+
+    def test_a_section_made_in_code_is_kept_as_it_is(self, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        meeting = MeetingConfig(dialogs=DialogsConfig(acknowledge=["is being recorded"], ask_everything=True), controls=ControlsConfig(reactions=["Clap"]))
+        assert meeting.dialogs.acknowledge == ["is being recorded"] and meeting.dialogs.ask_everything is True and meeting.controls.reactions == ["Clap"]
+        assert not caplog.records
 
     def test_the_settings_survive_the_config_file(self, temp_dir):
         config = Config()
@@ -425,3 +435,44 @@ class TestDialogAndControlConfig:
         loaded = load_config(path)
         assert loaded.meeting.dialogs == DialogsConfig(acknowledge=["is being recorded"], ask_everything=True)
         assert loaded.meeting.controls == ControlsConfig(reactions=["Clap", "Tada"])
+
+    def test_a_list_left_blank_in_the_file_is_the_default_and_the_config_still_writes_out(self):
+        """`reactions:` or `acknowledge:` with nothing under it loads as None: the defaults stand (an empty list, written as `[]`, is a choice)."""
+        config = Config.from_dict({"meeting": {"dialogs": {"acknowledge": None, "ask_everything": True}, "controls": {"reactions": None}}})
+        assert config.meeting.dialogs == DialogsConfig(acknowledge=list(DEFAULT_ACKNOWLEDGE), ask_everything=True)
+        assert config.meeting.controls == ControlsConfig(reactions=list(DEFAULT_REACTIONS))
+        written = config.to_dict()["meeting"]
+        assert written["dialogs"] == {"acknowledge": DEFAULT_ACKNOWLEDGE, "ask_everything": True} and written["controls"] == {"reactions": DEFAULT_REACTIONS}
+        none = Config.from_dict({"meeting": {"dialogs": {"acknowledge": []}, "controls": {"reactions": []}}})
+        assert none.meeting.dialogs.acknowledge == [] and none.meeting.controls.reactions == []
+        assert DialogsConfig(acknowledge=None).acknowledge == DEFAULT_ACKNOWLEDGE and ControlsConfig(reactions=None).reactions == DEFAULT_REACTIONS
+
+    def test_a_bare_word_is_one_item_not_its_letters(self):
+        config = Config.from_dict({"meeting": {"dialogs": {"acknowledge": "is being recorded"}, "controls": {"reactions": "Clap"}}})
+        assert config.meeting.dialogs.acknowledge == ["is being recorded"] and config.meeting.controls.reactions == ["Clap"]
+        assert config.to_dict()["meeting"]["controls"] == {"reactions": ["Clap"]}
+
+    def test_a_key_the_section_does_not_know_is_ignored_with_a_warning_and_the_rest_of_the_section_loads(self, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"dialogs": {"ask_evrything": True, "ask_everything": True}, "controls": {"reactons": ["Clap"], "reactions": ["Tada"]}}})
+        assert config.meeting.dialogs.ask_everything is True and config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE
+        assert config.meeting.controls.reactions == ["Tada"]
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warned) == 2 and "ask_evrything" in warned[0] and "dialogs" in warned[0] and "reactons" in warned[1] and "controls" in warned[1]
+
+    def test_a_mistyped_key_does_not_cost_the_room_the_rest_of_its_config_file(self, temp_dir, caplog):
+        """load_config falls back to the defaults for the whole file when anything in it raises: one typo under `dialogs:` must not."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        path = temp_dir / "config.yaml"
+        path.write_text("room:\n  name: Lab\nmeeting:\n  platforms: [zoom]\n  dialogs:\n    ask_evrything: true\n    acknowledge:\n  controls:\n    reactions:\n")
+        loaded = load_config(str(path))
+        assert loaded.room.name == "Lab" and loaded.meeting.platforms == ["zoom"]
+        assert loaded.meeting.dialogs == DialogsConfig() and loaded.meeting.controls == ControlsConfig()
+        assert [r.getMessage() for r in caplog.records if "ask_evrything" in r.getMessage()] and len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+    @pytest.mark.parametrize("section", [[], "yes", 3, ["acknowledge"]])
+    def test_a_section_that_is_not_a_mapping_is_the_defaults_with_a_warning(self, section, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"dialogs": section, "controls": section}})
+        assert config.meeting.dialogs == DialogsConfig() and config.meeting.controls == ControlsConfig()
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2

@@ -135,8 +135,10 @@ class DialogPolicy:
     whose words are on the list is pressed at once and kept on the table as a line; any other dialog, and every dialog when
     ask_everything is set, waits for a tap on the table."""
 
-    # The room's own mute: shown by the Mute button, read from Zoom, so these notices have no line under the title.
-    STATE_ONLY = ("has been muted", "has been unmuted", "have been muted", "have been unmuted")
+    # Notices that say a state changed, which is read from Zoom again once the notice is gone: the room's own mute (the Mute button shows
+    # it), and a recording or a transcript that stopped (what the meeting disclosed stays as it was). They add no line under the title.
+    STATE_ONLY = ("has been muted", "has been unmuted", "have been muted", "have been unmuted",
+                  "recording has stopped", "transcription has stopped")
 
     def __init__(self, acknowledge: List[str], ask_everything: bool = False):
         # A blank phrase is in every text, and a bare word is one phrase, not the letters it is spelt with.
@@ -163,12 +165,17 @@ class DialogPolicy:
         return str(buttons[-1]) if buttons else ""
 
     def disclosure(self, dialog: Dict[str, Any]) -> str:
-        """The sentence the table keeps for an acknowledged notice; empty for one about the room's own mute."""
+        """The sentence the table keeps for an acknowledged notice: the first that holds a phrase of the list (what the notice is about:
+        recorded, transcribed, AI Companion), else the first; empty for a notice that only says a state changed."""
         if any(p in self._words(dialog) for p in self.STATE_ONLY):
             return ""
         text = (dialog.get("text") or dialog.get("title") or "").strip()
-        first = text.split(". ")[0].rstrip(".")
-        return first + "." if first else ""
+        sentences = [part.strip().rstrip(".") for part in text.split(". ")]
+        sentences = [sentence for sentence in sentences if sentence]
+        if not sentences:
+            return ""
+        about = next((sentence for sentence in sentences if any(p in sentence.lower() for p in self.acknowledge)), sentences[0])
+        return about + "."
 
 
 class MeetingProvider(ABC):

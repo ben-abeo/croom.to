@@ -132,6 +132,7 @@ class ZoomSdkProvider(MeetingProvider):
         self._dialogs: List[Dict[str, Any]] = []    # the dialogs waiting for a tap on the table, oldest first
         self._on_screen: Set[int] = set()           # every dialog the page has said is open: the waiting ones, and the notices being answered
         self._answered: Set[int] = set()            # the dialogs this provider has pressed a button of
+        self._notices: Dict[int, Dict[str, Any]] = {}   # the notices it is pressing for the room, by id: handed to the table if the press fails
         self._last_answer = float("-inf")           # when it last pressed a notice's button by itself
         self._view_read = False                     # whether the View menu has been looked at in this meeting
 
@@ -382,6 +383,7 @@ class ZoomSdkProvider(MeetingProvider):
         what it had started on its own (a press that has no page to go to)."""
         self._dialogs.clear()
         self._on_screen.clear()
+        self._notices.clear()
         if self._current_meeting is not None:
             self._current_meeting.dialog = None
         for task in list(self._background):
@@ -613,17 +615,24 @@ class ZoomSdkProvider(MeetingProvider):
             return
         logger.info(f"Zoom dialog: {dialog.get('title')!r} {dialog.get('text')!r} buttons {dialog.get('buttons')}")
         self._on_screen.add(dialog_id)
+        words = self._dialog_words(dialog_id, dialog)
         if self.dialog_policy.decide(dialog) == "acknowledge":
             self._answered.add(dialog_id)
+            self._notices[dialog_id] = words
             self._spawn(self._acknowledge(dialog_id, self.dialog_policy.answer(dialog)))
             sentence = self.dialog_policy.disclosure(dialog)
             if sentence and sentence not in info.notice:
                 info.notice = f"{info.notice} {sentence}".strip()
             return
-        self._dialogs.append({"id": dialog_id, "title": str(dialog.get("title") or ""), "text": str(dialog.get("text") or ""),
-                              "buttons": [str(label) for label in dialog.get("buttons") or []]})
+        self._dialogs.append(words)
         info.dialog = dict(self._dialogs[0])
         logger.info("The dialog waits on the table")
+
+    @staticmethod
+    def _dialog_words(dialog_id: int, dialog: Dict[str, Any]) -> Dict[str, Any]:
+        """A dialog as the table is given it."""
+        return {"id": dialog_id, "title": str(dialog.get("title") or ""), "text": str(dialog.get("text") or ""),
+                "buttons": [str(label) for label in dialog.get("buttons") or []]}
 
     def _on_dialog_closed(self, data: Dict[str, Any]) -> None:
         dialog_id = self._dialog_id(data)
@@ -635,13 +644,14 @@ class ZoomSdkProvider(MeetingProvider):
     def _forget_dialog(self, dialog_id: int) -> None:
         """The dialog is off the screen: the table shows the oldest of those still waiting."""
         self._on_screen.discard(dialog_id)
+        self._notices.pop(dialog_id, None)
         self._dialogs = [dialog for dialog in self._dialogs if dialog["id"] != dialog_id]
         if self._current_meeting is not None:
             self._current_meeting.dialog = dict(self._dialogs[0]) if self._dialogs else None
 
     async def _acknowledge(self, dialog_id: int, label: str) -> None:
-        """Press a notice's button for the room, at most one dialog in ANSWER_SPACING_S whatever Zoom draws. A press the page refuses is
-        a line for the debug level and nothing more: the notice's words are on the table either way."""
+        """Press a notice's button for the room, at most one dialog in ANSWER_SPACING_S whatever Zoom draws, and not twice. A press the
+        page refuses leaves the dialog on the TV: it goes to the table like any dialog with a choice in it, to wait for a tap."""
         async with self._answering:
             wait = self._last_answer + self.ANSWER_SPACING_S - time.monotonic()
             if wait > 0:
@@ -649,9 +659,26 @@ class ZoomSdkProvider(MeetingProvider):
             self._last_answer = time.monotonic()
             try:
                 await self._press_dialog(dialog_id, label)
-                logger.info(f"Acknowledged Zoom's dialog with {label!r}")
             except MeetingControlError as e:
-                logger.debug(f"Could not press {label!r} on Zoom's dialog: {e}")
+                failure = e
+            else:
+                logger.info(f"Acknowledged Zoom's dialog with {label!r}")
+                self._notices.pop(dialog_id, None)
+                return
+        self._put_on_the_table(dialog_id, label, failure)
+
+    def _put_on_the_table(self, dialog_id: int, label: str, failure: Exception) -> None:
+        """A notice whose press the page refused is still on the TV, and nothing else will answer it: it waits on the table (its words are
+        on the notice line already), and the journal says so. One that has gone in the meantime (its words are forgotten with it) has
+        nothing to wait for."""
+        words = self._notices.pop(dialog_id, None)
+        info = self._current_meeting
+        if words is None or info is None:
+            logger.debug(f"Could not press {label!r} on Zoom's dialog ({failure}), which has gone")
+            return
+        logger.warning(f"Could not press {label!r} on Zoom's dialog {words['title']!r} {words['text']!r} ({failure}): it waits on the table")
+        self._dialogs.append(words)
+        info.dialog = dict(self._dialogs[0])
 
     async def _press_dialog(self, dialog_id: int, label: str) -> None:
         """Press the button the label names on a dialog of the page. The page's words when it will not (the dialog's button is not ready,
@@ -724,4 +751,3 @@ class ZoomSdkProvider(MeetingProvider):
         if watcher is not None and not watcher.done():
             await asyncio.wait({watcher}, timeout=self.LEFT_WAIT_S)
         return {}
-

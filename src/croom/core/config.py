@@ -4,11 +4,14 @@ Configuration management for Croom.
 Handles loading, validation, and access to configuration settings.
 """
 
+import logging
 import os
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Optional, Dict, Any, List
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Default configuration paths
@@ -61,17 +64,49 @@ DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companio
 DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
 
 
+def _listed(value: Any, defaults: List[str]) -> Any:
+    """A list setting as a file gives it: nothing at all (`reactions:` with its lines deleted) is the defaults, and a bare word is one
+    item, not the letters it is spelt with."""
+    if value is None:
+        return list(defaults)
+    return [value] if isinstance(value, str) else value
+
+
 @dataclass
 class DialogsConfig:
     """What the agent does with the dialogs Zoom draws over the TV (spec 2026-10-13, section 5)."""
     acknowledge: List[str] = field(default_factory=lambda: list(DEFAULT_ACKNOWLEDGE))   # one-button notices pressed at once
     ask_everything: bool = False   # every dialog waits for a tap on the table, the acknowledgeable ones too
 
+    def __post_init__(self):
+        self.acknowledge = _listed(self.acknowledge, DEFAULT_ACKNOWLEDGE)
+
 
 @dataclass
 class ControlsConfig:
     """What the table offers from the meeting's controls (spec 2026-10-13, section 8)."""
     reactions: List[str] = field(default_factory=lambda: list(DEFAULT_REACTIONS))   # by the names Zoom's picker gives them
+
+    def __post_init__(self):
+        self.reactions = _listed(self.reactions, DEFAULT_REACTIONS)
+
+
+def _section(cls, value: Any, where: str):
+    """A nested section of the meeting config, as its dataclass. From a file it is a dict: a key the section does not know is left out
+    with a warning (not a TypeError, which makes load_config throw the whole file away), and nothing at all, or anything that is not a
+    mapping, is the defaults."""
+    if isinstance(value, cls):
+        return value
+    if value is None:
+        return cls()
+    if not isinstance(value, dict):
+        logger.warning(f"{where} should be a mapping of settings, not {value!r}: using the defaults")
+        return cls()
+    known = {f.name for f in fields(cls)}
+    unknown = [str(key) for key in value if key not in known]
+    if unknown:
+        logger.warning(f"{where}: ignoring {', '.join(unknown)} (the settings are {', '.join(sorted(known))})")
+    return cls(**{key: setting for key, setting in value.items() if key in known})
 
 
 @dataclass
@@ -90,15 +125,8 @@ class MeetingConfig:
     controls: ControlsConfig = field(default_factory=ControlsConfig)
 
     def __post_init__(self):
-        # From a config file the two sections are plain dicts, or nothing at all when their lines were deleted.
-        if isinstance(self.dialogs, dict):
-            self.dialogs = DialogsConfig(**self.dialogs)
-        elif self.dialogs is None:
-            self.dialogs = DialogsConfig()
-        if isinstance(self.controls, dict):
-            self.controls = ControlsConfig(**self.controls)
-        elif self.controls is None:
-            self.controls = ControlsConfig()
+        self.dialogs = _section(DialogsConfig, self.dialogs, "meeting.dialogs")
+        self.controls = _section(ControlsConfig, self.controls, "meeting.controls")
 
 
 @dataclass

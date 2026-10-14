@@ -14,7 +14,13 @@ import pytest
 playwright = pytest.importorskip("playwright.async_api")
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config  # noqa: E402
-from croom.meeting.providers.base import DialogPolicy, MeetingControlError, MeetingInfo, MeetingState, controls_from  # noqa: E402
+from croom.meeting.providers.base import (  # noqa: E402
+    DialogPolicy,
+    MeetingControlError,
+    MeetingInfo,
+    MeetingState,
+    controls_from,
+)
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED, ZoomSdkProvider  # noqa: E402
 from croom.meeting.zoom_auth import ZoomAuthError, ZoomCredentials  # noqa: E402
 from tests.unit.meeting.zoom_stub import STUB_JS  # noqa: E402
@@ -963,17 +969,28 @@ def test_the_policy_presses_the_last_button_which_zoom_draws_as_the_affirmative_
     assert policy.answer({"buttons": []}) == ""
 
 
-def test_the_disclosure_is_the_first_sentence_of_the_words_else_of_the_title():
+def test_the_disclosure_is_the_first_sentence_that_holds_a_phrase_of_the_list_else_the_first_sentence():
     policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
     assert policy.disclosure({"title": "Recording in progress", "text": "This meeting is being recorded. Your host may share it.", "buttons": ["OK"]}) == "This meeting is being recorded."
+    # What the notice is about is not always its first sentence.
+    assert policy.disclosure({"title": "Notice", "text": "Your audio and video are off until you agree. This meeting is being recorded.", "buttons": ["OK"]}) == "This meeting is being recorded."
+    assert policy.disclosure({"title": "Notice", "text": "Anyone with access may share it. AI Companion is on. Zoom does not use it to train models.", "buttons": ["OK"]}) == "AI Companion is on."
+    # An admin's own phrase picks the sentence too, whatever the case of either.
+    assert DialogPolicy(["Quality Review"]).disclosure({"text": "Welcome. This call is part of a quality review.", "buttons": ["OK"]}) == "This call is part of a quality review."
+    # No sentence of the words holds one (the phrase is in the title): the first sentence.
+    assert policy.disclosure({"title": "AI Companion", "text": "Anyone with access to the summary may view or share it. Zoom does not use it to train models.", "buttons": ["OK"]}) == "Anyone with access to the summary may view or share it."
     assert policy.disclosure({"title": "This meeting is being recorded", "text": "", "buttons": ["OK"]}) == "This meeting is being recorded."
     assert policy.disclosure({"title": "", "text": "  ", "buttons": ["OK"]}) == ""
     assert policy.disclosure({}) == ""
 
 
-@pytest.mark.parametrize("words", ["Your microphone has been muted by the host.", "You have been muted by the host", "The host unmuted you: you have been unmuted"])
-def test_a_notice_about_the_rooms_own_mute_has_no_disclosure_line(words):
-    """The room's mute shows on the Mute button, which is read from Zoom: the line under the title is for what the meeting records."""
+@pytest.mark.parametrize("words", [
+    "Your microphone has been muted by the host.", "You have been muted by the host", "The host unmuted you: you have been unmuted",
+    "Recording has stopped.", "Transcription has stopped. Anyone with access may still view the transcript.",
+])
+def test_a_notice_that_only_says_a_state_changed_has_no_disclosure_line(words):
+    """The room's mute shows on the Mute button, and a recording or a transcript that stopped is read from Zoom again: the line under the
+    title is for what the meeting has disclosed, and stays as it was."""
     assert DialogPolicy(DEFAULT_ACKNOWLEDGE).disclosure({"text": words, "buttons": ["OK"]}) == ""
 
 
@@ -1035,6 +1052,16 @@ class FakePage:
         if "readMeeting" in script:
             return self.reading
         raise AssertionError(f"unexpected page call: {script}")
+
+
+class SilentPage(FakePage):
+    """A page that reads as FakePage does but never answers a dialog press or a control: what is pinned with it is the bound the provider
+    puts on the call."""
+
+    async def evaluate(self, script, arg=None):
+        if "answerDialog" in script or "crystalMeet.control" in script:
+            await asyncio.sleep(3600)
+        return await super().evaluate(script, arg)
 
 
 def in_a_meeting(page):
@@ -1322,6 +1349,50 @@ class TestControlsAndDialogs:
         finally:
             await shutdown(provider)
 
+    async def test_a_notice_zoom_takes_the_press_of_and_keeps_waits_on_the_table_with_its_words_on_the_line(self, caplog):
+        caplog.set_level(logging.INFO, logger="croom.meeting.providers.zoom_sdk")
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.dialogStays = true;")
+        provider.ANSWER_SPACING_S = 0.2
+        try:
+            info = await provider.join_meeting(LINK)
+            sid = await provider._page.evaluate("window.ZoomMtg._showDialog('', 'This meeting is being transcribed.', ['OK'])")
+            assert await eventually(lambda: info.dialog, seconds=6)                      # the page gives up on it after two seconds
+            assert info.dialog["buttons"] == ["OK"] and info.dialog["text"] == "This meeting is being transcribed." and info.notice == "This meeting is being transcribed."
+            warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and r.name == "croom.meeting.providers.zoom_sdk"]
+            assert len(warned) == 1 and "This meeting is being transcribed." in warned[0] and "did not close" in warned[0]
+            await asyncio.sleep(0.6)
+            assert len(await dialog_presses(provider)) == 1                              # it was pressed once and is not pressed again
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("dialog", {"id": info.dialog["id"], "button": "OK"})      # a tap gets the page's words
+            assert "did not close" in str(failure.value) and info.dialog is not None
+            await provider._page.evaluate(f"window.ZoomMtg._closeDialog('{sid}')")       # Zoom closes it at last
+            assert await eventually(lambda: info.dialog is None)
+            assert await provider.control("dialog", {"id": 1, "button": "OK"}) == {"dialog": None}      # a tap that comes after it is gone is done
+        finally:
+            await shutdown(provider)
+
+    async def test_a_recording_that_stopped_is_pressed_read_again_and_not_disclosed(self):
+        provider = await provider_for(api=FakeApi())
+        provider.ANSWER_SPACING_S = 0.1
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'Recording has started. Everyone in the meeting is notified.', ['OK'])")
+            assert await eventually(lambda: info.notice)
+            reads = []
+            read = provider._read_state_from_zoom
+
+            async def counting():
+                reads.append(1)
+                return await read()
+
+            provider._read_state_from_zoom = counting
+            await provider._page.evaluate("window.ZoomMtg._showDialog('', 'Recording has stopped.', ['OK'])")
+            assert len(await dialog_presses(provider, at_least=2)) == 2
+            assert await eventually(lambda: reads)                                       # the state is read again once it has closed
+            assert info.notice == "Recording has started." and info.dialog is None
+        finally:
+            await shutdown(provider)
+
     async def test_a_button_that_is_not_ready_says_so_and_a_button_the_dialog_lacks_does_too(self):
         provider = await provider_for(api=FakeApi())
         try:
@@ -1483,6 +1554,17 @@ class TestControlsAndDialogs:
         assert provider.reactions == ["Clap"]
 
 
+def test_a_provider_is_built_from_a_config_whose_lists_were_left_blank(tmp_path):
+    """`reactions:` or `acknowledge:` with its lines deleted loads as nothing: the defaults stand, and the Zoom provider is still built."""
+    path = tmp_path / "zoom-credentials.json"
+    path.write_text(json.dumps({"sdk_client_id": "a", "sdk_client_secret": "b"}))
+    config = Config.from_dict({"meeting": {"zoom_credentials_path": str(path), "dialogs": {"acknowledge": None, "ask_everything": True}, "controls": {"reactions": None}}})
+    provider = ZoomSdkProvider.from_config(config)
+    assert provider.dialog_policy.acknowledge == [p.lower() for p in DEFAULT_ACKNOWLEDGE] and provider.dialog_policy.ask_everything is True
+    assert provider.reactions == DEFAULT_REACTIONS
+    assert Config.from_dict(config.to_dict()).meeting.controls.reactions == DEFAULT_REACTIONS
+
+
 def test_the_base_provider_offers_no_controls():
     from croom.meeting.providers.zoom import ZoomProvider
 
@@ -1630,15 +1712,68 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         assert [(i, label) for _, i, label in page.pressed] == [(6, "OK")]
         assert provider.current_meeting.notice == "" and provider.current_meeting.dialog is None
 
-    async def test_an_acknowledgment_the_page_refuses_is_a_debug_line_and_the_notice_stays(self, caplog):
+    async def test_a_recording_that_stopped_is_pressed_and_adds_nothing_to_the_notice_line(self):
+        page = FakePage()
+        provider = in_a_meeting(page)
+        provider.ANSWER_SPACING_S = 0.05
+        info = provider.current_meeting
+        provider._on_dialog({"id": 1, "title": "", "text": "Recording has started. Everyone in the meeting is notified.", "buttons": ["OK"]})
+        provider._on_dialog({"id": 2, "title": "", "text": "Recording has stopped.", "buttons": ["OK"]})
+        await settle_background(provider)
+        assert info.notice == "Recording has started." and info.dialog is None
+        assert [(i, label) for _, i, label in page.pressed] == [(1, "OK"), (2, "OK")]
+
+    async def test_a_notice_said_again_is_pressed_again_and_said_once_and_different_ones_follow_in_the_order_they_came(self):
+        page = FakePage()
+        provider = in_a_meeting(page)
+        provider.ANSWER_SPACING_S = 0.05
+        info = provider.current_meeting
+        for i, words in enumerate(["This meeting is being recorded.", "This meeting is being recorded.", "This meeting is being transcribed and Zoom AI is on."], 1):
+            provider._on_dialog({"id": i, "title": "", "text": words, "buttons": ["OK"]})
+        await settle_background(provider)
+        assert info.notice == "This meeting is being recorded. This meeting is being transcribed and Zoom AI is on."
+        assert [i for _, i, _ in page.pressed] == [1, 2, 3]
+
+    async def test_an_acknowledgment_the_page_refuses_is_a_warning_and_the_dialog_waits_on_the_table_unpressed_again(self, caplog):
         caplog.set_level(logging.DEBUG, logger="croom.meeting.providers.zoom_sdk")
         page = FakePage(press_failure="The dialog's OK button is not ready yet; try again in a moment")
         provider = in_a_meeting(page)
+        info = provider.current_meeting
+        provider._on_dialog({"id": 7, "title": "Recording", "text": "This meeting is being recorded.", "buttons": ["OK"]})
+        await settle_background(provider)
+        assert info.notice == "This meeting is being recorded."                       # its words are on the notice line, and it is still on the TV:
+        assert info.dialog == {"id": 7, "title": "Recording", "text": "This meeting is being recorded.", "buttons": ["OK"]}      # so it waits for a tap
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and r.name == "croom.meeting.providers.zoom_sdk"]
+        assert len(warned) == 1 and "Recording" in warned[0] and "This meeting is being recorded." in warned[0] and "not ready yet" in warned[0]
+        await asyncio.sleep(0.2)
+        provider._on_dialog({"id": 7, "title": "Recording", "text": "This meeting is being recorded.", "buttons": ["OK"]})      # said again: not taken again
+        await settle_background(provider)
+        assert [(i, label) for _, i, label in page.pressed] == [(7, "OK")] and len(provider._dialogs) == 1       # never the same dialog twice
+
+    async def test_a_tap_on_a_notice_the_provider_could_not_press_gets_the_pages_words_and_is_done_once_the_dialog_is_gone(self):
+        page = FakePage(press_failure="The dialog's OK button is not ready yet; try again in a moment")
+        provider = in_a_meeting(page)
+        info = provider.current_meeting
         provider._on_dialog({"id": 7, "title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]})
         await settle_background(provider)
-        assert provider.current_meeting.notice == "This meeting is being recorded." and provider.current_meeting.dialog is None
-        said = [r for r in caplog.records if "not ready yet" in r.getMessage()]
-        assert [r.levelno for r in said] == [logging.DEBUG]
+        with pytest.raises(MeetingControlError) as failure:
+            await provider.control("dialog", {"id": 7, "button": "OK"})                    # the page still will not
+        assert str(failure.value) == "The dialog's OK button is not ready yet; try again in a moment" and info.dialog["id"] == 7
+        page.press_failure = "That dialog is no longer on the screen"                         # it went away on its own: the notice was this provider's to answer
+        assert await provider.control("dialog", {"id": 7, "button": "OK"}) == {"dialog": None}
+        assert info.dialog is None
+        page.press_failure = None
+        provider._on_dialog({"id": 8, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
+        await settle_background(provider)
+        assert info.dialog is None                                                           # and one that is pressed never reaches the table
+
+    async def test_a_notice_that_closes_before_its_press_fails_does_not_reach_the_table(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="croom.meeting.providers.zoom_sdk")
+        provider = in_a_meeting(FakePage(press_failure="Zoom's dialog did not close when OK was pressed; try again in a moment"))
+        provider._on_dialog({"id": 7, "title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]})
+        provider._on_dialog_closed({"id": 7})                                                # Zoom closed it on its own before the page gave up
+        await settle_background(provider)
+        assert provider.current_meeting.dialog is None and provider._dialogs == []
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [r.getMessage() for r in caplog.records]
 
     async def test_every_dialog_is_a_line_in_the_journal_with_its_words_and_buttons(self, caplog):
@@ -1687,6 +1822,50 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         for odd in ([], 7, None, "hi"):
             provider._on_chat(odd)
         assert provider.current_meeting.chat == {"unread": 0, "messages": []}
+
+    async def test_a_tap_on_a_dialog_is_given_the_controls_long_bound_not_the_reads_short_one(self):
+        provider = in_a_meeting(SilentPage())
+        provider.CONTROL_TIMEOUT_S, provider.PAGE_CALL_TIMEOUT_S = 0.4, 30
+        provider._on_dialog({"id": 1, "title": "Unmute?", "text": "", "buttons": ["Stay muted", "Unmute"]})
+        with pytest.raises(MeetingControlError) as failure:
+            await asyncio.wait_for(provider.control("dialog", {"id": 1, "button": "Unmute"}), timeout=5)
+        assert str(failure.value) == "Could not answer the dialog: the meeting page did not answer within 0.4 seconds"
+        assert provider.current_meeting.dialog["id"] == 1                                    # it stays for another try
+
+    async def test_the_press_of_a_notice_is_given_the_same_bound_and_a_press_that_never_answers_puts_the_notice_on_the_table(self):
+        provider = in_a_meeting(SilentPage())
+        provider.CONTROL_TIMEOUT_S, provider.PAGE_CALL_TIMEOUT_S = 0.4, 30
+        provider._on_dialog({"id": 1, "title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]})
+        await asyncio.wait_for(settle_background(provider), timeout=5)
+        assert provider.current_meeting.dialog["id"] == 1 and provider.current_meeting.notice == "This meeting is being recorded."
+
+    async def test_ending_the_meeting_is_given_the_controls_long_bound_too(self):
+        provider = in_a_meeting(SilentPage())
+        provider.CONTROL_TIMEOUT_S, provider.PAGE_CALL_TIMEOUT_S = 0.4, 30
+        with pytest.raises(MeetingControlError) as failure:
+            await asyncio.wait_for(provider.control("host.end"), timeout=5)
+        assert str(failure.value) == "Could not end the meeting: the meeting page did not answer within 0.4 seconds"
+        assert provider.state == MeetingState.CONNECTED                                       # a call that never answered is no end
+
+    async def test_the_view_read_is_given_the_controls_long_bound_too(self, caplog):
+        caplog.set_level(logging.DEBUG, logger="croom.meeting.providers.zoom_sdk")
+        provider = in_a_meeting(SilentPage())
+        provider.CONTROL_TIMEOUT_S, provider.PAGE_CALL_TIMEOUT_S = 0.4, 30
+        provider._take_state(READING)
+        await asyncio.wait_for(settle_background(provider), timeout=5)
+        assert [r.getMessage() for r in caplog.records if "The View menu was not read" in r.getMessage()] == [
+            "The View menu was not read: Could not read the View menu: the meeting page did not answer within 0.4 seconds"]
+
+    @pytest.mark.parametrize("event", [("left", ""), ("error", "boom")])
+    async def test_what_the_provider_started_on_its_own_is_cancelled_when_the_meeting_ends_or_fails(self, event):
+        provider = in_a_meeting(FakePage())
+        provider._display = NoDisplay()
+        waiting = provider._spawn(asyncio.sleep(60))                                          # a press waiting for its turn, say
+        provider._events.put_nowait(event)
+        await asyncio.wait_for(provider._watch_meeting(), timeout=5)
+        await asyncio.gather(waiting, return_exceptions=True)
+        await asyncio.sleep(0)
+        assert waiting.cancelled() and provider._background == set()
 
     async def test_an_error_takes_the_waiting_dialog_off_the_status(self):
         provider = in_a_meeting(FakePage())
@@ -1818,4 +1997,3 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         finally:
             provider._watcher.cancel()
             await asyncio.gather(provider._watcher, return_exceptions=True)
-

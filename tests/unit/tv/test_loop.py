@@ -12,7 +12,7 @@ async def test_a_tv_that_is_off_at_start_is_found_when_it_answers(tmp_path):
     async def sleep(seconds):                             # the back-off lasts until the test says it is over
         await gate.wait()
         await asyncio.sleep(0)
-    service = build_service(tmp_path, loop_sleep=sleep)
+    service = build_service(tmp_path, loop_sleep=sleep, keep_on=False)       # (the wake of a TV that is to be kept on is not the loop's)
     FakeTvClient.refuse_next = True                       # off when the agent starts, answering on the next try
     await service.start()
     try:
@@ -97,7 +97,7 @@ async def test_the_watch_tick_is_the_injected_sleep(tmp_path):
 
 
 async def test_stop_does_not_wait_out_a_reconnect_back_off(tmp_path):
-    service = build_service(tmp_path)                     # the default back-off: the next try is two seconds away
+    service = build_service(tmp_path, keep_on=False)      # the default back-off: the next try is two seconds away
     FakeTvClient.refuse_next = True
     await service.start()
     assert service.status()["reachable"] is False
@@ -213,7 +213,7 @@ async def test_a_bug_in_one_round_does_not_end_the_loop(tmp_path, caplog):
     async def sleep(seconds):                             # the back-off lasts until the test says it is over
         await gate.wait()
         await asyncio.sleep(0)
-    service = build_service(tmp_path, loop_sleep=sleep)
+    service = build_service(tmp_path, loop_sleep=sleep, keep_on=False)
     real, rounds = service._connect_once, []
 
     async def flaky():

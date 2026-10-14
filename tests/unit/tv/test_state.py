@@ -81,6 +81,16 @@ async def test_what_counts_as_on(tmp_path, power_state, app, from_library, on):
         await service.stop()
 
 
+@pytest.mark.parametrize("power_state, on", [
+    ({"state": "Active"}, True), ({"state": "Screen Off"}, True), ({"state": "Screen Saver"}, True),   # on, if dark
+    ({"state": "Active Standby"}, False), ({"state": "Suspend"}, False), ({"state": "Power Off"}, False), ({"state": "Off"}, False),
+    ({}, None), (None, None), ("Active", None),                                                          # nothing that can be used
+])
+def test_what_a_power_state_that_was_read_back_says(power_state, on):
+    from croom.tv.service import _power_says_on
+    assert _power_says_on(power_state) is on
+
+
 async def test_a_state_the_service_cannot_read_never_reaches_the_library(tmp_path, caplog):
     service = build_service(tmp_path)
     await service.start()

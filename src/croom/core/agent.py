@@ -80,7 +80,9 @@ class CroomAgent:
                 logger.warning(f"AI service not available: {e}")
 
         # The room's TV (spec 2026-10-13 TV remote and touchpad): kept on, and woken before a meeting is joined. Registered
-        # ahead of the services the meeting depends on, so that it starts first; the meeting is wired to it below.
+        # ahead of audio and video, and listed among the meeting's dependencies below, so that it starts before the meeting
+        # (with the AI service on, audio and video are put right after it in the start order, and still come first). Its
+        # start never holds the others for long: it waits half a second for the first look at the TV, and no more.
         tv_service = None
         if self.config.tv.enabled:
             try:

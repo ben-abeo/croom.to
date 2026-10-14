@@ -1,23 +1,21 @@
 """The controls: what each one asks of the TV, what is refused in words before the TV is asked, what the TV's refusals
 become, and what the table sees afterwards."""
 import asyncio
+import logging
 
 import pytest
 from croom.tv.errors import TvError
 from croom.tv.service import KEYS
 from tests.unit.tv.fake_client import FakeTvClient
-from tests.unit.tv.helpers import build_service, forgetful_tv, running, silent_tv
+from tests.unit.tv.helpers import DoingTv, StandbyTv, WebOsTvCommandError, build_service, forgetful_tv, running, silent_tv
 
-READS = ("connect", "get_volume")                         # what the service may ask of the TV besides the control itself
+READS = ("connect", "get_volume", "get_muted", "get_input", "get_current_app", "get_current_channel", "get_power_state")
+# ... what the service may ask of the TV besides the control itself: the reads that follow it (see below)
 
 
 def asked(client):
     """The calls the TV was given that were not reads."""
     return [call for call in client.calls if call[0] not in READS]
-
-
-class WebOsTvCommandError(Exception):
-    """Named as the library's exception for a command the TV did not carry out."""
 
 
 @pytest.mark.parametrize("control, call", [
@@ -91,26 +89,127 @@ async def test_a_control_that_makes_no_sense_is_refused_in_words_before_the_tv_i
         assert asked(client) == []
 
 
-class ChangingTv(FakeTvClient):
-    """A TV that does what it is told, and does not say so unless asked: nothing is pushed to the service."""
-
-    async def set_volume(self, volume):
-        await super().set_volume(volume)
-        self.tv_state.volume = volume
-
-    async def volume_up(self):
-        await super().volume_up()
-        self.tv_state.volume += 1
-
-
 async def test_what_a_control_answers_is_what_the_tv_has_now_and_not_what_it_had(tmp_path):
-    service = build_service(tmp_path, ChangingTv)
+    service = build_service(tmp_path, DoingTv)                # the TV pushes nothing of what it is told: the service reads it back
     async with running(service):
-        assert service.status()["volume"] == 24
+        shown = service.status()
+        assert (shown["volume"], shown["muted"], shown["input"], shown["app"], shown["channel"]) == (
+            24, False, "HDMI_1", "com.webos.app.hdmi1", "7")
         shown = await service.control("volume", 55)
-        assert shown["volume"] == 55 and service.status()["volume"] == 55         # the TV pushed nothing: the service asked
+        assert shown["volume"] == 55 and service.status()["volume"] == 55
         shown = await service.control("volume_up")
         assert shown["volume"] == 56 and shown == service.status()
+        assert (await service.control("mute"))["muted"] is True
+        shown = await service.control("input", "HDMI_2")
+        assert (shown["input"], shown["app"]) == ("HDMI_2", "com.webos.app.hdmi2")
+        shown = await service.control("app", "netflix")
+        assert (shown["input"], shown["app"]) == (None, "netflix")                # an app is not an input
+        assert (await service.control("channel", "12"))["channel"] == "12"
+        assert (await service.control("channel_up"))["channel"] == "13"
+        assert (await service.control("channel_down"))["channel"] == "12"
+
+
+@pytest.mark.parametrize("control, reads", [
+    (("volume_up", None), []), (("volume_down", None), []), (("volume", 55), []), (("mute", None), []),
+    (("key", "HOME"), []), (("digit", "7"), []), (("toast", "Hello"), []),
+    (("channel_up", None), ["get_current_channel"]), (("channel_down", None), ["get_current_channel"]),
+    (("channel", "12"), ["get_current_channel"]),
+    (("input", "HDMI_2"), ["get_input"]), (("input", "pi"), ["get_input"]),
+    (("app", "netflix"), ["get_current_app"]),
+    (("power", "on"), ["get_power_state"]),               # a TV that is on already: nothing to wake, and its power read back
+])
+async def test_every_control_reads_back_the_volume_and_the_mute_and_what_it_may_have_changed(tmp_path, control, reads):
+    service = build_service(tmp_path)
+    async with running(service) as client:
+        mark = len(client.calls)
+        await service.control(*control)
+        assert sorted(call[0] for call in client.calls[mark:] if call[0].startswith("get_")) == sorted(["get_volume", "get_muted"] + reads)
+
+
+async def test_power_off_reads_nothing_back(tmp_path):
+    """The TV is going away: what it would say now is what it said before it went, if it said anything."""
+    service = build_service(tmp_path)
+    async with running(service) as client:
+        mark = len(client.calls)
+        shown = await service.control("power", "off")
+        assert [call for call in client.calls[mark:] if call[0].startswith("get_")] == [] and shown["on"] is False
+
+
+async def test_a_power_on_reads_the_power_back_when_the_tv_did_not_push_it(tmp_path):
+    class Quiet(StandbyTv):
+        async def power_on(self):                         # turns on, and says so only to whoever asks
+            self.calls.append(("power_on",))
+            self.tv_state.power_state = {"state": "Active"}
+            return {}
+    service = build_service(tmp_path, Quiet, keep_on=False)
+    service.TURN_ON_GRACE_S = 0.05
+    async with running(service):
+        assert service.status()["on"] is False
+        assert (await service.control("power", "on"))["on"] is True
+
+
+async def test_a_tv_that_does_not_do_what_it_was_told_shows_what_it_has(tmp_path):
+    class Stubborn(DoingTv):
+        async def set_mute(self, mute):
+            await FakeTvClient.set_mute(self, mute)          # the command is taken, and nothing changes
+    service = build_service(tmp_path, Stubborn)
+    async with running(service):
+        assert (await service.control("mute"))["muted"] is False          # what the TV has, not what was asked of it
+
+
+async def test_a_mute_the_tv_cannot_give_leaves_what_is_shown(tmp_path):
+    class Unsure(DoingTv):
+        async def get_muted(self):
+            return None
+    service = build_service(tmp_path, Unsure)
+    async with running(service):
+        assert (await service.control("mute"))["muted"] is True           # the command's own word stands
+
+
+async def test_a_power_state_that_says_nothing_leaves_what_is_shown(tmp_path):
+    class Mumbling(FakeTvClient):
+        async def get_power_state(self):
+            return {}
+    service = build_service(tmp_path, Mumbling)
+    async with running(service):
+        assert (await service.control("power", "on"))["on"] is True      # it is on, and was already shown so
+
+
+async def test_a_read_that_fails_or_hangs_leaves_what_is_shown_and_does_not_hold_the_control(tmp_path, caplog):
+    class Awkward(DoingTv):
+        async def get_muted(self):
+            await asyncio.sleep(30)                       # does not answer in time
+        async def get_input(self):
+            raise TimeoutError()
+    service = build_service(tmp_path, Awkward)
+    service.REREAD_TIMEOUT_S = 0.1
+    caplog.set_level(logging.DEBUG, logger="croom.tv.service")
+    async with running(service):
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        shown = await service.control("input", "HDMI_2")
+        assert loop.time() - t0 < 1.5
+        assert shown["volume"] == 24 and shown["muted"] is False and shown["input"] == "HDMI_1"      # as it was shown
+        assert "The TV's muted could not be read back" in caplog.text and "The TV's app could not be read back" in caplog.text
+
+
+async def test_the_reads_are_made_together_and_not_one_after_the_other(tmp_path):
+    class Slow(DoingTv):
+        async def get_volume(self):
+            await asyncio.sleep(0.2)
+            return await super().get_volume()
+        async def get_muted(self):
+            await asyncio.sleep(0.2)
+            return await super().get_muted()
+        async def get_input(self):
+            await asyncio.sleep(0.2)
+            return await super().get_input()
+    service = build_service(tmp_path, Slow)
+    async with running(service):
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        shown = await service.control("input", "HDMI_2")
+        assert 0.15 <= loop.time() - t0 < 0.5 and shown["input"] == "HDMI_2"
 
 
 async def test_a_read_the_tv_does_not_answer_leaves_what_is_known_and_the_control_stands(tmp_path):
@@ -132,14 +231,25 @@ async def test_a_volume_the_tv_cannot_give_leaves_what_is_known(tmp_path):
         assert (await service.control("volume_up"))["volume"] == 24
 
 
-async def test_mute_switches_from_what_the_table_shows_even_before_the_tv_says_so(tmp_path):
-    service = build_service(tmp_path)                     # the fake pushes nothing when told to mute
+async def test_mute_switches_from_what_the_tv_says(tmp_path):
+    service = build_service(tmp_path, DoingTv)
     async with running(service) as client:
         await client.update(muted=True)                   # muted with the TV's own remote
         assert (await service.control("mute"))["muted"] is False
         assert (await service.control("mute"))["muted"] is True             # quick taps are switches, one after the other
         assert (await service.control("mute"))["muted"] is False
         assert [call for call in client.calls if call[0] == "set_mute"] == [("set_mute", False), ("set_mute", True), ("set_mute", False)]
+
+
+async def test_mute_goes_by_the_command_when_the_tv_cannot_be_read(tmp_path):
+    class Deaf(FakeTvClient):
+        async def get_muted(self):
+            raise TimeoutError()
+    service = build_service(tmp_path, Deaf)               # (and does not push what it is told)
+    async with running(service) as client:
+        assert (await service.control("mute"))["muted"] is True
+        assert (await service.control("mute"))["muted"] is False            # two quick taps still switch twice
+        assert [call for call in client.calls if call[0] == "set_mute"] == [("set_mute", True), ("set_mute", False)]
 
 
 @pytest.mark.parametrize("error, words", [

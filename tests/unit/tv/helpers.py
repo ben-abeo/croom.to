@@ -68,6 +68,109 @@ def forgetful_tv(host, key):
     return client
 
 
+class WebOsTvCommandError(Exception):
+    """Named as the library's exception for a command the TV did not carry out."""
+
+
+class DoingTv(FakeTvClient):
+    """A TV that does what it is told, as a real one does: its state follows the commands, and what it is asked says what it
+    has now. It pushes nothing of the change: whatever shows it to the service is the service's read-back."""
+
+    APPS = {"HDMI_1": "com.webos.app.hdmi1", "HDMI_2": "com.webos.app.hdmi2"}
+
+    async def volume_up(self):
+        await super().volume_up()
+        self.tv_state.volume += 1
+
+    async def volume_down(self):
+        await super().volume_down()
+        self.tv_state.volume -= 1
+
+    async def set_volume(self, volume):
+        await super().set_volume(volume)
+        self.tv_state.volume = volume
+
+    async def set_mute(self, mute):
+        await super().set_mute(mute)
+        self.tv_state.muted = mute
+
+    async def set_input(self, input_id):
+        await super().set_input(input_id)
+        self.tv_state.current_input, self.tv_state.current_app_id = input_id, self.APPS.get(input_id, input_id)
+
+    async def launch_app(self, app):
+        await super().launch_app(app)
+        self.tv_state.current_input, self.tv_state.current_app_id = None, app      # an app is not an input
+
+    async def set_channel(self, channel):
+        await super().set_channel(channel)
+        self.tv_state.channel_number = channel
+
+    async def channel_up(self):
+        await super().channel_up()
+        self.tv_state.channel_number = str(int(self.tv_state.channel_number) + 1)
+
+    async def channel_down(self):
+        await super().channel_down()
+        self.tv_state.channel_number = str(int(self.tv_state.channel_number) - 1)
+
+
+class StandbyTv(DoingTv):
+    """A TV in standby with its socket up (Quick Start+): it answers, says Active Standby, and comes on when it is told to
+    turn on, `delay` seconds later (None: it never says that it has)."""
+    delay = 0.0
+    refuses = False                                       # the TV does not accept the command
+
+    def __init__(self, host, key):
+        super().__init__(host, key)
+        self.tv_state.power_state = {"state": "Active Standby"}
+
+    async def power_on(self):
+        await super().power_on()                          # (records the call)
+        if self.refuses:
+            raise WebOsTvCommandError("Request failed with response {'payload': {'returnValue': False, 'errorText': 'not now'}}")
+        if self.delay is None:
+            return
+        if self.delay:
+            asyncio.get_running_loop().call_later(
+                self.delay, lambda: asyncio.ensure_future(self.update(power_state={"state": "Active"})))
+        else:
+            await self.update(power_state={"state": "Active"})
+
+
+def quick_start_tv(delay=0.0, refuses=False):
+    """A factory for a TV in standby that turns on when told to (see StandbyTv)."""
+    def build(host, key):
+        client = StandbyTv(host, key)
+        client.delay, client.refuses = delay, refuses
+        return client
+    return build
+
+
+class LibraryLike(FakeTvClient):
+    """What aiowebostv's client does when the task awaiting connect() is cancelled: its connect task goes on, its
+    connect_result future is cancelled, and until that ends (or the client is hung up on) any connect() raises
+    CancelledError at once. Its connect() waits for `gate` (the conftest's fixture: an event the test owns) and then
+    fails, as a TV that does not answer does."""
+    gate = None
+    poisoned = False
+
+    async def connect(self):
+        if self.poisoned:
+            raise asyncio.CancelledError()
+        self.calls.append(("connect", self.client_key))
+        try:
+            await LibraryLike.gate.wait()                # a TV that does not answer: the attempt takes its time
+        except asyncio.CancelledError:
+            self.poisoned = True
+            raise
+        raise ConnectionError("no answer in time")
+
+    async def disconnect(self):
+        self.poisoned = False
+        await super().disconnect()
+
+
 @contextlib.asynccontextmanager
 async def running(service):
     """The service started, and stopped when the test is done with it; the newest fake client, if the TV was reached."""

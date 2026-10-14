@@ -260,6 +260,104 @@ class TestBeforeJoinHooks:
         assert loop.time() - t0 < 2.0 and len(provider.joins) == 1 and ended == ["cancelled"]
         assert "hangs did not finish in 0.1 s" in caplog.text and service.state == MeetingState.IDLE
 
+    async def test_a_cancellation_that_comes_out_of_a_hook_is_not_the_join_being_cancelled(self, caplog):
+        """A hook that raises CancelledError (the TV library's, from a client that was cancelled earlier) has failed: the join
+        was not cancelled, and goes on."""
+        service, provider = self.service_with_zoom()
+
+        async def cancelled_from_inside():
+            raise asyncio.CancelledError()
+        service.add_before_join(cancelled_from_inside)
+        info = await service.join_meeting("https://zoom.us/j/98765432100")
+        assert len(provider.joins) == 1 and info.meeting_id == "98765432100"
+        assert "cancelled_from_inside was cancelled; joining anyway" in caplog.text
+
+    async def test_the_hooks_run_after_the_meeting_the_room_was_in_is_left(self):
+        service, provider = self.service_with_zoom()
+        order = []
+
+        class OldMeeting:
+            state = MeetingState.CONNECTED
+
+            async def leave_meeting(self):
+                order.append("left")
+
+        class OrderedProvider(RecordingProvider):
+            async def join_meeting(self, *args, **kwargs):
+                order.append("joined")
+                return await super().join_meeting(*args, **kwargs)
+        service._providers["zoom"] = OrderedProvider()
+        service._active_provider = OldMeeting()
+
+        async def hook():
+            order.append("hook")
+        service.add_before_join(hook)
+        await service.join_meeting("https://zoom.us/j/98765432100")
+        assert order == ["left", "hook", "joined"]
+
+    async def test_the_service_says_joining_until_the_provider_says_so_itself(self):
+        """A provider can take a while before it reports that it is joining (the Zoom provider waits for the TV's page first):
+        in that while the room is not idle, and a second join is not to be let through."""
+        service = MeetingService(Config())
+        gate = asyncio.Event()
+        seen = []
+
+        class SlowToSay(RecordingProvider):
+            async def join_meeting(self, *args, **kwargs):
+                seen.append(("before", service.state))
+                await gate.wait()
+                self.state = MeetingState.JOINING
+                seen.append(("provider says joining", service.state))
+                self.state = MeetingState.CONNECTED
+                seen.append(("provider says connected", service.state))
+                return await super().join_meeting(*args, **kwargs)
+        service._providers["zoom"] = SlowToSay()
+        joining = asyncio.ensure_future(service.join_meeting("https://zoom.us/j/98765432100"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert service.state == MeetingState.JOINING and seen == [("before", MeetingState.JOINING)]
+        gate.set()
+        await joining
+        assert seen[1:] == [("provider says joining", MeetingState.JOINING), ("provider says connected", MeetingState.CONNECTED)]
+        assert service.state == MeetingState.CONNECTED                    # the provider's own, now that it has one
+
+    async def test_two_joins_waiting_on_their_provider_do_not_clear_each_others_state(self):
+        service = MeetingService(Config())
+        gates = [asyncio.Event(), asyncio.Event()]
+        calls = []
+
+        class SlowToSay(RecordingProvider):
+            async def join_meeting(self, *args, **kwargs):
+                calls.append(1)
+                await gates[len(calls) - 1].wait()
+                return await super().join_meeting(*args, **kwargs)
+        service._providers["zoom"] = SlowToSay()
+        first = asyncio.ensure_future(service.join_meeting("https://zoom.us/j/98765432100"))
+        second = asyncio.ensure_future(service.join_meeting("https://zoom.us/j/98765432101"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        gates[0].set()
+        await first
+        assert service.state == MeetingState.JOINING                      # the second is still waiting on its provider
+        gates[1].set()
+        await second
+        assert service.state == MeetingState.IDLE
+
+    async def test_a_provider_that_gives_up_before_it_said_anything_leaves_the_service_idle(self):
+        service = MeetingService(Config())
+
+        class Refuses(RecordingProvider):
+            async def join_meeting(self, *args, **kwargs):
+                assert service.state == MeetingState.JOINING
+                raise RuntimeError("the page could not be opened")
+        service._providers["zoom"] = Refuses()
+        with pytest.raises(RuntimeError):
+            await service.join_meeting("https://zoom.us/j/98765432100")
+        assert service.state == MeetingState.IDLE
+
+    async def test_the_hooks_are_given_thirty_seconds(self):
+        assert MeetingService.BEFORE_JOIN_TIMEOUT_S == 30.0
+
     async def test_a_hook_that_succeeds_says_nothing(self, caplog):
         service, provider = self.service_with_zoom()
 

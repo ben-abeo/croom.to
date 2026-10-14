@@ -75,7 +75,9 @@ async def test_a_tv_that_refuses_is_unreachable_in_words_and_retried(tmp_path):
 
 # The controls, Wake-on-LAN and keeping the TV on: the brief's own tests, as written. They pass with a waker that only
 # records the MAC address as well as with service_for's, which brings the TV on as a real wake does. More of the same, and
-# the edges, are in test_controls.py and test_keep_on.py.
+# the edges, are in test_controls.py and test_keep_on.py. One line differs from the brief: the first test's list of calls
+# that are reads, not controls, gains the four reads that the review had every control followed by (the volume's and the
+# power state's were there); what it asserts of the control calls themselves is as it was.
 
 async def test_controls_map_to_the_tv_and_re_read_the_state(tmp_path):
     (tmp_path / "tv-client-key").write_text("key-9")
@@ -86,7 +88,7 @@ async def test_controls_map_to_the_tv_and_re_read_the_state(tmp_path):
         await service.control("volume_up"); await service.control("volume", 55); await service.control("mute")
         await service.control("channel", "12"); await service.control("input", "pi"); await service.control("key", "HOME")
         await service.control("digit", "7"); await service.control("toast", "Hello")
-        names = [c[0] for c in client.calls if c[0] not in ("connect", "get_inputs", "get_volume", "get_power_state")]
+        names = [c[0] for c in client.calls if c[0] not in ("connect", "get_inputs", "get_volume", "get_power_state", "get_muted", "get_input", "get_current_app", "get_current_channel")]
         assert names == ["volume_up", "set_volume", "set_mute", "set_channel", "set_input", "button", "button", "send_message"]
         assert ("set_input", "HDMI_1") in client.calls and ("button", "7") in client.calls and ("set_mute", True) in client.calls
         with pytest.raises(TvError):
@@ -188,6 +190,15 @@ async def test_a_client_that_fails_to_hang_up_does_not_keep_the_service_from_sto
     assert service.status()["reachable"] is True
     await service.stop()
     assert service.status()["reachable"] is False and service._client is None
+
+
+def test_the_waits_are_the_ones_the_spec_and_the_review_settled():
+    assert TvService.WAKE_TIMEOUT_S == 15.0               # a wake, and so a join, waits this long for the TV to answer
+    assert TvService.REWAKE_AFTER_S == 5.0                # a TV that went off by itself is woken after this
+    assert TvService.WAKE_POLL_S == 1.0                   # and looked at this often meanwhile
+    assert TvService.WAKE_RESEND_S == 3.0                 # with the magic packet sent again this often while it does not answer
+    assert TvService.TURN_ON_GRACE_S == 0.5               # a TV in standby has this long to say that it was told to turn on
+    assert TvService.START_WAIT_S == 0.5                  # starting waits this long for the first look at the TV
 
 
 def test_from_config_keeps_the_key_in_the_data_dir(tmp_path):

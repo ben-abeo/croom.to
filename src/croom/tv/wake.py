@@ -24,10 +24,14 @@ async def wake(mac: str) -> None:
         raise TvError(f"{mac!r} is not a MAC address (tv.mac in the room's config wants one like \"AA:BB:CC:DD:EE:FF\", in "
                       "quotes), so the TV cannot be turned on from the table")
     try:
-        from wakeonlan import send_magic_packet
+        import wakeonlan
     except ImportError as e:
         raise TvError("The Wake-on-LAN library is not installed on this device: pip install wakeonlan") from e
+    # wakeonlan 4 has wake() and deprecates send_magic_packet(); the pin is wakeonlan>=3.0, which has only the latter
+    send = getattr(wakeonlan, "wake", None) or getattr(wakeonlan, "send_magic_packet", None)
+    if send is None:
+        raise TvError("The Wake-on-LAN library on this device cannot send a wake-up call: pip install -U wakeonlan")
     try:
-        send_magic_packet(mac)
+        send(mac)
     except (OSError, ValueError) as e:     # the network is down, or the library does not like the address after all
         raise TvError(f"The wake-up call could not be sent to {mac}: {e}") from e

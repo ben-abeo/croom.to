@@ -53,11 +53,12 @@ async def test_a_join_goes_on_without_a_tv_that_never_wakes_after_the_cap(tmp_pa
     tv.wake_works, tv.WAKE_TIMEOUT_S, tv.WAKE_POLL_S, tv.REWAKE_AFTER_S = False, 0.3, 0.05, 60
     meeting, provider = meeting_for(tv)
     async with running(tv) as client:
-        await client.update(power_state={"state": "Off"})
+        client.refuse = True
+        await client.drop()                               # it went off, and nothing answers: the wait runs to the cap
         loop = asyncio.get_running_loop()
         t0 = loop.time()
         info = await meeting.join_meeting(LINK)
-        assert loop.time() - t0 < 1.5                     # waited for the cap, not for ever
+        assert 0.25 <= loop.time() - t0 < 1.5             # waited for the cap, not for ever
         assert provider.tv_on_at_join == [False] and info.meeting_id == "98765432100"
         assert tv.woken == ["AA:BB:CC:DD:EE:FF"] and tv.status()["on"] is False
 

@@ -93,6 +93,24 @@ def _channel_number(value: Any) -> str:
     return text
 
 
+def _input_of(tv_state: Any, app: Optional[str]) -> Optional[str]:
+    """The input whose app is on the screen. The library has no current input: its inputs are keyed by the id of the app
+    each one runs, and the input is the one whose app is on. (The test fake names its current input itself.)"""
+    current_input = getattr(tv_state, "current_input", None)
+    if current_input is None and app:
+        known = getattr(tv_state, "inputs", None) or {}
+        current_input = next((item.get("id") for item in known.values() if item.get("appId") == app), None)
+    return current_input
+
+
+def _power_says_on(power_state: Any) -> Optional[bool]:
+    """Whether a power state, as the TV reports it, is on; None when it says nothing. The library's rule: a TV is on in every
+    state but standby, suspended and off (Screen Off and Screen Saver are on: the TV is only dark)."""
+    if not isinstance(power_state, dict) or not power_state.get("state"):
+        return None
+    return power_state["state"] not in ("Power Off", "Suspend", "Active Standby", "Off")
+
+
 def _declined(error: BaseException) -> bool:
     """The library's WebOsTvPairError: the TV showed its prompt and it was declined, or the TV would not register this
     client. Told by the class name (any class in the error's ancestry), so that the library is not imported here."""
@@ -120,10 +138,14 @@ class TvService(Service):
     RECONNECT_FIRST_S = 2.0   # the wait before trying again at a TV that does not answer; it doubles each time
     RECONNECT_MAX_S = 30.0    # up to this
     WATCH_S = 1.0             # how often a live connection is looked at
-    START_WAIT_S = 3.0        # start() waits this long for the first look at the TV, then leaves it to the background
+    START_WAIT_S = 0.5        # start() waits this long for the first look at the TV, then leaves it to the background
     REWAKE_AFTER_S = 5.0      # a TV that went off by itself is woken after this long, unless it is back on by then
-    WAKE_TIMEOUT_S = 15.0     # a wake waits this long for the TV to come on (a join waits no longer for it)
+    WAKE_TIMEOUT_S = 15.0     # a wake waits this long for the TV to answer (a join waits no longer for it)
     WAKE_POLL_S = 1.0         # and looks at the TV this often meanwhile
+    WAKE_RESEND_S = 3.0       # sending the magic packet again this often while it does not (one can be lost)
+    TURN_ON_GRACE_S = 0.5     # a TV that answers in standby is told to turn on, and has this long to say that it has
+    ASK_TIMEOUT_S = 3.0       # a command that the service gives the TV on its own account (turn on, show the Pi) has this long
+    REREAD_TIMEOUT_S = 2.0    # and each read-back after a control has this long
 
     def __init__(self, config: TvConfig, keystore: KeyStore, client_factory: ClientFactory, waker: Waker,
                  loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep):
@@ -180,12 +202,14 @@ class TvService(Service):
             return
         self._first_look = asyncio.Event()
         self._run_loop()
+        # A TV that is not on as the agent starts is woken. That is the background's business: the wake waits for the first
+        # look at the TV by itself (and does nothing for a TV that answers), and the agent does not wait for it.
+        if self._wants_on():
+            self._wake_after(0)
         # The first look gets a moment, so the room page's first status already knows the TV. One that is slow to
         # answer (or off, and not answering at all) is left to the loop: the agent's other services are waiting.
         with contextlib.suppress(asyncio.TimeoutError):
             await asyncio.wait_for(self._first_look.wait(), self.START_WAIT_S)
-        if self._wants_on() and not self._is_on():
-            self._wake_after(0)                  # off as the agent starts: it is woken, and the agent does not wait for it
         logger.info("TV service started")
 
     async def stop(self) -> None:
@@ -293,7 +317,7 @@ class TvService(Service):
         except Exception as e:  # noqa: BLE001 - the TV did not carry it out: refused, no answer in time, or the link is gone
             logger.warning(f"The TV at {self._config.host} did not accept {name}: {_why(e)}")
             raise TvError(f"The TV did not accept that: {_reason(e)}") from e
-        await self._reread(client)
+        await self._read_back(client, name)
         return self.status()
 
     async def _set_power(self, value: Any) -> None:
@@ -303,6 +327,9 @@ class TvService(Service):
             if not await self.ensure_on(manual=True) and not self._answering():
                 raise TvError(f"The TV at {self._config.host} did not turn on: check that Wake-on-LAN is enabled on it "
                               "(Mobile TV On) and that tv.mac is its MAC address")
+            client = self._client
+            if client is not None and self._answering():
+                await self._read_back(client, "power")
         elif value == "off":
             client = self._require_ready()
             self._cancel_wake()
@@ -384,17 +411,46 @@ class TvService(Service):
     async def _toast(self, client: TvClient, value: Any) -> None:
         await client.send_message(_text(value, "A message"))
 
-    async def _reread(self, client: TvClient) -> None:
+    async def _read_back(self, client: TvClient, name: str) -> None:
         """Read back what the TV shows, as the table is waiting to see it: the TV tells of every change too, but not before
-        the control has been answered. The volume is what a control changes that the table watches and cannot know (up and
-        down are steps). A read the TV does not answer leaves what is known."""
-        try:
-            volume = await client.get_volume()
-        except Exception as e:  # noqa: BLE001
-            logger.debug(f"The TV's volume could not be read back: {_why(e)}")
-            return
-        if isinstance(volume, int) and not isinstance(volume, bool):
-            self._shown["volume"] = volume
+        the control has been answered. The volume and the mute are read after every control (any of them may have touched
+        them), and the field the control changed besides: the input and the app, the channel, the power. The reads go
+        together, each is given REREAD_TIMEOUT_S, and one the TV does not answer leaves what is shown. Nothing is read after
+        turning the TV off: it is going away, and what it would say now is what it said before it went."""
+        reads = {"volume": client.get_volume, "muted": client.get_muted}
+        if name == "input":
+            reads["app"] = client.get_input             # (the library's current input is the id of the app that is running)
+        elif name == "app":
+            reads["app"] = client.get_current_app
+        elif name in ("channel", "channel_up", "channel_down"):
+            reads["channel"] = client.get_current_channel
+        elif name == "power":
+            reads["power"] = client.get_power_state
+        answers = await asyncio.gather(*(self._read(ask) for ask in reads.values()), return_exceptions=True)
+        for field, answer in zip(reads, answers):
+            if isinstance(answer, BaseException):
+                logger.debug(f"The TV's {field} could not be read back: {_why(answer)}")
+                continue
+            self._take_read(client, field, answer)
+
+    async def _read(self, ask: Callable[[], Awaitable[Any]]) -> Any:
+        return await asyncio.wait_for(ask(), self.REREAD_TIMEOUT_S)
+
+    def _take_read(self, client: TvClient, field: str, answer: Any) -> None:
+        """What one read-back said, when it said something this service can use."""
+        if field == "volume" and isinstance(answer, int) and not isinstance(answer, bool):
+            self._shown["volume"] = answer
+        elif field == "muted" and isinstance(answer, bool):
+            self._shown["muted"] = answer
+        elif field == "app" and isinstance(answer, str) and answer:
+            self._shown["app"] = answer
+            self._shown["input"] = _input_of(client.tv_state, answer)
+        elif field == "channel" and isinstance(answer, dict) and answer.get("channelNumber"):
+            self._shown["channel"] = answer["channelNumber"]
+        elif field == "power":
+            on = _power_says_on(answer)
+            if on is not None:
+                self._shown["on"] = on
 
     def _require_paired(self) -> None:
         """Why the TV cannot be told anything at all, in words; nothing when it is set up, paired and accepts this table."""
@@ -416,15 +472,17 @@ class TvService(Service):
     # never against the table, which holds it off from a manual off until a manual on or the next join.
 
     async def ensure_on(self, timeout: Optional[float] = None, manual: bool = False) -> bool:
-        """Wake the TV and wait for it to answer (up to `timeout`, WAKE_TIMEOUT_S by default); whether it is on.
+        """Wake the TV and wait for it to answer (up to `timeout`, WAKE_TIMEOUT_S by default); whether it answered. It is
+        then on, or has been told to turn on and given a moment to say so.
 
         A TV that is on is left alone, and one that the table turned off stays off, unless a person asked for it (`manual`).
-        The wake is a magic packet; what comes after is looking, not hoping: the TV is asked (`_connect_once`) until it
-        answers. A TV that went off the network but not off arrives here as a cleared state, the same as one that went off,
-        so finding it answering again is as good as having woken it. One that keeps its socket up in standby (Quick Start+)
-        answers at once and is on a moment later: it is not waited for, and the table follows what it says next. A wake
-        that cannot be sent is the person's to hear of (TvError); for a join or a wake of the service's own it is logged,
-        and the TV is not waited for."""
+        The wake is a magic packet, sent again every WAKE_RESEND_S while there is no answer; what comes after is looking, not
+        hoping: the TV is asked (`_connect_once`) until it answers, and no try goes on past the time that is left. A TV that
+        went off the network but not off arrives here as a cleared state, the same as one that went off, so finding it
+        answering again is as good as having woken it. One that keeps its socket up in standby (Quick Start+) answers at
+        once and is not on: the packet may not reach it (Mobile TV On is off), so it is told to turn on over its socket, as
+        the remote would. A wake that cannot be sent is the person's to hear of (TvError); for a join or a wake of the
+        service's own it is logged, and the TV is not waited for."""
         if self._is_on():
             return True
         if not self._still_wanted(manual):
@@ -438,25 +496,82 @@ class TvService(Service):
             return False
         logger.info(f"Sent Wake-on-LAN to the TV ({self._config.mac}); waiting for it to answer")
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + (self.WAKE_TIMEOUT_S if timeout is None else timeout)
+        sent = loop.time()
+        deadline = sent + (self.WAKE_TIMEOUT_S if timeout is None else timeout)
         while True:
             if not self._can_wait():                 # stopped, or the TV can no longer be asked, while it was being waited for
                 return False
-            if await self._connect_once():
-                return self._is_on()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                return False
+            try:
+                # The library's connect takes two seconds for a TV that does not answer and ten for one that is slow to say
+                # hello: a try that is still going when the time is up is cut off (it lets go of its client, see there)
+                answered = await asyncio.wait_for(self._connect_once(), remaining)
+            except asyncio.TimeoutError:
+                return False
+            if answered:
+                if not self._is_on():
+                    await self._turn_on()
+                return True
+            if loop.time() - sent >= self.WAKE_RESEND_S:      # still nothing: a packet can be lost, or sent too soon
+                sent = loop.time()
+                try:
+                    await self._wake(self._config.mac)
+                except TvError as e:
+                    logger.warning(f"The TV cannot be woken again: {e}")
             remaining = deadline - loop.time()
             if remaining <= 0:
                 return False
             await asyncio.sleep(min(self.WAKE_POLL_S, remaining))
 
+    async def _turn_on(self) -> None:
+        """The TV answers on its socket and is not on (standby with the network kept up): tell it to turn on, as the remote
+        would, and give it a moment to say that it has. A TV that refuses is logged and not waited for."""
+        client = self._client
+        if client is None:
+            return
+        try:
+            await asyncio.wait_for(client.power_on(), self.ASK_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001 - not a reason to fail a wake that found the TV
+            logger.warning(f"The TV at {self._config.host} did not accept power on: {_why(e)}")
+            return
+        loop = asyncio.get_running_loop()
+        moment = loop.time() + self.TURN_ON_GRACE_S
+        while not self._is_on() and loop.time() < moment:
+            await asyncio.sleep(0.05)
+
     async def before_join(self) -> bool:
         """A meeting is about to be joined (the meeting service calls this first): the TV is wanted on, whatever the table
-        turned it off for, and the join waits up to WAKE_TIMEOUT_S for it to answer. Whether it is on: the join goes on
-        either way."""
+        turned it off for, and the join waits up to WAKE_TIMEOUT_S for it to answer; a TV that answers is switched to the
+        room Pi's input if it shows another. Whether the TV answered: the join goes on either way. A TV that there is nothing
+        to wait for (not set up, not paired, not accepting this table, a service that is stopped) is not one that failed to
+        come on: the answer is True, and the room is not warned about it before every join."""
         if not self._config.keep_on:
             return True
         self._held_off = False
-        return await self.ensure_on()
+        if not self._can_wait():
+            logger.debug("TV service: nothing to wake before the join (the TV is not set up, not paired, has refused this "
+                         "table, or the service is stopped)")
+            return True
+        answered = await self.ensure_on()
+        if answered and self._is_on():
+            await self._show_the_pi()
+        return answered
+
+    async def _show_the_pi(self) -> None:
+        """A meeting is not joined onto a TV that shows another input: when the TV's current input is known, and is not the
+        one the room Pi is on, it is switched to it. A TV that refuses is logged and the join goes on."""
+        pi, shown, client = self._config.pi_input, self._shown["input"], self._client
+        if not pi or shown is None or shown == pi or client is None:
+            return
+        try:
+            await asyncio.wait_for(client.set_input(pi), self.ASK_TIMEOUT_S)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"The TV at {self._config.host} did not switch to the room Pi's input {pi}: {_why(e)}")
+            return
+        logger.info(f"The TV at {self._config.host} showed {shown}: switched to the room Pi's input {pi}")
+        await self._read_back(client, "input")
 
     def _is_on(self) -> bool:
         return bool(self._shown["on"]) and self._answering()
@@ -487,10 +602,18 @@ class TvService(Service):
 
     async def _wake_when_due(self, delay: float) -> None:
         try:
-            await asyncio.sleep(delay)
+            if delay:
+                await asyncio.sleep(delay)       # (none: as the service starts, the look at the TV decides at once)
+            await self._first_look_over()
             await self.ensure_on()               # which does nothing for a TV that is back on, or was turned off at the table
         except Exception:  # noqa: BLE001 - nobody awaits this task: say what went wrong, and let the next off try again
             logger.exception("TV service: waking the TV failed")
+
+    async def _first_look_over(self) -> None:
+        """A wake that was scheduled as the service started does not wait for the first look at the TV where start() does:
+        it waits here, in the background (a TV that answers needs no waking)."""
+        if self._task is not None and not self._task.done():
+            await self._first_look.wait()
 
     def _cancel_wake(self) -> None:
         """The table decided: a wake that is waiting its turn is not wanted (or is the one being asked for)."""
@@ -587,6 +710,7 @@ class TvService(Service):
             if not self.configured or key is None or self._refused:
                 self._set_down()
                 return False
+            client = None
             try:
                 if self._client is None:
                     self._client = await self._open(key)
@@ -595,6 +719,16 @@ class TvService(Service):
                 await self._connected(client)
                 self._keep_issued_key(client, held)
                 self._adopt(client)
+            except asyncio.CancelledError:
+                # Whoever awaited this try was cancelled (a join given up on, a wake ended, a request dropped). The library's
+                # connect() then leaves its client with a cancelled future, which its connect task keeps until it ends: every
+                # connect() and is_connected() on that client raises CancelledError meanwhile, out of the next try, whoever
+                # makes it. So the client is let go of, and hung up on even if we are cancelled again while we do it.
+                if client is not None:
+                    if self._client is client:
+                        self._client = None
+                    await asyncio.shield(self._close(client))
+                raise
             except Exception as e:  # noqa: BLE001 - refused, timed out, no library: all one thing to the table
                 self._set_down()
                 self._timed_out = isinstance(e, asyncio.TimeoutError)
@@ -624,9 +758,14 @@ class TvService(Service):
 
     async def _open(self, key: Optional[str]) -> TvClient:
         """A client for the TV with this service's state callback on it, once: the library keeps its callbacks when
-        the connection is lost and made again."""
+        the connection is lost and made again. The callback belongs to its client: one that the service has let go of (a
+        hang-up that failed, and says goodbye later) is no longer the TV, and what it says counts for nothing."""
         client = self._factory(self._config.host, key)
-        await client.register_state_update_callback(self._on_state)
+
+        async def on_state(tv_state: Any) -> None:
+            if client is self._client:
+                await self._on_state(tv_state)
+        await client.register_state_update_callback(on_state)
         return client
 
     @staticmethod
@@ -708,9 +847,7 @@ class TvService(Service):
         power = getattr(tv_state, "power_state", None) or {}
         known = getattr(tv_state, "inputs", None) or {}
         app = getattr(tv_state, "current_app_id", None)
-        current_input = getattr(tv_state, "current_input", None)
-        if current_input is None and app:
-            current_input = next((item.get("id") for item in known.values() if item.get("appId") == app), None)
+        current_input = _input_of(tv_state, app)
         channel = getattr(tv_state, "channel_number", None)
         if channel is None:
             current = getattr(tv_state, "current_channel", None)

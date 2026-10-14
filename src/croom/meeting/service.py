@@ -42,9 +42,11 @@ class MeetingService(Service):
         self._providers: Dict[str, MeetingProvider] = {}
         self._active_provider: Optional[MeetingProvider] = None
         self._state_callbacks: List[Callable[[MeetingState], None]] = []
-        # What the room does before a join (the TV is woken here), and how many joins are waiting on it just now
+        # What the room does before a join (the TV is woken here), how many joins are waiting on it just now, and how many
+        # have gone on to ask their provider to join
         self._before_join: List[Callable[[], Awaitable[Any]]] = []
         self._preparing = 0
+        self._starting = 0
 
     async def start(self) -> None:
         """Start the TV display and the configured providers on it."""
@@ -128,6 +130,12 @@ class MeetingService(Service):
                         logger.warning(f"Before-join hook {name} did not get what it wanted; joining anyway")
                 except asyncio.TimeoutError:
                     logger.warning(f"Before-join hook {name} did not finish in {self.BEFORE_JOIN_TIMEOUT_S:g} s; joining anyway")
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise                                # the join itself was cancelled (a Leave): that is not a hook failing
+                    # a cancellation that came out of the hook (the TV library's, from a client cancelled earlier): it failed
+                    logger.warning(f"Before-join hook {name} was cancelled; joining anyway")
                 except Exception as e:  # noqa: BLE001 - a failing courtesy must not cost the room its meeting
                     logger.warning(f"Before-join hook {name} failed ({e}); joining anyway")
         finally:
@@ -197,13 +205,17 @@ class MeetingService(Service):
 
         # Join meeting
         self._active_provider = provider
-        meeting_info = await provider.join_meeting(
-            meeting_url,
-            display_name=display_name,
-            camera_on=camera_on,
-            mic_on=mic_on,
-            passcode=passcode
-        )
+        self._starting += 1             # (see state: a provider can take a while before it says that it is joining)
+        try:
+            meeting_info = await provider.join_meeting(
+                meeting_url,
+                display_name=display_name,
+                camera_on=camera_on,
+                mic_on=mic_on,
+                passcode=passcode
+            )
+        finally:
+            self._starting -= 1
 
         return meeting_info
 
@@ -255,7 +267,12 @@ class MeetingService(Service):
             # must not show an idle room, and let the join be tapped again, for the fifteen seconds that can take.
             return MeetingState.JOINING
         if self._active_provider:
-            return self._active_provider.state
+            state = self._active_provider.state
+            if self._starting and state == MeetingState.IDLE:
+                # The provider has been asked to join and has not said so itself yet (the Zoom provider waits for the TV's
+                # page first): the same, until it does
+                return MeetingState.JOINING
+            return state
         return MeetingState.IDLE
 
     @property

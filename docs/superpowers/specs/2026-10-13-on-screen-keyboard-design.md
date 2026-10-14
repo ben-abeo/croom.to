@@ -16,7 +16,7 @@ The keys act on the browser's `click` event, which a touchscreen fires only afte
 
 ### 3.1 Input handling
 
-- Keys act on **pointerdown**, per pointer id, with pointer capture: a letter is inserted the moment a finger lands, two fingers are two keys, and lifting does nothing (except for Shift's long-press and the repeat keys). `touch-action: none` on the tray; the browser's synthesized clicks are ignored.
+- Keys act on **pointerdown**, per pointer id, with pointer capture: a letter is inserted the moment a finger lands, two fingers are two keys, and lifting does nothing (except to stop the repeat of a held key; Shift locks with a double tap, below, not a long press). `touch-action: none` on the tray; the browser's synthesized clicks are ignored.
 - Rows are built once per layer; switching layer or Shift only changes labels and classes in place, so no element under a finger is ever replaced.
 - The field keeps the focus by construction: the tray and its keys are not focusable, every pointerdown on them prevents the default, and the hide path runs only for a tap outside the tray and the fields, for Hide, for Join, and for a view change. A `focusout` with no related target is ignored while a key is down.
 - Backspace repeats after 400 ms at 12 per second while held; Space does not repeat.

@@ -311,23 +311,23 @@ def test_the_screen_picker_posts_the_style_and_marks_the_current_one(browser):
 
 # --- the page's own keyboard (the table Pi's kiosk browser has no keyboard of its own) ---
 
-def open_kiosk_page(browser, server, width=1280, height=800):
-    page = browser.new_page(viewport={"width": width, "height": height})
+def open_kiosk_page(browser, server, width=1280, height=800, touchscreen=False):
+    page = browser.new_page(viewport={"width": width, "height": height}, has_touch=touchscreen)
     page.goto(f"http://127.0.0.1:{server.port}/?keyboard=1", wait_until="networkidle")
     page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
     return page
 
 
-def touch(page, selector, pointer_id=1, lift=True, move_to=None):
-    """A finger on an element: pointerdown (and pointerup unless lift is False), the way a touchscreen fires them."""
+def touch(page, selector, pointer_id=1, release=True):
+    """A finger on an element: pointerdown (and pointerup unless release is False), the way a touchscreen fires them."""
     box = page.locator(selector).bounding_box()
     x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-    page.evaluate("""([x, y, id, lift]) => {
+    page.evaluate("""([x, y, id, release]) => {
         const target = document.elementFromPoint(x, y);
         const init = { pointerId: id, pointerType: 'touch', isPrimary: id === 1, bubbles: true, cancelable: true, clientX: x, clientY: y, buttons: 1 };
         target.dispatchEvent(new PointerEvent('pointerdown', init));
-        if (lift) target.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, init, { buttons: 0 })));
-    }""", [x, y, pointer_id, lift])
+        if (release) target.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, init, { buttons: 0 })));
+    }""", [x, y, pointer_id, release])
 
 
 def lift(page, selector, pointer_id=1):
@@ -350,7 +350,7 @@ def test_two_thumbs_typing_fast_lose_nothing_and_the_keyboard_stays(browser):
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         text = "zoomusjmeeting"
         for i, ch in enumerate(text):                              # the next finger lands before the last one lifts
-            touch(page, f"#keyboard .key[data-key='{ch}']", pointer_id=1 + (i % 2), lift=False)
+            touch(page, f"#keyboard .key[data-key='{ch}']", pointer_id=1 + (i % 2), release=False)
             if i:
                 lift(page, f"#keyboard .key[data-key='{text[i - 1]}']", pointer_id=1 + ((i - 1) % 2))
         lift(page, f"#keyboard .key[data-key='{text[-1]}']", pointer_id=1 + ((len(text) - 1) % 2))
@@ -364,8 +364,8 @@ def test_switching_layers_under_a_finger_replaces_no_key(browser):
         page = open_kiosk_page(browser, server)
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
-        same = page.evaluate("""() => { const k = document.querySelector("#keyboard .key[data-key='q']"); window.__q = k; return true; }""")
-        touch(page, "#keyboard .key[data-key='q']", pointer_id=1, lift=False)
+        page.evaluate("""() => { const k = document.querySelector("#keyboard .key[data-key='q']"); window.__q = k; return true; }""")
+        touch(page, "#keyboard .key[data-key='q']", pointer_id=1, release=False)
         touch(page, "#keyboard .key[data-key='layer:symbols']", pointer_id=2)
         assert page.evaluate("document.getElementById('keyboard').dataset.layer") == "symbols"
         lift(page, "#keyboard .key[data-key='1']", pointer_id=1)     # the finger lifts where q was: the element is still the same node
@@ -379,7 +379,7 @@ def test_a_lost_focus_while_a_key_is_down_does_not_close_the_keys(browser):
         page = open_kiosk_page(browser, server)
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
-        touch(page, "#keyboard .key[data-key='a']", pointer_id=1, lift=False)
+        touch(page, "#keyboard .key[data-key='a']", pointer_id=1, release=False)
         page.evaluate("document.getElementById('link-input').dispatchEvent(new FocusEvent('focusout', { relatedTarget: null }))")
         assert not page.evaluate("document.getElementById('keyboard').hidden")
         lift(page, "#keyboard .key[data-key='a']", pointer_id=1)
@@ -389,19 +389,18 @@ def test_a_lost_focus_while_a_key_is_down_does_not_close_the_keys(browser):
 
 def test_backspace_repeats_while_held_and_letters_do_not(browser):
     with PageServer() as server:
-        page = open_kiosk_page(browser, server)
-        page.clock.install()
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)   # a count of repeats must not depend on how long the test's own calls take
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         page.fill("#link-input", "abcdefghijklmnopqrstuvwxyz")
-        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=1, lift=False)
+        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=1, release=False)
         page.clock.run_for(400 + 1000)
         lift(page, "#keyboard .key[data-key='backspace']", pointer_id=1)
         removed = 26 - len(page.input_value("#link-input"))
-        assert 11 <= removed <= 14, removed                          # one at the press, then 12 a second
+        assert removed == 13, removed                                # one at the press, then 12 a second
         page.clock.run_for(1000)
         assert 26 - len(page.input_value("#link-input")) == removed  # stopped when lifted
-        touch(page, "#keyboard .key[data-key='x']", pointer_id=1, lift=False)
+        touch(page, "#keyboard .key[data-key='x']", pointer_id=1, release=False)
         page.clock.run_for(1500)
         lift(page, "#keyboard .key[data-key='x']", pointer_id=1)
         assert page.input_value("#link-input").endswith("x") and not page.input_value("#link-input").endswith("xx")
@@ -410,7 +409,7 @@ def test_backspace_repeats_while_held_and_letters_do_not(browser):
 
 def test_shift_once_double_locks_and_a_tap_releases(browser):
     with PageServer() as server:
-        page = open_kiosk_page(browser, server)
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)   # a double tap is a matter of milliseconds: the clock is held still
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         touch(page, "#keyboard .key[data-key='shift']")
@@ -425,19 +424,59 @@ def test_shift_once_double_locks_and_a_tap_releases(browser):
         touch(page, "#keyboard .key[data-key='shift']")
         touch(page, "#keyboard .key[data-key='e']")
         assert page.input_value("#link-input") == "AbCDe"
+        touch(page, "#keyboard .key[data-key='shift']")
+        page.clock.run_for(400)
+        touch(page, "#keyboard .key[data-key='shift']")               # a second tap that comes too late releases, it does not lock
+        assert page.evaluate("document.getElementById('keyboard').dataset.shift") == "off"
+        touch(page, "#keyboard .key[data-key='f']")
+        assert page.input_value("#link-input") == "AbCDef"
         page.close()
 
 
-# What the five tests above cannot show: they dispatch pointer events themselves, so the browser's own touch pipeline (the
-# click it follows a tap with, the capture it gives a finger) never runs. These put real fingers on the page through CDP.
+def test_a_slow_second_shift_tap_releases_and_a_quick_one_locks(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
 
-def open_kiosk_page_with_a_touchscreen(browser, server):
-    """The kiosk page in a context with touch, and the CDP session that puts real fingers on it."""
-    context = browser.new_context(viewport={"width": 1280, "height": 800}, has_touch=True)
-    page = context.new_page()
-    page.goto(f"http://127.0.0.1:{server.port}/?keyboard=1", wait_until="networkidle")
-    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-    return context, page, context.new_cdp_session(page)
+        def shift():
+            return page.evaluate("document.getElementById('keyboard').dataset.shift")
+
+        touch(page, "#keyboard .key[data-key='shift']")
+        touch(page, "#keyboard .key[data-key='shift']")               # the clock does not move between the taps: a double tap
+        assert shift() == "lock"
+        touch(page, "#keyboard .key[data-key='shift']")
+        assert shift() == "off"
+        touch(page, "#keyboard .key[data-key='shift']")
+        page.clock.run_for(400)
+        touch(page, "#keyboard .key[data-key='shift']")
+        assert shift() == "off"                                       # the second tap came too late: it released the capital
+        page.close()
+
+
+def test_a_space_pressed_and_held_types_once(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        touch(page, "#keyboard .key[data-key='space']", pointer_id=1, release=False)
+        page.clock.run_for(2000)
+        lift(page, "#keyboard .key[data-key='space']", pointer_id=1)
+        assert page.input_value("#link-input") == " "
+        page.close()
+
+
+# What the tests above cannot show: they dispatch pointer events themselves, and those are not trusted: no focus moves for
+# them, and the browser makes no click of its own. These press the keys the way a person does, with Playwright's mouse and
+# with real fingers through CDP (what the browser makes of a tap: the click it follows it with, the capture it gives a finger).
+
+A_LITTLE_TYPING = ("a", "shift", "b", "layer:symbols", "1", "layer:letters", "backspace")    # types a, B, 1 and takes the 1 away: "aB"
+
+
+def open_kiosk_page_with_a_touchscreen(browser, server, stopped=False):
+    """The kiosk page on a touchscreen, and the CDP session that puts real fingers on it (stopped: its timers wait for page.clock.run_for)."""
+    page = page_on_a_stopped_clock(browser, server, kiosk=True, touchscreen=True) if stopped else open_kiosk_page(browser, server, touchscreen=True)
+    return page, page.context.new_cdp_session(page)
 
 
 def finger_down(page, cdp, selector, finger_id=1):
@@ -456,11 +495,36 @@ def finger_tap(page, cdp, selector):
     finger_up(cdp, finger_down(page, cdp, selector))
 
 
+def test_a_real_mouse_press_acts_once_and_leaves_the_focus_in_the_field(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for key in A_LITTLE_TYPING:
+            page.locator(f"#keyboard .key[data-key='{key}']").click()     # a press, a release and the click the browser adds: one action
+            assert page.evaluate("document.activeElement.id") == "link-input", key
+        assert page.input_value("#link-input") == "aB"
+        page.close()
+
+
+def test_a_lone_real_finger_acts_once_and_leaves_the_focus_in_the_field(browser):
+    with PageServer() as server:
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
+        finger_tap(page, cdp, "#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        for key in A_LITTLE_TYPING:
+            finger_tap(page, cdp, f"#keyboard .key[data-key='{key}']")
+            page.wait_for_timeout(60)                              # room for the click a lone tap gets
+            assert page.evaluate("document.activeElement.id") == "link-input", key
+        assert page.input_value("#link-input") == "aB"
+        page.close()
+
+
 def test_two_real_fingers_typing_fast_lose_nothing_and_the_keyboard_stays(browser):
     """The bug as Ben met it: the browser makes a click only of a tap that stands alone, so keys that act on click drop
     letters when the fingers overlap. The old keys typed nothing here."""
     with PageServer() as server:
-        context, page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
         finger_tap(page, cdp, "#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         text = "zoomusjmeetingabcdef"
@@ -473,24 +537,47 @@ def test_two_real_fingers_typing_fast_lose_nothing_and_the_keyboard_stays(browse
         finger_up(cdp, previous)
         assert page.input_value("#link-input") == text
         assert not page.evaluate("document.getElementById('keyboard').hidden")
-        context.close()
+        page.close()
 
 
-@pytest.mark.parametrize("key", ["hide", "join"])
-def test_a_tap_on_hide_or_join_leaves_no_click_for_the_page_under_the_keys(browser, key):
-    """The browser follows a tap with a click where the finger was, and Hide and Join take the keys away as the finger
-    lands: that click would reach the page beneath them, a booking's Join button say."""
+@pytest.mark.parametrize("key, effect", [
+    ("hide", "document.getElementById('keyboard').hidden"),
+    ("join", "document.getElementById('keyboard').hidden"),
+    ("layer:symbols", "document.getElementById('keyboard').dataset.layer === 'symbols'"),
+])
+def test_a_tap_on_a_key_that_leaves_the_tray_leaves_no_click_under_the_finger(browser, key, effect):
+    """The browser follows a tap with a click where the finger was. Hide and Join take the keys away as the finger lands, and
+    a layer key goes to the shelf with its row: that click would reach the page beneath, or the key that is under the finger
+    now. A tap on the field is counted first, so that the check is not an empty one."""
     with PageServer() as server:
-        context, page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
         page.evaluate("window.__clicks = 0; document.addEventListener('click', () => { window.__clicks += 1; }, true)")
         finger_tap(page, cdp, "#link-input")                       # a real tap: its click is counted, and the keys come up
         page.wait_for_function("window.__clicks === 1 && !document.getElementById('keyboard').hidden", timeout=5000)
         page.fill("#link-input", "98765432100")                    # something for Join to send
         finger_tap(page, cdp, f"#keyboard .key[data-key='{key}']")
-        page.wait_for_function("document.getElementById('keyboard').hidden", timeout=5000)
+        page.wait_for_function(effect, timeout=5000)
         page.wait_for_timeout(500)                                 # long enough for a click to come, as it does to the field's tap
         assert page.evaluate("window.__clicks") == 1
-        context.close()
+        page.close()
+
+
+def test_a_cancelled_touch_ends_the_press(browser):
+    """The browser takes a touch back (a palm, a gesture): the pointer is cancelled, not lifted."""
+    with PageServer() as server:
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server, stopped=True)
+        finger_tap(page, cdp, "#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.fill("#link-input", "a" * 60)
+        finger_down(page, cdp, "#keyboard .key[data-key='backspace']")
+        page.clock.run_for(400 + 300)
+        cdp.send("Input.dispatchTouchEvent", {"type": "touchCancel", "touchPoints": []})
+        removed = 60 - len(page.input_value("#link-input"))
+        assert removed >= 2                                         # it was repeating
+        assert page.evaluate("document.querySelectorAll('#keyboard .key.down').length") == 0
+        page.clock.run_for(2000)
+        assert 60 - len(page.input_value("#link-input")) == removed # and stopped there
+        page.close()
 
 
 def test_a_key_is_let_go_when_its_finger_lifts_over_another_key(browser):
@@ -499,7 +586,7 @@ def test_a_key_is_let_go_when_its_finger_lifts_over_another_key(browser):
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         page.evaluate("window.__q = document.querySelector(\"#keyboard .key[data-key='q']\")")
-        touch(page, "#keyboard .key[data-key='q']", pointer_id=1, lift=False)
+        touch(page, "#keyboard .key[data-key='q']", pointer_id=1, release=False)
         touch(page, "#keyboard .key[data-key='layer:symbols']", pointer_id=2)    # the layer changes under the first finger
         lift(page, "#keyboard .key[data-key='1']", pointer_id=1)                 # and it lifts over a key of the new one
         assert not page.evaluate("window.__q.classList.contains('down')")        # q is not left looking pressed
@@ -508,18 +595,140 @@ def test_a_key_is_let_go_when_its_finger_lifts_over_another_key(browser):
 
 def test_a_held_backspace_stops_when_its_finger_lifts_off_the_keys(browser):
     with PageServer() as server:
-        page = open_kiosk_page(browser, server)
-        page.clock.install()
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         page.fill("#link-input", "a" * 60)
-        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=1, lift=False)
+        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=1, release=False)
         page.clock.run_for(400 + 300)
         page.evaluate("document.body.dispatchEvent(new PointerEvent('pointerup', { pointerId: 1, bubbles: true }))")   # it slid off the keys
         removed = 60 - len(page.input_value("#link-input"))
         assert removed >= 2                                         # it was repeating
         page.clock.run_for(2000)
         assert 60 - len(page.input_value("#link-input")) == removed # and stopped at the lift, wherever that was
+        page.close()
+
+
+def test_a_held_backspace_stops_when_the_keys_go(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.fill("#link-input", "a" * 60)
+        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=1, release=False)
+        page.clock.run_for(400 + 300)
+        page.evaluate("croomKeyboard.hide()")                       # a view change, Hide or Join, with the finger still down
+        removed = 60 - len(page.input_value("#link-input"))
+        assert removed >= 2
+        page.clock.run_for(2000)
+        assert 60 - len(page.input_value("#link-input")) == removed
+        page.close()
+
+
+def test_a_window_that_loses_its_focus_ends_every_press(browser):
+    """No lift comes to a window nobody is looking at: a held key must not repeat on, nor stay looking pressed."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.fill("#link-input", "a" * 60)
+        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=1, release=False)
+        page.clock.run_for(400 + 300)
+        page.evaluate("window.dispatchEvent(new Event('blur'))")
+        removed = 60 - len(page.input_value("#link-input"))
+        assert removed >= 2                                         # it was repeating
+        assert page.evaluate("document.querySelectorAll('#keyboard .key.down').length") == 0
+        page.clock.run_for(2000)
+        assert 60 - len(page.input_value("#link-input")) == removed
+        page.close()
+
+
+def test_a_press_by_a_finger_whose_last_press_never_lifted_leaves_no_repeat_behind(browser):
+    """A lift can be lost. The same pointer pressing again must end its old press first, or that press's repeat is left
+    running with nothing in the keyboard that can stop it, not even a lift or Hide."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, kiosk=True)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.fill("#link-input", "a" * 100)
+        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=7, release=False)
+        page.clock.run_for(400 + 300)                               # repeating
+        touch(page, "#keyboard .key[data-key='backspace']", pointer_id=7, release=False)    # the same pointer lands again: no lift came between
+        lift(page, "#keyboard .key[data-key='backspace']", pointer_id=7)
+        page.evaluate("croomKeyboard.hide()")
+        removed = 100 - len(page.input_value("#link-input"))
+        page.clock.run_for(2000)
+        assert 100 - len(page.input_value("#link-input")) == removed
+        page.close()
+
+
+@pytest.mark.parametrize("key", ["hide", "join"])
+def test_hide_and_join_do_not_leave_their_own_key_looking_pressed(browser, key):
+    """They take the keys away as the finger lands; that finger's press is over with them, whether or not its lift ever comes."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.fill("#link-input", "98765432100")                    # something for Join to send
+        touch(page, f"#keyboard .key[data-key='{key}']", pointer_id=1, release=False)
+        assert page.evaluate("document.getElementById('keyboard').hidden")
+        assert page.evaluate("document.querySelectorAll('.key.down').length") == 0
+        page.close()
+
+
+def test_a_key_pressed_while_the_focus_is_on_the_keyboard_button_puts_it_back_in_the_field(browser):
+    """The keys stay up while the focus is on their button (a Tab, on a laptop); a key then types into the field and has the focus go back to it."""
+    with PageServer() as server:
+        page = open_page(browser, server)                           # no ?keyboard=1: the keys come from the button
+        page.click("#keyboard-toggle")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.evaluate("document.getElementById('keyboard-toggle').focus()")
+        assert not page.evaluate("document.getElementById('keyboard').hidden")
+        tap(page, "a")
+        assert page.input_value("#link-input") == "a"
+        assert page.evaluate("document.activeElement.id") == "link-input"
+        page.close()
+
+
+def test_a_press_hook_that_throws_costs_the_person_no_key(browser):
+    """Task 3's key click hangs on the press hooks: whatever one of them does, the key it is for is typed and let go."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.evaluate("croomKeyboard.onPress(() => { throw new Error('a hook that is broken'); })")
+        tap(page, "a", "b")
+        assert page.input_value("#link-input") == "ab" and errors == []
+        assert page.evaluate("document.querySelectorAll('#keyboard .key.down').length") == 0
+        page.close()
+
+
+def test_only_the_main_mouse_button_presses_a_key(browser):
+    """The keys work with a mouse too (the keyboard button shows them on any device): the other buttons are not key presses,
+    and a menu does not open over the keys."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.locator("#keyboard .key[data-key='c']").click(button="right")
+        page.locator("#keyboard .key[data-key='d']").click(button="middle")
+        assert page.input_value("#link-input") == ""
+        assert page.evaluate("""() => { const menu = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+            document.querySelector("#keyboard .key[data-key='c']").dispatchEvent(menu); return menu.defaultPrevented; }""")
+        page.locator("#keyboard .key[data-key='e']").click()
+        assert page.input_value("#link-input") == "e"               # and the main button still types
+        assert page.evaluate("document.activeElement.id") == "link-input"
+        page.close()
+
+
+def test_the_keyboard_tray_takes_no_scroll_zoom_or_text_selection(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        assert page.evaluate("""() => { const s = getComputedStyle(document.getElementById('keyboard')); return [s.touchAction, s.userSelect]; }""") == ["none", "none"]
         page.close()
 
 
@@ -1601,11 +1810,12 @@ def hold(page, selector, ms=120):
     page.mouse.up()
 
 
-def page_on_a_stopped_clock(browser, server, width=1280, height=800):
-    """The room page, loaded, with its timers stopped: from here they run only when the test calls page.clock.run_for."""
-    page = browser.new_page(viewport={"width": width, "height": height})
+def page_on_a_stopped_clock(browser, server, width=1280, height=800, kiosk=False, touchscreen=False):
+    """The room page, loaded, with its timers stopped: from here they run only when the test calls page.clock.run_for.
+    kiosk opens it as the table Pi's browser does (?keyboard=1); touchscreen gives it a touch device."""
+    page = browser.new_page(viewport={"width": width, "height": height}, has_touch=touchscreen)
     page.clock.install()
-    page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+    page.goto(f"http://127.0.0.1:{server.port}/" + ("?keyboard=1" if kiosk else ""), wait_until="networkidle")
     page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
     page.clock.pause_at(datetime.now() + timedelta(seconds=2))
     return page

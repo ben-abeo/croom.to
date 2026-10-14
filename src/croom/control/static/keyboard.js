@@ -37,6 +37,7 @@
   let listeners = [];                // what tests may hook (press)
 
   const field = () => (input.hidden ? link : input);
+  const inTray = (t) => Boolean(t && t.closest && t.closest(".key, .keyboard"));   // a key may be on the shelf: its row is not under the tray then
   const layer = () => layers.get(field());
   const label = (key) => (LABELS[key] || (shift !== "off" && layer() === "letters" ? key.toUpperCase() : key));
 
@@ -89,8 +90,7 @@
   function hide() {
     if (!open) return;
     open = false;
-    for (const d of down.values()) { stopRepeat(d); d.button.classList.remove("down"); }
-    down.clear();
+    letGoAll();
     box.hidden = true;
     document.body.classList.remove("keyboard-open");
     toggle.setAttribute("aria-pressed", "false");
@@ -112,7 +112,12 @@
     target.focus({ preventScroll: true });
   }
   function act(key) {
-    for (const fn of listeners) fn(key);
+    perform(key);
+    for (const fn of listeners) {   // after the key: a hook that fails (the click, the buzz) costs the person nothing
+      try { fn(key); } catch (err) { console.error("croomKeyboard: a press hook failed", err); }
+    }
+  }
+  function perform(key) {
     if (key === "shift") {
       const now = Date.now();
       if (shift === "once" && now - lastShiftAt < DOUBLE_TAP_MS) shift = "lock";
@@ -130,27 +135,31 @@
     if (shift === "once") { shift = "off"; relabel(); }
   }
   function stopRepeat(d) { clearTimeout(d.timer); clearInterval(d.interval); }
+  function letGo(d) { stopRepeat(d); d.button.classList.remove("down"); }
+  function letGoAll() { for (const d of down.values()) letGo(d); down.clear(); }
   function onDown(e) {
+    if (e.pointerType === "mouse" && e.button !== 0) return;   // only the main button types; the tray's own handler keeps the focus for the others
     e.preventDefault();   // the field keeps the focus
+    onUp(e);              // a press of this pointer that never lifted is over: its repeat must not outlive it
     const b = e.currentTarget;
     try { b.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events have no capture */ }
     b.classList.add("down");
-    act(b.dataset.key);
     const d = { button: b, timer: null, interval: null };
+    down.set(e.pointerId, d);   // before the key acts: Hide and Join let every press go, this one with them
     if (b.dataset.key === "backspace") d.timer = setTimeout(() => { d.interval = setInterval(() => act("backspace"), REPEAT_EVERY_MS); }, REPEAT_AFTER_MS);
-    down.set(e.pointerId, d);
+    act(b.dataset.key);
   }
   // A finger lifting ends its press wherever it lifts, on the key it pressed or not (a layer may have changed under it, or
   // it slid off), so the listener is the document's: the pressed key is let go and a held key stops repeating.
   function onUp(e) {
     const d = down.get(e.pointerId);
     if (!d) return;
-    d.button.classList.remove("down");
-    stopRepeat(d);
+    letGo(d);
     down.delete(e.pointerId);
   }
   document.addEventListener("pointerup", onUp, true);
   document.addEventListener("pointercancel", onUp, true);
+  window.addEventListener("blur", letGoAll);   // no lift comes to a window nobody is looking at
   function aim(target) {
     if (target !== input) shift = "off";
     input = target;
@@ -168,9 +177,12 @@
   }
   box.addEventListener("pointerdown", (e) => e.preventDefault());   // the tray's gaps: no focus change either
   // A touchscreen follows a tap with a click at the finger's spot once it lifts, and by then Hide or Join has taken the tray
-  // away: the click would land on whatever the page has beneath. Cancelling the touch leaves no click to land (the pointer
-  // events, which do the typing, are not touch events and still come).
-  box.addEventListener("touchstart", (e) => e.preventDefault(), { passive: false });
+  // away, or a layer key has taken its own row to the shelf: the click would land on whatever is beneath the finger now.
+  // Cancelling the touch leaves no click to land (the pointer events, which do the typing, are not touch events and still
+  // come). It is the document that listens: a layer key's pointerdown has moved its row off the tray before the touchstart
+  // that follows it, and a listener on the tray would not hear it. A long press is no context menu on the keys either.
+  document.addEventListener("touchstart", (e) => { if (inTray(e.target)) e.preventDefault(); }, { capture: true, passive: false });
+  document.addEventListener("contextmenu", (e) => { if (inTray(e.target)) e.preventDefault(); }, true);
   toggle.addEventListener("pointerdown", (e) => e.preventDefault());
   toggle.addEventListener("click", () => { if (open) { hide(); return; } show(); field().focus(); });
   P.onViewChange((name) => { if (name !== "idle") hide(); });

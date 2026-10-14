@@ -225,7 +225,9 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
   padding: 10px 8px calc(10px + env(safe-area-inset-bottom, 0px));
   background: #0B1220; border-top: 1px solid var(--surface-800);
-  display: grid; gap: 6px; touch-action: none;   /* a finger on a key is a key press, never a scroll or a zoom */
+  display: grid; gap: 6px;
+  touch-action: none;   /* a finger on a key is a key press, never a scroll or a zoom */
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;   /* nor a selection or a callout, held or dragged */
 }
 .keyboard[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 .keyboard .row { display: flex; gap: 6px; }
@@ -238,7 +240,9 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
 .keyboard .key.space { flex: 4 1 0; }
 .keyboard .key.join { flex: 2 1 0; background: var(--blue-600); }
 .keyboard[data-shift="once"] .key[data-key="shift"], .keyboard[data-shift="lock"] .key[data-key="shift"] { background: var(--blue-700); }
-.keyboard .key.down, .keyboard .key:active { background: var(--blue-700); }
+/* The pressed look is the .down class the script puts on the key that was pressed, not :active: after a layer switch the
+   :active key would be the one that came up under the finger. */
+.keyboard .key.down { background: var(--blue-700); }
 /* The link box stays above the keys because the page makes room under them (the padding) and may grow into it (height:
    auto): the field scrolls up above the keys however tall the status card is. Hiding the Today box moves nothing above
    or beside the link box; it only keeps the keys from covering the lower half of a list. */

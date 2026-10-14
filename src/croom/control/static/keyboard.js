@@ -47,7 +47,7 @@
   const layers = new Map([[link, "letters"], [passcode, "symbols"]]);
   const built = new Map();           // layer name -> its rows, built once
   const down = new Map();            // pointerId -> { button, timer, interval }
-  let listeners = [];                // what tests may hook (press)
+  let listeners = [];                // the tests' hooks, from onPress: each is handed the key that was pressed
   const preview = document.createElement("div");   // the pop above a pressed key: made once, moved from key to key, never rebuilt
   preview.id = "key-preview";
   preview.setAttribute("aria-hidden", "true");     // it repeats the key, which is already read
@@ -177,7 +177,7 @@
     if (key === "join") { hide(); P.submitForm(el("link-form")); return; }
     if (key === "backspace") { edit("", true); return; }
     if (key === "space") { edit(" "); return; }
-    edit(shift !== "off" && layer() === "letters" ? key.toUpperCase() : key);
+    edit(label(key));
     if (shift === "once") { shift = "off"; relabel(); }
   }
   function stopRepeat(d) { clearTimeout(d.timer); clearInterval(d.interval); }
@@ -199,17 +199,22 @@
   }
   function hidePreview() { clearTimeout(previewTimer); previewOf = null; preview.hidden = true; }
   function lingerPreview(pointerId) { if (previewOf === pointerId) previewTimer = setTimeout(hidePreview, PREVIEW_LINGER_MS); }
+  // Ask a context that is not running to start: the browser holds one back until a gesture has led to it, and the system may
+  // interrupt one. A refusal is swallowed (the key is typed whatever the audio does). Says whether the context was not running.
+  function askToStart() {
+    if (!audio || !audio.state || audio.state === "running") return false;
+    const asked = audio.resume && audio.resume();
+    if (asked && asked.catch) asked.catch(() => {});
+    return true;
+  }
   // One tick for a finger landing on a key. It never throws: with no audio, or audio that will not play, typing goes on in silence.
   function sound() {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (!Ctx) return;
     const fresh = !audio;
     audio = audio || new Ctx();
-    if (audio.state && audio.state !== "running") {   // held back by the browser until a tap has led to it, or interrupted: ask it to start
-      const asked = audio.resume && audio.resume();
-      if (asked && asked.catch) asked.catch(() => {});
-      if (!fresh) return;   // and queue nothing behind it: every tick waiting would sound at once the moment it started (this key's own may follow it)
-    }
+    const held = askToStart();   // not running: asked to start
+    if (held && !fresh) return;  // and nothing queued behind it: every tick waiting would sound at once the moment it started (a context just made queues this key's own, which may follow it)
     const at = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
     osc.type = "sine";
     osc.frequency.value = CLICK_HZ;
@@ -253,8 +258,7 @@
   // Chromium counts a touch's lift, not its pointerdown, as the gesture that lets audio start. A keyboard that came up by itself
   // (a reload onto the passcode card brings it up for the code) has made its context on a press that no gesture had led to, and
   // that context stays held back until it is asked again from a lift: so every lift asks, and the next key is heard.
-  function wake() { if (!audio || !audio.state || audio.state === "running" || !audio.resume) return; const asked = audio.resume(); if (asked && asked.catch) asked.catch(() => {}); }
-  document.addEventListener("pointerup", wake, true);
+  document.addEventListener("pointerup", askToStart, true);
   window.addEventListener("blur", letGoAll);   // no lift comes to a window nobody is looking at
   function aim(target) {
     if (target !== input) shift = "off";
@@ -278,5 +282,8 @@
   P.onViewChange((name) => { if (name !== "idle") hide(); });
   const setClick = (on) => { clickOn = Boolean(on); };
   P.onRender((s) => { if (s.settings) setClick(s.settings.key_click !== false); });   // the room's setting, with every status
-  window.croomKeyboard = { open: show, hide: hide, isOpen: () => open, layer: layer, press: act, onPress: (fn) => listeners.push(fn), setClick: setClick };
+  // Nothing in the page calls this: it is the tests' hold on the keyboard. open and hide bring the keys up and put them away as a
+  // view change or Join does; press, onPress and setClick exist for the tests alone (a key pressed from code, a hook on every press,
+  // and the room's setting handed over by hand).
+  window.croomKeyboard = { open: show, hide: hide, press: act, onPress: (fn) => listeners.push(fn), setClick: setClick };
 })();

@@ -483,6 +483,13 @@ def finger_down(page, cdp, selector, finger_id=1):
     return point
 
 
+def finger_down_at(cdp, x, y, finger_id=1):
+    """A real finger lands at a point of the page and stays; the point comes back for finger_up."""
+    point = {"x": x, "y": y, "id": finger_id}
+    cdp.send("Input.dispatchTouchEvent", {"type": "touchStart", "touchPoints": [point]})
+    return point
+
+
 def finger_up(cdp, point):
     cdp.send("Input.dispatchTouchEvent", {"type": "touchEnd", "touchPoints": [point]})
 
@@ -726,6 +733,62 @@ def test_the_keyboard_tray_takes_no_scroll_zoom_or_text_selection(browser):
         page.click("#link-input")
         page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
         assert page.evaluate("""() => { const s = getComputedStyle(document.getElementById('keyboard')); return [s.touchAction, s.userSelect]; }""") == ["none", "none"]
+        page.close()
+
+
+TRAY_PLACES = ("between two keys", "between two rows", "the edge of the tray")
+
+
+def a_place_in_the_tray_that_is_no_key(page, place):
+    """A point in the tray that belongs to no key: the 6 px between the first two keys of the first row (the point is on the row), the 6 px
+    between the first two rows, or the empty edge of the tray beside the keys (the last two are on the tray itself). What is under the point
+    is checked, so that a test cannot pass by pressing a key."""
+    def box(key):
+        return page.locator(f"#keyboard .key[data-key='{key}']").bounding_box()
+    if place == "between two keys":
+        q, w = box("q"), box("w")
+        x, y, under = (q["x"] + q["width"] + w["x"]) / 2, q["y"] + q["height"] / 2, "row"
+    elif place == "between two rows":
+        q, a = box("q"), box("a")
+        x, y, under = q["x"] + q["width"] / 2, (q["y"] + q["height"] + a["y"]) / 2, "keyboard"
+    else:
+        tray = page.locator("#keyboard").bounding_box()
+        x, y, under = 8, tray["y"] + tray["height"] / 2, "keyboard"
+    assert page.evaluate("([x, y]) => document.elementFromPoint(x, y).className", [x, y]) == under, place
+    return x, y
+
+
+@pytest.mark.parametrize("place", TRAY_PLACES)
+def test_a_mouse_click_where_the_tray_has_no_key_keeps_the_keys_up_and_the_focus_in_the_field(browser, place):
+    """The gaps between the keys belong to no key. A mouse pressed in one would take the focus from the field, and the keys would close
+    with it, were it not for the tray's own pointerdown, which keeps the focus as a key's does (a mouse has no touchstart to cancel)."""
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        x, y = a_place_in_the_tray_that_is_no_key(page, place)
+        page.mouse.click(x, y)
+        assert not page.evaluate("document.getElementById('keyboard').hidden")
+        assert page.evaluate("document.activeElement.id") == "link-input"
+        page.close()
+
+
+def test_a_finger_at_the_edge_of_the_tray_keeps_the_keys_up_and_the_focus_in_the_field(browser):
+    """The same with a real finger. Chromium takes a touch put in a 6 px gap to the nearest key (it presses it: the gaps cannot be
+    tested with a finger), so the finger goes where no key is near, the empty edge of the tray. Two things keep it from taking the
+    focus, and either is enough: the page cancels the touch (no mouse events follow it) and the tray's pointerdown does not let the
+    focus go. The browser's own mouse events and click for a tap come after the lift, so the test waits for them."""
+    with PageServer() as server:
+        page, cdp = open_kiosk_page_with_a_touchscreen(browser, server)
+        finger_tap(page, cdp, "#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.evaluate("window.__landed = []; document.addEventListener('pointerdown', (e) => window.__landed.push(e.target.className), true)")
+        x, y = a_place_in_the_tray_that_is_no_key(page, "the edge of the tray")
+        finger_up(cdp, finger_down_at(cdp, x, y))
+        page.wait_for_timeout(150)
+        assert page.evaluate("window.__landed") == ["keyboard"]         # on the tray, not snapped to a key
+        assert not page.evaluate("document.getElementById('keyboard').hidden")
+        assert page.evaluate("document.activeElement.id") == "link-input"
         page.close()
 
 

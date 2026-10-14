@@ -336,6 +336,15 @@ git commit -m "feat(control): the on-screen keyboard acts the moment a finger la
 
 ### Task 2: Layout and visuals: three layers, key caps, the preview pop
 
+> **Changed in review.** The CSS and the tests below are the plan as first written. What shipped differs as follows; the spec's 3.2 and 3.3, the keyboard block of `style.css` and `keyboard.js` say it as it is, and the ledger (`.superpowers/sdd/2026-10-13-on-screen-keyboard/progress.md`, kept out of git) has the review behind each change.
+>
+> - **Rows.** Every row is as wide as the first, ten keys at their widest: the cap is on the row (`max-width: calc(10 * 118px + 9 * 6px)`, centred), not on each key. The 118 px key cap is the letters layer's alone (`.keyboard[data-layer="letters"] .key`), so the middle row's nine letters sit half a key in from each end. The wide keys (`.wide`: shift, delete, the layer keys, hide) have no cap of their own, not 160 px, and flex to take what the rest of their row leaves, which is how the rows end together; the symbols layers hold no key to 118 px. Space and Join are as written below.
+> - **Glyphs.** Shift, delete and hide are inline SVG (24 px, in the key's own colour) with accessible names ("Shift", "Delete", "Hide keyboard"), not text: for these three keys that overrides the Global Constraints' "the glyphs are text".
+> - **The pop** is at least 80 px wide, not 56, and sits 2 px above its key; it also goes with its layer (a layer switched under a held letter takes it away).
+> - **The shift lock's dot** is 0.9 rem and 1 px from the key's foot, not 0.6 rem at 6 px.
+> - **The tests' helper** takes `release=False`, not `lift=False` (Task 1's tests and this task's below say `lift=False`).
+> - **`window.croomKeyboard`** is `{open, hide, press, onPress, setClick}`, the tests' hold on the keyboard and nothing else's: Task 1's `isOpen()` and `layer()` went because nothing used them.
+
 **Files:**
 - Modify: `src/croom/control/static/style.css`, `src/croom/control/static/keyboard.js` (the preview)
 - Test: `tests/unit/control/test_page.py`

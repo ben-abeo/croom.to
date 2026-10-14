@@ -95,8 +95,11 @@ def test_readme_describes_the_on_screen_keyboard_and_its_key_click():
         "no key under a finger is ever replaced",
         "`key_click`",
         "`/api/settings`",
+        # the features table's row says it in the README's own voice
+        "the preview pop, a key click that can be switched off under **Options**, then **Keyboard** |",
     ):
         assert needle in text, needle
+    assert "Options ›" not in text      # the README says "**Options**, then **Keyboard**", not the arrow
 
 
 def test_the_rooms_readme_counts_what_to_replace_as_the_room_templates_do():

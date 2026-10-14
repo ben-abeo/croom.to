@@ -8,7 +8,8 @@ and record what the control service asked them to do.
 import asyncio
 import json
 import socket
-from datetime import datetime, timedelta, timezone
+import time
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -456,6 +457,84 @@ class TestCalendarEvents:
         assert [e["joinable"] for e in data["events"]] == [True, False, False]
         assert data["events"][0]["title"] == "Design review"
         assert data["events"][0]["meeting_platform"] == "zoom"
+
+
+@pytest.fixture
+def central_time(monkeypatch):
+    """The device's clock set to US Central time (daylight saving from the second Sunday of March to the first of November), whatever
+    zone the machine running the tests keeps: "the device's local day" is a test only where local time is not UTC."""
+    monkeypatch.setenv("TZ", "CST6CDT,M3.2.0,M11.1.0")
+    time.tzset()
+    yield
+    monkeypatch.undo()
+    time.tzset()
+
+
+def at(text, offset="Z", **kwargs):
+    """A booking starting at an ISO moment ("2026-11-01T04:30"), an hour long; offset is "Z" or "+09:00"."""
+    start = datetime.fromisoformat(text + ("+00:00" if offset == "Z" else offset))
+    return CalendarEvent(id=kwargs.pop("id", text), title=kwargs.pop("title", text), start_time=start,
+                         end_time=start + timedelta(hours=1), meeting_url="https://zoom.us/j/98765432100",
+                         meeting_platform=MeetingPlatform.ZOOM)
+
+
+class TestCalendarWeek:
+    """GET /api/calendar/week: the next seven days from today, each with its bookings, by the device's local date (spec 2026-10-13, 2.3)."""
+
+    async def get_week(self, client_factory, events, today=date(2026, 10, 29), calendar=True):
+        service = make_service(meeting=StubMeeting(), calendar=StubCalendar(events=events) if calendar else None)
+        service._local_today = lambda: today                                   # the day the device's clock says it is
+        client = await client_factory(service)
+        response = await client.get("/api/calendar/week")
+        assert response.status == 200
+        return await response.json()
+
+    async def test_the_week_route_groups_by_local_day_across_a_month_boundary(self, client_factory, central_time):
+        # Thursday October 29 to Wednesday November 4, 2026; Central time is UTC-5 until 2 AM on November 1 and UTC-6 after it.
+        events = [
+            at("2026-11-02T15:00", id="monday", title="Monday 9 AM"),                          # 9:00 AM CST on the 2nd
+            at("2026-11-01T04:30", id="late", title="Saturday 11:30 PM"),                     # the 31st at 11:30 PM CDT: the 1st in UTC
+            at("2026-11-01T05:30", id="early", title="Sunday 12:30 AM"),                      # the 1st at 12:30 AM CDT: the same UTC day, the next local one
+            at("2026-11-02T05:30", id="evening", title="Sunday 11:30 PM"),                    # the 1st at 11:30 PM CST: the 2nd in UTC, after the clocks went back
+            at("2026-11-02T08:00", "+09:00", id="tokyo", title="Booked from Tokyo"),          # the 2nd by its own offset, the 1st at 5:00 PM here
+            at("2026-10-29T15:00", id="today", title="Thursday 10 AM"),
+            at("2026-10-28T20:00", id="yesterday", title="Wednesday 3 PM"),                    # before today: not in the week
+            at("2026-11-05T15:00", id="eighth", title="Thursday the 5th"),                    # the eighth day: not in the week
+        ]
+        data = await self.get_week(client_factory, events)
+        assert list(data) == ["days"] and len(data["days"]) == 7
+        assert [(d["date"], d["label"]) for d in data["days"]] == [
+            ("2026-10-29", "Thursday"), ("2026-10-30", "Friday"), ("2026-10-31", "Saturday"), ("2026-11-01", "Sunday"),
+            ("2026-11-02", "Monday"), ("2026-11-03", "Tuesday"), ("2026-11-04", "Wednesday")]   # today first, across the month's end
+        assert all(list(d) == ["date", "label", "events"] for d in data["days"])
+        ids = {d["date"]: [e["id"] for e in d["events"]] for d in data["days"]}
+        assert ids == {"2026-10-29": ["today"], "2026-10-30": [], "2026-10-31": ["late"],                    # the 31st's last booking stays on the 31st
+                       "2026-11-01": ["early", "tokyo", "evening"],                                           # the 1st's, in start order, whatever the order sent
+                       "2026-11-02": ["monday"], "2026-11-03": [], "2026-11-04": []}
+
+    async def test_an_empty_week_is_seven_empty_days(self, client_factory, central_time):
+        for calendar in (True, False):                                                                         # a calendar with no bookings, and none at all
+            data = await self.get_week(client_factory, [], today=date(2026, 12, 29), calendar=calendar)
+            assert [d["date"] for d in data["days"]] == ["2026-12-29", "2026-12-30", "2026-12-31", "2027-01-01", "2027-01-02", "2027-01-03", "2027-01-04"]
+            assert [d["label"] for d in data["days"]] == ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday"]
+            assert all(d["events"] == [] for d in data["days"])
+
+    async def test_the_week_carries_each_booking_as_the_events_route_does(self, client_factory, central_time):
+        ev = at("2026-10-30T15:00", id="e1", title="Design review")
+        ev.description, ev.organizer, ev.location = "Agenda: next year's budget", "ceo@example.com", "HQ 3rd floor"
+        data = await self.get_week(client_factory, [ev])
+        booking = data["days"][1]["events"][0]
+        assert set(booking) == EVENT_FIELDS                                                                    # the page's fields, and nothing the room page keeps off the network
+        assert (booking["title"], booking["meeting_platform"], booking["joinable"]) == ("Design review", "zoom", True)
+        assert booking["start_time"] == ev.start_time.isoformat()
+
+    async def test_the_week_begins_on_the_devices_own_today(self, client_factory, central_time):
+        skip_if_day_ends_within(1)
+        soon = event("soon", "Standup", starts_in_minutes=20)
+        service = make_service(meeting=StubMeeting(), calendar=StubCalendar(events=[soon]))                    # no clock set: the real one
+        data = await (await (await client_factory(service)).get("/api/calendar/week")).json()
+        assert data["days"][0]["date"] == datetime.now().astimezone().date().isoformat()
+        assert [e["id"] for e in data["days"][0]["events"]] == ["soon"]
 
 
 class TestJoin:

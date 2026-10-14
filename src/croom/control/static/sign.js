@@ -6,6 +6,7 @@
   const EVENTS_EVERY_MS = 60000;
   const IN_PROGRESS = ["joining", "in_lobby", "connected", "leaving"];
   const TODAY_ROWS = 3;
+  const WEEK_IDLE_MS = 30 * 1000;   // the week view goes back to Today after this long without a tap inside it
 
   const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css)
   const PHOTO_TIMEOUT_MS = 20 * 1000;   // a photograph not decoded by then counts as failed: a connection gone half open neither answers nor fails
@@ -16,7 +17,7 @@
   const photoUrl = (key) => "/static/backgrounds/" + key + ".jpg";
 
   const el = (id) => document.getElementById(id);
-  const model = { status: null, events: [], offline: false };
+  const model = { status: null, events: [], week: null, weekFailed: false, offline: false };
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
@@ -24,6 +25,8 @@
   // (the Pi's Chromium would otherwise follow the system locale and show 24-hour times).
   const fmtTime = (d) => d.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit", hour12: true }).replace(/\s+(?=[AP]M$)/, "\u00A0");   // no-break space: a time never splits across lines
   const fmtDate = (d) => d.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  // A day the room's calendar names ("2026-10-14") is a date, not an instant: it is read as the browser's own day, so no time zone moves it.
+  const fmtDay = (iso) => { const [y, m, d] = iso.split("-").map(Number); return new Date(y, m - 1, d).toLocaleDateString("en-US", { month: "short", day: "numeric" }); };
   const plural = (n, word) => n + " " + word + (n === 1 ? "" : "s");
 
   const timeout = () => (typeof AbortSignal !== "undefined" && AbortSignal.timeout ? { signal: AbortSignal.timeout(4000) } : {});
@@ -52,6 +55,19 @@
       // keep the last list
     }
     render();
+  }
+
+  // A failed request leaves the week as it was; the next opening asks again.
+  async function refreshWeek() {
+    try {
+      const body = await getJson("/api/calendar/week");
+      if (!Array.isArray(body.days) || !body.days.every((day) => day && Array.isArray(day.events))) throw new Error("the week is not a list of days");
+      model.week = body.days;
+      model.weekFailed = false;
+    } catch (e) {
+      model.weekFailed = true;
+    }
+    drawView();
   }
 
   // Writes only what changed: the status words are aria-live, where the same words written again are announced again, and
@@ -149,7 +165,6 @@
     const m = s.meeting;
     const cal = s.calendar;
     const now = Date.now();
-    el("today").hidden = !cal.connected;
     // The API's "current" only covers bookings with a video link; an in-person
     // booking still occupies the room, so fall back to today's event list.
     const current = cal.current || ongoingEvent(now);
@@ -170,6 +185,7 @@
     }
 
     renderEvents(cal, now, current);
+    drawView();
   }
 
   // The next bookings as rows: the time, the title and, for a video meeting, the platform. The one in progress is ringed
@@ -207,11 +223,131 @@
     }
   }
 
+  // The week view (spec 2026-10-13, section 2.3). This week takes the Today list's place with the next seven days, today first, from
+  // /api/calendar/week; Back, or thirty seconds without a tap inside it, brings the Today list back. Asked for when it opens, and shown
+  // from what came back: a day with nothing booked says so. The sign never scrolls, so a day with more bookings than its box holds
+  // shows the ones that fit and "+N more" (fitWeek).
+  let weekOpen = false;
+  let weekTimer = null;
+  let weekKey = null;   // what the days were last drawn from, so that a poll that changes nothing draws nothing
+
+  function openWeek() {
+    weekOpen = true;
+    model.week = null;
+    model.weekFailed = false;
+    armWeekReturn();
+    drawView();
+    el("week-back").focus({ preventScroll: true });
+    refreshWeek();
+  }
+
+  function closeWeek() {
+    const hadFocus = el("week").contains(document.activeElement);
+    weekOpen = false;
+    clearTimeout(weekTimer);
+    weekTimer = null;
+    weekKey = null;
+    drawView();
+    if (hadFocus) el("this-week").focus({ preventScroll: true });
+  }
+
+  // Thirty seconds from now on the page's own clock; every tap inside the week view starts them again.
+  function armWeekReturn() {
+    clearTimeout(weekTimer);
+    weekTimer = weekOpen ? setTimeout(closeWeek, WEEK_IDLE_MS) : null;
+  }
+
+  // Which of the Today list and the week shows, and the week's days when it is the week. Both need the calendar. Called at the end of
+  // every render, and when the week opens or closes, so that those work while the room cannot be reached (render returns early then).
+  function drawView() {
+    const cal = model.status && model.status.calendar;
+    const connected = !!(cal && cal.connected);
+    const showWeek = weekOpen && connected;
+    el("today").hidden = !connected || showWeek;
+    el("week").hidden = !showWeek;
+    setData("view", showWeek ? "week" : "today");
+    if (showWeek) renderWeek(Date.now(), cal.current || ongoingEvent(Date.now()));
+  }
+
+  const make = (tag, className, text) => {
+    const node = document.createElement(tag);
+    node.className = className;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  function slotElement(ev, current) {
+    const li = make("li", "slot");
+    li.classList.toggle("now", !!current && ev.id === current.id);   // ringed in the status colour, as on the Today list
+    const time = make("time", "", fmtTime(new Date(ev.start_time)));
+    time.dateTime = ev.start_time;
+    li.append(time, make("p", "title", ev.title));
+    if (platformNames[ev.meeting_platform]) li.append(make("p", "who", platformNames[ev.meeting_platform]));
+    return li;
+  }
+
+  function dayElement(day, events, isToday, current) {
+    const li = make("li", "day");
+    if (isToday) li.setAttribute("aria-current", "date");
+    const head = make("div", "day-head");
+    const date = make("time", "day-date", fmtDay(day.date));
+    date.dateTime = day.date;
+    head.append(make("h3", "day-name", day.label), date);
+    li.append(head);
+    if (!events.length) {
+      li.append(make("p", "none", "Nothing booked"));
+      return li;
+    }
+    const slots = make("ul", "slots");
+    slots.append(...events.map((ev) => slotElement(ev, current)));
+    const more = make("li", "more");
+    more.hidden = true;
+    slots.append(more);
+    li.append(slots);
+    return li;
+  }
+
+  // Today's own column leaves out what is over, as the Today list does.
+  function renderWeek(now, current) {
+    const days = model.week;
+    setText(el("week-note"), days ? "" : model.weekFailed ? "The week could not be loaded." : "Loading the week.");
+    const drawn = (days || []).map((day, n) => ({ day, events: n === 0 ? day.events.filter((ev) => endMs(ev) > now) : day.events }));
+    const key = JSON.stringify([drawn, current ? current.id : null]);
+    if (key === weekKey) return;
+    weekKey = key;
+    el("week-days").replaceChildren(...drawn.map(({ day, events }, n) => dayElement(day, events, n === 0, current)));
+    fitWeek();
+  }
+
+  // Of a day's bookings, the ones that fit its box show, and "+N more" counts the rest. Run when the days are drawn and whenever the
+  // box they sit in changes size (the sign turned on its stand, a different screen, a taller status when the room's state changes, the
+  // scoreboard strip coming up); each day starts from all its bookings, so a bigger box shows more again.
+  function fitWeek() {
+    if (el("week").hidden) return;
+    for (const slots of el("week-days").querySelectorAll(".slots")) {
+      const rows = [...slots.querySelectorAll(".slot")];
+      const more = slots.querySelector(".more");
+      for (const row of rows) row.hidden = false;
+      more.hidden = true;
+      let shown = rows.length;
+      while (shown > 0 && slots.scrollHeight > slots.clientHeight) {
+        shown -= 1;
+        rows[shown].hidden = true;
+        more.textContent = "+" + (rows.length - shown) + " more";
+        more.hidden = false;
+      }
+    }
+  }
+
   function tick() {
     el("clock").textContent = fmtTime(new Date());
     el("date").textContent = fmtDate(new Date());
   }
 
+  el("this-week").addEventListener("click", openWeek);
+  el("week-back").addEventListener("click", closeWeek);
+  el("week").addEventListener("pointerdown", armWeekReturn);
+  if (typeof ResizeObserver === "function") new ResizeObserver(fitWeek).observe(el("week-days"));
   tick();
   setInterval(tick, 1000);
   refreshStatus();

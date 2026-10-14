@@ -10,7 +10,7 @@ import copy
 import logging
 import mimetypes
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
@@ -42,6 +42,10 @@ PLATFORM_HOSTS = {
 }
 # The only calendar fields the page needs; the rest stays off the network.
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
+# The week the door sign shows (spec 2026-10-13, section 2.3): today and the six days after it, named in English whatever the
+# machine's locale says (date.strftime would follow it).
+WEEK_DAYS = 7
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
 # The door sign's backgrounds (spec 2026-10-13, section 2.4), in the order the room page offers them: a photograph of Austin
@@ -229,6 +233,7 @@ class ControlService(Service):
         app.router.add_get("/tv", self._handle_tv)
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/calendar/events", self._handle_events)
+        app.router.add_get("/api/calendar/week", self._handle_week)
         app.router.add_post("/api/meeting/join", self._handle_join)
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
@@ -321,15 +326,36 @@ class ControlService(Service):
         data["joinable"] = self._platform_for(event.meeting_url) is not None
         return data
 
+    def _local_today(self) -> date:
+        """Today's date on the device's clock: the room's day, so a booking at 11:30 PM is that day's, not the next UTC day's."""
+        return datetime.now().astimezone().date()
+
     def _today_events(self) -> List[Any]:
         """Today's events in start order, by the device's local date."""
         if self._calendar is None:
             return []
-        today = datetime.now().astimezone().date()
+        today = self._local_today()
         return sorted(
             (e for e in self._calendar.events if e.start_time.astimezone().date() == today),
             key=lambda e: e.start_time,
         )
+
+    def _week(self) -> List[Dict[str, Any]]:
+        """The next seven days, today first, each with its events in start order, by the device's local date as today's list is.
+        A day with nothing booked is still there, with an empty list. The calendar service holds the bookings from an hour ago to a week
+        ahead, which covers the six days after today whole and what is left of today."""
+        first = self._local_today()
+        days = []
+        for n in range(WEEK_DAYS):
+            day = first + timedelta(days=n)
+            days.append({"date": day.isoformat(), "label": DAY_NAMES[day.weekday()], "events": []})
+        if self._calendar is not None:
+            events_by_date = {day["date"]: day["events"] for day in days}
+            for e in sorted(self._calendar.events, key=lambda e: e.start_time):
+                bookings = events_by_date.get(e.start_time.astimezone().date().isoformat())
+                if bookings is not None:
+                    bookings.append(self._event_dict(e))
+        return days
 
     def _calendar_status(self) -> Dict[str, Any]:
         if self._calendar is None:
@@ -690,6 +716,9 @@ class ControlService(Service):
         if self._calendar is None:
             return web.json_response({"events": []})
         return web.json_response({"events": [self._event_dict(e) for e in self._today_events()]})
+
+    async def _handle_week(self, request: web.Request) -> web.Response:
+        return web.json_response({"days": self._week()})
 
     @staticmethod
     def _require_json(request: web.Request) -> Optional[web.Response]:

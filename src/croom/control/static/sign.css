@@ -71,7 +71,7 @@ body[data-photo] .sign::after {
   background: linear-gradient(90deg, rgba(0, 22, 54, 0.94) 0%, rgba(0, 22, 54, 0.84) 45%, rgba(0, 22, 54, 0.55) 100%),
               linear-gradient(180deg, rgba(0, 22, 54, 0.6) 0%, rgba(0, 22, 54, 0) 40%, rgba(0, 22, 54, 0.55) 100%);
 }
-body[data-photo] .event { background: rgba(0, 22, 54, 0.55); backdrop-filter: blur(2px); }
+body[data-photo] .event, body[data-photo] .day { background: rgba(0, 22, 54, 0.55); backdrop-filter: blur(2px); }
 
 /* A narrow sign wraps: the clock and date drop to a line of their own, on the right, and the company name keeps its words
    whole. The brand row will not shrink under 16 rem, which is the logo, its gap and "Management" with a little to spare
@@ -119,8 +119,8 @@ body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-s
 .detail:empty { display: none; }
 
 .today { align-self: start; min-width: 0; }
-.today-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 10px; }
-.today-head h2 { margin: 0; color: var(--periwinkle-300); font-size: 1.05rem; font-weight: 600; }
+.today-head, .week-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 10px; }
+.today-head h2, .week-head h2 { margin: 0; color: var(--periwinkle-300); font-size: 1.05rem; font-weight: 600; }
 .button {
   font: inherit;
   font-size: 1rem;
@@ -146,6 +146,31 @@ body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-s
 .note { margin: 6px 0 0; color: var(--periwinkle-300); }
 .note:empty { display: none; }
 
+/* The week view (spec 2.3) takes the Today list's place: the next seven days, today first, each a panel with its name and date over
+   its bookings. Its head (This week and Back) stands where the Today list's did, beside the status, and the days run across the whole
+   width under the status, side by side, because a seventh of the Today list's 480 px is too narrow for a booking; in portrait the head
+   and the days stack under the status, and each day is a row. Nothing scrolls: the bookings that do not fit a day's box are left
+   out, and "+N more" counts them (sign.js fitWeek). */
+body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0, 1fr); row-gap: 1.25rem; padding-bottom: clamp(1rem, 3vh, 2rem); }
+.week { display: contents; }   /* its parts take their places in the .main grid */
+.week-head { grid-column: 2; grid-row: 1; align-self: start; }
+.week .note { grid-column: 1 / -1; grid-row: 2; align-self: start; margin: 0; }
+.days { grid-column: 1 / -1; grid-row: 2; list-style: none; margin: 0; padding: 0; min-width: 0; min-height: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 0.5rem; }
+.days:empty { display: none; }
+.day { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 0.625rem 0.75rem; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }
+.day[aria-current] { outline: 1px solid rgba(255, 255, 255, 0.4); outline-offset: -1px; }   /* today, among the seven */
+.day-head { flex: none; }
+.day-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1rem; font-weight: 600; }   /* "Wednesday" is one line, or an ellipsis on a small sign */
+.day-date { display: block; color: var(--periwinkle-300); font-size: 0.875rem; }
+.none { margin: 0.625rem 0 0; color: var(--periwinkle-300); font-size: 0.875rem; }
+.slots { list-style: none; margin: 0.5rem 0 0; padding: 0; flex: 1 1 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 0.375rem; }
+.slot { flex: none; padding: 0.375rem 0.5rem; border-radius: 12px; background: rgba(255, 255, 255, 0.07); }
+.slot time { display: block; color: var(--periwinkle-300); font-size: 0.8125rem; font-variant-numeric: tabular-nums; }
+.slot .title { margin: 0.125rem 0 0; overflow: hidden; overflow-wrap: anywhere; font-size: 0.875rem; line-height: 1.25; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }   /* two lines, then an ellipsis */
+.slot .who { margin: 0.125rem 0 0; color: var(--periwinkle-300); font-size: 0.75rem; }
+.slot.now { box-shadow: inset 0 0 0 2px var(--status); }   /* the booking in progress, ringed as on the Today list */
+.more { flex: none; padding: 0 0.5rem; color: var(--periwinkle-300); font-size: 0.75rem; }
+
 /* The scoreboard strip along the bottom edge: hidden until the sign has a score to show. */
 .score {
   position: relative;
@@ -168,4 +193,16 @@ body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-s
   .main { grid-template-columns: minmax(0, 1fr); }
   .room { font-size: clamp(2.6rem, 11vw, 4.6rem); }
   .room.long { font-size: clamp(2rem, 7vw, 3rem); }
+  body[data-view="week"] .main { grid-template-rows: auto auto minmax(0, 1fr); }
+  .week-head { grid-column: 1; grid-row: 2; margin-bottom: calc(10px - 1.25rem); }   /* the head and the days, ten pixels apart */
+  .week .note { grid-row: 3; }
+  .days { grid-row: 3; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(7, minmax(0, 1fr)); }
+  .day { flex-direction: row; gap: 1rem; padding: 0.5rem 0.75rem; }
+  .day-head { width: 7rem; }
+  .none { align-self: center; margin: 0; }
+  .slots { margin: 0; gap: 0.25rem; }
+  .slot { display: grid; grid-template-columns: 5rem minmax(0, 1fr) auto; grid-template-areas: "time title who"; column-gap: 0.5rem; align-items: baseline; padding: 0.1875rem 0.5rem; }
+  .slot time { grid-area: time; }
+  .slot .title { grid-area: title; margin: 0; -webkit-line-clamp: 1; }
+  .slot .who { grid-area: who; margin: 0; }
 }

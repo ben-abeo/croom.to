@@ -16,14 +16,14 @@ import tempfile
 import threading
 import urllib.request
 import zlib
-from datetime import datetime, timedelta
+from datetime import datetime, time as time_of_day, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from aiohttp import web
 
-from croom.calendar.providers.base import MeetingPlatform
+from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.control import service as control_service
 from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService
 from croom.devices.errors import Interrupted, NotReady
@@ -219,7 +219,7 @@ def test_door_sign_follows_the_room_state(browser):
         assert page.locator("#chip-text").inner_text().startswith("Free until")
         assert sign_colors(page) == (SIGN_GREEN, SIGN_GREEN, SIGN_NAVY)   # a green rail and chip on navy, never a green wall
         assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY   # navy words on green
-        assert [b.get_attribute("id") for b in page.locator("button").all()] == ["this-week"]  # a sign has one thing to press
+        assert [b.get_attribute("id") for b in page.locator("button:visible").all()] == ["this-week"]  # a sign has one thing to press at a time (Back waits, hidden, for the week view)
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
                           data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
@@ -709,11 +709,54 @@ def luminance(colour):
     return 0.2126 * red + 0.7152 * green + 0.0722 * blue
 
 
+# The week view's words, found when it is open on a week with every kind of day (a busy one with "+N more", an empty one); a hidden
+# one (a booking left out, a "+N more" not needed) has no box to measure.
+WEEK_WORDS = {"week heading": ".week-head h2", "Back": "#week-back", "day name": "#week .day-name", "date": "#week .day-date",
+              "booking time": "#week .slot:not([hidden]) time", "booking title": "#week .slot:not([hidden]) .title", "booking platform": "#week .slot:not([hidden]) .who",
+              "nothing booked": "#week .none", "more": "#week .more:not([hidden])"}
+LABELS = {"This week", "Back"}    # a button's label: measured over its own text, so that a fill behind it counts
+HIDE_TODAYS_WORDS = ".top *, .status *, .today-head h2, .event > * { visibility: hidden !important; } #this-week { color: transparent !important; }"   # the rows keep their own veil, the buttons their border and fill
+HIDE_THE_WEEKS_WORDS = ".top *, .status *, .week-head h2, .day-head *, .slot > *, .none, .more { visibility: hidden !important; } #week-back { color: transparent !important; }"
+
+
+def contrast_of_every_word(page, browser, selectors, hide):
+    """The words named in `selectors` (name -> CSS selector), each with its WCAG contrast against the brightest 1 % of the picture behind it
+    (the screen with the words hidden by the CSS in `hide`): [(name, contrast, least allowed)]. A label's box is its text alone, and
+    only its colour is hidden, so that whatever the button has behind the label is part of what the label is read against."""
+    words = page.evaluate("""([selectors, labels]) => Object.entries(selectors).flatMap(([name, selector]) => [...document.querySelectorAll(selector)].map((e) => {
+        let r = e.getBoundingClientRect();
+        if (labels.includes(name)) {                                                   // the box of the label's text, not of the button around it
+            const range = document.createRange();
+            range.selectNodeContents([...e.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim()));
+            r = range.getBoundingClientRect();
+        }
+        const s = getComputedStyle(e);
+        return { name: name, x: r.x, y: r.y, width: r.width, height: r.height, color: s.color, size: parseFloat(s.fontSize), weight: parseInt(s.fontWeight) };
+    }))""", [selectors, sorted(LABELS)])
+    assert {w["name"] for w in words} == set(selectors)                                # every kind of word was found
+    hiding = page.add_style_tag(content=hide)
+    picture = base64.b64encode(page.screenshot()).decode()
+    hiding.evaluate("e => e.remove()")
+    reader = browser.new_page()
+    try:
+        lights = reader.evaluate(BRIGHTEST_BEHIND, [picture, words])
+    finally:
+        reader.close()
+    measured = []
+    for word, light in zip(words, lights):
+        ink = tuple(int(v) for v in re.findall(r"\d+", word["color"])[:3])
+        large = word["size"] >= 24 or (word["size"] >= 18.66 and word["weight"] >= 700)
+        measured.append((word["name"], (luminance(ink) + 0.05) / (light + 0.05), 3.0 if large else 4.5))
+    return measured
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
 @pytest.mark.parametrize("key", PHOTOGRAPHS)
-def test_every_word_keeps_its_contrast_over_every_photograph(browser, key):
+def test_every_word_keeps_its_contrast_over_every_photograph(browser, key, width, height):
     """Measured, not looked at: with the words hidden, the brightest 1 % of the picture behind each word (so each word is judged at the
     hardest it is to read over this photograph) against the word's own colour: 4.5 to 1 for text, 3 to 1 for large text (WCAG AA). A
-    photograph swapped in later that is too bright where the words are fails here, by name.
+    photograph swapped in later that is too bright where the words are fails here, by name. At both sizes (the photograph is cropped
+    differently on a tall sign, and the words sit elsewhere on it), on the Today list and on the week view.
 
     The page's clock is pinned. The date and the clock are right-aligned, so a short one is a narrow box at the very edge, where the
     brightest part of a photograph is (the stadium's floodlights are under the date); a long one reaches over darker picture. Friday,
@@ -721,9 +764,10 @@ def test_every_word_keeps_its_contrast_over_every_photograph(browser, key):
     the worst case, and measures it on every day, not only on the days of the calendar that happen to be short."""
     skip_if_day_ends_within(2)
     bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 70), event("e3", "Sales pipeline", 100)]
+    bookings += [event_on(f"w{n}", f"Planning review {n}", 1, 8 + n, 0, url=None, platform=MeetingPlatform.UNKNOWN if n % 2 else MeetingPlatform.ZOOM) for n in range(8)]   # a busy tomorrow
     with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
         choose(server, sign_background=key)
-        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page = browser.new_page(viewport={"width": width, "height": height})
         page.clock.install(time=datetime(2026, 5, 1, 1, 5))
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
@@ -731,23 +775,12 @@ def test_every_word_keeps_its_contrast_over_every_photograph(browser, key):
         page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
         page.wait_for_selector("#events .event", timeout=5000)
         wait_for_the_photograph_to_paint(page)
-        words = page.evaluate("""(selectors) => Object.entries(selectors).flatMap(([name, selector]) => [...document.querySelectorAll(selector)].map((e) => {
-            const r = e.getBoundingClientRect(), s = getComputedStyle(e);
-            return { name: name, x: r.x, y: r.y, width: r.width, height: r.height, color: s.color, size: parseFloat(s.fontSize), weight: parseInt(s.fontWeight) };
-        }))""", SIGN_WORDS)
-        assert {w["name"] for w in words} == set(SIGN_WORDS)                 # every kind of word was found
-        page.add_style_tag(content=".top *, .status *, .today-head *, .event > * { visibility: hidden !important; }")   # the rows keep their own veil
-        picture = base64.b64encode(page.screenshot()).decode()
-        reader = browser.new_page()
-        try:
-            lights = reader.evaluate(BRIGHTEST_BEHIND, [picture, words])
-        finally:
-            reader.close()
-        for word, light in zip(words, lights):
-            ink = tuple(int(v) for v in re.findall(r"\d+", word["color"])[:3])
-            contrast = (luminance(ink) + 0.05) / (light + 0.05)
-            large = word["size"] >= 24 or (word["size"] >= 18.66 and word["weight"] >= 700)
-            assert contrast >= (3.0 if large else 4.5), (key, word["name"], round(contrast, 2))
+        for name, contrast, least in contrast_of_every_word(page, browser, SIGN_WORDS, HIDE_TODAYS_WORDS):
+            assert contrast >= least, (key, width, height, "Today", name, round(contrast, 2))
+        open_the_week(page)
+        wait_for_the_photograph_to_paint(page)
+        for name, contrast, least in contrast_of_every_word(page, browser, WEEK_WORDS, HIDE_THE_WEEKS_WORDS):
+            assert contrast >= least, (key, width, height, "week", name, round(contrast, 2))
         page.close()
 
 
@@ -1071,8 +1104,11 @@ def test_a_photograph_that_failed_is_asked_for_again_after_an_outage(browser):
 def test_a_photograph_whose_request_never_answers_is_given_up_on_after_twenty_seconds(browser, monkeypatch):
     """A connection that went half open neither answers nor fails. The sign waits twenty seconds and then counts the photograph as
     failed (plain, with the glow); until then it waits on bare navy, and it never asks again at a poll. The request is held by the
-    server itself (the test's own middleware answers nothing until told to), and the page's clock runs the twenty seconds in a moment."""
-    release, held = threading.Event(), []
+    server itself (the test's own middleware answers nothing until told to), and the page's clock runs the twenty seconds in a moment, one
+    status poll at a time (the page's clock also drives AbortSignal.timeout, so a poll inside a longer jump could abort under load, which
+    shows the sign as outage and has it ask for the photograph again). Giving up also lets go of the request: the server sees the
+    connection close, which it does not while the sign still waits."""
+    release, held, dropped = threading.Event(), [], []
     served = control_service._static_no_cache
 
     @web.middleware
@@ -1080,6 +1116,7 @@ def test_a_photograph_whose_request_never_answers_is_given_up_on_after_twenty_se
         if request.path == "/static/backgrounds/capitol.jpg":
             held.append(request.method)
             while not release.is_set():
+                dropped.append(request.transport is None or request.transport.is_closing())   # aiohttp drops the transport once the browser has closed the connection
                 await asyncio.sleep(0.05)
         return await served(request, handler)
 
@@ -1094,19 +1131,388 @@ def test_a_photograph_whose_request_never_answers_is_given_up_on_after_twenty_se
             page.wait_for_timeout(300)
             assert held == ["GET"]                                                             # the picture was asked for, and is not answered
             page.clock.pause_at(datetime.now() + timedelta(seconds=2))
-            page.clock.run_for(15000)                                                          # about 17 seconds in: still waiting
+            for _ in range(3):
+                poll(page)                                                                     # about 17 seconds in: still waiting
             assert page.evaluate("document.body.dataset.photo === undefined && !('photoMissing' in document.body.dataset)")
             assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"            # bare navy: not given up yet
-            page.clock.run_for(6000)                                                           # about 23 seconds in: given up
+            assert dropped and not any(dropped)                                                # and the request is still held open: the sign has not let go
+            poll(page)                                                                         # about 22 seconds in: given up
             page.wait_for_function("'photoMissing' in document.body.dataset", timeout=5000)
             assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "block"           # plain, with the glow
             assert page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage") == "none"
             assert page.evaluate("document.body.dataset.bg") == "capitol"                      # and it still says which was chosen
-            page.clock.run_for(10000)                                                          # two polls more
+            for _ in range(50):                                                                # the let-go reaches the server a moment after the give-up
+                if dropped[-1]:
+                    break
+                page.wait_for_timeout(100)
+            assert dropped[-1], "the sign gave the photograph up but left its request open"   # the request was released, not just forgotten
+            poll(page)
+            poll(page)                                                                         # two polls more
             assert held == ["GET"]                                                             # one request, while it stalled and after it was given up
         finally:
             release.set()                                                                       # the server may stop: its held request goes
             page.close()
+
+
+# --- the week view: This week replaces the Today list with seven days, today first (spec 2026-10-13, section 2.3) ---
+
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def event_on(event_id, title, days_ahead, hour, minute, duration=45, url="https://zoom.us/j/98765432100?pwd=abc", platform=MeetingPlatform.ZOOM):
+    """A booking `days_ahead` days from today at hour:minute on the device's clock (event() counts minutes from now instead)."""
+    start = datetime.combine(datetime.now().astimezone().date() + timedelta(days=days_ahead), time_of_day(hour, minute)).astimezone()
+    return CalendarEvent(id=event_id, title=title, start_time=start, end_time=start + timedelta(minutes=duration), meeting_url=url, meeting_platform=platform)
+
+
+def the_next_seven_days():
+    """What the week view heads its columns with, from the test's own clock: the day names and the dates ("Oct 14")."""
+    today = datetime.now().astimezone().date()
+    days = [today + timedelta(days=n) for n in range(7)]
+    return [WEEKDAYS[d.weekday()] for d in days], [f"{d:%b} {d.day}" for d in days]
+
+
+def open_the_week(page):
+    page.click("#this-week")
+    page.wait_for_function("document.body.dataset.view === 'week' && document.querySelectorAll('#week .day').length === 7", timeout=5000)
+
+
+def visible_buttons(page):
+    return page.locator("button:visible").evaluate_all("buttons => buttons.map(b => b.id)")
+
+
+def test_this_week_shows_seven_columns_and_back_returns(browser):
+    skip_if_day_ends_within(1)                                              # the first booking is 40 minutes out, on today's list
+    names, dates = the_next_seven_days()
+    bookings = [event("e1", "Customer call", 40),
+                event_on("e2", "Design review", 1, 10, 0, url="https://meet.google.com/abc-defg-hij", platform=MeetingPlatform.GOOGLE_MEET),
+                event_on("e3", "Sales pipeline", 1, 14, 30),
+                event_on("e4", "Offsite lunch", 3, 12, 0, url=None, platform=MeetingPlatform.UNKNOWN)]
+    for width, height in ((1280, 800), (800, 1280)):
+        with PageServer(calendar_events=bookings, room_name="Boardroom") as server:
+            page = open_sign(browser, server, width, height)
+            errors, asked = [], []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.on("request", lambda r: asked.append(r.url) if r.url.endswith("/api/calendar/week") else None)
+            page.wait_for_selector("#events .event", timeout=5000)
+            assert page.locator("#week").is_hidden() and page.evaluate("document.body.dataset.view") == "today"
+            assert asked == [] and visible_buttons(page) == ["this-week"]    # the week is asked for when it is wanted; a sign has one thing to press
+            today_head = page.locator(".today-head").bounding_box()
+            open_the_week(page)
+            assert page.locator("#today").is_hidden() and page.locator("#week").is_visible() and len(asked) == 1
+            days = page.locator("#week .day")
+            assert page.locator("#week .day-name").all_text_contents() == names           # today first, then the six days after it
+            assert page.locator("#week .day-date").all_text_contents() == dates
+            assert page.locator("#week .day[aria-current='date']").count() == 1 and days.first.get_attribute("aria-current") == "date"
+            rows = lambda selector: [days.nth(n).locator(selector).all_text_contents() for n in range(7)]
+            assert rows(".slot .title") == [["Customer call"], ["Design review", "Sales pipeline"], [], ["Offsite lunch"], [], [], []]
+            assert rows(".slot .who") == [["Zoom"], ["Google Meet", "Zoom"], [], [], [], [], []]       # the platform in small type; none for a booking with no link
+            assert rows(".slot time")[1] == ["10:00 AM", "2:30 PM"] and rows(".slot time")[3] == ["12:00 PM"]
+            assert all(re.match(TWELVE_HOUR, t) for column in rows(".slot time") for t in column)
+            assert rows(".none") == [[], [], ["Nothing booked"], [], ["Nothing booked"], ["Nothing booked"], ["Nothing booked"]]   # a day with no bookings says so
+            assert page.locator("#chip-text").inner_text().startswith("Free until") and page.locator("#room-name").inner_text() == "Boardroom"   # the status stays
+            assert page.locator("#week-back").inner_text() == "Back" and visible_buttons(page) == ["week-back"]
+            boxes = [days.nth(n).bounding_box() for n in range(7)]
+            if width > height:                                              # landscape: side by side in one row, the same width
+                assert all(abs(b["y"] - boxes[0]["y"]) <= 0.5 and abs(b["height"] - boxes[0]["height"]) <= 0.5 for b in boxes)
+                assert all(abs(b["width"] - boxes[0]["width"]) <= 1 for b in boxes)
+                assert all(a["x"] + a["width"] <= b["x"] for a, b in zip(boxes, boxes[1:]))
+                week_head = page.locator(".week-head").bounding_box()
+                assert all(abs(week_head[k] - today_head[k]) <= 1 for k in ("x", "y", "width"))      # the head stands where the Today list's did: Back is where This week was
+            else:                                                           # portrait: stacked, one under the next, the same height
+                assert all(abs(b["x"] - boxes[0]["x"]) <= 0.5 and abs(b["width"] - boxes[0]["width"]) <= 0.5 for b in boxes)
+                assert all(abs(b["height"] - boxes[0]["height"]) <= 1 for b in boxes)
+                assert all(a["y"] + a["height"] <= b["y"] for a, b in zip(boxes, boxes[1:]))
+            assert all(b["x"] >= 0 and b["x"] + b["width"] <= width and b["y"] >= 0 and b["y"] + b["height"] <= height for b in boxes)
+            assert fits(page)
+            page.click("#week-back")                                         # Back: the Today list again
+            assert page.locator("#week").is_hidden() and page.locator("#today").is_visible() and page.evaluate("document.body.dataset.view") == "today"
+            assert page.locator("#events .event").count() == 1 and visible_buttons(page) == ["this-week"] and fits(page)
+            open_the_week(page)                                              # and again: asked for afresh, shown afresh
+            assert len(asked) == 2 and page.locator("#week .day").count() == 7
+            assert errors == []
+            page.close()
+
+
+def test_the_week_view_returns_to_today_after_thirty_idle_seconds(browser):
+    """On the page's own clock, stopped: each jump below lets every timer that falls due in it fire once, at its end."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        view = lambda: page.evaluate("document.body.dataset.view")
+
+        def pass_seconds(seconds):
+            page.clock.fast_forward(seconds * 1000)
+            page.wait_for_timeout(300)
+
+        open_the_week(page)
+        pass_seconds(29)
+        assert view() == "week"                                              # 29 seconds without a tap: still there ...
+        pass_seconds(2)
+        assert view() == "today" and page.locator("#today").is_visible() and page.locator("#week").is_hidden()   # ... and at 31 it is back on Today
+        assert page.locator("#events .event").count() == 1 and visible_buttons(page) == ["this-week"]
+
+        open_the_week(page)                                                  # a tap inside the week view starts the 30 seconds again
+        pass_seconds(25)
+        page.click("#week .day >> nth=2")
+        pass_seconds(29)
+        assert view() == "week"                                              # 54 seconds since it opened, 29 since the tap
+        pass_seconds(2)
+        assert view() == "today"                                             # 31 since the tap
+
+        open_the_week(page)                                                  # Back puts the wait away: the next visit has its own
+        pass_seconds(10)
+        page.click("#week-back")
+        assert view() == "today"
+        pass_seconds(10)
+        open_the_week(page)
+        pass_seconds(29)
+        assert view() == "week"                                              # 49 seconds after the first visit began: its wait would have closed this one at 30
+        pass_seconds(2)
+        assert view() == "today"
+        page.close()
+
+
+def test_a_week_that_is_loading_or_cannot_be_loaded_says_so_and_back_still_works(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = open_sign(browser, server)
+        errors, held = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/api/calendar/week", lambda route: held.append(route))           # not answered until the test says
+        page.click("#this-week")
+        page.wait_for_function("document.body.dataset.view === 'week'", timeout=5000)
+        for _ in range(50):                                                  # the request reaches the test a moment after the tap
+            if held:
+                break
+            page.wait_for_timeout(100)
+        assert len(held) == 1 and page.locator("#week-note").inner_text() == "Loading the week." and page.locator("#week .day").count() == 0
+        assert visible_buttons(page) == ["week-back"] and page.locator("#week-days").is_hidden() and fits(page)    # Back is there while the days are not
+        held[0].abort()                                                              # the request fails
+        page.wait_for_function("document.getElementById('week-note').innerText === 'The week could not be loaded.'", timeout=5000)
+        assert page.locator("#week .day").count() == 0
+        assert page.evaluate("document.body.dataset.view") == "week" and visible_buttons(page) == ["week-back"] and fits(page)
+        page.click("#week-back")
+        assert page.locator("#today").is_visible() and page.locator("#week").is_hidden()
+        page.unroute("**/api/calendar/week")
+        open_the_week(page)                                                  # the next visit tries again, and the note is gone
+        assert page.locator("#week-note").inner_text() == "" and page.locator("#week-note").is_hidden()
+        assert errors == []
+        page.close()
+
+
+def test_the_weeks_first_day_leaves_out_what_has_ended_and_rings_what_is_on(browser):
+    skip_if_day_ends_within(2)
+    now = datetime.now().astimezone()
+    if now - now.replace(hour=0, minute=0, second=0, microsecond=0) < timedelta(hours=1):
+        pytest.skip("less than an hour has passed in the local day")        # the finished booking began 50 minutes ago
+    ended, on, later = event("e1", "Finished standup", -50, duration=30), event("e2", "Design review", -10, duration=40), event("e3", "Sales pipeline", 90)
+    with PageServer(calendar_events=[ended, on, later]) as server:
+        page = open_sign(browser, server, state="occupied")
+        open_the_week(page)
+        today = page.locator("#week .day").first
+        assert today.locator(".slot .title").all_text_contents() == ["Design review", "Sales pipeline"]   # what is over is not on the sign's week
+        assert today.locator(".slot.now .title").all_text_contents() == ["Design review"] and page.locator("#week .slot.now").count() == 1
+        assert today.locator(".slot.now").evaluate("e => getComputedStyle(e).boxShadow") == "rgb(229, 72, 77) 0px 0px 0px 2px inset"   # ringed as on the Today list
+        assert today.locator(".slot:not(.now)").evaluate("e => getComputedStyle(e).boxShadow") == "none"
+        page.close()
+    with PageServer(calendar_events=[ended]) as server:                      # nothing left today
+        page = open_sign(browser, server)
+        open_the_week(page)
+        assert page.locator("#week .day").first.locator(".none").all_text_contents() == ["Nothing booked"]
+        page.close()
+
+
+def test_the_week_view_goes_when_the_calendar_does_and_comes_back_with_it(browser):
+    """The week needs the calendar as the Today list does: with it gone the sign shows neither, and the view a person left open is
+    there again when the calendar returns."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        open_the_week(page)
+
+        def without_the_calendar(route):
+            body = route.fetch().json()
+            body["calendar"]["connected"] = False
+            route.fulfill(json=body)
+
+        page.route("**/api/status", without_the_calendar)
+        poll(page)
+        assert page.locator("#week").is_hidden() and page.locator("#today").is_hidden() and page.evaluate("document.body.dataset.view") == "today"
+        page.unroute("**/api/status")
+        poll(page)
+        assert page.locator("#week").is_visible() and page.locator("#week .day").count() == 7 and page.locator("#today").is_hidden()
+        page.close()
+
+
+def week_fit(page):
+    """What each day of the open week view shows: [bookings, shown, the "+N more" text or None, clipped], clipped when a day's
+    bookings stick out of its box."""
+    return page.evaluate("""() => [...document.querySelectorAll('#week .day')].map((day) => {
+        const slots = day.querySelector('.slots'), rows = [...day.querySelectorAll('.slot')], more = day.querySelector('.more');
+        return [rows.length, rows.filter((row) => !row.hidden).length, more && !more.hidden ? more.textContent : null, slots ? slots.scrollHeight > slots.clientHeight : false];
+    })""")
+
+
+FULL_WEEK_TITLES = ["Standup", "Design review", "Quarterly planning review with the regional leadership teams", "Customer call", "Sales pipeline", "Vendor demo",
+                    "Board meeting", "Wrap up"]
+
+
+def a_full_week():
+    """Three bookings today, an hour apart from 40 minutes out, and eight on each of the six days after it."""
+    return ([event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+            + [event_on(f"d{d}{n}", FULL_WEEK_TITLES[n], d, 8 + n, 0) for d in range(1, 7) for n in range(8)])
+
+
+def test_the_week_view_fits_a_full_week_at_every_size_and_counts_what_it_leaves_out(browser):
+    """A day shows the bookings that fit its box, whole (none cut across), and "+N more" says how many it left out. A day with the
+    three bookings the Today list holds shows all three, at both sizes of the sign."""
+    skip_if_day_ends_within(3)
+    for width, height, least in ((1280, 800, 3), (800, 1280, 2), (1920, 1080, 2)):
+        with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
+            page = open_sign(browser, server, width, height)
+            open_the_week(page)
+            assert fits(page), (width, height)
+            week = week_fit(page)
+            assert week[0] == [3, 3, None, False], (width, height, week[0])                  # today's three: all of them, and no "+N more"
+            for rows, shown, more, clipped in week[1:]:
+                assert rows == 8 and shown >= least and not clipped, (width, height, rows, shown, clipped)
+                assert more == f"+{rows - shown} more", (width, height, shown, more)         # what is left out is counted
+            page.close()
+
+
+def test_the_week_view_fits_a_full_week_with_long_names_on_every_sign(browser):
+    """The worst case for room: a room name over two lines, a long location, company and titles, on the signs from a small kiosk to a
+    full HD one. Fewer bookings show, and none is cut across or runs off the sign."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen, past the elevators",
+                    room_company="Lone Star Eye Care and Surgery Partners") as server:
+        for width, height in ((1280, 800), (800, 1280), (1920, 1080), (1024, 600), (1080, 1920)):
+            page = open_sign(browser, server, width, height)
+            open_the_week(page)
+            assert fits(page), (width, height)
+            for n, (rows, shown, more, clipped) in enumerate(week_fit(page)):
+                assert not clipped, (width, height, n)
+                assert more == (f"+{rows - shown} more" if shown < rows else None), (width, height, n, rows, shown, more)
+            boxes = page.locator("#week .day").evaluate_all("days => days.map((d) => { const b = d.getBoundingClientRect(); return [b.left, b.top, b.right, b.bottom]; })")
+            assert all(left >= 0 and top >= 0 and right <= width and bottom <= height for left, top, right, bottom in boxes), (width, height)
+            page.close()
+
+
+def test_the_week_view_refits_when_the_sign_is_turned(browser):
+    """A day's bookings are fitted to the box it has: turned on its stand, the sign shows what fits the new box, more or fewer than
+    before, as a sign loaded in that position would."""
+    skip_if_day_ends_within(3)
+    landscape, portrait = {"width": 1280, "height": 800}, {"width": 800, "height": 1280}
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom") as server:
+        fresh = {}
+        for name, size in (("landscape", landscape), ("portrait", portrait)):
+            page = open_sign(browser, server, **size)
+            open_the_week(page)
+            fresh[name] = week_fit(page)
+            page.close()
+        assert fresh["landscape"] != fresh["portrait"]                          # the two boxes do hold different numbers
+        page = open_sign(browser, server, **landscape)
+        open_the_week(page)
+        for name, size in (("portrait", portrait), ("landscape", landscape), ("portrait", portrait)):
+            page.set_viewport_size(size)
+            for _ in range(50):
+                if week_fit(page) == fresh[name]:
+                    break
+                page.wait_for_timeout(100)
+            assert week_fit(page) == fresh[name], name
+            assert fits(page), name
+        page.close()
+
+
+def test_the_week_view_gives_way_to_the_scoreboard_strip_when_it_comes_up(browser):
+    """The strip (spec section 2.5) takes the bottom of the sign when it has a score; the days refit above it, and nothing runs under it."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
+        page = open_sign(browser, server)
+        open_the_week(page)
+        before = week_fit(page)
+        page.evaluate("""() => { document.getElementById('score-last').textContent = 'Texas (#4) 45 - Texas A&M 42'; document.getElementById('score').hidden = false; }""")
+        for _ in range(50):                                                  # the box shrinks at once; the days are fitted to it a moment later
+            after = week_fit(page)
+            if after != before and not any(clipped for _, _, _, clipped in after):
+                break
+            page.wait_for_timeout(100)
+        assert sum(shown for _, shown, _, _ in after) < sum(shown for _, shown, _, _ in before)           # less room, so fewer bookings
+        assert not any(clipped for _, _, _, clipped in after) and fits(page)
+        assert page.locator("#week-days").evaluate("e => e.getBoundingClientRect().bottom") <= page.locator("#score").evaluate("e => e.getBoundingClientRect().top")
+        page.close()
+
+
+def test_a_poll_that_changes_nothing_redraws_nothing_in_the_week(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        open_the_week(page)
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || '') + ':' + r.target.nodeName)))
+                .observe(document.getElementById('week'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == []                             # the same week: the days are not drawn again
+        assert page.locator("#week .day").count() == 7
+        page.close()
+
+
+@pytest.mark.parametrize("zone", ["America/Los_Angeles", "Pacific/Auckland"])
+def test_the_weeks_dates_are_the_rooms_days_whatever_zone_the_browser_keeps(browser, zone):
+    """"2026-10-14" is a day, not a moment: read as midnight UTC it would be the evening of the 13th in Los Angeles."""
+    skip_if_day_ends_within(1)                                              # the names and dates below are today's, and the page asks for its own
+    names, dates = the_next_seven_days()
+    with PageServer() as server:
+        page = open_sign(browser, server, timezone_id=zone)
+        open_the_week(page)
+        assert page.locator("#week .day-name").all_text_contents() == names
+        assert page.locator("#week .day-date").all_text_contents() == dates
+        page.close()
+
+
+def test_the_week_view_is_opened_kept_and_left_by_touch(browser):
+    """The hallway screen is a touchscreen: its taps are touches, which must open the week, keep it open and put it away."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800}, has_touch=True)
+        page.clock.install()
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        view = lambda: page.evaluate("document.body.dataset.view")
+        page.tap("#this-week")
+        page.wait_for_function("document.body.dataset.view === 'week' && document.querySelectorAll('#week .day').length === 7", timeout=5000)
+        page.clock.fast_forward(25_000)
+        page.wait_for_timeout(300)
+        page.tap("#week .day >> nth=1")                                      # a touch inside the week view starts the 30 seconds again
+        page.clock.fast_forward(29_000)
+        page.wait_for_timeout(300)
+        assert view() == "week"                                              # 54 seconds since it opened, 29 since the touch
+        page.clock.fast_forward(2_000)
+        page.wait_for_timeout(300)
+        assert view() == "today"
+        page.tap("#this-week")
+        page.wait_for_function("document.body.dataset.view === 'week'", timeout=5000)
+        page.tap("#week-back")
+        assert view() == "today" and page.locator("#today").is_visible()
+        page.close()
+
+
+def test_the_week_view_can_be_opened_and_left_from_the_keyboard(browser):
+    """Focus goes where the person is: to Back when the week opens, and to This week when it closes."""
+    with PageServer() as server:
+        page = open_sign(browser, server)
+        page.focus("#this-week")
+        page.keyboard.press("Enter")
+        page.wait_for_function("document.body.dataset.view === 'week'", timeout=5000)
+        assert page.evaluate("document.activeElement.id") == "week-back"
+        page.keyboard.press("Enter")
+        assert page.evaluate("document.body.dataset.view") == "today" and page.evaluate("document.activeElement.id") == "this-week"
+        page.close()
 
 
 def free_port():

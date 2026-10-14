@@ -7,7 +7,7 @@
 <link rel="icon" href="/static/crystalpm-logo-white.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/sign.css">
 </head>
-<body data-state="loading" data-bg="skyline">
+<body data-state="loading" data-bg="skyline" data-view="today">
 <main class="sign">
   <div class="backdrop" aria-hidden="true">
     <div class="glow"></div>
@@ -43,6 +43,15 @@
       <ul id="events" class="events"></ul>
       <p id="calendar-note" class="note"></p>
     </div>
+
+    <section id="week" class="week" aria-labelledby="week-title" hidden>
+      <div class="week-head">
+        <h2 id="week-title">This week</h2>
+        <button id="week-back" class="button" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>Back</button>
+      </div>
+      <ol id="week-days" class="days"></ol>
+      <p id="week-note" class="note"></p>
+    </section>
   </section>
 
   <footer id="score" class="score" hidden>

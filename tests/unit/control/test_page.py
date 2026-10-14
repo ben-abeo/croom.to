@@ -2110,7 +2110,7 @@ def test_on_a_sign_too_narrow_for_a_line_it_breaks_between_the_teams_and_never_i
         page.close()
 
 
-def test_a_next_game_at_a_neutral_site_reads_vs_in_the_order_espn_lists_it_and_a_last_game_is_unchanged(browser, central_time):
+def test_the_scoreboard_reads_vs_for_a_next_game_at_a_neutral_site_in_the_order_espn_lists_it_and_a_last_game_is_unchanged(browser, central_time):
     """The Red River game is marked neutralSite with Oklahoma listed home: "Texas (#4) @ Oklahoma" would call Oklahoma the host. A bowl or a
     championship game would read the same way. The line of the last game is the same at a neutral site as anywhere."""
     red_river = schedule("Texas", [game("Oklahoma", "Texas", "2026-10-10T19:30Z", home_score=27, away_score=24, away_rank=1, state="post", neutral=True),
@@ -2125,7 +2125,7 @@ def test_a_next_game_at_a_neutral_site_reads_vs_in_the_order_espn_lists_it_and_a
         page.close()
 
 
-def test_the_next_game_reads_at_unless_the_status_says_neutral_is_true(browser):
+def test_the_scoreboards_next_game_reads_at_unless_the_status_says_neutral_is_true(browser):
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         flag = {}
@@ -2144,7 +2144,7 @@ def test_the_next_game_reads_at_unless_the_status_says_neutral_is_true(browser):
         page.close()
 
 
-def test_a_date_is_the_month_and_the_day_without_leading_zeros(browser):
+def test_the_scoreboard_date_is_the_month_and_the_day_without_leading_zeros(browser):
     """The strip's date is "10/19" for the 19th of October and "9/5" for the 5th of September, as Americans write it."""
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
@@ -2165,7 +2165,7 @@ def test_a_date_is_the_month_and_the_day_without_leading_zeros(browser):
         page.close()
 
 
-def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_strip(browser, central_time):
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_scoreboard_strip(browser, central_time):
     with PageServer(schedules=every_school()) as server:
         choose(server, sign_scores=["texas"])
         scoreboard_has(server, ["texas"])
@@ -2234,7 +2234,7 @@ def test_a_scores_list_with_junk_in_it_draws_what_it_can_and_throws_nothing(brow
         page.close()
 
 
-def test_a_team_name_with_markup_in_it_is_drawn_as_the_text_it_is_and_nothing_is_injected(browser):
+def test_a_scoreboard_team_name_with_markup_in_it_is_drawn_as_the_text_it_is_and_nothing_is_injected(browser):
     """Names come from ESPN and are written to the sign's own page: a name with markup in it must show as typed and run nothing."""
     onerror, script, bold, italic = '<img src=x onerror="window.pwned = 1">', "</span><script>window.pwned = 2</script>", "<b>Ohio State</b>", "a &amp; b <i>c</i>"
     scores = [{"school": "michigan", "name": onerror,

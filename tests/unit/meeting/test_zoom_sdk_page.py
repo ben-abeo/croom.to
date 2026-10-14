@@ -2487,6 +2487,43 @@ async def test_the_title_of_a_dialog_is_the_div_the_client_gives_it_or_a_heading
         assert (b["title"], b["text"]) == ("Join breakout room", "Room 1 is ready.")
 
 
+async def test_the_title_is_the_title_nodes_words_without_a_button_that_sits_in_it():
+    """zmu's Banner puts the OK button inside its title node. The node is the title though it holds a button, and the title is its
+    words without the button's: its text nodes joined as they are, so a word split by an inline element is one word."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const d = document.createElement("div"); d.setAttribute("role", "dialog");
+            d.innerHTML = '<div class="zm-modal-body-title">Lea<b>ve</b> the meeting?<button>Help</button></div><p>You can rejoin.</p><button>Leave</button>';
+            document.body.appendChild(d);
+        }""")
+        [d] = await reported(run, "dialog")
+        assert (d["title"], d["text"], d["buttons"]) == ("Leave the meeting?", "You can rejoin.", ["Help", "Leave"])
+
+
+@pytest.mark.parametrize("label, words, title, expected", [
+    ("Recording has started This meeting is being recorded.", "", "Recording has started", "This meeting is being recorded."),
+    ("  Recording   has started \n This meeting is being recorded.  ", "", "Recording has started", "This meeting is being recorded."),
+    ("Recording has started", "", "Recording has started", ""),                                          # nothing but the title: no words
+    ("Host request", "", "Unmute?", "Host request"),                                                     # not "<title> <description>": the words are never lost
+    ("Aria words", "The words it has.", "Unmute?", "The words it has."),                                 # words of its own: the label is not wanted
+])
+async def test_a_dialog_with_no_words_of_its_own_has_its_aria_label_for_them(label, words, title, expected):
+    """The consent banner has its description only in its aria-label ("<title> <description>"): when the text nodes give no words, the
+    words are the label with the title taken off its start, tidied; a label that does not begin with the title is the words whole,
+    so what a policy matches on is never lost."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""([label, words, title]) => {
+            const d = document.createElement("div"); d.setAttribute("role", "dialog"); d.setAttribute("aria-label", label);
+            d.innerHTML = '<div class="zm-modal-body-title"></div><p></p><button>OK</button>';
+            d.querySelector(".zm-modal-body-title").textContent = title; d.querySelector("p").textContent = words;
+            document.body.appendChild(d);
+        }""", [label, words, title])
+        [d] = await reported(run, "dialog")
+        assert (d["title"], d["text"]) == (title, expected)
+
+
 @pytest.mark.parametrize("classes", ["zm-modal", "zm-modal-legacy"])
 async def test_a_modal_drawn_without_a_role_is_a_dialog_by_its_class(classes):
     async with PageRun() as run:
@@ -2504,16 +2541,22 @@ async def test_a_modal_drawn_without_a_role_is_a_dialog_by_its_class(classes):
 
 
 async def test_the_consent_banner_the_client_draws_in_the_meeting_is_a_dialog_too():
-    """The unified consent notice (recording started, captions, AI Companion) is div.consent-banner[role=banner] with a button.ok-button,
-    never role=dialog: it is reported with its OK and answered like any other, or it stays on the TV. A page header that carries
-    role=banner is not one."""
+    """The unified consent notice (recording started, captions, AI Companion) is div.consent-banner[role=banner], never role=dialog, and
+    zmu's Banner builds it oddly: its OK button sits inside its title node, and its description is no text node, only the banner's
+    aria-label ("<title> <description>"). It is reported with its title, the description for its words and its OK, and answered like
+    any other, or it stays on the TV. The icon that tells more (a div with role=button, not a button) is no button of its, and a page
+    header that carries role=banner is no banner of the client's."""
     async with PageRun() as run:
         await run.wait_for("connected")
         await run.page.evaluate("""() => {
             const header = document.createElement("header"); header.setAttribute("role", "banner"); header.innerHTML = "<button>Menu</button>"; document.body.appendChild(header);
         }""")
         sid = await run.page.evaluate("window.ZoomMtg._showBanner('Recording has started', 'This meeting is being recorded.')")
-        assert await run.page.evaluate("document.querySelectorAll('[role=dialog]').length") == 0         # it is no role=dialog
+        shape = await run.page.evaluate("""(id) => [document.querySelectorAll('[role=dialog]').length,
+            document.querySelector('#' + id + ' .ui-Banner-title button.ok-button') !== null,          // the OK is inside the title node
+            document.querySelector('#' + id + ' [role=button]:not(button)') !== null,                  // the icon that tells more
+            document.getElementById(id).textContent.includes('being recorded')]                        // the description is no text node""", sid)
+        assert shape == [0, True, True, False]
         [d] = await reported(run, "dialog")
         assert d == {"id": d["id"], "title": "Recording has started", "text": "This meeting is being recorded.", "buttons": ["OK"]}
         await asyncio.sleep(0.3)
@@ -2521,6 +2564,10 @@ async def test_the_consent_banner_the_client_draws_in_the_meeting_is_a_dialog_to
         assert await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'ok')") is True
         assert await run.calls("dialog") == [["dialog", "Recording has started", "OK"]] and await presses(run) == [sid]
         assert (await reported(run, "dialog-closed"))[0] == {"id": d["id"]} and await open_dialogs(run) == []
+        bare = await run.page.evaluate("window.ZoomMtg._showBanner('Captions are on', '')")           # no description: no icon, and nothing to say but the title
+        assert await run.page.evaluate("(id) => document.querySelector('#' + id + ' [role=button]:not(button)')", bare) is None
+        e = (await reported(run, "dialog", 2))[1]
+        assert e == {"id": e["id"], "title": "Captions are on", "text": "", "buttons": ["OK"]} and e["id"] != d["id"]
         assert await run.page.evaluate("window.__reactErrors") == []
 
 
@@ -2878,28 +2925,33 @@ async def test_chat_messages_come_as_zoom_6_5_0_sends_them():
             Z._fire("onReceiveChatMsg", { sender: "Ed", timestamp: "10.32", type: "text", content: { text: "A time of day only" } });
             Z._fire("onReceiveChatMsg", { sender: "Flo", timestamp: "10:32 AM", type: "text", content: { text: "Not a date", t: 10.32 } });
             Z._fire("onReceiveChatMsg", { sender: "Ivy", timestamp: "Nov 5", type: "text", content: { text: "A date with no year", t: "1032" } });
+            Z._fire("onReceiveChatMsg", { sender: "Jo", timestamp: "10:34 AM", type: "text", content: { text: "Eleven digits", t: 99999999999 } });      // read as seconds: the year 5138
+            Z._fire("onReceiveChatMsg", { sender: "Kai", timestamp: "10:35 AM", type: "text", content: { text: "A day and a half ahead", t: Date.now() + 36 * 3600 * 1000 } });
         }""")
-        got = await reported(run, "chat", 8)
+        ahead = await run.page.evaluate("""() => { const t = Date.now() + 3600 * 1000; window.ZoomMtg._chat("Lou", "An hour ahead", t); return t; }""")        # a moment a little ahead of the clock is taken
+        got = await reported(run, "chat", 11)
         assert [(c["from"], c["text"]) for c in got] == [("Ann Lee", "Can you hear us?"), ("Cy Dunn", "agenda.pdf"), ("Di", "Seconds"), ("Gus", "t comes first"),
-                                                          ("Hal", ""), ("Ed", "A time of day only"), ("Flo", "Not a date"), ("Ivy", "A date with no year")]
+                                                          ("Hal", ""), ("Ed", "A time of day only"), ("Flo", "Not a date"), ("Ivy", "A date with no year"),
+                                                          ("Jo", "Eleven digits"), ("Kai", "A day and a half ahead"), ("Lou", "An hour ahead")]
         assert [c["at"] for c in got[:5]] == ["2026-10-14T17:46:40.000Z", "2026-10-14T17:47:40.000Z", "2026-10-14T17:48:40.000Z", "2026-10-14T17:49:40.000Z", "2026-10-14T17:51:40.000Z"]
-        arrival = await run.page.evaluate("(ats) => ats.map((at) => Math.abs(Date.parse(at) - Date.now()) < 10000)", [c["at"] for c in got[5:]])
-        assert arrival == [True, True, True]                                                            # dated by its arrival
+        arrival = await run.page.evaluate("(ats) => ats.map((at) => Math.abs(Date.parse(at) - Date.now()) < 10000)", [c["at"] for c in got[5:10]])
+        assert arrival == [True] * 5                                                                    # dated by its arrival
+        assert got[10]["at"] == await run.page.evaluate("(t) => new Date(t).toISOString()", ahead)
         assert run.errors == []
 
 
 async def test_chat_messages_from_other_builds_come_in_other_shapes():
-    """The sender is a name or a record, the words and the time have more than one name, and a time that is no time (not a date, too
-    large for one) is the moment the message came."""
+    """The sender is a name or a record, the words and the time have more than one name (a field that is null is no field: content null
+    falls through to message), and a time that is no time (not a date, too large for one) is the moment the message came."""
     async with PageRun() as run:
         await run.wait_for("connected")
         payloads = [{"senderName": "Raj Patel", "message": "Hello", "timestamp": 1700000000000}, {"sender": "Ann Lee", "text": "Hi", "time": "1700000060000"},
                     {"sender": {"userName": "Cy"}, "msg": "Yo"}, {"content": "Anonymous"}, {"content": "Late", "timestamp": 1e20},
-                    {"sender": {"name": "Di"}, "content": "Dated", "timeStamp": "2023-11-14T22:15:20.000Z"}]
+                    {"sender": {"name": "Di"}, "content": "Dated", "timeStamp": "2023-11-14T22:15:20.000Z"}, {"sender": "Fay", "content": None, "message": "Fallback"}]
         for payload in payloads:
             await run.page.evaluate("(p) => window.ZoomMtg._fire('onReceiveChatMsg', p)", payload)
         got = await reported(run, "chat", len(payloads))
-        assert [(c["from"], c["text"]) for c in got] == [("Raj Patel", "Hello"), ("Ann Lee", "Hi"), ("Cy", "Yo"), ("", "Anonymous"), ("", "Late"), ("Di", "Dated")]
+        assert [(c["from"], c["text"]) for c in got] == [("Raj Patel", "Hello"), ("Ann Lee", "Hi"), ("Cy", "Yo"), ("", "Anonymous"), ("", "Late"), ("Di", "Dated"), ("Fay", "Fallback")]
         assert [c["at"] for c in got[:2]] == ["2023-11-14T22:13:20.000Z", "2023-11-14T22:14:20.000Z"] and got[5]["at"] == "2023-11-14T22:15:20.000Z"
         assert all(c["at"].endswith("Z") and c["at"].startswith("20") for c in got[2:5])
         assert run.errors == []

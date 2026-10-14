@@ -46,9 +46,12 @@ depends on Zoom's behaviour it mirrors Zoom 6.5.0 as its own bundle has it:
   div.zm-modal-footer-default-actions with a ZoomButton (button.zm-btn.zm-btn-legacy) for each label, in the order given. The
   client's own footer draws cancel first and OK last, so a consent reads ["Leave Meeting", "Got it"]. A label may be {label,
   disabled: true}: a ZoomButton has no disabled attribute, only the class zm-btn--disabled, and ignores a press then. With no
-  label at all it is a modal with nothing to press. _showBanner(title, text) is the unified consent notice drawn at the top of the
-  meeting: div#zoom2modal.top > div.consent-banner[role="banner"] (never role="dialog") with div.disclaimer-content__title[role="alert"],
-  its words and button.ok-button "OK" (aria-label "OK"). Both are the client's nodes, as the popovers are: their owner takes them
+  label at all it is a modal with nothing to press. _showBanner(title, description) is the unified consent notice drawn at the top
+  of the meeting, as zmu's Banner composes it: div#zoom2modal.top > div.consent-banner[role="banner"][aria-label="<title>
+  <description>"] > ... > div.MuiAlertTitle-root.ui-Banner-title > div.disclaimer-content, which holds the title row
+  (div.disclaimer-content__title[role="alert"] and, given a description, an info icon that is a div with role="button") AND
+  div.right-section-wrap with button.ok-button "OK": the OK button is inside the title node, and the description is no text node,
+  only the aria-label (never role="dialog"). Both are the client's nodes, as the popovers are: their owner takes them
   out with removeChild, in a microtask after a button that is not disabled is pressed or when Zoom closes them (_closeDialog(id)),
   and anything else that took any of it out first makes that throw (window.__reactErrors). A press is logged as [id, label] in
   window.__presses, and a press the button took as ["dialog", title, label] in window.__zoomCalls. _chat(from, text) and
@@ -409,20 +412,34 @@ window.ZoomMtg = {
     return id;
   },
   // The unified consent notice the client draws at the top of the meeting once the room can use audio and video (recording started,
-  // captions, AI Companion): div#zoom2modal.top > div.consent-banner[role="banner"] (never role="dialog") with a title
-  // (div.disclaimer-content__title[role="alert"]), its words and a button.ok-button "OK" (aria-label "OK", as Zoom's button does).
-  _showBanner(title, text) {
+  // captions, AI Companion), as zmu's Banner composes it in 6.5.0: div#zoom2modal.top > div.consent-banner[role="banner"] whose
+  // aria-label is "<title> <description>" > div.MuiAlert-message > div.ui-Banner-context > div.MuiAlertTitle-root.ui-Banner-title >
+  // div.disclaimer-content, which holds BOTH the title row (div.disclaimer-content__title[role="alert"] and, only when there is a
+  // description, an info icon that is a div with role="button", not a button) and div.right-section-wrap with the OK button
+  // (button.ok-button, aria-label "OK"): the OK button is inside the title node, and the description is no text node, it is only in
+  // the aria-labels (and in a tooltip the client draws when the icon is hovered).
+  _showBanner(title, description) {
     const id = "stub-banner-" + (++this._banners);
     const make = (cls, tag) => { const e = document.createElement(tag || "div"); e.className = cls; return e; };
     let top = document.getElementById("zoom2modal");
     if (!top) { top = make("top"); top.id = "zoom2modal"; document.body.appendChild(top); }
-    const banner = make("consent-banner MuiPaper-root MuiAlert-root MuiAlert-standard"); banner.id = id; banner.setAttribute("role", "banner");
-    const message = make("MuiAlert-message"), head = make("disclaimer-content__title"), words = make("disclaimer-content__text");
-    head.setAttribute("role", "alert"); head.textContent = title; words.textContent = text; message.appendChild(head); message.appendChild(words);
-    const action = make("MuiAlert-action"), ok = make("MuiButtonBase-root MuiButton-root ok-button", "button");
+    const banner = make("MuiPaper-root MuiPaper-outlined MuiAlert-root MuiAlert-outlinedInfo ui-Banner-root ui-Banner-info ui-Banner-inline consent-banner");
+    banner.id = id; banner.setAttribute("role", "banner"); banner.setAttribute("aria-live", "off"); banner.setAttribute("aria-label", description ? title + " " + description : title);
+    const icon = make("MuiAlert-icon ui-Banner-icon-wrapper"); icon.setAttribute("aria-hidden", "true"); icon.appendChild(this._svg());
+    const message = make("MuiAlert-message ui-Banner-message"), context = make("ui-Banner-context");
+    const titleNode = make("MuiTypography-root MuiTypography-body1 MuiAlertTitle-root ui-Banner-title");
+    const content = make("disclaimer-content"), row = make("disclaimer-content__row"), head = make("disclaimer-content__title");
+    head.title = title; head.setAttribute("aria-label", title); head.setAttribute("role", "alert"); head.textContent = title; row.appendChild(head);
+    if (description) {
+      const info = make("disclaimer-info__icon"); info.setAttribute("role", "button"); info.tabIndex = 0; info.setAttribute("aria-label", title + " More information");
+      info.appendChild(this._svg()); row.appendChild(info);
+    }
+    const right = make("right-section-wrap"), ok = make("MuiButtonBase-root MuiButton-root ok-button", "button");
     ok.type = "button"; ok.setAttribute("aria-label", "OK"); ok.textContent = "OK";
     ok.addEventListener("click", () => this._pressed(id, title, "OK", ok));
-    action.appendChild(ok); banner.appendChild(message); banner.appendChild(action); top.appendChild(banner);
+    right.appendChild(ok); content.appendChild(row); content.appendChild(right); titleNode.appendChild(content);
+    context.appendChild(titleNode); context.appendChild(make("ui-Banner-content")); message.appendChild(context);
+    banner.appendChild(icon); banner.appendChild(message); banner.appendChild(make("ui-Banner-close-wrapper")); top.appendChild(banner);
     this._owned[id] = { root: banner, parent: top, links: [[banner, top]] };
     return id;
   },

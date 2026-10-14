@@ -71,7 +71,7 @@
   };
 
   // ---- State as Zoom has it: the current user's record and the client's own buttons ----
-  const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined) return obj[n]; } return undefined; };
+  const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined && obj[n] !== null) return obj[n]; } return undefined; };
   const known = (value) => value !== undefined && value !== null && value !== "";
   const handUp = (user) => !!pick(user, ["raiseHand", "bRaiseHand", "isHandRaised", "bHandRaised"]);
   // The room's id and name from Zoom's record, once Zoom lists the room (before that the record has neither).
@@ -663,18 +663,28 @@
   const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
   const dialogButtons = (el) => Array.from(el.querySelectorAll("button")).filter((b) => clean(labelOf(b)));
   const isOpen = (el) => el.isConnected && el.matches(DIALOG_SELECTOR) && dialogButtons(el).length > 0;
-  // Its title, and the rest of its words as its text nodes say them (the buttons' words are theirs, and so are the footer's: a checkbox, a
-  // link), as the client has them now.
+  // Its title, its words and its buttons, as the client has them now. The title is the words of the title node without a button's: the
+  // consent banner holds its OK button inside its title node. The words are the other text nodes, not a button's, a script's or a
+  // style's, nor the footer's (a checkbox, a link); the banner has none, its description is only in its aria-label ("<title>
+  // <description>"), which, with the title taken off its start, is the words when the text nodes give none.
   function dialogInfo(el, id) {
     const heading = Array.from(el.querySelectorAll("h1, h2, h3, [class*='title']")).find((h) => !h.closest("button"));
-    const parts = [];
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
-    while (walker.nextNode()) {
-      const node = walker.currentNode, owner = node.parentElement, apart = owner && owner.closest("button, .zm-modal-footer");
-      if (!owner || /^(script|style)$/i.test(owner.tagName) || (heading && heading.contains(node)) || (apart && el.contains(apart))) continue;
-      if (clean(node.nodeValue)) parts.push(clean(node.nodeValue));
+    const wordsUnder = (root) => {
+      const found = [], walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      while (walker.nextNode()) {
+        const node = walker.currentNode, owner = node.parentElement, button = owner && owner.closest("button");
+        if (owner && !/^(script|style)$/i.test(owner.tagName) && !(button && el.contains(button))) found.push(node);
+      }
+      return found;
+    };
+    const footerOf = (node) => { const footer = node.parentElement.closest(".zm-modal-footer"); return !!footer && el.contains(footer); };
+    const title = heading ? clean(wordsUnder(heading).map((n) => n.nodeValue).join("")) : "";
+    let text = wordsUnder(el).filter((n) => !(heading && heading.contains(n)) && !footerOf(n)).map((n) => clean(n.nodeValue)).filter(Boolean).join(" ");
+    if (!text) {
+      const label = clean(el.getAttribute("aria-label"));
+      text = title && label.startsWith(title) ? clean(label.slice(title.length)) : label;
     }
-    return { id: id, title: heading ? clean(heading.textContent) : "", text: parts.join(" ").slice(0, 400), buttons: dialogButtons(el).map((b) => clean(labelOf(b))) };
+    return { id: id, title: title, text: text.slice(0, 400), buttons: dialogButtons(el).map((b) => clean(labelOf(b))) };
   }
   function scanDialogs() {
     if (bridge.state !== "connected") return;
@@ -721,11 +731,11 @@
   // The moment a message came, from a stamp: milliseconds as a number or as text, seconds as ten digits (or fewer) of text, or a date as
   // ISO text. A stamp that is no date this century is no moment ("10.32" read as a number is 10 ms of 1970, and Zoom's own `timestamp`
   // is only a time of day), and neither is text that is not an ISO date, whatever a lenient parser makes of it (V8 reads "Nov 5" as
-  // November 5, 2001).
+  // November 5, 2001), nor a moment more than a day after now (ten digits of seconds are this century, eleven are the year 5138).
   const momentOf = (stamp) => {
     const n = Number(stamp);
     const ms = Number.isFinite(n) ? (n < 1e11 ? n * 1000 : n) : (typeof stamp === "string" && /^\d{4}-\d\d-\d\d/.test(stamp) ? Date.parse(stamp) : NaN);
-    return ms >= Date.UTC(2000, 0, 1) && ms <= 8.64e15 ? new Date(ms).toISOString() : null;
+    return ms >= Date.UTC(2000, 0, 1) && ms <= Date.now() + 864e5 ? new Date(ms).toISOString() : null;
   };
   function chatListener(data) {
     const sender = pick(data, ["sender"]);

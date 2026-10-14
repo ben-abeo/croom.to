@@ -2119,6 +2119,33 @@ def test_the_strip_never_wraps_so_its_height_is_the_same_for_the_longest_names_a
         page.close()
 
 
+def test_the_scoreboards_last_game_is_clipped_inside_the_strip_when_a_team_name_is_wider_than_the_whole_strip(browser, central_time):
+    """The strip's last-game side is `max-width: 100%` of the strip's content: without it, a side that does not shrink is as wide as its text and runs
+    off the sign (the next game with it). A feed can send a name of any length, so a team name of 167 characters, wider than a 1280 px strip (the line of
+    one of 90 is 961 px of the strip's 1151, and fits), is cut with an ellipsis at the strip's own edge, is whole in the page's text, and leaves the strip
+    the height of one line."""
+    name = ("Louisiana State University and Agricultural and Mechanical College Fighting Tigers of 1860, "
+            "the flagship campus on the bluff above the Mississippi River in Baton Rouge")
+    assert len(name) == 167
+    long_name = schedule("Texas", [game("Texas", name, "2026-10-12T00:00Z", home_score=45, away_score=42, home_rank=4, state="post"),
+                                   game("Texas", "Rice", "2026-10-19T19:00Z", home_rank=4)])
+    with PageServer(schedules={**every_school(), 251: long_name}) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, 1280, 800)
+        strip_is_up(page)
+        assert strip_text(page)[0] == f"Texas (#4) 45 \u2013 {name} 42"                  # every character is in the page, whatever is shown of it
+        drawn = page.evaluate("""() => { const strip = document.getElementById('score'), last = document.getElementById('score-last'), s = getComputedStyle(strip);
+            const box = strip.getBoundingClientRect(), side = last.getBoundingClientRect(), root = document.documentElement;
+            return {inside_left: box.left + parseFloat(s.paddingLeft), inside_right: box.right - parseFloat(s.paddingRight), left: side.left, right: side.right,
+                    height: box.height, clipped: last.scrollWidth > last.clientWidth, wider_than_the_sign: root.scrollWidth > root.clientWidth}; }""")
+        assert drawn["clipped"], drawn                                                      # the line is wider than the strip, so ...
+        assert drawn["left"] >= drawn["inside_left"] - 0.5 and drawn["right"] <= drawn["inside_right"] + 0.5, drawn      # ... its side stops at the strip's content edge
+        assert what_a_side_of_the_strip_is(page, "#score-last")[3:] == ["nowrap", "hidden", "ellipsis"]       # by being cut, not wrapped
+        assert abs(drawn["height"] - (29 + 1.485 * 16)) <= 1 and not drawn["wider_than_the_sign"] and fits(page), drawn      # one line of it, on a sign that does not move
+        page.close()
+
+
 def test_the_scoreboard_reads_vs_for_a_next_game_at_a_neutral_site_in_the_order_espn_lists_it_and_a_last_game_is_unchanged(browser, central_time):
     """The Red River game is marked neutralSite with Oklahoma listed home: "Texas (#4) @ Oklahoma" would call Oklahoma the host. A bowl or a
     championship game would read the same way. The line of the last game is the same at a neutral site as anywhere."""
@@ -2280,15 +2307,18 @@ def test_the_strip_stays_as_it_was_while_the_sign_cannot_reach_the_room(browser,
 def test_on_a_short_sign_with_a_school_on_the_week_counts_the_strip_and_keeps_every_days_plus_n_more_whole(browser, room, location, central_time):
     """The strip takes 53 to 81 px of a short screen's height, which the short-screen rules did not count: on a 1024 by 600 sign with a long room
     name the days were 74 px tall and their "+N more" cut off, on 900 by 500 they were 43 and on 800 by 480, 20. While a school is on, up to
-    680 px of height the week gives the days room (the strip is 81 px tall under 1100 px wide, where it is two lines, and a 1024 by 641 sign's
-    "+N more" was cut off by it, as a 1280 by 641 sign's was before): the status gives up its detail and its location and shrinks the room's name
-    (the days keep their dates down to 561 px, where the rule for short signs takes them); and up to 560 the Today list's status gives up its
-    detail too. Every busy day's "+N more" is then whole: inside its day and inside the box its bookings are in."""
+    700 px of height the week gives the days room (the strip is 81 px tall under 1100 px wide, where it is two lines, and a 1024 by 641 sign's
+    "+N more" was cut off by it, as a 1280 by 641 sign's was before; on a wide panel the root font grows with the long side, so with the rule at
+    680 a 1366 by 681 sign's and a 1400 by 690 one's were cut off too, and the rule's edge is pinned at 700 and 701): the status gives up its detail
+    and its location and shrinks the room's name (the days keep their dates down to 561 px, where the rule for short signs takes them); and up to
+    560 the Today list's status gives up its detail too. Every busy day's "+N more" is then whole: inside its day and inside the box its bookings
+    are in."""
     skip_if_day_ends_within(3)
     with PageServer(calendar_events=a_full_week(), room_name=room, room_location=location, schedules=every_school()) as server:
         choose(server, sign_scores=["texas", "texas_am"])                      # two on: the name leads, the longest line the strip has
         scoreboard_has(server, ["texas", "texas_am"])
-        for width, height in ((1024, 680), (1024, 641), (1280, 641), (1024, 600), (1024, 561), (900, 500), (800, 480), (1024, 560), (1280, 561), (1024, 681), (1280, 720)):
+        for width, height in ((1024, 700), (1024, 641), (1280, 641), (1024, 600), (1024, 561), (900, 500), (800, 480), (1024, 560), (1280, 561), (1024, 701), (1280, 720),
+                              (1366, 681), (1400, 690)):
             page = open_sign(browser, server, width, height)
             strip_is_up(page)
             today_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
@@ -2297,12 +2327,13 @@ def test_on_a_short_sign_with_a_school_on_the_week_counts_the_strip_and_keeps_ev
             open_the_week(page)
             page.wait_for_timeout(200)
             assert fits(page), ("week", width, height)
-            short = height <= 680
-            assert page.locator("#detail").is_hidden() == short, (width, height)                       # up to 680 px of height the detail goes while the strip is up ...
+            short = height <= 700
+            assert page.locator("#detail").is_hidden() == short, (width, height)                       # up to 700 px of height the detail goes while the strip is up ...
             assert page.locator("#room-location").is_hidden() == short, (width, height)                # ... and the location ...
             assert page.locator("#week .day-date").first.is_hidden() == (height <= 560), (width, height)        # while the days keep their dates until 560
             week_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
-            assert (week_size == pytest.approx(min(max(1.8 * 16, 0.04 * width), 2.6 * 16))) if short else (week_size == today_size), (width, height, week_size)   # ... and the name is smaller
+            root = page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)")           # 16 px, and more on a panel wider than 1280
+            assert (week_size == pytest.approx(min(max(1.8 * root, 0.04 * width), 2.6 * root))) if short else (week_size == today_size), (width, height, week_size)   # ... and the name is smaller
             counts = page.evaluate("""() => [...document.querySelectorAll('#week .day')].slice(1).map((day) => {
                 const more = day.querySelector('.more'), slots = day.querySelector('.slots');
                 if (!more || more.hidden) return null;

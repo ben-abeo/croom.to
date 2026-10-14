@@ -299,6 +299,37 @@ async def test_a_read_with_no_game_in_it_is_a_failed_read_that_keeps_the_last_an
     assert service.current()[0]["last"]["home_score"] == 52
 
 
+ONE_SIDED_PAYLOADS = {   # what ESPN sends before a season (a next game, no last one) and after it (a last game, no next one), and what the sign is to hold
+    "only a next game, before the season": (
+        schedule("Texas", [game("Texas", "Rice", "2026-09-05T19:30Z", home_rank=4)]),
+        {"last": None, "next": {"date": "2026-09-05", "home": "Texas", "home_rank": 4, "away": "Rice", "away_rank": None, "neutral": False}}),
+    "only a last game, the season over": (
+        schedule("Texas", [game("Rice", "Texas", "2026-12-05T19:00Z", home_score=17, away_score=31, away_rank=4, state="post")]),
+        {"last": {"home": "Rice", "home_rank": None, "home_score": 17, "away": "Texas", "away_rank": 4, "away_score": 31, "date": "2026-12-05", "school_home": False},
+         "next": None}),
+}
+
+
+@pytest.mark.parametrize("payload, answer", ONE_SIDED_PAYLOADS.values(), ids=ONE_SIDED_PAYLOADS.keys())
+async def test_a_school_with_only_a_next_game_or_only_a_last_one_is_a_good_read_that_replaces_the_last_answer(central, caplog, payload, answer):
+    """Unlike a read with no game in it, a schedule with one side is something the sign can draw: it replaces what was held (the old other side
+    does not stay), nothing is warned about, and the school is read again in ten minutes, not in one."""
+    service, feed, clock = make(["texas"])
+    await service.refresh()
+    assert service.current() == [TEXAS]
+    feed.answers[TEXAS_ID] = payload
+    clock.advance(600)
+    await service.refresh()
+    assert service.current() == [{"school": "texas", "name": "Texas", **answer}]
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [] and len(feed.asked) == 2
+    clock.advance(599)
+    await service.refresh()
+    assert len(feed.asked) == 2                                               # a good read: the next one is ten minutes on
+    clock.advance(1)
+    await service.refresh()
+    assert len(feed.asked) == 3
+
+
 async def test_a_school_whose_first_read_has_no_game_in_it_has_nothing_to_show_and_says_why_once(central, caplog):
     service, feed, clock = make(["texas", "michigan"])
     feed.answers[TEXAS_ID] = {"events": []}

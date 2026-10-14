@@ -1703,6 +1703,7 @@ class TestTvDiscover:
         client = await client_factory(service)
         asked = [asyncio.ensure_future(client.get("/api/tv/discover")) for _ in range(2)]
         await wait_until(lambda: len(seen.arrived) == 2)   # the second has come while the first search is still running
+        await wait_until(lambda: search.calls == 1)        # (and the search is a task of its own: it has begun a turn after the first came)
         assert search.calls == 1
         search.gate.set()
         for response in await asyncio.gather(*asked):
@@ -1932,6 +1933,112 @@ class TestTvRequestsInFlight:
             tv.gate.set()
             await service.stop()
         assert tv.calls == [("control", "power", "on"), ("control", "volume_up", None)]
+
+
+class TestStopEndsWhatIsOpen:
+    """stop() ends the join, the search and the requests that are with the TV from the listener's own shutdown (the app's on_shutdown),
+    which aiohttp runs after the listening sockets are closed and before it waits for the requests in flight: no request can arrive while
+    a cancelled task is let go of. Before, the cancel came first and the listener stayed open for as long as it took, up to CANCEL_WAIT_S:
+    a Turn on that arrived in that time was not cancelled, and the listener's cleanup waited for it (a minute, and another)."""
+
+    URL = "https://zoom.us/j/98765432100"
+
+    @staticmethod
+    async def post(http, url, body):
+        async with http.post(url, json=body) as response:
+            return response.status
+
+    def test_a_task_that_is_cancelled_is_waited_for_five_seconds_and_no_longer(self):
+        assert ControlService.CANCEL_WAIT_S == 5.0
+
+    async def test_a_tv_control_that_comes_while_a_join_is_let_go_of_is_not_served_and_stop_takes_no_longer_than_the_join(self, monkeypatch):
+        """A join that takes 8 s to let go and a TV control that takes 20 s, scaled to 0.3 s for the wait (CANCEL_WAIT_S is 5 s) and for
+        ever for the control. The control that is with the TV when stop() begins is cancelled; the one that comes after is refused
+        (the listener is closed), and stop() is over when the join has been waited for."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.3)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()      # a join that is slow to let go
+        tv = StubTv()
+        tv.gate = asyncio.Event()                          # a control that does not end by itself
+        service = make_service(meeting=meeting, tv=tv)
+        await service.start()
+        base = f"http://127.0.0.1:{service.bound_port}"
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as joiner, aiohttp.ClientSession() as holder, aiohttp.ClientSession() as late:
+                assert await self.post(joiner, base + "/api/meeting/join", {"url": self.URL}) == 202
+                await wait_until(lambda: meeting.state == MeetingState.JOINING)
+                turn_on = asyncio.ensure_future(self.post(holder, base + "/api/tv/control", {"name": "power", "value": "on"}))
+                await wait_until(lambda: tv.order == [("start", "power")])
+                t0 = loop.time()
+                stopping = asyncio.ensure_future(service.stop())
+                await asyncio.sleep(0.1)                   # stop() is waiting for the join to let go
+                with pytest.raises(aiohttp.ClientError):   # and the listener does not take another request
+                    await asyncio.wait_for(self.post(late, base + "/api/tv/control", {"name": "volume_up"}), 2.0)
+                await asyncio.wait_for(stopping, 3.0)
+                assert loop.time() - t0 < 2.0              # (the control the TV was with did not have to be waited for either)
+                with pytest.raises(aiohttp.ClientError):   # the page that waited for the Turn on is let go of, not told that it was done
+                    await asyncio.wait_for(turn_on, 2.0)
+        finally:
+            meeting.cancel_gate.set()
+            tv.gate.set()
+        assert tv.calls == [("control", "power", "on")] and tv.order == [("start", "power"), ("end", "power")]     # cancelled, and nothing after it
+        assert service._tv_requests == set()
+        await wait_until(lambda: meeting.order == ["join given up"])        # the join ends in its own time, as it did
+
+
+class TestTvRequestsOnTheBooks:
+    """The requests that are with the TV service are on the books (`_tv_requests`) for as long as they last, which is how stop() finds
+    them; none stays on them once it is over, whichever way."""
+
+    ROUTES = [("/api/tv/control", {"name": "volume_up"}, "fail_control"), ("/api/tv/pair", {}, "fail_pair"),
+              ("/api/tv/forget", {}, "fail_forget")]
+
+    @pytest.mark.parametrize("path, body, failing", ROUTES)
+    async def test_an_answered_request_is_off_the_books(self, client_factory, path, body, failing):
+        service = make_service(tv=StubTv())
+        client = await client_factory(service)
+        assert (await client.post(path, json=body)).status == 200
+        assert service._tv_requests == set()
+
+    @pytest.mark.parametrize("path, body, failing", ROUTES)
+    async def test_a_refused_request_is_off_the_books(self, client_factory, path, body, failing):
+        tv = StubTv()
+        setattr(tv, failing, TvError("The TV is not answering"))
+        service = make_service(tv=tv)
+        client = await client_factory(service)
+        assert (await client.post(path, json=body)).status == 409
+        assert service._tv_requests == set()
+
+    @pytest.mark.parametrize("has_tv, request_kwargs, status", [
+        (True, {"json": {"not": "a control"}}, 400),
+        (True, {"data": "[1]", "headers": {"Content-Type": "application/json"}}, 400),
+        (True, {"data": "x", "headers": {"Content-Type": "text/plain"}}, 415),
+        (False, {"json": {"name": "volume_up"}}, 503),
+    ])
+    async def test_a_request_that_is_turned_away_is_off_the_books(self, client_factory, has_tv, request_kwargs, status):
+        service = make_service(tv=StubTv() if has_tv else None)
+        client = await client_factory(service)
+        assert (await client.post("/api/tv/control", **request_kwargs)).status == status
+        assert service._tv_requests == set()
+
+    async def test_a_request_is_on_the_books_while_it_lasts_and_a_cancelled_one_is_off_them(self, client_factory):
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        client = await client_factory(service)
+        asked = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+        try:
+            await wait_until(lambda: tv.order == [("start", "power")])
+            assert len(service._tv_requests) == 1                       # a Turn on that is with the TV: stop() will find it
+            asked.cancel()                                              # and the page goes away
+            with pytest.raises(asyncio.CancelledError):
+                await asked
+            await wait_until(lambda: len(seen.cancelled) == 1)          # the server has ended the handler that nobody waits for
+            assert service._tv_requests == set()
+        finally:
+            tv.gate.set()
 
 
 class TestLeaveWhileJoining:

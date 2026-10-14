@@ -238,6 +238,7 @@ class ControlService(Service):
         app.router.add_get("/api/tv/discover", self._handle_tv_discover)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
+        app.on_shutdown.append(self._end_what_is_open)
         return app
 
     async def start(self) -> None:
@@ -263,16 +264,21 @@ class ControlService(Service):
         if not self._running:
             return
         self._running = False
-        # All that is still running is ended before the listener is cleaned up, since the cleanup waits for every request in flight
-        # (a minute for them and another for what is left: more than the agent's shutdown is given): the join or the leave, the
-        # search for TVs, and the requests that are with the TV (a Turn on, a pairing that waits for a person) or wait their turn
-        # behind them. None of them is given time to finish: the pages that asked are going away with this service.
-        await self._cancel(self._task, self._search, *self._tv_requests)
-        self._task = self._join_task = self._search = None
         if self._runner is not None:
+            # The listener closes its sockets, then ends what is still running (_end_what_is_open), and only then waits for the
+            # requests that are in flight (a minute for them and another for what is left: more than the agent's shutdown is given)
             await self._runner.cleanup()
             self._runner = None
+        self._task = self._join_task = self._search = None
         logger.info("Room control page stopped")
+
+    async def _end_what_is_open(self, app: web.Application) -> None:
+        """The application's on_shutdown, which aiohttp runs after the listening sockets are closed and before it waits for the
+        requests in flight: so no request can arrive while the tasks that are ended here are let go of, and none is left for the wait
+        to wait for. They are the join or the leave, the search for TVs, and the requests that are with the TV (a Turn on, a pairing
+        that waits for a person) or wait their turn behind them. None of them is given time to finish: the pages that asked are going
+        away with this service. It must not raise: an error here would end the listener's shutdown half way."""
+        await self._cancel(self._task, self._search, *self._tv_requests)
 
     async def _cancel(self, *tasks: Optional[asyncio.Task]) -> None:
         """Cancel the tasks that are running among these and wait until they are over, for CANCEL_WAIT_S in all: what has not ended

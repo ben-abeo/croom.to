@@ -1,6 +1,7 @@
 """Pairing, forgetting, and what becomes of the connection while they happen; the key the TV hands out, and a TV that
 stops accepting the one that was stored."""
 import asyncio
+import logging
 
 import pytest
 from croom.tv.errors import TvError
@@ -214,6 +215,76 @@ async def test_a_pairing_nobody_answers_ends_in_words_and_leaves_the_service_rea
     FakeTvClient.instances[-1].accept()
     await within(again)
     assert service.status()["paired"] is True and service.status()["reachable"] is True
+
+
+class AcceptedInTheLastMoments(FakeTvClient):
+    """A person who accepts the prompt as the wait runs out. The TV registers the client and hands it the key at once; the library
+    goes on to open its input socket and read the TV's state, and connect() returns `finish` seconds later (None: never does)."""
+    finish = 0.5
+
+    async def connect(self):
+        self.calls.append(("connect", self.client_key))
+        self.client_key = "key-1"
+        self.calls.append(("paired",))
+        if self.finish is None:
+            await asyncio.Event().wait()
+        await asyncio.sleep(self.finish)
+        self.connected = True
+        return True
+
+
+def test_a_tv_that_accepted_is_given_five_more_seconds_to_finish():
+    from croom.tv.service import TvService
+    assert TvService.PAIR_FINISH_S == 5.0
+
+
+async def test_a_person_who_accepts_in_the_last_moments_of_the_wait_is_paired_and_not_told_that_nobody_did(tmp_path):
+    """The wait is for the person at the TV. An accept in its last second is the TV's to finish: cut off then, the TV has
+    registered this client and no key was stored (an entry on the TV that belongs to nobody), and the person is told that nobody accepted."""
+    service = build_service(tmp_path, AcceptedInTheLastMoments, key=None)
+    service.PAIR_WAIT_S, service.PAIR_FINISH_S = 0.2, 2.0         # the connect takes 0.5 s: it runs past the wait, not past the extra time
+    await within(service.pair(), 3.0)
+    client = FakeTvClient.instances[-1]
+    assert (tmp_path / KEY).read_text() == "key-1" and service.status()["paired"] is True
+    assert client.connected is True and ("disconnect",) not in client.calls
+    assert service.status()["reachable"] is True and service._pairing is False
+
+
+async def test_a_tv_that_accepted_and_does_not_finish_is_given_up_on_after_the_extra_time(tmp_path):
+    class NeverFinishes(AcceptedInTheLastMoments):
+        finish = None
+    service = build_service(tmp_path, NeverFinishes, key=None)
+    service.PAIR_WAIT_S, service.PAIR_FINISH_S = 0.1, 0.2
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    with pytest.raises(TvError) as failure:
+        await within(service.pair(), 3.0)
+    assert 0.25 <= loop.time() - t0 < 2.0                 # the wait, and the extra time, and no more
+    assert "did not finish" in str(failure.value) and "Nobody accepted" not in str(failure.value)   # somebody did accept
+    assert ("disconnect",) in FakeTvClient.instances[-1].calls
+    assert service._client is None and service._pairing is False and not (tmp_path / KEY).exists()
+    assert service.status()["paired"] is False and service.status()["reachable"] is False
+
+
+async def test_the_wait_for_the_person_leaves_nothing_behind_when_the_pairing_ends_sooner(tmp_path, caplog):
+    """The timer that ends the person's wait is cancelled with the pairing: left to run it would act on a pairing that is over."""
+    service = build_service(tmp_path, key=None)
+    service.PAIR_WAIT_S = 0.1
+    FakeTvClient.refuse_next = True                       # the TV is off: the pairing ends at once, in words
+    with pytest.raises(TvError):
+        await service.pair()
+    await asyncio.sleep(0.25)                             # past the end of the wait
+    assert [record for record in caplog.records if record.levelno >= logging.ERROR] == []
+
+
+async def test_a_pairing_nobody_has_accepted_is_not_given_the_extra_time(tmp_path):
+    service = build_service(tmp_path, PromptingTvClient, key=None)
+    service.PAIR_WAIT_S, service.PAIR_FINISH_S = 0.1, 5.0
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    with pytest.raises(TvError) as failure:
+        await within(service.pair(), 3.0)
+    assert loop.time() - t0 < 1.0 and "Nobody accepted" in str(failure.value)     # (no key was handed out: the extra time is for the TV's finishing)
 
 
 async def test_a_pairing_the_library_gives_up_on_says_what_it_said_before_the_services_own_wait_is_up(tmp_path):

@@ -189,6 +189,10 @@ class TvService(Service):
     # A pairing waits this long for the person at the TV to accept the prompt. The library's own wait for it (ten seconds) does not
     # end: aiohttp restarts its receive timeout on every ping and pong of the connection, and the library pings every five seconds.
     PAIR_WAIT_S = 60.0
+    # A TV that has accepted by then (it has handed the client its key) is given this long more to finish connecting: the library goes
+    # on after the key to open its input socket and read the TV's state, and a pairing cut off there leaves the TV with an entry for a
+    # client whose key was never kept, and the person told that nobody accepted.
+    PAIR_FINISH_S = 5.0
 
     def __init__(self, config: TvConfig, keystore: KeyStore, client_factory: ClientFactory, waker: Waker,
                  loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep):
@@ -278,7 +282,7 @@ class TvService(Service):
         The wait for the person is the service's own to cut short: the client is the service's from the moment it is
         built, so stop() and forget() hang up on it, and a caller that goes away leaves nothing connected. It is bounded, too:
         a prompt nobody accepts within PAIR_WAIT_S ends the pairing, in words (the library's own wait for it does not end), and
-        the next tap on Pair starts another."""
+        the next tap on Pair starts another. A TV that has accepted by then is given PAIR_FINISH_S more to finish connecting."""
         if not self.configured:
             raise TvError(NOT_SET_UP)
         if self._pairing:                        # a double tap: one prompt on the TV is enough
@@ -296,14 +300,20 @@ class TvService(Service):
                 try:
                     client = await self._open(None)
                     self._client = client
-                    async with asyncio.timeout(self.PAIR_WAIT_S) as waiting:
-                        await self._connected(client)
+                    # The timeout is the person's wait and the TV's time to finish: at the end of the first the pairing nobody has
+                    # accepted is cut off (_wait_is_up), and one the TV has accepted goes on to the end of the second
+                    async with asyncio.timeout(self.PAIR_WAIT_S + self.PAIR_FINISH_S) as waiting:
+                        due = asyncio.get_running_loop().call_later(self.PAIR_WAIT_S, self._wait_is_up, waiting, client)
+                        try:
+                            await self._connected(client)
+                        finally:
+                            due.cancel()
                 except TvError:
                     raise
                 except Exception as e:  # noqa: BLE001 - the TV was off, declined, did not answer in time, or was hung up on
                     if self._client is not client:       # hung up on by stop() or forget(): the library answers False
                         raise stopped from e
-                    if waiting is not None and waiting.expired():       # this wait, and not the library's own timeout
+                    if waiting is not None and waiting.expired() and not client.client_key:   # this wait, and not the library's own timeout
                         logger.warning(f"Pairing with the TV at {host}: nobody accepted the prompt within {self.PAIR_WAIT_S:g} s")
                         raise TvError(NOBODY_ACCEPTED.format(seconds=self.PAIR_WAIT_S)) from e
                     logger.warning(f"Pairing with the TV at {host} failed: {_why(e)}")
@@ -887,6 +897,13 @@ class TvService(Service):
         was closed while it was being made."""
         if not await client.connect():
             raise ConnectionError("the connection was closed before it was made")
+
+    @staticmethod
+    def _wait_is_up(waiting: asyncio.Timeout, client: TvClient) -> None:
+        """The person's wait for the prompt is over (PAIR_WAIT_S). A pairing that nobody has accepted ends now. One that the TV has
+        accepted (the client holds the key the TV handed out) is left to finish, in the PAIR_FINISH_S that the timeout has left."""
+        if not client.client_key:
+            waiting.reschedule(asyncio.get_running_loop().time())
 
     async def _drop_client(self) -> None:
         client, self._client = self._client, None

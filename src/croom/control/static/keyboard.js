@@ -133,7 +133,9 @@
   function switchLayer(name) {
     layers.set(field(), name);
     shift = "off";
-    hidePreview();   // a held letter's pop would stay over keys that are not its: it goes with its layer, and the lift that comes later finds nothing to do
+    // A held letter's pop would stay over keys that are not its: it goes with its layer, and the lift that comes later finds nothing to do.
+    // Only when the layer changes: a press that gives the focus back to the field comes here too, with the layer it has.
+    if (box.dataset.layer !== name) hidePreview();
     if (!open) return;
     place(name);
     relabel();

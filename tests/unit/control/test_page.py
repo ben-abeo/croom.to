@@ -1037,6 +1037,21 @@ def test_a_layer_switched_under_a_held_letter_takes_its_pop_with_it(browser):
         page.close()
 
 
+def test_a_press_that_returns_the_focus_to_the_field_keeps_its_pop(browser):
+    """With the focus on the keyboard's own button (a Tab, on a laptop) a key's press puts it back in the field. The layer is
+    the same one, so the pop of the key stays: it goes when the layer changes, not when the focus comes back."""
+    with PageServer() as server:
+        page = open_page(browser, server)                           # no ?keyboard=1: the keys come from the button
+        page.click("#keyboard-toggle")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        page.evaluate("document.getElementById('keyboard-toggle').focus()")
+        touch(page, "#keyboard .key[data-key='g']", release=False)
+        assert page.evaluate("document.activeElement.id") == "link-input"   # the press put the focus back in the field ...
+        assert pop(page) == "g"                                             # ... and the pop is still over its key
+        lift(page, "#keyboard .key[data-key='g']")
+        page.close()
+
+
 def test_the_keys_wear_the_rooms_colours_and_show_pressed_and_shift_on(browser):
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server, kiosk=True)

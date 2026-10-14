@@ -99,6 +99,10 @@ class _BadBody(Exception):
     """A request body that is no use, in words for whoever sent it (a 400)."""
 
 
+class _PageGone(Exception):
+    """The page that sent a request has hung up: there is nobody to do it for."""
+
+
 @web.middleware
 async def _static_no_cache(
     request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -671,11 +675,20 @@ class ControlService(Service):
             return web.json_response({"tv": await action(data)})
         except _BadBody as e:
             return self._error_response(str(e), 400)
+        except _PageGone:
+            return web.Response(status=499)         # (nginx's "client closed request": nobody is there to read it)
         except TvError as e:
             return self._error_response(str(e), 409)
         except Exception as e:  # noqa: BLE001 - whatever it was, the table is told in words and not left with a 500
             logger.warning(f"The TV did not carry out the request to {request.path}: {type(e).__name__}: {e}", exc_info=True)
             return self._error_response("The TV did not do that: " + self._reason(e), 409)
+
+    @staticmethod
+    def _page_has_gone(request: web.Request) -> bool:
+        """The page that made this request has hung up. The listener does not end a handler for that (the request's transport is
+        None from then on, or is closing), so a request that waited has to look."""
+        transport = request.transport
+        return transport is None or transport.is_closing()
 
     async def _handle_tv_control(self, request: web.Request) -> web.Response:
         """One control of the TV, {"name", "value"?}, answered with the TV's status after it.
@@ -684,12 +697,16 @@ class ControlService(Service):
         second wake, and a key sent during one goes down the socket the wake is using), so a control that comes while another
         is with the TV waits for it. There is no time limit of its own here: Turn on from the table waits for the TV to come
         on, up to 23 seconds, and the page's request is made to wait for that. The body is looked at before the wait, so that one
-        that is no use is refused at once."""
+        that is no use is refused at once; and a control whose page has hung up by the time it has its turn is dropped (the
+        listener does not end a handler for that, and a tap that waited behind a Turn on would be made for nobody)."""
         async def action(data: Dict[str, Any]) -> Dict[str, Any]:
             name = data.get("name")
             if not isinstance(name, str) or not name.strip():
                 raise _BadBody('Send a JSON object with the "name" of the control, and its "value" when it has one')
             async with self._tv_busy:
+                if self._page_has_gone(request):
+                    logger.debug(f"The TV control {name!r} was dropped: the page that asked for it has gone")
+                    raise _PageGone()
                 return await self._tv.control(name, data.get("value"))
 
         return await self._tv_call(request, action)

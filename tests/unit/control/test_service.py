@@ -6,7 +6,9 @@ and record what the control service asked them to do.
 """
 
 import asyncio
+import contextlib
 import json
+import logging
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -1351,19 +1353,21 @@ def json_request(path, body):
     payload.feed_data(raw)
     payload.feed_eof()
     return make_mocked_request("POST", path, headers={"Content-Type": "application/json", "Content-Length": str(len(raw))},
-                               payload=payload)
+                               payload=payload, transport=mock.Mock(is_closing=mock.Mock(return_value=False)))
 
 
 def watching(service, handler_name):
-    """What reaches a handler, noted as it happens: `.arrived` has a path for each request that has come, `.cancelled` a path for
-    each that was cancelled (the test server does that when a client goes away) and `.responses` what the others were answered
-    with. A test that holds one request in the handler and sends another waits for this to say that the other has arrived, and
-    does not guess at a time. Call it before the service is started: the routes are made then."""
-    seen = SimpleNamespace(arrived=[], cancelled=[], responses=[])
+    """What reaches a handler, noted as it happens: `.arrived` has a path for each request that has come, `.requests` the requests,
+    `.cancelled` a path for each that was cancelled (the test server does that when a client goes away), `.responses` what the
+    others were answered with and `.finished` a path for each that is over, however. A test that holds one request in the handler
+    and sends another waits for this to say that the other has arrived, and does not guess at a time. Call it before the service
+    is started: the routes are made then."""
+    seen = SimpleNamespace(arrived=[], requests=[], cancelled=[], responses=[], finished=[])
     handler = getattr(service, handler_name)
 
     async def watched(request):
         seen.arrived.append(request.path)
+        seen.requests.append(request)
         try:
             response = await handler(request)
             seen.responses.append(response)
@@ -1371,6 +1375,8 @@ def watching(service, handler_name):
         except asyncio.CancelledError:
             seen.cancelled.append(request.path)
             raise
+        finally:
+            seen.finished.append(request.path)
 
     setattr(service, handler_name, watched)
     return seen
@@ -1832,6 +1838,71 @@ class TestTvRequestsInFlight:
                     await tap
         assert len(seen.cancelled) == 3 and seen.responses == []      # none was answered, as if it had been done
         assert tv.calls == [("control", "power", "on")]               # and the two that were waiting never had their turn
+
+    async def test_a_control_whose_page_has_gone_is_not_carried_out_when_its_turn_comes(self, caplog):
+        """The real listener does not end a handler when its client goes away, so a tap that waited behind a Turn on would be made
+        when the Turn on ends, for a page that is no longer there: it is dropped when it has the TV's turn and finds the page
+        gone (the request's transport is None, or is closing)."""
+        caplog.set_level(logging.DEBUG, logger="croom.control.service")
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        await service.start()
+        url = f"http://127.0.0.1:{service.bound_port}/api/tv/control"
+        try:
+            async with aiohttp.ClientSession() as holder:
+                turn_on = asyncio.ensure_future(self.post(holder, url, {"name": "power", "value": "on"}))
+                await wait_until(lambda: tv.order == [("start", "power")])
+                async with aiohttp.ClientSession() as other_page:
+                    tap = asyncio.ensure_future(self.post(other_page, url, {"name": "volume_up"}))
+                    await wait_until(lambda: len(seen.arrived) == 2)     # it waits behind the Turn on ...
+                    tap.cancel()                                          # ... and its page goes away
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await tap
+                gone = seen.requests[1]
+                await wait_until(lambda: gone.transport is None or gone.transport.is_closing())      # the server has seen it go
+                assert seen.finished == []                    # (its handler is waiting still: the listener does not end it)
+                tv.gate.set()
+                assert await asyncio.wait_for(turn_on, 2.0) == 200
+                await wait_until(lambda: len(seen.finished) == 2)
+        finally:
+            tv.gate.set()
+            await service.stop()
+        assert tv.calls == [("control", "power", "on")]               # the tap of the page that had gone was never made
+        assert [response.status for response in seen.responses] == [200, 499]
+        assert "dropped" in caplog.text
+
+    @pytest.mark.parametrize("how, gone", [
+        ("none", True),                  # as the listener leaves the request when the client has hung up
+        ("closing", True),               # or as a request that kept its transport sees it, in a version that caches it
+        ("open", False),
+    ])
+    def test_a_page_has_gone_when_its_transport_is_none_or_closing(self, how, gone):
+        request = make_mocked_request("POST", "/api/tv/control",
+                                      transport=mock.Mock(is_closing=mock.Mock(return_value=how == "closing")))
+        if how == "none":
+            request.protocol.transport = None
+        assert ControlService._page_has_gone(request) is gone
+
+    async def test_a_control_whose_page_is_there_is_carried_out_when_its_turn_comes(self):
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        await service.start()
+        url = f"http://127.0.0.1:{service.bound_port}/api/tv/control"
+        try:
+            async with aiohttp.ClientSession() as http:
+                first = asyncio.ensure_future(self.post(http, url, {"name": "power", "value": "on"}))
+                await wait_until(lambda: tv.order == [("start", "power")])
+                second = asyncio.ensure_future(self.post(http, url, {"name": "volume_up"}))
+                await asyncio.sleep(0.05)
+                tv.gate.set()
+                assert await asyncio.wait_for(first, 2.0) == 200 and await asyncio.wait_for(second, 2.0) == 200
+        finally:
+            tv.gate.set()
+            await service.stop()
+        assert tv.calls == [("control", "power", "on"), ("control", "volume_up", None)]
 
 
 class TestLeaveWhileJoining:

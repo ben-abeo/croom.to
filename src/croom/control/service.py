@@ -797,6 +797,7 @@ class ControlService(Service):
         relay = PointerRelay(self._tv, self._mouse)
         self._pointers[ws] = relay
         try:
+            await self._make_the_mouse()
             async for frame in ws:
                 if frame.type == WSMsgType.TEXT:
                     words = await self._pointer_message(relay, frame.data)
@@ -813,6 +814,18 @@ class ControlService(Service):
             finally:
                 self._pointers.pop(ws, None)             # (not before: until the relay is done, stop() ends the move that it waits for)
         return ws
+
+    async def _make_the_mouse(self) -> None:
+        """Make the room Pi's virtual mouse now, as a pointer socket opens, so that the desktop has taken it up by the time a finger is
+        on the pad. The device takes a moment to appear (evdev waits for it and looks through /dev/input): it is made in a thread, and
+        the event loop goes on. It is kept until the service stops. One that cannot be made is no reason to refuse the socket (the TV's
+        cursor does not need it): every Pi event says why not, in words (PiMouse.unavailable), and tries again."""
+        try:
+            await asyncio.to_thread(self._mouse.open)
+        except TvError:
+            pass
+        except Exception:  # noqa: BLE001 - a bug in making it: the first Pi event makes it, or says why not
+            logger.warning("The room Pi's mouse could not be made as the pointer socket opened", exc_info=True)
 
     async def _pointer_message(self, relay: PointerRelay, text: str) -> Optional[str]:
         """Hand one frame to the relay: None when it was carried out, else the words to answer it with. Whatever goes wrong is words

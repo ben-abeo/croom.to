@@ -28,3 +28,11 @@ def test_the_tv_and_touchpad_libraries_are_dependencies_and_evdev_only_where_lin
     assert requirements["aiowebostv"].marker is None and requirements["wakeonlan"].marker is None
     marker = requirements["evdev"].marker
     assert marker is not None and marker.evaluate({"sys_platform": "linux"}) and not marker.evaluate({"sys_platform": "darwin"})
+    from packaging.version import Version
+    assert Version("1.6.0") in requirements["evdev"].specifier and Version("1.5.9") not in requirements["evdev"].specifier   # (1.6 builds on 3.11)
+
+
+def test_mypy_does_not_ask_for_evdevs_stubs():
+    """evdev is imported where the room Pi's virtual mouse is made (a room without a touchpad runs without it, and so does a machine
+    that only runs the checks): mypy is told not to mind that it is not there."""
+    assert {"module": "evdev", "ignore_missing_imports": True} in pyproject()["tool"]["mypy"]["overrides"]

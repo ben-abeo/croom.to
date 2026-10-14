@@ -11,6 +11,7 @@ import json
 import logging
 import socket
 import sys
+import threading
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
@@ -27,7 +28,7 @@ from croom.meeting.providers.base import MeetingInfo, MeetingState, detect_platf
 from croom.control.service import ControlService
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TvError
-from croom.tv.pointer import BAD_MESSAGE, BAD_TARGET, BAD_TYPE, PiMouse
+from croom.tv.pointer import BAD_MESSAGE, BAD_TARGET, BAD_TYPE, CODES, PiMouse
 
 
 class StubMeeting:
@@ -377,6 +378,22 @@ class StubCursor:
         self.calls.append(("scroll", d_x, d_y))
 
 
+class StubDevice:
+    """What evdev.UInput is to a real PiMouse: it notes the events written to it."""
+
+    def __init__(self):
+        self.writes = []
+
+    def write(self, kind, code, value):
+        self.writes.append((kind, code, value))
+
+    def syn(self):
+        self.writes.append("syn")
+
+    def close(self):
+        pass
+
+
 class StubMouse:
     """Behaves like PiMouse: notes what it is told, in `calls`, and raises `fail` (an error) when it has one, as a mouse that cannot be
     made does. `closed` counts the times the service closed it."""
@@ -385,7 +402,13 @@ class StubMouse:
         self.calls = []
         self.fail = None
         self.unavailable = None
+        self.opened = 0           # the times the service made it ahead of the first event (a socket opened)
         self.closed = 0
+
+    def open(self):
+        self.opened += 1
+        if self.fail is not None:
+            raise self.fail
 
     def _note(self, *call):
         if self.fail is not None:
@@ -1878,7 +1901,7 @@ class TestPointerSocket:
             return [(p.name, p.default) for p in list(inspect.signature(getattr(cls, name)).parameters.values())[1:]]
         for name in ("move", "click", "scroll"):
             assert shape(StubCursor, name) == shape(TvClient, name)
-        for name in ("move", "press", "release", "click", "scroll", "close"):
+        for name in ("open", "move", "press", "release", "click", "scroll", "close"):
             assert shape(StubMouse, name) == shape(PiMouse, name)
         assert shape(StubTv, "pointer") == shape(TvService, "pointer")
 
@@ -1996,6 +2019,104 @@ class TestPointerSocket:
             await ws.send_json({"target": "pi", "type": "tap"})
             assert "pip install evdev" in (await self.says(ws))["error"]
             assert not ws.closed
+
+    async def test_no_test_can_make_a_real_device_on_the_machine_it_runs_on(self, client_factory, tmp_path, monkeypatch):
+        """A service with no mouse of its own has the real one, which uses evdev wherever evdev is installed: a test that opened a
+        pointer socket there would put a mouse on the machine's desktop. The control tests keep evdev out (tests/unit/control/conftest.py),
+        so that with a stand-in evdev on the path, which would make a device and note it in a file, nothing is made."""
+        package = tmp_path / "evdev"
+        package.mkdir()
+        made = tmp_path / "made-a-device"
+        (package / "__init__.py").write_text(f"class UInput:\n    def __init__(self, *args, **kwargs):\n        open({str(made)!r}, 'w').close()\n"
+                                             "    def write(self, *args): pass\n    def syn(self): pass\n    def close(self): pass\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        client = await client_factory(make_service(tv=StubTv()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            assert "pip install evdev" in (await self.says(ws))["error"]
+        assert not made.exists()
+
+    async def test_a_socket_that_opens_makes_the_room_pis_mouse_off_the_loop_and_two_sockets_make_one(self, client_factory):
+        """The device takes a moment to appear (evdev waits for it and looks through /dev/input), and the desktop takes it up a moment
+        after: it is made when a socket opens, in a thread, so that it is there before a finger is on the pad."""
+        made = []
+
+        def factory():
+            made.append(threading.get_ident())
+            return StubDevice()
+        client = await client_factory(make_service(mouse=PiMouse(uinput_factory=factory)))
+        async with client.ws_connect("/ws/pointer") as first, client.ws_connect("/ws/pointer") as second:
+            await wait_until(lambda: made)
+            await first.send_json({"target": "pi", "type": "tap"})                  # (the sockets have been looked at by now)
+            await second.send_json({"target": "pi", "type": "tap"})
+            await asyncio.sleep(0.1)
+        assert len(made) == 1 and made[0] != threading.get_ident()                   # one device, and not made on the loop's thread
+
+    async def test_making_the_mouse_does_not_hold_the_loop_up(self, client_factory):
+        gate, started = threading.Event(), threading.Event()
+
+        def slow_factory():
+            started.set()
+            gate.wait(3.0)
+            return StubDevice()
+        client = await client_factory(make_service(mouse=PiMouse(uinput_factory=slow_factory)))
+        loop = asyncio.get_running_loop()
+        try:
+            t0 = loop.time()
+            async with client.ws_connect("/ws/pointer"):
+                await wait_until(started.is_set)
+                response = await asyncio.wait_for(client.get("/api/status"), 2.0)       # a request is served while the device is being made
+                assert response.status == 200 and not gate.is_set()
+                assert loop.time() - t0 < 1.5                                          # (it did not wait for the 3 s that the factory takes)
+                gate.set()                                                             # (the socket's own end waits for the device)
+        finally:
+            gate.set()
+
+    async def test_a_mouse_that_cannot_be_made_when_a_socket_opens_leaves_every_event_answered_in_words(self, client_factory, caplog):
+        attempts = []
+
+        def failing():
+            attempts.append(1)
+            raise PermissionError(13, "Permission denied", "/dev/uinput")
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv, mouse=PiMouse(uinput_factory=failing)))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await wait_until(lambda: attempts)                                      # (made when the socket opened, and could not be)
+            await ws.send_json({"target": "pi", "type": "tap"})
+            answer = (await self.says(ws))["error"]
+            assert "not allowed to use /dev/uinput" in answer and "sudo systemctl restart croom" in answer
+            assert len(attempts) == 2 and not ws.closed                             # the event tried again, and the socket is open
+            await ws.send_json({"target": "tv", "type": "tap"})                     # and the TV's side does not care
+            await wait_until(lambda: tv.cursor.calls == [("click",)])
+        # the mouse said why not, once (the reason is for the log as well as the page); the control service has nothing to add to it
+        assert len([r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.tv.pointer"]) == 1
+        assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []
+
+    async def test_a_mouse_that_could_not_be_made_when_the_socket_opened_is_made_by_the_first_event_when_it_can_be(self, client_factory):
+        devices = []
+
+        def factory():
+            if not devices:
+                devices.append(None)
+                raise PermissionError(13, "Permission denied", "/dev/uinput")
+            devices.append(StubDevice())
+            return devices[-1]
+        client = await client_factory(make_service(mouse=PiMouse(uinput_factory=factory)))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await wait_until(lambda: devices)
+            await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 0})
+            await wait_until(lambda: len(devices) == 2 and devices[1].writes == [(CODES["EV_REL"], CODES["REL_X"], 1), "syn"])
+
+    async def test_a_mouse_that_blows_up_when_it_is_made_does_not_close_the_socket(self, client_factory, caplog):
+        mouse = StubMouse()
+        mouse.fail = RuntimeError("a bug in making the mouse")
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await wait_until(lambda: mouse.opened == 1)
+            mouse.fail = None
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+        assert [r for r in caplog.records if r.levelname == "WARNING" and r.exc_info and "a bug in making the mouse" in str(r.exc_info[1])]
 
     async def test_a_room_without_a_tv_service_answers_for_the_tv_and_still_has_its_pi(self, client_factory):
         mouse = StubMouse()

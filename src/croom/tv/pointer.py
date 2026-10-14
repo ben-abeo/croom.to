@@ -8,6 +8,7 @@ on fakes: no TV, no evdev and no /dev/uinput.
 import asyncio
 import errno
 import logging
+import threading
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from croom.tv.errors import TV_NOT_ENABLED, TvError
@@ -35,6 +36,9 @@ CODES: Dict[str, int] = {
     "BTN_LEFT": 0x110, "BTN_RIGHT": 0x111,
 }
 BUTTONS = {"left": "BTN_LEFT", "right": "BTN_RIGHT"}
+# What an error's text says, when it is not the system's own class and number that say it (evdev's UInput looks before it opens)
+NOT_ALLOWED_TEXTS = ("permission denied", "cannot be opened for writing")
+NOT_THERE_TEXTS = ("no such file", "does not exist", "uinput module")
 
 
 def _uinput() -> Any:
@@ -55,24 +59,29 @@ def _why_not(error: BaseException) -> str:
     """Why the virtual mouse could not be made, as words that say what to do. What stands in the way is the device /dev/uinput: the
     user the agent runs as may not be allowed to open it (it is not in the input group, or the device is not the group's), or it is not
     there (the uinput kernel module is not loaded). The installer sets up both. evdev reports a failed open by its own exception as well
-    as by the system's, so the words are chosen from the error's number and its text."""
+    as by the system's, so the words are chosen from the error's number and its text: evdev looks before it opens, and says `"/dev/uinput"
+    cannot be opened for writing` or `"/dev/uinput" does not exist or is not a character device file - verify that the uinput module is
+    loaded` (its UInput._verify)."""
     text = str(error)
+    lowered = text.lower()
     code = getattr(error, "errno", None)
     if isinstance(error, TvError):
         return text
-    if isinstance(error, PermissionError) or code == errno.EACCES or "permission denied" in text.lower():
+    if isinstance(error, PermissionError) or code == errno.EACCES or any(phrase in lowered for phrase in NOT_ALLOWED_TEXTS):
         return ("The room Pi's mouse is not allowed to use /dev/uinput: the user the agent runs as needs to be in the input group, and "
                 "/dev/uinput to belong to it (the installer sets up both; then restart the agent: sudo systemctl restart croom)")
-    if isinstance(error, FileNotFoundError) or code == errno.ENOENT or "no such file" in text.lower():
+    if isinstance(error, FileNotFoundError) or code == errno.ENOENT or any(phrase in lowered for phrase in NOT_THERE_TEXTS):
         return "The room Pi's mouse needs /dev/uinput, and it is not there: the uinput kernel module is not loaded (sudo modprobe uinput)"
     return (f"The room Pi's mouse could not be made: {one_line(text, REASON_LIMIT) or type(error).__name__} (it needs the uinput kernel "
             "module and the agent's user in the input group, which the installer sets up)")
 
 
 class PiMouse:
-    """A virtual mouse on the room Pi. The device is made the first time something is sent to it (a room that never uses the
-    touchpad has no mouse on its desktop) and again after it was lost. `unavailable` is the reason, in words, when it cannot be made
-    (permission, the module, the library): every event then raises TvError with it, and the next one tries again, in case it has been put right.
+    """A virtual mouse on the room Pi. The device is made when open() is called (the control service calls it when a pointer socket
+    opens, in a thread: it takes a moment to appear, and the desktop takes it up a moment after) or, failing that, the first time
+    something is sent to it; it is made again after it was lost, and removed by close(). A room that never uses the touchpad has no
+    mouse on its desktop. `unavailable` is the reason, in words, when it cannot be made (permission, the module, the library): every
+    event then raises TvError with it, and the next one tries again, in case it has been put right.
 
     uinput_factory makes the device: an object with write(type, code, value) and syn() (and close()), as evdev.UInput has them. The
     default makes the real one.
@@ -81,7 +90,15 @@ class PiMouse:
     def __init__(self, uinput_factory: Optional[Callable[[], Any]] = None):
         self._factory = uinput_factory or _uinput
         self._device: Any = None
+        self._making = threading.Lock()     # one thread makes the device: open() is called from the sockets' threads
         self.unavailable: Optional[str] = None
+
+    def open(self) -> None:
+        """Make the device now, if it is not there. It takes a moment to appear (evdev waits for it, and looks through /dev/input):
+        call this from a thread when the event loop must not wait for it, and ahead of the events when none of them should be the one
+        that does. Safe to call from several threads at once, and as often as you like. Raises TvError, in words, as every event does,
+        when it cannot be made."""
+        self._open()
 
     def move(self, dx: int, dy: int) -> None:
         """Move the pointer by dx to the right and dy down."""
@@ -105,24 +122,29 @@ class PiMouse:
             self._emit(("EV_REL", "REL_WHEEL", dy))
 
     def close(self) -> None:
-        """Remove the device (the kernel lets go of a button that was down on it)."""
-        device, self._device = self._device, None
+        """Remove the device (the kernel lets go of a button that was down on it); one that is being made is waited for."""
+        with self._making:
+            device, self._device = self._device, None
         if device is not None:
             self._let_go(device)
 
     def _open(self) -> Any:
-        if self._device is None:
-            try:
-                self._device = self._factory()
-            except Exception as e:  # noqa: BLE001 - /dev/uinput cannot be opened, or the library is not there
-                reason = _why_not(e)
-                if reason != self.unavailable:         # (said once: a page that sends many events a second would say it as often)
-                    logger.warning(reason)
-                self.unavailable = reason
-                raise TvError(reason) from e
-            self.unavailable = None
-            logger.info(f"The room Pi's virtual mouse is ready ({MOUSE_NAME})")
-        return self._device
+        device = self._device
+        if device is not None:
+            return device
+        with self._making:                             # (the thread that gets here second finds the device made)
+            if self._device is None:
+                try:
+                    self._device = self._factory()
+                except Exception as e:  # noqa: BLE001 - /dev/uinput cannot be opened, or the library is not there
+                    reason = _why_not(e)
+                    if reason != self.unavailable:     # (said once: a page that sends many events a second would say it as often)
+                        logger.warning(reason)
+                    self.unavailable = reason
+                    raise TvError(reason) from e
+                self.unavailable = None
+                logger.info(f"The room Pi's virtual mouse is ready ({MOUSE_NAME})")
+            return self._device
 
     def _emit(self, *events: Tuple[str, str, int]) -> None:
         """Write events, by the names of their type and code, and report them as one."""

@@ -2,8 +2,10 @@
 touchpad, sections 3 and 5). The mouse runs on a fake device (the tests use pointer.CODES, and need neither evdev nor /dev/uinput), the TV
 on the fake client, and nothing here leaves the machine."""
 import asyncio
+import concurrent.futures
 import re
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -133,6 +135,85 @@ async def test_a_dropped_socket_whose_mouse_has_gone_says_nothing():
     await relay.release_all()                                    # there is nobody to tell: it raises nothing
 
 
+def test_the_device_can_be_made_ahead_of_the_first_event_and_only_once():
+    """A socket that opens makes the mouse (PiMouse.open), so that the desktop has taken it up by the time a finger is on the pad;
+    every socket that opens asks, and one device is made."""
+    device, made = FakeUInput(), []
+    mouse = PiMouse(uinput_factory=lambda: made.append(device) or device)
+    mouse.open()
+    mouse.open()
+    assert made == [device] and mouse.unavailable is None and device.writes == []
+    mouse.move(1, 1)                                             # and the first event goes to the device that is there
+    assert made == [device] and device.writes == [(EV_REL, REL_X, 1), (EV_REL, REL_Y, 1), "syn"]
+    mouse.close()
+    assert device.closed == 1
+
+
+def test_opening_the_mouse_says_in_words_when_it_cannot_be_made_and_the_next_try_is_not_refused():
+    attempts = []
+
+    def factory():
+        attempts.append(1)
+        if len(attempts) == 1:
+            raise PermissionError(13, "Permission denied", "/dev/uinput")
+        return FakeUInput()
+    mouse = PiMouse(uinput_factory=factory)
+    with pytest.raises(TvError) as failure:
+        mouse.open()
+    assert "not allowed to use /dev/uinput" in str(failure.value) and mouse.unavailable == str(failure.value)
+    mouse.open()                                                 # the installer's group is there now
+    assert len(attempts) == 2 and mouse.unavailable is None
+
+
+def test_sockets_that_open_together_make_one_device():
+    """Each socket makes the mouse in a thread of its own (the device takes a moment to appear, and the event loop must not wait for
+    it): the ones that open together must not each make a device."""
+    made = []
+
+    def slow_factory():
+        time.sleep(0.05)
+        made.append(FakeUInput())
+        return made[-1]
+    mouse = PiMouse(uinput_factory=slow_factory)
+    with concurrent.futures.ThreadPoolExecutor(8) as pool:
+        for _ in pool.map(lambda _: mouse.open(), range(8)):
+            pass
+    assert len(made) == 1
+
+
+def test_an_event_while_another_thread_makes_the_device_waits_for_it_and_makes_no_second():
+    made = []
+
+    def slow_factory():
+        time.sleep(0.1)
+        made.append(FakeUInput())
+        return made[-1]
+    mouse = PiMouse(uinput_factory=slow_factory)
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        opening = pool.submit(mouse.open)
+        time.sleep(0.02)                                         # (the thread is in the factory)
+        mouse.move(2, 0)
+        opening.result()
+    assert len(made) == 1 and made[0].writes == [(EV_REL, REL_X, 2), "syn"]
+
+
+def test_closing_the_mouse_waits_for_a_device_that_is_being_made_and_closes_it():
+    """The service's stop does not leave a device behind that a socket's thread was still making."""
+    made = []
+
+    def slow_factory():
+        time.sleep(0.1)
+        made.append(FakeUInput())
+        return made[-1]
+    mouse = PiMouse(uinput_factory=slow_factory)
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        opening = pool.submit(mouse.open)
+        time.sleep(0.02)                                         # (the thread is in the factory)
+        mouse.close()
+        opening.result()
+    assert len(made) == 1 and made[0].closed == 1
+
+
 def test_the_device_is_made_when_it_is_first_needed_and_closed_at_the_end():
     made = []
 
@@ -151,11 +232,32 @@ def test_the_device_is_made_when_it_is_first_needed_and_closed_at_the_end():
     assert len(made) == 2
 
 
+class Numbered(Exception):
+    """An error that is not the system's but carries its number, as a library's may."""
+    def __init__(self, errno):
+        super().__init__("it did not work")
+        self.errno = errno
+
+
+NOT_ALLOWED = ["not allowed to use /dev/uinput", "input group", "then restart the agent: sudo systemctl restart croom"]
+NOT_THERE = ["/dev/uinput", "is not there", "uinput kernel module is not loaded", "sudo modprobe uinput"]
+
+
 @pytest.mark.parametrize("error, words", [
-    (PermissionError(13, "Permission denied", "/dev/uinput"), ["not allowed to use /dev/uinput", "input group", "systemctl restart croom"]),
-    (FileNotFoundError(2, "No such file or directory", "/dev/uinput"), ["/dev/uinput", "not there", "uinput kernel module", "modprobe uinput"]),
-    (Exception('"/dev/uinput" cannot be opened for writing'), ["could not be made", "cannot be opened for writing", "uinput kernel module", "input group"]),
-    (OSError(5, "Input/output error"), ["could not be made", "Input/output error"]),
+    # the system's own errors, by their class
+    (PermissionError(13, "Permission denied", "/dev/uinput"), NOT_ALLOWED),
+    (FileNotFoundError(2, "No such file or directory", "/dev/uinput"), NOT_THERE),
+    # what evdev says when it looks before it opens (its UInput._verify): its own error, with its own words
+    (Exception('"/dev/uinput" cannot be opened for writing'), NOT_ALLOWED),
+    (Exception('"/dev/uinput" does not exist or is not a character device file - verify that the uinput module is loaded'), NOT_THERE),
+    # an error that is neither of those, told by its number or by its text
+    (Numbered(13), NOT_ALLOWED),
+    (Numbered(2), NOT_THERE),
+    (Exception("[Errno 13] Permission denied: '/dev/uinput'"), NOT_ALLOWED),
+    (Exception("[Errno 2] No such file or directory: '/dev/uinput'"), NOT_THERE),
+    # and what is none of them says what it is, and where to look
+    (OSError(5, "Input/output error"), ["could not be made", "Input/output error", "uinput kernel module", "input group"]),
+    (Exception(""), ["could not be made", "Exception", "uinput kernel module", "input group"]),
 ])
 async def test_a_mouse_that_cannot_be_made_says_what_to_do_to_every_event(caplog, error, words):
     attempts = []
@@ -174,6 +276,17 @@ async def test_a_mouse_that_cannot_be_made_says_what_to_do_to_every_event(caplog
     assert mouse.unavailable == str(failure.value) and len(attempts) == 3
     said = [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.tv.pointer"]
     assert len(said) == 1 and said[0].getMessage() == str(failure.value)                                                    # said once
+
+
+async def test_the_words_a_factory_gives_are_the_words_the_event_answers_with():
+    """The real factory says in words when evdev is not there (a TvError); nothing is made of words that are already words."""
+    def without_the_library():
+        raise TvError("The room Pi's mouse needs the evdev library: pip install evdev")
+    mouse = PiMouse(uinput_factory=without_the_library)
+    with pytest.raises(TvError) as failure:
+        await PointerRelay(None, mouse).handle({"target": "pi", "type": "tap"})
+    assert str(failure.value) == "The room Pi's mouse needs the evdev library: pip install evdev"
+    assert mouse.unavailable == str(failure.value)
 
 
 async def test_a_mouse_that_could_not_be_made_is_tried_again_when_it_has_been_put_right():

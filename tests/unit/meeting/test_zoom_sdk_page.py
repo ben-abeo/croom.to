@@ -1025,3 +1025,180 @@ async def test_a_failed_read_followed_by_a_good_one_is_not_passed_on():
         await run.page.evaluate("() => { window.ZoomMtg._behaviour.silentAttendees = false; window.__break = true; }")   # the first read fails ...
         await asyncio.wait_for(first, timeout=3)                                               # ... the one after it works
         await asyncio.wait_for(second, timeout=3)
+
+
+# ---- Controls: the client's own buttons, pressed from the table (spec 2026-10-13, section 4.3) ----
+
+
+async def test_button_controls_press_the_clients_buttons_and_settle_on_the_new_state():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('raise_hand')")
+        assert m["buttons"]["raise_hand"] == {"on": True} and m["me"]["raisedHand"] is True    # the button and the room's record agree
+        m = await run.page.evaluate("window.crystalMeet.control('captions')")
+        assert m["buttons"]["captions"] == {"on": True}
+        m = await run.page.evaluate("window.crystalMeet.control('hide_self')")
+        assert m["buttons"]["hide_self"] == {"on": True}
+        m = await run.page.evaluate("window.crystalMeet.control('camera')")
+        assert m["buttons"]["camera"] == {"on": False} and m["me"]["videoOn"] is False
+        assert [p[0] for p in await run.page.evaluate("window.__presses")] == ["stub-hand", "stub-captions", "stub-self"]
+
+
+async def test_menus_open_pick_and_close_within_one_call():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('layout', 'gallery')")
+        assert m["buttons"]["layout"] == {"value": "gallery"}
+        assert await run.page.evaluate("document.getElementById('stub-view-menu')") is None
+        await run.page.evaluate("window.crystalMeet.control('reactions', '👏')")
+        assert ["reaction", "clap"] in await run.page.evaluate("window.__zoomCalls")
+        assert await run.page.evaluate("document.getElementById('stub-reaction-menu')") is None
+        with pytest.raises(Exception) as failure:
+            await run.page.evaluate("window.crystalMeet.control('reactions', '🦄')")
+        assert "offers no" in str(failure.value)
+        assert await run.page.evaluate("document.getElementById('stub-reaction-menu')") is None   # closed again after the miss
+
+
+async def test_a_missing_button_says_so():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        await run.wait_for("connected")
+        with pytest.raises(Exception) as failure:
+            await run.page.evaluate("window.crystalMeet.control('raise_hand')")
+        assert "not on the screen yet" in str(failure.value)
+
+
+async def test_every_control_names_the_button_that_is_not_on_the_screen():
+    """Without the footer each control says which of Zoom's buttons it could not find, in the camera's own wording, and
+    presses nothing."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        await run.wait_for("connected")
+        for name in ["raise_hand", "captions", "hide_self", "reactions", "layout", "camera"]:
+            with pytest.raises(Exception) as failure:
+                await run.page.evaluate(f"window.crystalMeet.control('{name}', 'gallery')")
+            assert f"Zoom's {name.replace('_', ' ')} button is not on the screen yet; try again in a moment" in str(failure.value)
+        assert await run.page.evaluate("window.__presses") == []
+
+
+async def test_an_unknown_control_is_refused_in_words():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        with pytest.raises(Exception) as failure:
+            await run.page.evaluate("window.crystalMeet.control('dance')")
+        assert "Unknown control dance" in str(failure.value)
+        assert await run.page.evaluate("window.__presses") == []
+
+
+async def test_a_button_that_shows_its_change_late_is_waited_for():
+    """Zoom's footer follows its state a moment after the press: the answer is the meeting once the button says so, not the
+    meeting as it was read at the press."""
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("""() => {
+            const hand = document.getElementById("stub-hand");
+            hand.addEventListener("click", () => {          // after the stub's own listener: the record has changed, the button has not
+                const says = hand.getAttribute("aria-label");
+                hand.setAttribute("aria-label", "Raise Hand");
+                setTimeout(() => hand.setAttribute("aria-label", says), 400);
+            });
+        }""")
+        m = await run.page.evaluate("window.crystalMeet.control('raise_hand')")
+        assert m["buttons"]["raise_hand"] == {"on": True} and m["me"]["raisedHand"] is True
+
+
+async def test_a_press_the_client_does_not_act_on_is_answered_with_what_zoom_has_within_the_bound():
+    """A button that takes no press is not reported as done and is not waited for for ever: the call ends within about two
+    seconds with the meeting as it still is."""
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("() => { const hand = document.getElementById('stub-hand'); hand.replaceWith(hand.cloneNode(true)); }")   # the copy has no listener
+        m = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.control('raise_hand')"), timeout=8)
+        assert m["buttons"]["raise_hand"] == {"on": False} and m["me"]["raisedHand"] is False
+
+
+async def test_the_camera_control_waits_for_zooms_button_as_a_camera_press_does():
+    """The camera goes through setVideo: Zoom swallows a press while its video button is aria-disabled, so a control made
+    right after connecting waits for the button, presses it once, and answers when the camera has switched."""
+    async with PageRun(stub=client(videoOffOnEntry=True, videoStartsAfterMs=800)) as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('camera')")
+        assert m["buttons"]["camera"] == {"on": True} and m["me"]["videoOn"] is True
+        assert await run.page.evaluate("window.__videoClicks") == 1
+
+
+async def test_a_control_reaches_the_device_as_a_state_event_too():
+    """The call answers with the meeting, and the change goes out as a "state" event as well, so the device does not wait for
+    the next five-second read to hear of it."""
+    async with PageRun() as run:
+        await settled(run)
+        m = await run.page.evaluate("window.crystalMeet.control('captions')")
+        found = await states(run, 1, timeout=1.0)
+        assert m["buttons"]["captions"] == {"on": True} and found[0]["buttons"]["captions"] == {"on": True}
+
+
+MENU_LIKE = r"""(() => {
+    const how = window.__menuHow;
+    window.ZoomMtg._menu = function (id, items, onPick) {
+        const open = () => {
+            const menu = document.createElement("div"); menu.id = id; menu.setAttribute("role", "menu");
+            for (const [value, label] of items) {
+                const item = document.createElement("button"); item.setAttribute("role", "menuitem");
+                if (how.labelled) item.setAttribute("aria-label", value);       // an icon, and the name in the label only
+                else { item.dataset.item = value; item.textContent = label; }
+                item.addEventListener("click", () => {
+                    onPick(value);
+                    if (how.closeMs) setTimeout(() => { if (menu.isConnected) { window.__closedByZoom = true; menu.remove(); } }, how.closeMs);
+                    else if (!how.staysOpen) menu.remove();
+                });
+                menu.appendChild(item);
+            }
+            document.body.appendChild(menu);
+        };
+        if (how.lateMs) setTimeout(open, how.lateMs); else open();
+    };
+})();"""
+
+
+def menu_like(**how):
+    """The stub with a menu that behaves as the flags say: labelled (items with a label and no text or data), staysOpen (the
+    menu is still there after a pick), lateMs (it opens that long after the press) and closeMs (it closes itself that long
+    after a pick, and window.__closedByZoom says it did, not the page)."""
+    return STUB_JS + f"window.__menuHow = {json.dumps(how)};" + MENU_LIKE
+
+
+async def test_a_menu_that_opens_a_moment_after_the_press_is_waited_for():
+    async with PageRun(stub=menu_like(lateMs=300)) as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('layout', 'gallery')")
+        assert m["buttons"]["layout"] == {"value": "gallery"} and await run.page.evaluate("window.ZoomMtg._layout") == "gallery"
+
+
+async def test_a_menu_zoom_leaves_open_after_the_pick_is_closed_before_the_call_ends():
+    async with PageRun(stub=menu_like(staysOpen=True)) as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('layout', 'gallery')")
+        assert m["buttons"]["layout"] == {"value": "gallery"} and await run.page.evaluate("window.ZoomMtg._layout") == "gallery"
+        assert await run.page.evaluate("document.querySelector('[role=menu]')") is None          # never left open on the TV
+
+
+async def test_a_menu_zoom_closes_a_moment_after_the_pick_is_left_to_close_itself():
+    """The menu is Zoom's own element: the page takes it out only when Zoom has not closed it, never out from under it."""
+    async with PageRun(stub=menu_like(closeMs=300)) as run:
+        await run.wait_for("connected")
+        m = await run.page.evaluate("window.crystalMeet.control('layout', 'gallery')")
+        assert m["buttons"]["layout"] == {"value": "gallery"}
+        assert await run.page.evaluate("window.__closedByZoom") is True
+        assert await run.page.evaluate("document.querySelector('[role=menu]')") is None
+
+
+async def test_a_menu_item_is_found_by_its_key_its_emoji_or_its_label():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        picks = [("thumbsup", "thumbsup"), ("👍", "thumbsup"), ("👏", "clap"), ("❤️", "heart"), ("😂", "joy"), ("😮", "open_mouth"), ("🎉", "tada")]
+        for asked, _ in picks:
+            await run.page.evaluate("([name, value]) => window.crystalMeet.control(name, value)", ["reactions", asked])
+        assert [c[1] for c in await run.calls("reaction")] == [key for _, key in picks]
+        assert [p[0] for p in await run.page.evaluate("window.__presses")] == ["stub-reactions"] * len(picks)     # the opener once a call
+    async with PageRun(stub=menu_like(labelled=True)) as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.crystalMeet.control('reactions', 'clap')")
+        assert ["reaction", "clap"] in await run.page.evaluate("window.__zoomCalls")

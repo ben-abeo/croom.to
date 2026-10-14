@@ -320,6 +320,60 @@
     if (pollTimer === null) pollTimer = setInterval(() => { syncState().catch(() => {}); }, 5000);
   }
 
+  // ---- Controls: the client's own buttons, pressed for the table ----
+  // The hand, reactions, captions, the view and self view have no SDK call: the bridge presses the client's own button, found
+  // by what it says (BUTTONS), gives the client a bounded moment to show the change, and answers with the meeting as Zoom then
+  // has it, never with the state the press was meant to reach. The camera goes through setVideo, which knows its button.
+  const settle = (done, ms) => new Promise((resolve) => {
+    let tries = 0;
+    const tick = () => { if (done() || tries++ >= Math.ceil(ms / 100)) resolve(); else setTimeout(tick, 100); };
+    setTimeout(tick, 100);
+  });
+  const noButton = (name) => new Error("Zoom's " + name.replace("_", " ") + " button is not on the screen yet; try again in a moment");
+  // Never leave a menu open on the TV.
+  function closeMenus() { for (const m of document.querySelectorAll('[role="menu"]')) m.remove(); }
+  async function pressButton(name) {
+    const b = findButton(name);
+    if (!b) throw noButton(name);
+    const before = labelOf(b);
+    b.click();
+    await settle(() => labelOf(b) !== before, 2000);
+  }
+  // Open the menu, pick the item the value names (by its text, a data attribute or its label), and close the menu if the
+  // client has not. The client's buttons do not say which view is showing: the bridge keeps the last one it picked.
+  async function pickFromMenu(name, value) {
+    const b = findButton(name);
+    if (!b) throw noButton(name);
+    b.click();
+    await settle(() => document.querySelector('[role="menu"], [role="menuitem"]'), 2000);
+    const wanted = String(value).toLowerCase();
+    const items = Array.from(document.querySelectorAll('[role="menuitem"], [role="menu"] button'));
+    const item = items.find((i) => {
+      const text = (i.textContent || "").trim().toLowerCase();
+      const data = Object.values(i.dataset || {}).map((v) => String(v).toLowerCase());
+      return text === wanted || data.includes(wanted) || (i.getAttribute("aria-label") || "").toLowerCase() === wanted;
+    });
+    if (!item) {
+      closeMenus();
+      throw new Error("Zoom offers no " + value + " here");
+    }
+    item.click();
+    await settle(() => !document.querySelector('[role="menu"]'), 1000);
+    closeMenus();
+    if (name === "layout") bridge._layout = String(value);
+  }
+  bridge.control = async function (name, value) {
+    switch (name) {
+      case "camera": await bridge.setVideo(!(bridge.video().on)); break;
+      case "raise_hand": case "captions": case "hide_self": await pressButton(name); break;
+      case "reactions": await pickFromMenu("reactions", value); break;
+      case "layout": await pickFromMenu("layout", value); break;
+      default: throw new Error("Unknown control " + name);
+    }
+    await syncState();
+    return bridge.readMeeting();
+  };
+
   // The join's mic-off default goes out as soon as the room's id is known: at once, or when a later read first finds it (Zoom
   // builds the current user's record from its roster, so the first record can have no id), and only once. It is an action,
   // so the meeting is read again once Zoom has answered it: a read that found the id has the record from before the mute.

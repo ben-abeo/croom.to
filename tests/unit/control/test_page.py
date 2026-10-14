@@ -2682,24 +2682,25 @@ def how_far_past_the_bottom(browser, name, location, state, sizes, title=BOOKING
     return found
 
 
-def test_the_limit_the_docs_state_for_a_long_room_name_on_a_very_short_sign_is_the_one_the_sign_has(browser, central_time):
-    """What is left on a screen 480 to 500 px high, as the guide and the README say: a name that takes three lines or more of the smaller type (31
-    characters or more at 800 to 1024 px wide, 41 at 1280) still runs off. At 800 by 480 with the strip up, a location of two lines and the room free for the
-    rest of the day, whose chip is two lines there, a name of 36 characters by 8 px (and not with a location of one line); at 1280 by 480 a name of 41
-    characters by 1 px with the strip up, and by 14 px with no strip while a booking is under way; four lines (55 characters) by tens of px. When one of
-    these stops being so, the docs change."""
-    thirty_six, forty_one, fifty_five = "Executive Conference Room North Wing", "The Executive Conference Room, North Wing", "The Executive Conference Room, North Wing, Second Floor"
-    assert (len(thirty_six), len(forty_one), len(fifty_five)) == (36, 41, 55)
-    two_lines = how_far_past_the_bottom(browser, thirty_six, TWO_LINE_LOCATION, "free all day", ((800, 480),))
-    assert abs(two_lines[(True, 800, 480)] - 8) <= 3 and two_lines[(False, 800, 480)] == 0, two_lines
-    one_line = how_far_past_the_bottom(browser, thirty_six, "2nd floor, by the kitchen", "free all day", ((800, 480),))
-    assert one_line == {(False, 800, 480): 0, (True, 800, 480): 0}, one_line
-    wide = how_far_past_the_bottom(browser, forty_one, "2nd floor, by the kitchen", "free all day", ((1280, 480),))
-    assert abs(wide[(True, 1280, 480)] - 1) <= 2 and wide[(False, 1280, 480)] == 0, wide
-    booked = how_far_past_the_bottom(browser, forty_one, "2nd floor, by the kitchen", "booked", ((1280, 480),))
-    assert abs(booked[(False, 1280, 480)] - 14) <= 3, booked
-    four_lines = how_far_past_the_bottom(browser, fifty_five, "2nd floor, by the kitchen", "free all day", ((1280, 480),))
-    assert 20 <= four_lines[(True, 1280, 480)] <= 80 and 20 <= four_lines[(False, 1280, 480)] <= 80, four_lines
+def a_room_in_a_status(status, title=BOOKING_TITLES[1]):
+    """(the bookings, the state the sign reaches) for a room that is in `status`, one of STATUSES."""
+    now_booking = [event("now", title, -10, duration=50)] + [event(f"t{n}", "Later", 60 + 60 * n) for n in range(2)]
+    bookings = {"free": [event(f"t{n}", title, 40 + 60 * n) for n in range(3)], "free all day": [], "starting soon": [event(f"t{n}", title, 8 + 60 * n) for n in range(3)],
+                "booked": now_booking, "in use": now_booking, "not connected": [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]}[status]
+    reached = {"free": "free", "free all day": "free", "starting soon": "soon", "booked": "occupied", "in use": "occupied", "not connected": "free"}[status]
+    return bookings, reached
+
+
+def sign_in_a_status(browser, server, status, reached, width, height):
+    """The sign at the size with the room in `status` (for "not connected": the room is lost after the sign has seen it, and the name and the strip stay)."""
+    if status == "not connected":
+        page = sign_on_a_stopped_clock(browser, server, width, height)
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        return page
+    return open_sign(browser, server, width, height, state=reached)
 
 
 @pytest.mark.parametrize("status", STATUSES)
@@ -2707,13 +2708,9 @@ def test_nothing_runs_off_a_sign_480_to_500_px_high_in_any_status(browser, statu
     """800 by 480 is the Raspberry Pi's 7-inch panel: whatever the room is doing, with the strip up or down, a name of up to two lines of the smaller type
     (the longest is 26 characters), a location of two lines and a booking title of 60 characters, at 800 by 480, 900 by 500, 1024 by 480, 1024 by 500,
     1280 by 480 and 1366 by 500 the sign stays whole: the chip, the status under it and the strip are on the screen. (Before this, a two-line name and a
-    long title in the chip pushed it up to 72 px off.) A name of three lines or more still runs off, as the next test says."""
+    long title in the chip pushed it up to 72 px off.) A name that would take more lines goes down a size at a time, as the next tests say."""
     skip_if_day_ends_within(3)
-    title = BOOKING_TITLES[1]
-    now_booking = [event("now", title, -10, duration=50)] + [event(f"t{n}", "Later", 60 + 60 * n) for n in range(2)]
-    bookings = {"free": [event(f"t{n}", title, 40 + 60 * n) for n in range(3)], "free all day": [], "starting soon": [event(f"t{n}", title, 8 + 60 * n) for n in range(3)],
-                "booked": now_booking, "in use": now_booking, "not connected": [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]}[status]
-    wanted = {"free": "free", "free all day": "free", "starting soon": "soon", "booked": "occupied", "in use": "occupied", "not connected": "free"}[status]
+    bookings, reached = a_room_in_a_status(status)
     for name in ("Conference Room Twelve", LONGEST_TWO_LINE_NAME):                                   # two lines in the large type, and the longest of two in the smaller
         with PageServer(calendar_events=bookings, room_name=name, room_location=TWO_LINE_LOCATION, schedules=every_school()) as server:
             if status == "in use":
@@ -2723,14 +2720,7 @@ def test_nothing_runs_off_a_sign_480_to_500_px_high_in_any_status(browser, statu
                 if scores:
                     scoreboard_has(server, scores)
                 for width, height in SHORT_SIGNS:
-                    if status == "not connected":                                        # the room is lost after the sign has seen it: the name stays, the strip stays
-                        page = sign_on_a_stopped_clock(browser, server, width, height)
-                        page.route("**/api/status", lambda route: route.abort())
-                        with page.expect_event("requestfailed"):
-                            page.clock.run_for(5000)
-                        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
-                    else:
-                        page = open_sign(browser, server, width, height, state=wanted)
+                    page = sign_in_a_status(browser, server, status, reached, width, height)
                     if scores:
                         strip = page.locator("#score").bounding_box()
                         assert strip["y"] >= 0 and strip["y"] + strip["height"] <= height + 0.5, ("the strip is not wholly on the sign", name, width, height, strip)
@@ -2738,6 +2728,155 @@ def test_nothing_runs_off_a_sign_480_to_500_px_high_in_any_status(browser, statu
                     assert chip["y"] + chip["height"] <= (page.locator("#score").bounding_box()["y"] if scores else height) + 0.5, ("the chip", name, width, height, chip)
                     assert fits(page), (status, name, bool(scores), width, height, page.evaluate("document.documentElement.scrollHeight") - height)
                     page.close()
+
+
+# --- a long name steps down on a short sign until it takes two lines (the task 5 review, round 1c) ---
+
+STEPPED_NAMES = {36: "Executive Conference Room North Wing", 45: "Executive Conference Room North Wing, Floor 2",
+                 55: "The Executive Conference Room, North Wing, Second Floor"}
+STEPPED_SIZES = ((800, 480), (1024, 500), (1280, 480), (1366, 500))
+FLOOR_REM = 1.3                                                                        # the smallest a name is set on a short sign, and the step is 0.1 rem
+
+
+def room_name_type(page):
+    """(its size in rem, the inline size it was stepped to or "", how many lines it takes)."""
+    return page.evaluate("""() => { const r = document.getElementById('room-name'), rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+        return [parseFloat(getComputedStyle(r).fontSize) / rem, r.style.fontSize, Math.round(r.getBoundingClientRect().height / parseFloat(getComputedStyle(r).lineHeight))]; }""")
+
+
+@pytest.mark.parametrize("status", STATUSES)
+def test_on_a_sign_560_px_high_or_less_a_name_that_still_takes_more_than_two_lines_steps_down_until_it_takes_two(browser, status, central_time):
+    """After the smaller type a name of 36, 45 or 55 characters still takes three lines on the narrow signs, and three lines of it ran off the bottom of an
+    800 by 480 sign (8 px, free all day, with the strip up and a location of two lines). It goes down 0.1 rem at a time, to 1.3 rem, until it takes two
+    lines: in every status, with the strip up and a location of two lines, at the four sizes, the name is two lines or less (or is at the floor), is
+    whole in the page, sits on the 0.1 rem steps, and the sign is whole."""
+    skip_if_day_ends_within(3)
+    bookings, reached = a_room_in_a_status(status)
+    for length, name in STEPPED_NAMES.items():
+        assert len(name) == length
+        with PageServer(calendar_events=bookings, room_name=name, room_location=TWO_LINE_LOCATION, schedules=every_school()) as server:
+            choose(server, sign_scores=["texas"])
+            scoreboard_has(server, ["texas"])
+            if status == "in use":
+                join_the_booking(server, "now")
+            for width, height in STEPPED_SIZES:
+                page = sign_in_a_status(browser, server, status, reached, width, height)
+                size, stepped, lines = room_name_type(page)
+                assert page.locator("#room-name").inner_text() == name, (length, width, height)              # whole: smaller, never cut
+                assert lines <= 2 or size == pytest.approx(FLOOR_REM, abs=0.01), (status, length, width, height, size, lines)
+                assert not stepped or abs(size * 10 - round(size * 10)) < 0.02 and size >= FLOOR_REM - 0.01, (length, width, height, size, stepped)
+                assert lines > 2 or fits(page), (status, length, width, height, size, page.evaluate("document.documentElement.scrollHeight") - height)
+                page.close()
+
+
+def test_a_stepped_name_goes_back_to_the_stylesheets_size_when_the_sign_grows_past_560_px_and_steps_again_when_it_shrinks(browser, central_time):
+    """The steps are for a short sign only, so they are undone when the sign is a pixel taller than 560 and made again when it is not: with its polls
+    stopped and the font events off, only the resize can do it."""
+    with PageServer(room_name=STEPPED_NAMES[55], room_location="2nd floor") as server:
+        page = sign_on_a_stopped_clock(browser, server, 800, 480, init_script="document.fonts.addEventListener = () => {};")
+        size, stepped, lines = room_name_type(page)
+        assert stepped and lines == 2 and size < 2.4, (size, stepped, lines)                    # 2.4 rem is the smaller type at 800 px wide
+        for width, height, short in ((1280, 800, False), (800, 480, True), (1280, 561, False), (1280, 560, True), (1280, 561, False)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                  # the page's own timers are stopped: this is the test's time
+            size, stepped, lines = room_name_type(page)
+            rem = min(max(16, 0.0125 * max(width, height)), 24)
+            smaller = min(max(2.2 * rem, 0.048 * width), 3.6 * rem) / rem                  # the stylesheet's .long size in rem
+            assert bool(stepped) == short and (size < smaller - 0.05 if short else size == pytest.approx(smaller)), (width, height, size, stepped)
+            assert lines <= 2 or not short, (width, height, lines)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, sizes", [(800, 480, {36: 2.3, 45: 1.9, 55: 1.5, 67: 1.3}), (1280, 480, {36: 3.6, 45: 3.1, 55: 2.4, 67: 2.1})])
+def test_a_name_goes_down_to_the_largest_tenth_of_a_rem_at_which_it_takes_two_lines_on_a_short_sign(browser, width, height, sizes):
+    """From the smaller type (2.4 rem at 800 px wide, 3.6 rem at 1280) in steps of 0.1 rem, and it stops at the first size at which it takes two lines, so
+    the steps are those and not 0.2 rem, and it does not go on to one line. (36 characters are two lines of the smaller type at 1280: no step.)"""
+    for length, rem_wanted in sizes.items():
+        with PageServer(room_name=FLOOR_NAMES[67] if length == 67 else STEPPED_NAMES[length], room_location="2nd floor") as server:
+            page = open_sign(browser, server, width, height)
+            size, stepped, lines = room_name_type(page)
+            assert size == pytest.approx(rem_wanted, abs=0.001) and lines == 2, (width, length, size, stepped, lines)
+            assert bool(stepped) == (length != 36 or width == 800), (width, length, stepped)
+            page.close()
+
+
+def test_a_name_that_needs_the_smaller_type_keeps_it_when_a_tall_sign_is_fitted_again(browser, central_time):
+    """Fitted again with the smaller type on (the week opens and closes, so the view changes twice), "Sales Conference Room" is measured with it taken off, as it
+    is the first time: it needs the type, and has it, as it does on a short sign, where the limit is one line and a name of two lines of it keeps it anyway."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=[event("t0", "Standup", 40)], room_name="Sales Conference Room", room_location="2nd floor") as server:
+        page = open_sign(browser, server, 1280, 800)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2]
+        open_the_week(page)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2]
+        page.click("#week-back")
+        page.wait_for_function("document.body.dataset.view === 'today'", timeout=3000)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
+        page.close()
+
+
+def test_a_name_too_long_for_two_lines_even_at_the_floor_stays_at_the_floor_and_whole_on_a_short_sign(browser):
+    """5 x 36 characters is seven lines at 1.3 rem on an 800 px sign and four on a 1280 px one: it goes down to the floor and no further, and none of it is cut."""
+    name = " ".join([STEPPED_NAMES[36]] * 5)
+    with PageServer(room_name=name, room_location="2nd floor") as server:
+        for width, height in ((800, 480), (1280, 480)):
+            page = open_sign(browser, server, width, height)
+            size, stepped, lines = room_name_type(page)
+            assert size == pytest.approx(FLOOR_REM, abs=0.01) and stepped == "1.3rem" and lines > 2, (width, height, size, stepped, lines)
+            assert page.locator("#room-name").inner_text() == name
+            page.close()
+
+
+@pytest.mark.parametrize("name", ["Boardroom", "Conference Room Twelve", "Sales Conference Room", "North Wing Training Room 2"])
+def test_a_name_that_takes_two_lines_or_less_is_not_stepped_on_a_short_sign(browser, name):
+    """One line at the large size, or two lines at the large or the smaller size: the sizes of the stylesheet are the sizes it has, with no step."""
+    with PageServer(room_name=name, room_location="2nd floor") as server:
+        for width, height in SHORT_SIGNS:
+            page = open_sign(browser, server, width, height)
+            size, stepped, lines = room_name_type(page)
+            assert stepped == "" and lines <= 2, (name, width, height, size, stepped, lines)
+            page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_signs_stepped_name(browser):
+    with PageServer(room_name=STEPPED_NAMES[55]) as server:
+        page = sign_on_a_stopped_clock(browser, server, 800, 480)
+        assert room_name_type(page)[1]                                                      # it is stepped
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || ''))))
+                .observe(document.getElementById('room-name'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == []                                        # neither measured nor stepped again
+        page.close()
+
+
+FLOOR_NAMES = {67: "The Executive Conference Room, North Wing, Second Floor, East Annex",
+               87: "The Executive Conference Room, North Wing, Second Floor, East Annex, Building B, Austin",
+               110: " ".join([STEPPED_NAMES[36]] * 3), 147: " ".join([STEPPED_NAMES[36]] * 4), 184: " ".join([STEPPED_NAMES[36]] * 5)}
+
+
+def test_the_limit_the_docs_state_for_a_name_at_the_floor_is_the_one_the_sign_has(browser, central_time):
+    """What the guide and the README say is left on a screen 480 to 500 px high: a name goes down to 1.3 rem and no further. A name of up to 67 characters takes
+    two lines at that size and one of 87 to 147 characters three to five (at 800 by 480), and the sign is whole at the six sizes, in every status, with a location
+    of two lines and the strip up or down. A name of 184 characters, seven lines at 800 by 480, runs past the bottom by 6 px with the strip up, and by 39 px when
+    the room is free for the rest of the day (its label is two lines there). When one of these stops being so, the docs change."""
+    assert {length: len(name) for length, name in FLOOR_NAMES.items()} == {length: length for length in FLOOR_NAMES}
+    for length in (67, 87, 110, 147):
+        found = how_far_past_the_bottom(browser, FLOOR_NAMES[length], TWO_LINE_LOCATION, "free all day", SHORT_SIGNS)
+        assert set(found.values()) == {0}, (length, found)
+    for length, lines in ((67, 2), (87, 3), (147, 5), (184, 7)):
+        with PageServer(room_name=FLOOR_NAMES[length], room_location=TWO_LINE_LOCATION) as server:
+            page = open_sign(browser, server, 800, 480)
+            size, stepped, taken = room_name_type(page)
+            assert (round(size, 2), taken) == (FLOOR_REM if length > 67 else size, lines), (length, size, stepped, taken)
+            page.close()
+    seven = how_far_past_the_bottom(browser, FLOOR_NAMES[184], TWO_LINE_LOCATION, "free all day", ((800, 480),))
+    assert abs(seven[(True, 800, 480)] - 39) <= 4 and seven[(False, 800, 480)] == 0, seven
+    booked = how_far_past_the_bottom(browser, FLOOR_NAMES[184], TWO_LINE_LOCATION, "booked", ((800, 480),))
+    assert abs(booked[(True, 800, 480)] - 6) <= 3, booked
 
 
 def free_port():

@@ -12,6 +12,8 @@
   const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css) ...
   const NAME_LINES = 2;   // ... and so does a shorter one that would take more lines than this at the large size (fitRoomName),
   const SHORT_NAME_LINES = 1;   // or than this on a short sign
+  const NAME_STEP_REM = 0.1;    // and on a short sign a name that still takes more than NAME_LINES lines in the smaller type goes down this much at a time ...
+  const NAME_FLOOR_REM = 1.3;   // ... until it takes NAME_LINES or reaches this size, below which it is not set
   // A short sign, 560 px high or less (the 7-inch 800 by 480 panel is one): sign.css gives up detail there, the chip says only the status (the booking's
   // title is in the Today list beside it), and a room name takes the smaller type as soon as it would take two lines, so that nothing runs off the screen.
   const shortSign = window.matchMedia("(max-height: 560px)");
@@ -156,12 +158,27 @@
     const fitted = [name, window.innerWidth, window.innerHeight, data.view, "strip" in data, fontsArrived].join("|");   // the height decides shortSign too
     if (fitted === nameFit) return;
     nameFit = fitted;
+    room.style.removeProperty("font-size");   // the sizes the stylesheet gives, afresh: a sign that has grown past 560 px is let go of its steps
     let long = name.length > LONG_NAME;
     if (!long) {
       room.classList.remove("long");
-      long = Math.round(room.getBoundingClientRect().height / parseFloat(getComputedStyle(room).lineHeight)) > (shortSign.matches ? SHORT_NAME_LINES : NAME_LINES);
+      long = linesOf(room) > (shortSign.matches ? SHORT_NAME_LINES : NAME_LINES);
     }
     room.classList.toggle("long", long);
+    if (shortSign.matches) stepNameDown(room);
+  }
+
+  const linesOf = (node) => Math.round(node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight));
+
+  // A name that takes more than NAME_LINES lines even in the smaller type ("Executive Conference Room North Wing" on an 800 px sign) goes on down, NAME_STEP_REM
+  // at a time, each size on the 0.1 rem grid, until it takes NAME_LINES or has reached NAME_FLOOR_REM. Whole, as ever, and the status under it keeps its room.
+  function stepNameDown(room) {
+    const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+    let size = parseFloat(getComputedStyle(room).fontSize) / rem;
+    while (size > NAME_FLOOR_REM && linesOf(room) > NAME_LINES) {
+      size = Math.max(NAME_FLOOR_REM, Math.round((size - NAME_STEP_REM) * 10) / 10);
+      room.style.fontSize = size + "rem";
+    }
   }
 
   // The state (free, soon, occupied, offline, loading) colours the rail, the chip and the ring through the CSS;

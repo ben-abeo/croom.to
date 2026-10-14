@@ -571,7 +571,12 @@ class TvService(Service):
         """The client for the TV's cursor (the pointer socket of the library's client): the live connection when the TV can be told
         something, else why not, as TvError in the words control() has for it. The cursor is not one of the controls. It sends many
         messages a second, so it takes no turn behind them (the control service's lock) and reads nothing back; the pointer relay
-        (croom.tv.pointer) calls the client's move, click and scroll itself."""
+        (croom.tv.pointer) calls the client's move, click and scroll itself. A TV that is up is answered from what the service holds, with
+        no look at the file where the key is kept: a connection that is up is paired, and a hundred reads a second would be for nothing.
+        Only a TV that cannot be told anything looks (_require_ready), to say why."""
+        client = self._client
+        if client is not None and self._answering():
+            return client
         return self._require_ready()
 
     # Keeping the TV on (spec section 3): woken as the agent starts, before every join, and after it went off by itself;

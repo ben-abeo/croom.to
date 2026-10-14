@@ -11,9 +11,10 @@ from types import SimpleNamespace
 
 import pytest
 from croom.tv.errors import TvError
+from croom.tv.keystore import KeyStore
 from croom.tv.pointer import CODES, PiMouse, PointerRelay
 from tests.unit.tv.fake_client import FakeTvClient
-from tests.unit.tv.helpers import build_service, forgetful_tv, running, silent_tv, until, within
+from tests.unit.tv.helpers import WebOsTvCommandError, build_service, forgetful_tv, running, silent_tv, until, within
 
 EV_KEY, EV_REL = CODES["EV_KEY"], CODES["EV_REL"]
 REL_X, REL_Y, REL_WHEEL = CODES["REL_X"], CODES["REL_Y"], CODES["REL_WHEEL"]
@@ -49,12 +50,18 @@ def a_mouse():
 
 
 class PointerTv(FakeTvClient):
-    """A TV whose cursor can be held up. A move is noted as soon as it is sent, and then waits for `hold` (an asyncio.Event, when there
-    is one) to open, as a TV that has been written to and has not taken it yet; `fail` is an error that the move then raises."""
+    """A TV whose cursor can be held up. A call is noted as soon as it is sent, and then a move or a click waits for `hold` (an
+    asyncio.Event, when there is one) to open, as a TV that has been written to and has not taken it yet; `fail` is an error that the
+    move then raises. A call on a connection that is down raises what the library does (WebOsTvCommandError)."""
     hold = None
     fail = None
 
+    def _written_to(self):
+        if not self.connected:
+            raise WebOsTvCommandError("Not connected, can't execute input command.")
+
     async def move(self, *args, **kwargs):
+        self._written_to()
         self._record("move", *args, **kwargs)
         if self.hold is not None:
             await self.hold.wait()
@@ -62,9 +69,14 @@ class PointerTv(FakeTvClient):
             raise self.fail
 
     async def click(self, *args, **kwargs):
+        self._written_to()
         self._record("click", *args, **kwargs)
         if self.hold is not None:
             await self.hold.wait()
+
+    async def scroll(self, *args, **kwargs):
+        self._written_to()
+        self._record("scroll", *args, **kwargs)
 
 
 def sent(client):
@@ -106,6 +118,16 @@ async def test_a_move_along_one_axis_writes_that_axis_and_nothing_at_all_writes_
     await relay.handle({"target": "pi", "type": "move", "dx": 0, "dy": 0})
     await relay.handle({"target": "pi", "type": "scroll"})
     assert device.writes == [(EV_REL, REL_Y, 5), "syn"]
+
+
+async def test_a_button_that_went_up_is_not_released_again_when_the_socket_ends():
+    mouse, device = a_mouse()
+    relay = PointerRelay(None, mouse)
+    await relay.handle({"target": "pi", "type": "down"})
+    await relay.handle({"target": "pi", "type": "up"})
+    written = list(device.writes)
+    await relay.release_all()
+    assert device.writes == written == [(EV_KEY, BTN_LEFT, 1), "syn", (EV_KEY, BTN_LEFT, 0), "syn"]
 
 
 async def test_an_up_with_no_down_releases_nothing():
@@ -621,25 +643,262 @@ async def test_a_move_that_failed_on_its_way_is_said_by_the_next_message_once(tm
 
 
 async def test_a_failure_that_is_a_bug_is_said_by_the_next_message_and_logged(tmp_path, caplog):
-    class Buggy:
-        """A TV service that answers once with a client, and then fails in a way that is not words."""
-        def __init__(self, client):
-            self.client, self.asked = client, 0
+    """A client that cannot be called at all (not what the library gives): not words, so it is logged, and said all the same."""
+    service = SimpleNamespace(pointer=lambda: SimpleNamespace())
+    relay = PointerRelay(service, a_mouse()[0])
+    await relay.handle(TV_MOVE)
+    await relay.drain()
+    with pytest.raises(TvError) as failure:
+        await relay.handle(TV_MOVE)
+    assert str(failure.value).startswith("The TV did not accept that: ") and "move" in str(failure.value)
+    assert [r for r in caplog.records if r.levelname == "WARNING" and "could not be moved" in r.getMessage() and r.exc_info]
 
-        def pointer(self):
-            self.asked += 1
-            if self.asked > 1:
-                raise RuntimeError("the service has a bug")
-            return self.client
+
+@pytest.mark.parametrize("message, call", [
+    ({"type": "tap"}, ("click",)),
+    ({"type": "scroll", "dx": 1, "dy": 2}, ("scroll", 1, 2)),
+])
+async def test_old_news_of_a_move_that_failed_does_not_eat_the_tap_or_the_scroll_that_comes_after(tmp_path, message, call):
+    """A move that failed on its way is said by the next MOVE. What comes after it that is not a move makes its own call, which says
+    if the TV is still not taking them: a tap long after, with the TV back, is sent, and not refused for what happened to a move."""
     service = build_service(tmp_path, PointerTv)
     async with running(service) as tv:
-        relay = PointerRelay(Buggy(tv), a_mouse()[0])
-        await relay.handle(TV_MOVE)                                                   # (the first look is sound; the send is not)
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle(TV_MOVE)
+        await relay.drain()                                                           # the move failed in the background
+        tv.fail = None                                                                # and the TV is fine again
+        await relay.handle(dict(message, target="tv"))
+        assert sent(tv)[-1] == call
+        await relay.handle(TV_MOVE)                                                   # nothing is left to say, to the next move either
         await relay.drain()
+        assert sent(tv)[-1] == ("move", 1, 0)
+
+
+async def test_old_news_of_a_move_that_failed_does_not_eat_a_down_or_an_up_either(tmp_path):
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle(TV_MOVE)
+        await relay.drain()
+        tv.fail = None
+        await relay.handle({"target": "tv", "type": "down"})                          # not refused for the move before it
+        await relay.handle({"target": "tv", "type": "move", "dx": 4, "dy": 0})
+        await relay.handle({"target": "tv", "type": "up"})
+        assert sent(tv) == [("move", 1, 0), ("move", 4, 0, 1), ("move", 0, 0)]
+
+
+async def test_a_tap_after_a_failed_move_with_the_tv_still_down_says_its_own_words_and_the_old_news_is_not_said_again(tmp_path):
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle(TV_MOVE)
+        await relay.drain()
+        await tv.drop()                                                               # and the TV is down
         with pytest.raises(TvError) as failure:
-            await relay.handle(TV_MOVE)
-        assert str(failure.value) == "The TV did not accept that: the service has a bug"
-    assert [r for r in caplog.records if r.levelname == "WARNING" and "the service has a bug" in r.getMessage() and r.exc_info]
+            await relay.handle({"target": "tv", "type": "tap"})
+        assert str(failure.value) == "The TV is not answering at 10.0.0.41"          # the tap's own words, not the move's
+        with pytest.raises(TvError) as failure:
+            await relay.handle(TV_MOVE)                                               # and the move's news was dropped with it
+        assert str(failure.value) == "The TV is not answering at 10.0.0.41"
+
+
+async def test_a_failure_that_comes_while_a_tap_waits_is_not_the_taps_to_say(tmp_path):
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        tv.hold = asyncio.Event()
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle(TV_MOVE)
+        await until(lambda: sent(tv) == [("move", 1, 0)])
+        tapping = asyncio.ensure_future(relay.handle({"target": "tv", "type": "tap"}))
+        await asyncio.sleep(0.05)
+        tv.hold.set()                                                                 # the move in flight ends in the failure ...
+        await within(tapping)                                                         # ... and the tap that waited for it is sent
+        assert sent(tv) == [("move", 1, 0), ("click",)]
+        tv.fail = None
+        await relay.handle(TV_MOVE)                                                   # and the move has nothing to be told either
+        await relay.drain()
+        assert sent(tv)[-1] == ("move", 1, 0) and len(sent(tv)) == 3
+
+
+async def test_news_of_a_failed_move_is_old_after_a_moment(tmp_path):
+    """The TV may be back by the time the next move comes: a move that comes after STALE_FAILURE_S is not refused for the one before."""
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        relay = PointerRelay(service, a_mouse()[0])
+        relay.STALE_FAILURE_S = 0.05
+        await relay.handle(TV_MOVE)
+        await relay.drain()
+        await asyncio.sleep(0.1)
+        tv.fail = None
+        await relay.handle(TV_MOVE)                                                   # not refused: it is sent
+        await relay.drain()
+        assert sent(tv) == [("move", 1, 0), ("move", 1, 0)]
+
+
+def test_news_of_a_failed_move_is_good_for_a_second():
+    assert PointerRelay.STALE_FAILURE_S == 1.0
+
+
+class ReadCounting(KeyStore):
+    """A key store that counts the times its file is read."""
+    def __init__(self, path):
+        super().__init__(path)
+        self.reads = 0
+
+    def read(self):
+        self.reads += 1
+        return super().read()
+
+
+async def test_the_cursor_does_not_read_the_key_file_for_every_message(tmp_path):
+    """The pointer sends a hundred messages a second: the TV that is up is answered from what the service holds, not by a read of the
+    file where the key is kept."""
+    service = build_service(tmp_path, PointerTv, keystore=ReadCounting)
+    async with running(service) as tv:
+        reads = service._keys.reads
+        relay = PointerRelay(service, a_mouse()[0])
+        for _ in range(100):
+            await relay.handle({"target": "tv", "type": "move", "dx": 1, "dy": 1})
+            await relay.drain()
+        await relay.handle({"target": "tv", "type": "tap"})
+        await relay.handle({"target": "tv", "type": "scroll", "dy": 1})
+        await relay.handle({"target": "tv", "type": "down"})
+        await relay.handle({"target": "tv", "type": "move", "dx": 1, "dy": 1})
+        await relay.handle({"target": "tv", "type": "up"})
+        assert len(sent(tv)) == 100 + 4 and service._keys.reads == reads      # (the 100 moves, a click, a scroll, a move in the drag and its end)
+
+
+async def test_the_seam_answers_from_memory_when_the_tv_is_up_and_from_the_key_when_it_cannot_say_why(tmp_path):
+    service = build_service(tmp_path, FakeTvClient, keystore=ReadCounting)
+    async with running(service) as tv:
+        reads = service._keys.reads
+        for _ in range(100):
+            assert service.pointer() is tv
+        assert service._keys.reads == reads                       # (the up TV is the answer: the file is not asked)
+        await tv.drop()
+        with pytest.raises(TvError):
+            service.pointer()                                      # the TV is down: the words come from what is set up, which is looked at
+        assert service._keys.reads > reads
+
+
+async def test_a_message_asks_the_service_for_the_client_once(tmp_path):
+    """Once for the message, and the client is used for all of it: what waits for the moves before it, and what sends them."""
+    service = build_service(tmp_path, PointerTv)
+    async with running(service):
+        asked = []
+        pointer = service.pointer
+        service.pointer = lambda: asked.append(1) or pointer()
+        relay = PointerRelay(service, a_mouse()[0])
+        messages = ({"type": "move", "dx": 1, "dy": 0}, {"type": "move", "dx": 2, "dy": 0}, {"type": "tap"},
+                    {"type": "scroll", "dy": 1}, {"type": "down"}, {"type": "move", "dx": 3, "dy": 0}, {"type": "up"})
+        for message in messages:
+            await relay.handle(dict(message, target="tv"))
+        await relay.drain()
+        assert len(asked) == len(messages)
+
+
+async def test_a_second_down_keeps_the_drag(tmp_path):
+    """A down that comes again (a page that says it twice) is not a new press: the drag that was going on is ended, not turned into a
+    click."""
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle({"target": "tv", "type": "down"})
+        await relay.handle({"target": "tv", "type": "move", "dx": 3, "dy": 4})
+        await relay.handle({"target": "tv", "type": "down"})
+        await relay.handle({"target": "tv", "type": "up"})
+        assert sent(tv) == [("move", 3, 4, 1), ("move", 0, 0)]
+
+
+def test_a_call_to_the_tv_is_given_two_seconds():
+    assert PointerRelay.CALL_TIMEOUT_S == 2.0
+
+
+async def test_an_up_that_cannot_be_sent_still_ends_the_press(tmp_path):
+    """The TV went away in the middle of a drag: the up is refused in words, and the press is over all the same (the moves that come
+    when the TV is back are not a drag, and the end of the socket has no drag to end)."""
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle({"target": "tv", "type": "down"})
+        await relay.handle({"target": "tv", "type": "move", "dx": 3, "dy": 4})
+        await relay.drain()
+        await tv.drop()
+        with pytest.raises(TvError):
+            await relay.handle({"target": "tv", "type": "up"})
+        tv.connected = True                                                           # the TV is back
+        await relay.handle({"target": "tv", "type": "move", "dx": 5, "dy": 5})
+        await relay.drain()
+        await relay.release_all()
+        assert sent(tv) == [("move", 3, 4, 1), ("move", 5, 5)]
+
+
+async def test_an_up_that_is_cancelled_while_it_waits_for_the_moves_of_the_drag_still_ends_the_press(tmp_path):
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        tv.hold = asyncio.Event()
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle({"target": "tv", "type": "down"})
+        await relay.handle({"target": "tv", "type": "move", "dx": 3, "dy": 4})
+        await until(lambda: sent(tv) == [("move", 3, 4, 1)])
+        lifting = asyncio.ensure_future(relay.handle({"target": "tv", "type": "up"}))
+        await asyncio.sleep(0.05)
+        lifting.cancel()                                                              # the socket's handler is ended while the up waits
+        with pytest.raises(asyncio.CancelledError):
+            await lifting
+        tv.hold.set()
+        await relay.drain()
+        await relay.handle({"target": "tv", "type": "move", "dx": 5, "dy": 5})
+        await relay.drain()
+        assert sent(tv) == [("move", 3, 4, 1), ("move", 5, 5)]                        # the press is over
+
+
+async def test_the_moves_that_waited_behind_a_move_that_failed_are_dropped_with_it(tmp_path):
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        tv.hold = asyncio.Event()
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle({"target": "tv", "type": "move", "dx": 1, "dy": 0})
+        await until(lambda: sent(tv) == [("move", 1, 0)])
+        await relay.handle({"target": "tv", "type": "move", "dx": 2, "dy": 0})        # waits behind it
+        tv.hold.set()                                                                 # and the one in flight fails
+        await within(relay.drain())
+        tv.fail = None
+        with pytest.raises(TvError):
+            await relay.handle({"target": "tv", "type": "move", "dx": 4, "dy": 0})    # says so
+        await relay.handle({"target": "tv", "type": "move", "dx": 8, "dy": 0})
+        await relay.drain()
+        assert sent(tv) == [("move", 1, 0), ("move", 8, 0)]                           # the 2 that waited is not added to what comes next
+
+
+async def test_the_librarys_words_for_a_call_that_failed_are_one_line_and_not_long(tmp_path):
+    class Wordy(PointerTv):
+        async def click(self, *args, **kwargs):
+            raise RuntimeError("it did not work\n" + "x" * 500 + "\x1b[31m red")
+    service = build_service(tmp_path, Wordy)
+    async with running(service):
+        relay = PointerRelay(service, a_mouse()[0])
+        with pytest.raises(TvError) as failure:
+            await relay.handle({"target": "tv", "type": "tap"})
+        words = str(failure.value)
+        assert words.startswith("The TV did not accept that: it did not work x")
+        assert "\n" not in words and "\x1b" not in words and len(words) <= len("The TV did not accept that: ") + 160
+
+
+@pytest.mark.parametrize("target, kind", [("tv", "tap"), ("tv", "down"), ("tv", "up"), ("pi", "tap"), ("pi", "right"), ("pi", "down"), ("pi", "up")])
+async def test_a_message_that_carries_no_delta_is_not_refused_for_one(tmp_path, target, kind):
+    """Only a move and a scroll are measured: what a tap, a press or a release says in dx and dy is not looked at."""
+    service = build_service(tmp_path, PointerTv)
+    mouse, device = a_mouse()
+    async with running(service):
+        relay = PointerRelay(service, mouse)
+        await relay.handle({"target": target, "type": kind, "dx": "far", "dy": [1]})
 
 
 async def test_a_tap_whose_call_fails_is_said_by_that_tap(tmp_path):
@@ -654,7 +913,7 @@ async def test_a_tap_whose_call_fails_is_said_by_that_tap(tmp_path):
         assert str(failure.value) == "The TV did not accept that: Not connected, can't execute input command."
 
 
-async def test_the_moves_that_wait_when_the_tv_goes_are_said_in_the_words_the_service_has(tmp_path):
+async def test_the_moves_that_wait_when_the_tv_goes_are_said_in_the_words_of_the_library_and_then_the_service(tmp_path):
     service = build_service(tmp_path, PointerTv)
     async with running(service) as tv:
         tv.hold = asyncio.Event()
@@ -665,7 +924,10 @@ async def test_the_moves_that_wait_when_the_tv_goes_are_said_in_the_words_the_se
         await tv.drop()                                                               # and the TV goes away while it waits
         tv.hold.set()
         await within(relay.drain())
-        with pytest.raises(TvError) as failure:
+        with pytest.raises(TvError) as failure:                                       # what the library says of the call that found it so
+            await relay.handle(TV_MOVE)
+        assert str(failure.value) == "The TV did not accept that: Not connected, can't execute input command."
+        with pytest.raises(TvError) as failure:                                       # and the next frame looks again, and says it in the service's words
             await relay.handle(TV_MOVE)
         assert str(failure.value) == "The TV is not answering at 10.0.0.41"
         assert sent(tv) == [("move", 1, 0)]

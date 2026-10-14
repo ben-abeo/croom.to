@@ -2371,6 +2371,32 @@ class TestPointerSocket:
             closed = await asyncio.wait_for(ws.receive(), 2.0)
             assert closed.type == aiohttp.WSMsgType.CLOSE and closed.data == 1009            # too big: the protocol's own answer
 
+    def test_a_pointer_socket_that_has_been_quiet_for_five_seconds_is_pinged(self):
+        assert ControlService.POINTER_HEARTBEAT_S == 5.0
+
+    async def test_the_origin_is_compared_as_a_host_is_without_regard_to_case_and_one_that_cannot_be_read_is_refused(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer", headers={"Host": f"Room.Local:{client.port}", "Origin": f"http://ROOM.local:{client.port}"}) as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+        for origin in ("http://[::1", "http://[", "http://a b:1/"):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect("/ws/pointer", headers={"Origin": origin})
+            assert refused.value.status == 403, origin
+
+    async def test_an_answer_that_cannot_be_sent_because_the_page_has_gone_does_not_end_the_socket(self, client_factory, monkeypatch, caplog):
+        async def gone(self, data, **kwargs):
+            raise ConnectionResetError("Cannot write to closing transport")
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        monkeypatch.setattr(aiohttp.web.WebSocketResponse, "send_json", gone)
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str("not json")                                            # answered with an error that cannot be sent
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])            # the socket went on
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
     async def test_a_page_from_another_site_cannot_drive_the_room_through_the_socket(self, client_factory):
         """A browser lets any page open a WebSocket to any address, and tells the server where the page came from (Origin): a page from
         anywhere but the room's own may not move the room's mouse (the POSTs are kept from cross-site forms the same way)."""

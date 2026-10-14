@@ -193,21 +193,26 @@ class PointerRelay:
     and goes on.
 
     The TV's moves are coalesced. There is one in flight at most, and what comes in meanwhile is added up and goes in the next, so a TV
-    that is slow to take messages is sent the cursor's way and not every step of it. A move is not waited for (the socket goes on reading);
-    a tap, a scroll and a down or an up wait for the moves before them to go, so the order is kept. The room Pi's events apply at once.
+    that is slow to take messages is sent the cursor's way and not every step of it. A move is not waited for (the socket goes on reading):
+    one that fails on its way is said by the next move, if that comes soon (STALE_FAILURE_S). A tap, a scroll and a down or an up wait
+    for the moves before them to go, so the order is kept, and make their own call: they say if the TV is still not taking them, and
+    are not refused for what happened to a move. The room Pi's events apply at once.
 
     The TV is asked for through TvService.pointer(), not through control(): the cursor is not a control (it sends many messages a second,
-    it does not wait behind the controls and it reads nothing back).
+    it does not wait behind the controls and it reads nothing back). Each message asks once, and uses the client it was given.
     """
 
     CALL_TIMEOUT_S = 2.0      # a message to the TV is only written to its socket: one that takes longer is not being answered
+    STALE_FAILURE_S = 1.0     # a move that failed on its way is said by the next move if it comes this soon; after that it is old news
 
     def __init__(self, tv_service: Any, pi_mouse: PiMouse):
         self._tv = tv_service
         self._mouse = pi_mouse
         self._pending: Optional[List[int]] = None      # the moves that came in while one was in flight, added up: [dx, dy]
         self._sender: Optional[asyncio.Task] = None    # sends the TV's moves, for as long as there are any to send
-        self._failure: Optional[TvError] = None        # what a move that was sent in the background ran into: the next message says it
+        self._failure: Optional[TvError] = None        # what a move that was sent in the background ran into: the next move says it
+        self._failed_at = 0.0                          # when (the loop's clock)
+        self._client: Any = None                       # the TV's client, as the last move found it: the sender sends with it
         self._pressed = {"tv": False, "pi": False}     # a down that has not had its up, by target
         self._dragged = False                          # the TV's cursor was moved since its down
 
@@ -222,7 +227,7 @@ class PointerRelay:
         Raises:
             TvError: the message is no use (not an object, an unknown target or type, a delta that is not a number), it cannot be done
                 (a right button for the TV, typing), or the TV or the room Pi's mouse cannot be reached. A move for the TV that is sent in the
-                background and fails is said by the next message.
+                background and fails is said by the next move.
         """
         target, kind, dx, dy = self._read(message)
         if kind == "keys":
@@ -295,24 +300,29 @@ class PointerRelay:
         if kind == "up":
             await self._lift()
             return
-        self._say_what_failed()
-        self._ready()                                  # the TV cannot be told anything: said now, not by the next message
+        if kind == "move":
+            self._say_what_failed()                    # (a move is the one to say it)
+        else:
+            self._failure = None                       # a tap, a scroll or a down makes its own call: the TV may be back, and the call says if not
+        client = self._ready()                         # once for the message; the TV cannot be told anything: said now, not by the next one
         if kind == "move":
             if dx or dy:
                 if self._pressed["tv"]:
                     self._dragged = True
                 self._add(dx, dy)
+                self._client = client                  # (what the sender sends with, whenever it gets to this move)
                 self._send_soon()
             return
         await self._flush()
-        client = self._ready()
         if kind == "tap":
             await self._call(client.click)
         elif kind == "scroll":
             if dx or dy:
                 await self._call(client.scroll, dx, dy)
         elif kind == "down":                           # nothing is sent: the moves that follow carry it, until the up
-            self._pressed["tv"], self._dragged = True, False
+            if not self._pressed["tv"]:                # (a down that comes again is the same press: the drag that has begun goes on)
+                self._dragged = False
+            self._pressed["tv"] = True
 
     async def _lift(self) -> None:
         """The up of a down. The moves of the drag go first, with the button still down; then the TV is told that it is up: a move
@@ -320,10 +330,11 @@ class PointerRelay:
         if not self._pressed["tv"]:
             return
         try:
+            self._failure = None                       # (it makes its own call, as a tap does)
+            client = self._ready()
             await self._flush()
         finally:
-            self._pressed["tv"] = False
-        client = self._ready()
+            self._pressed["tv"] = False                # whatever came of that, nothing is held from here
         if self._dragged:
             await self._call(client.move, 0, 0)
         else:
@@ -348,26 +359,30 @@ class PointerRelay:
             while batch is not None:
                 dx, dy = batch
                 if dx or dy:                           # (moves that cancel out are no move)
-                    client = self._ready()
-                    await self._call(client.move, *((dx, dy, 1) if self._pressed["tv"] else (dx, dy)))
+                    await self._call(self._client.move, *((dx, dy, 1) if self._pressed["tv"] else (dx, dy)))
                 batch, self._pending = self._pending, None
-        except TvError as e:                           # nobody awaits this: the next message says it
-            self._pending, self._failure = None, e
-        except Exception as e:  # noqa: BLE001 - a bug: said by the next message as well, and logged
+        except TvError as e:                           # nobody awaits this: the next move says it
+            self._fail(e)
+        except Exception as e:  # noqa: BLE001 - a bug: said by the next move as well, and logged
             logger.warning(f"The TV's cursor could not be moved: {type(e).__name__}: {e}", exc_info=True)
-            self._pending = None
-            self._failure = TvError(f"The TV did not accept that: {one_line(str(e), REASON_LIMIT) or type(e).__name__}")
+            self._fail(TvError(f"The TV did not accept that: {one_line(str(e), REASON_LIMIT) or type(e).__name__}"))
+
+    def _fail(self, failure: TvError) -> None:
+        """The moves that were being sent failed: the ones that waited for them are dropped, and the next move says it."""
+        self._pending, self._failure, self._failed_at = None, failure, asyncio.get_running_loop().time()
 
     async def _flush(self) -> None:
-        """Let the moves that are on their way go first."""
+        """Let the moves that are on their way go first. What they ran into is not for the call that waited for them to say: it makes its
+        own, and says if the TV is still not taking them."""
         sender = self._sender
         if sender is not None and not sender.done():
             await asyncio.wait({sender})
-        self._say_what_failed()
+        self._failure = None
 
     def _say_what_failed(self) -> None:
+        """Said by a move, once, and only while it is news: a move that comes after STALE_FAILURE_S finds the TV as it is now."""
         failure, self._failure = self._failure, None
-        if failure is not None:
+        if failure is not None and asyncio.get_running_loop().time() - self._failed_at <= self.STALE_FAILURE_S:
             raise failure
 
     def _ready(self) -> Any:

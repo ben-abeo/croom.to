@@ -1724,6 +1724,33 @@ async def test_a_hosts_view_menu_has_an_attendee_view_section_that_is_not_the_ho
             await tidy(run)
 
 
+async def test_the_view_menu_can_be_read_without_picking_from_it():
+    """The view and self view are only to be read from the View menu: until it has been opened the reading says the defaults (speaker,
+    shown). A look opens it, reads it as a pick does, and closes it by its opener, and presses nothing in it: what the table starts from
+    is what the client has."""
+    async with PageRun(stub=client(role="host")) as run:
+        await settled(run)
+        await run.page.evaluate("() => { window.ZoomMtg._layout = 'gallery'; window.ZoomMtg._selfHidden = true; }")      # as an earlier meeting left them
+        before = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert before["buttons"]["layout"] == {"value": "speaker"} and before["buttons"]["hide_self"] == {"on": False}
+        m, ms = await run.page.evaluate("async () => { const t = performance.now(); const m = await window.crystalMeet.control('layout.read'); return [m, performance.now() - t]; }")
+        assert m["buttons"]["layout"] == {"value": "gallery"} and m["buttons"]["hide_self"] == {"on": True}
+        assert ms < 500, ms                                                            # nothing was picked, so Zoom has no pick to close the menu after: its opener does
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["buttons"]["layout"] == {"value": "gallery"}      # kept, not only answered
+        assert await presses(run) == ["stub-view", "stub-view"]                       # the opener, and the opener again to close it: no item
+        assert await run.page.evaluate("[window.ZoomMtg._layout, window.ZoomMtg._selfHidden, window.ZoomMtg._attendeeView]") == ["gallery", True, "speaker"]
+        await tidy(run)
+
+
+async def test_looking_at_the_view_menu_without_the_view_button_says_so_and_presses_nothing():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        await run.wait_for("connected")
+        with pytest.raises(Exception) as failure:
+            await run.page.evaluate("window.crystalMeet.control('layout.read')")
+        assert "Zoom's layout button is not on the screen yet; try again in a moment" in str(failure.value)
+        assert await run.page.evaluate("window.__presses") == []
+
+
 # ---- Diagnostics: the device inventory looks into the popovers too ----
 
 

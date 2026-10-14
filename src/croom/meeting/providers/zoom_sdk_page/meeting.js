@@ -505,6 +505,12 @@
       if (name === "layout") bridge._layout = viewOf(item);
     });
   }
+  // The View menu opened, read as a pick reads it, and closed again by its opener with nothing picked: the view and self view are only
+  // to be read there, and until it has been opened the reading says the defaults. The device asks for it once after the room is in the
+  // meeting, so the table starts from what the client has.
+  async function readViewMenu() {
+    await withPopover("layout", "layout", async (items) => { readView(items); return false; });
+  }
   // The inventory's look into the two popovers (the device run of spec section 7): each opener is pressed, what appeared is listed
   // by what the client says (text, label, tooltip, class, disabled), and the opener closes it again. A button that is missing or
   // disabled is reported, not pressed, and nothing is pressed before the room is in the meeting.
@@ -615,6 +621,7 @@
       case "raise_hand": case "captions": case "hide_self": await pressButton(name); break;
       case "reactions": await pickFromMenu("reactions", value); break;
       case "layout": await pickFromMenu("layout", value); break;
+      case "layout.read": await readViewMenu(); break;
       default:
         if (HOST[name]) { await HOST[name](value); break; }      // Zoom's own calls
         throw new Error("Unknown control " + name);

@@ -396,6 +396,7 @@
     const strip = el("score");
     if (!usable.length) {
       if (!strip.hidden) strip.hidden = true;
+      setData("strip", null);
       scoreShown = scoreKey = null;
       return;
     }
@@ -413,6 +414,7 @@
       el("score-next").replaceChildren(...(next ? ["Next: " + dayText(next.date) + " \u00b7 ", side(next.away), next.neutral ? " vs " : " @ ", side(next.home)] : []));
     }
     if (strip.hidden) strip.hidden = false;
+    setData("strip", "");   // body[data-strip]: the strip is up, which a short sign's rules (sign.css) count in the height they have to share
   }
 
   function rotateScore() {

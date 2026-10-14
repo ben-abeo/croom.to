@@ -2267,6 +2267,64 @@ def test_the_strip_stays_as_it_was_while_the_sign_cannot_reach_the_room(browser,
         page.close()
 
 
+@pytest.mark.parametrize("room, location", [("Boardroom", "2nd floor, by the kitchen"), ("Conference Room Twelve", "2nd floor, by the kitchen, past the elevators")])
+def test_on_a_short_sign_with_a_school_on_the_week_counts_the_strip_and_keeps_every_days_plus_n_more_whole(browser, room, location, central_time):
+    """The strip takes 53 to 81 px of a short screen's height, which the short-screen rules did not count: on a 1024 by 600 sign with a long room
+    name the days were 74 px tall and their "+N more" cut off, on 900 by 500 they were 43 and on 800 by 480, 20. While a school is on, up to
+    640 px of height the week gives the days room: the status gives up its detail and its location and shrinks the room's name (the days keep their
+    dates down to 561 px, where the rule for short signs takes them); and up to 560 the Today list's status gives up its detail too. Every busy day's "+N more" is then whole: inside its day and
+    inside the box its bookings are in."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name=room, room_location=location, schedules=every_school()) as server:
+        choose(server, sign_scores=["texas", "texas_am"])                      # two on: the name leads, the longest line the strip has
+        scoreboard_has(server, ["texas", "texas_am"])
+        for width, height in ((1024, 640), (1024, 600), (1024, 561), (900, 500), (800, 480), (1024, 560), (1280, 561), (1024, 641), (1280, 720)):
+            page = open_sign(browser, server, width, height)
+            strip_is_up(page)
+            today_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+            assert fits(page), ("Today", width, height)                       # the Today list's status fits above the strip, the long name included
+            assert page.locator("#detail").is_hidden() == (height <= 560), ("Today", width, height)     # and on the shortest screens does without its detail line
+            open_the_week(page)
+            page.wait_for_timeout(200)
+            assert fits(page), ("week", width, height)
+            short = height <= 640
+            assert page.locator("#detail").is_hidden() == short, (width, height)                       # up to 640 px of height the detail goes while the strip is up ...
+            assert page.locator("#room-location").is_hidden() == short, (width, height)                # ... and the location ...
+            assert page.locator("#week .day-date").first.is_hidden() == (height <= 560), (width, height)        # while the days keep their dates until 560
+            week_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+            assert (week_size == pytest.approx(min(max(1.8 * 16, 0.04 * width), 2.6 * 16))) if short else (week_size == today_size), (width, height, week_size)   # ... and the name is smaller
+            counts = page.evaluate("""() => [...document.querySelectorAll('#week .day')].slice(1).map((day) => {
+                const more = day.querySelector('.more'), slots = day.querySelector('.slots');
+                if (!more || more.hidden) return null;
+                const a = more.getBoundingClientRect(), b = slots.getBoundingClientRect(), c = day.getBoundingClientRect();
+                return [a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5 && a.bottom <= c.bottom && more.scrollWidth <= more.clientWidth, more.textContent];
+            })""")
+            assert all(count is not None and count[0] for count in counts), (room, width, height, counts)         # every busy day says how many it leaves out, whole
+            strip, days = page.locator("#score").bounding_box(), page.locator("#week-days").bounding_box()
+            assert days["y"] + days["height"] <= strip["y"] + 0.5, (width, height)                            # and the days end above the strip
+            page.close()
+
+
+def test_the_short_sign_rules_come_and_go_with_the_strip(browser, central_time):
+    """At 1024 by 600 the week keeps its detail, location and room name until a school's strip is up, and has them again when it goes."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        page = open_sign(browser, server, 1024, 600)
+        open_the_week(page)
+        plain = [page.locator(selector).is_visible() for selector in ("#detail", "#room-location")]
+        size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+        assert plain == [True, True] and size > 60 and page.evaluate("'strip' in document.body.dataset") is False
+        choose(server, sign_scores=["texas"])
+        page.wait_for_function("'strip' in document.body.dataset", timeout=8000)                      # the next poll brings the strip, and with it the rules
+        assert [page.locator(selector).is_visible() for selector in ("#detail", "#room-location")] == [False, False]
+        assert page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") < 45
+        choose(server, sign_scores=[])
+        page.wait_for_function("!('strip' in document.body.dataset)", timeout=8000)                   # and the next takes the strip away, and the rules with it
+        assert [page.locator(selector).is_visible() for selector in ("#detail", "#room-location")] == [True, True]
+        assert page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") == size and page.locator("#week .day").count() == 7
+        page.close()
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))

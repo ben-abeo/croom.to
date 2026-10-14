@@ -213,6 +213,20 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }
 }
 
+/* The scoreboard strip takes 53 to 81 px of a short screen's height (body[data-strip], set by sign.js while it is up), which the rule above
+   did not count: with a long room name the days were 74 px tall at 1024 by 600, 43 at 900 by 500 and 20 at 800 by 480, and their "+N more"
+   was cut off. So while the strip is up the week gives the days room up to 640 px of height: the status gives up its detail line and its
+   location and shrinks the room's name (to a size that still reads across a room); the days keep their dates until 560 px, where the
+   rule above takes them. On a screen of 560 or less the Today list gives up its detail line too (the status would not fit above the strip
+   at 800 by 480 with a long name). */
+@media (max-height: 640px) {
+  body[data-view="week"][data-strip] .detail, body[data-view="week"][data-strip] .location { display: none; }
+  body[data-view="week"][data-strip] .room { font-size: clamp(1.8rem, 4vw, 2.6rem); }
+}
+@media (max-height: 560px) {
+  body[data-strip] .detail { display: none; }
+}
+
 @media (orientation: portrait) {
   .main { grid-template-columns: minmax(0, 1fr); }
   .room { font-size: clamp(2.6rem, 11vw, 4.6rem); }

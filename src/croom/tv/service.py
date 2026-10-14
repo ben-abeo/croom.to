@@ -238,13 +238,16 @@ class TvService(Service):
         connection that has just closed is not reachable, and a TV that cannot be reached is not known to be on. Refused
         says that the TV declined the key it was paired with, which the person puts right (Forget TV, then Pair) and
         which a TV that is only off or away is not: the page tells the two apart by it. (Read it with `paired`: it
-        stays set after Forget TV, until the next pairing or start.)"""
+        stays set after Forget TV, until the next pairing or start.) Host and pi_input are the config's, whatever the TV
+        says: the pairing card names the TV this room is set up for (and tags it in the list Find TVs makes) before there
+        is a connection to ask, and the row of inputs marks the one the room Pi is on."""
         shown = dict(self._shown)
         shown["inputs"] = list(shown["inputs"])
         shown["reachable"] = self._answering()
         shown["on"] = shown["on"] and shown["reachable"]
         return dict(configured=self.configured, paired=self._keys.read() is not None, keep_on=self._config.keep_on,
-                    held_off=self._held_off, refused=self._refused, **shown)
+                    held_off=self._held_off, refused=self._refused, host=self._config.host, pi_input=self._config.pi_input,
+                    **shown)
 
     async def start(self) -> None:
         self._started = True

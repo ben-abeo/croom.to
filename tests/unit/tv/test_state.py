@@ -246,6 +246,22 @@ async def test_the_status_is_a_copy(tmp_path):
         await service.stop()
 
 
+@pytest.mark.parametrize("key", [None, "key-9"])
+@pytest.mark.parametrize("host", ["10.0.0.57", "tv.boardroom.example", ""])
+def test_the_status_says_which_tv_the_room_is_set_up_for_whether_or_not_it_is_paired(tmp_path, key, host):
+    """The table's pairing card says "This room is set up for the TV at ..." (and tags that TV in the list Find TVs makes) before there is
+    a key, so the address is the config's, and not what a connection learned. A room with no address yet has an empty one."""
+    assert build_service(tmp_path, key=key, host=host).status()["host"] == host
+
+
+def test_the_status_says_which_input_the_room_pi_is_on_so_the_table_can_mark_it(tmp_path):
+    """The row of inputs marks the room Pi's input "Crystal Meet", and the status line says "HDMI 1 (Crystal Meet)": by tv.pi_input."""
+    assert build_service(tmp_path).status()["pi_input"] == "HDMI_1"            # the config's default
+    assert build_service(tmp_path, pi_input="HDMI_3").status()["pi_input"] == "HDMI_3"
+    service = build_service(tmp_path, key=None, pi_input="HDMI_2")
+    assert service.status()["pi_input"] == "HDMI_2"                            # unpaired, nothing read from a TV: still the config's
+
+
 @pytest.mark.parametrize("failure", [RuntimeError("closing"), ConnectionError("gone"), asyncio.CancelledError()])
 async def test_a_client_that_cannot_say_whether_it_is_connected_is_not_answering(tmp_path, failure):
     """The library's is_connected() re-raises the error (or the cancellation) of a connect that failed, from the future

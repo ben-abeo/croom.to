@@ -36,7 +36,7 @@ async def test_start_connects_with_the_stored_key_and_reads_the_state(tmp_path):
         assert s == {"configured": True, "paired": True, "on": True, "reachable": True, "name": "Boardroom TV", "volume": 24, "muted": False,
                      "input": "HDMI_1", "inputs": [{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}],
                      "app": "com.webos.app.hdmi1", "channel": "7", "keep_on": True, "held_off": False,
-                     "refused": False}
+                     "refused": False, "host": "10.0.0.41", "pi_input": "HDMI_1"}
         await client.update(volume=30, muted=True)
         assert service.status()["volume"] == 30 and service.status()["muted"] is True
     finally:

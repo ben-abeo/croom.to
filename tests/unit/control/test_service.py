@@ -313,6 +313,7 @@ class StubTv:
     def __init__(self, configured=True, paired=True):
         self.configured, self.paired = configured, paired
         self.volume, self.name = 24, "Boardroom TV"
+        self.host, self.pi_input = "10.0.0.41", "HDMI_1"   # the config's, as the real status says them: the TV this room is set up for, and the Pi's input
         self.calls, self.order = [], []
         self.fail_control = self.fail_pair = self.fail_forget = self.fail_status = None   # what each raises when it is asked
         self.gate = None          # an asyncio.Event that control() waits for: a control that takes a while, as a wake does
@@ -324,6 +325,7 @@ class StubTv:
         if self.fail_status is not None:
             raise self.fail_status
         return {"configured": self.configured, "paired": self.paired, "keep_on": True, "held_off": False, "refused": False,
+                "host": self.host, "pi_input": self.pi_input,
                 "on": True, "reachable": True, "name": self.name, "volume": self.volume, "muted": False,
                 "input": "HDMI_1", "inputs": [{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}],
                 "app": "com.webos.app.hdmi1", "channel": None}

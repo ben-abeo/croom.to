@@ -21,8 +21,10 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
 
 from croom.calendar.providers.base import MeetingPlatform
+from croom.control import service as control_service
 from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
@@ -543,9 +545,9 @@ def white_photograph():
 
 
 # The navy overlay (spec 2.4) as alpha at fractions of the way across the sign (94 % at the left edge, 84 % at 45 %, 55 % at the right)
-# and of the way down (50 % at the top edge, none from 40 % down, 55 % at the bottom edge): the two gradients, one over the other.
+# and of the way down (60 % at the top edge, none from 40 % down, 55 % at the bottom edge): the two gradients, one over the other.
 OVERLAY_ACROSS = [(0, 0.94), (0.45, 0.84), (1, 0.55)]
-OVERLAY_DOWN = [(0, 0.5), (0.4, 0.0), (1, 0.55)]
+OVERLAY_DOWN = [(0, 0.6), (0.4, 0.0), (1, 0.55)]
 
 
 def stop_between(fraction, stops):
@@ -677,7 +679,7 @@ def test_the_words_stay_readable_over_every_photograph(browser, key):
 
 
 SIGN_WORDS = {"company": "#company", "room name": "#room-name", "location": "#room-location", "detail": "#detail", "clock": "#clock", "date": "#date",
-              "Today": ".today-head h2", "booking time": "#events .event time", "booking title": "#events .event .title", "booking platform": "#events .event .who"}
+              "Today": ".today-head h2", "This week": "#this-week", "booking time": "#events .event time", "booking title": "#events .event .title", "booking platform": "#events .event .who"}
 BRIGHTEST_BEHIND = """async ([png, boxes]) => {
     const image = new Image();
     image.src = 'data:image/png;base64,' + png;
@@ -711,12 +713,21 @@ def luminance(colour):
 def test_every_word_keeps_its_contrast_over_every_photograph(browser, key):
     """Measured, not looked at: with the words hidden, the brightest 1 % of the picture behind each word (so each word is judged at the
     hardest it is to read over this photograph) against the word's own colour: 4.5 to 1 for text, 3 to 1 for large text (WCAG AA). A
-    photograph swapped in later that is too bright where the words are fails here, by name."""
+    photograph swapped in later that is too bright where the words are fails here, by name.
+
+    The page's clock is pinned. The date and the clock are right-aligned, so a short one is a narrow box at the very edge, where the
+    brightest part of a photograph is (the stadium's floodlights are under the date); a long one reaches over darker picture. Friday,
+    May 1, 2026 at 1:05 AM is among the shortest strings the sign shows (the date within 2 px of the shortest), so the test measures
+    the worst case, and measures it on every day, not only on the days of the calendar that happen to be short."""
     skip_if_day_ends_within(2)
     bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 70), event("e3", "Sales pipeline", 100)]
     with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
         choose(server, sign_background=key)
-        page = open_sign(browser, server)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install(time=datetime(2026, 5, 1, 1, 5))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#date").inner_text() == "Friday, May 1, 2026" and page.locator("#clock").inner_text() == "1:05\u00a0AM"   # the pin took
         page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
         page.wait_for_selector("#events .event", timeout=5000)
         wait_for_the_photograph_to_paint(page)
@@ -1055,6 +1066,47 @@ def test_a_photograph_that_failed_is_asked_for_again_after_an_outage(browser):
         assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"
         assert page.evaluate("'photoMissing' in document.body.dataset") is False
         page.close()
+
+
+def test_a_photograph_whose_request_never_answers_is_given_up_on_after_twenty_seconds(browser, monkeypatch):
+    """A connection that went half open neither answers nor fails. The sign waits twenty seconds and then counts the photograph as
+    failed (plain, with the glow); until then it waits on bare navy, and it never asks again at a poll. The request is held by the
+    server itself (the test's own middleware answers nothing until told to), and the page's clock runs the twenty seconds in a moment."""
+    release, held = threading.Event(), []
+    served = control_service._static_no_cache
+
+    @web.middleware
+    async def stalling(request, handler):
+        if request.path == "/static/backgrounds/capitol.jpg":
+            held.append(request.method)
+            while not release.is_set():
+                await asyncio.sleep(0.05)
+        return await served(request, handler)
+
+    monkeypatch.setattr(control_service, "_static_no_cache", stalling)
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        try:
+            page.clock.install()
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="commit")           # the held picture would keep "networkidle" waiting
+            page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.bg === 'capitol'", timeout=8000)
+            page.wait_for_timeout(300)
+            assert held == ["GET"]                                                             # the picture was asked for, and is not answered
+            page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+            page.clock.run_for(15000)                                                          # about 17 seconds in: still waiting
+            assert page.evaluate("document.body.dataset.photo === undefined && !('photoMissing' in document.body.dataset)")
+            assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"            # bare navy: not given up yet
+            page.clock.run_for(6000)                                                           # about 23 seconds in: given up
+            page.wait_for_function("'photoMissing' in document.body.dataset", timeout=5000)
+            assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "block"           # plain, with the glow
+            assert page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage") == "none"
+            assert page.evaluate("document.body.dataset.bg") == "capitol"                      # and it still says which was chosen
+            page.clock.run_for(10000)                                                          # two polls more
+            assert held == ["GET"]                                                             # one request, while it stalled and after it was given up
+        finally:
+            release.set()                                                                       # the server may stop: its held request goes
+            page.close()
 
 
 def free_port():

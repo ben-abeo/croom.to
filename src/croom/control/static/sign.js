@@ -8,6 +8,7 @@
   const TODAY_ROWS = 3;
 
   const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css)
+  const PHOTO_TIMEOUT_MS = 20 * 1000;   // a photograph not decoded by then counts as failed: a connection gone half open neither answers nor fails
 
   // The backgrounds are photographs the room serves, static/backgrounds/<key>.jpg; "plain" has none. The sign shows the one the
   // room's settings name once it has loaded, and the navy with a glow when it cannot.
@@ -63,9 +64,10 @@
 
   // The photograph behind the sign. body[data-bg] is the room's choice (settings.sign_background in the status). The photograph is
   // loaded once, as an image, and shown only when it has decoded: body[data-photo] names it and --photo holds its address, and sign.css
-  // draws it under the navy overlay. Until then the sign keeps what it shows, so a photograph does not arrive after bare navy and a new
-  // choice does not take the old photograph away before its own is ready. "plain", and a photograph that fails to load (the room has no
-  // file for it, or it is not an image), show the navy with the glow instead (a failed load also sets body[data-photo-missing]).
+  // draws it under the navy overlay. Until then the sign keeps what it shows: a change of background keeps the old photograph until the
+  // new one has decoded, but a first load, or a reload, shows navy for a moment first (about 0.3 s with the picture cached, 1.3 s cold on
+  // a slow link). "plain", and a photograph that fails to load (the room has no file for it, it is not an image, or it has not decoded
+  // in twenty seconds), show the navy with the glow instead (a failed load also sets body[data-photo-missing]).
   const photos = new Map();   // key -> the decoded Image (kept, so that the style sheet draws that one and the room is asked once), or false when it failed
   const loading = new Set();
   let wanted = "skyline";
@@ -90,11 +92,16 @@
     loading.add(key);
     const image = new Image();
     image.src = photoUrl(key);
+    let timer = null;
+    const giveUp = new Promise((resolve, reject) => { timer = setTimeout(() => reject(new Error("the photograph did not decode in time")), PHOTO_TIMEOUT_MS); });
     try {
-      await image.decode();
+      await Promise.race([image.decode(), giveUp]);
       photos.set(key, image);
     } catch (e) {
+      image.src = "";   // lets go of a request still in flight
       photos.set(key, false);
+    } finally {
+      clearTimeout(timer);
     }
     loading.delete(key);
     showBackground();

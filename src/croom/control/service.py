@@ -44,6 +44,8 @@ ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invi
 PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
 BAD_PASSCODE = "Passcode must be letters, digits or @-_*, up to 32"
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
+# What a control from the table is told when there is no meeting to carry it out in; the provider says the same in its own RuntimeError.
+NOT_IN_A_MEETING = "Not in a meeting"
 # Hosts (and their subdomains) a join link may point the room's browser at.
 PLATFORM_HOSTS = {
     "zoom": ("zoom.us", "zoomgov.com"),
@@ -218,6 +220,9 @@ class ControlService(Service):
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
         app.router.add_post("/api/meeting/camera", self._handle_camera)
+        app.router.add_post("/api/meeting/control", self._handle_control)
+        app.router.add_post("/api/meeting/dialog", self._handle_dialog)
+        app.router.add_post("/api/meeting/chat/seen", self._handle_chat_seen)
         app.router.add_get("/api/meeting/diagnostics", self._handle_diagnostics)
         app.router.add_get("/api/screensaver", self._handle_screensaver)
         app.router.add_post("/api/screensaver", self._handle_set_screensaver)
@@ -331,7 +336,10 @@ class ControlService(Service):
             "next": self._event_dict(upcoming) if upcoming is not None else None,
         }
 
-    def _status(self) -> Dict[str, Any]:
+    def _meeting_block(self) -> Dict[str, Any]:
+        """The `meeting` block of /api/status: where the meeting stands, and the model the table draws from (spec 2026-10-13, section 3).
+        The routes that carry a control, a dialog answer or the chat seen to the meeting answer with this same block, so the table renders
+        from one shape."""
         state = self._meeting_state()
         current = self._meeting.current_meeting if self._meeting is not None else None
         error = self._last_error
@@ -340,22 +348,30 @@ class ControlService(Service):
         if error and state == "idle":
             # The provider refused the link before it started joining.
             state = "error"
+        return {
+            "state": state,
+            "platform": current.platform if current is not None else None,
+            "meeting_id": current.meeting_id if current is not None else None,
+            "title": self._title,
+            "url": current.meeting_url if current is not None else None,
+            "joined_at": self._joined_at.isoformat(timespec="seconds") if self._joined_at else None,
+            "muted": bool(current.is_muted) if current is not None else False,
+            "camera_on": bool(current.is_camera_on) if current is not None else False,
+            "error": error,
+            "controls": dict(current.controls) if current is not None else {},
+            "participants": dict(current.people) if current is not None else {"count": 0, "list": []},
+            "chat": dict(current.chat) if current is not None else {"unread": 0, "messages": []},
+            "notice": current.notice if current is not None else "",
+            "dialog": dict(current.dialog) if current is not None and current.dialog else None,
+        }
+
+    def _status(self) -> Dict[str, Any]:
         platforms = list(self._meeting.get_available_platforms()) if self._meeting is not None else []
         return {
             "room": {"name": self._room_name, "location": self._room_location},
             "server_time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "platforms": platforms,
-            "meeting": {
-                "state": state,
-                "platform": current.platform if current is not None else None,
-                "meeting_id": current.meeting_id if current is not None else None,
-                "title": self._title,
-                "url": current.meeting_url if current is not None else None,
-                "joined_at": self._joined_at.isoformat(timespec="seconds") if self._joined_at else None,
-                "muted": bool(current.is_muted) if current is not None else False,
-                "camera_on": bool(current.is_camera_on) if current is not None else False,
-                "error": error,
-            },
+            "meeting": self._meeting_block(),
             "calendar": self._calendar_status(),
             "screensaver": self._screensaver,
             "settings": self._settings_payload(),
@@ -809,6 +825,58 @@ class ControlService(Service):
             logger.warning(f"Could not switch the camera: {first_line(e)}", exc_info=True)
             return self._error_response(f"Could not switch the camera: {first_line(e)}", 409)
         return web.json_response({"camera_on": bool(camera_on)})
+
+    async def _run_control(self, name: str, value: Any) -> web.Response:
+        """Carry out a control from the table (or "dialog", an answer to a dialog Zoom drew, or "chat.seen") in the meeting, and answer with the
+        meeting as it is afterwards: the block /api/status carries, the same for all three routes. A failure is a 409 in words, never a 500
+        and never a stack. The caller has seen that there is a meeting service."""
+        if self._meeting_state() != "connected":
+            return self._error_response(NOT_IN_A_MEETING, 409)
+        what = re.sub(r"[^A-Za-z0-9]+", " ", name).strip() or "the control"     # "host.mute_all" in words, as the error line says it: "host mute all"
+        try:
+            await self._meeting.control(name, value)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
+            words = first_line(e)
+            if isinstance(e, MeetingControlError) or words == NOT_IN_A_MEETING:
+                # The platform's own words (Zoom's refusal, a button not ready, a name the bridge does not know), or the meeting that ended as
+                # the tap came in: for the person at the table, and no fault of the agent's.
+                logger.info(f"The {what} control was not carried out: {words}")
+                return self._error_response(words, 409)
+            logger.warning(f"Could not carry out {what}: {words}", exc_info=True)
+            return self._error_response(f"Could not carry out {what}: {words}", 409)
+        return web.json_response({"meeting": self._meeting_block()})
+
+    async def _handle_control(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        data = await self._read_object(request)
+        if not data or not isinstance(data.get("name"), str) or not data["name"]:
+            return self._error_response("Send a JSON object with name and, for some controls, value", 400)
+        return await self._run_control(data["name"], data.get("value"))
+
+    async def _handle_dialog(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        data = await self._read_object(request)
+        if not data or "id" not in data or not isinstance(data.get("button"), str):
+            return self._error_response("Send a JSON object with the dialog's id and the button's label", 400)
+        return await self._run_control("dialog", {"id": data["id"], "button": data["button"]})
+
+    async def _handle_chat_seen(self, request: web.Request) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
+        if self._meeting is None:
+            return self._error_response("Meeting service not available", 503)
+        return await self._run_control("chat.seen", None)
 
     async def _handle_diagnostics(self, request: web.Request) -> web.Response:
         """What the meeting page sees (Zoom's field names, the client's buttons): for pinning real wording from a device."""

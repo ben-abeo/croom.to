@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import ClientError
 from aiohttp.test_utils import TestClient, TestServer
 
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
@@ -36,6 +37,15 @@ class StubMeeting:
         self.fail_with = None
         self.fail_before_joining = None
         self.fail_next_join = False
+        # What the table draws from (spec 2026-10-13, section 3): what the meeting is given at join, and what control() was asked.
+        self.controls = {}
+        self.people = {"count": 0, "list": []}
+        self.chat = {"unread": 0, "messages": []}
+        self.notice = ""
+        self.dialog = None
+        self.controls_called = []
+        self.fail_control = None
+        self.on_control = None          # a function (name, value) run inside control(), to change the meeting as a provider would
 
     def get_available_platforms(self):
         return list(self._platforms)
@@ -74,6 +84,7 @@ class StubMeeting:
         self.current_meeting = MeetingInfo(
             platform=detect_platform(url) or "unknown", meeting_id="123456789",
             meeting_url=url, is_muted=self.muted, is_camera_on=self.camera_on,
+            controls=self.controls, people=self.people, chat=self.chat, notice=self.notice, dialog=self.dialog,
         )
         self.set_state(MeetingState.CONNECTED)
         return self.current_meeting
@@ -98,6 +109,14 @@ class StubMeeting:
         if self.current_meeting:
             self.current_meeting.is_camera_on = self.camera_on
         return self.camera_on
+
+    async def control(self, name, value=None):
+        self.controls_called.append((name, value))
+        if self.fail_control is not None:
+            raise self.fail_control
+        if self.on_control is not None:
+            self.on_control(name, value)
+        return self.current_meeting.controls
 
     async def diagnostics(self):
         if getattr(self, "fail_diagnostics", None) is not None:
@@ -332,6 +351,15 @@ async def wait_until(predicate, timeout=2.0):
     raise AssertionError("condition not met in time")
 
 
+async def joined_meeting(client_factory):
+    """A control service whose stub meeting has been joined: its client, and the stub."""
+    meeting = StubMeeting()
+    client = await client_factory(make_service(meeting=meeting))
+    await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+    await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+    return client, meeting
+
+
 class TestControlServiceBasics:
     def test_is_a_service_named_control(self):
         service = make_service()
@@ -391,6 +419,8 @@ class TestStatus:
         assert data["meeting"] == {
             "state": "idle", "platform": None, "meeting_id": None, "title": "", "url": None,
             "joined_at": None, "muted": False, "camera_on": False, "error": None,
+            "controls": {}, "participants": {"count": 0, "list": []}, "chat": {"unread": 0, "messages": []},
+            "notice": "", "dialog": None,
         }
         assert data["calendar"] == {"connected": False, "provider": None, "current": None, "next": None}
         datetime.fromisoformat(data["server_time"])
@@ -687,8 +717,210 @@ class TestLeaveMuteCamera:
 
     async def test_without_meeting_service_controls_are_unavailable(self, client_factory):
         client = await client_factory(make_service())
-        for path in ("/api/meeting/leave", "/api/meeting/mute", "/api/meeting/camera"):
+        for path in ("/api/meeting/leave", "/api/meeting/mute", "/api/meeting/camera",
+                     "/api/meeting/control", "/api/meeting/dialog", "/api/meeting/chat/seen"):
             assert (await client.post(path, json={})).status == 503, path
+
+
+class TestMeetingControls:
+    """The meeting's control model in the status, and the three routes that carry the table's controls, its answers to Zoom's dialogs and
+    the chat it has seen to the meeting (spec 2026-10-13, sections 3 and 5)."""
+
+    async def test_the_status_carries_the_control_model(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.current_meeting.controls = {"mute": {"available": True, "on": True}, "host": {"role": "host"}}
+        meeting.current_meeting.people = {"count": 2, "list": [{"id": 1, "name": "Ann"}]}
+        meeting.current_meeting.chat = {"unread": 1, "messages": [{"from": "Ann", "text": "hi", "at": "2026-10-13T20:00:00Z"}]}
+        meeting.current_meeting.notice = "This meeting is being recorded."
+        meeting.current_meeting.dialog = {"id": 3, "title": "Unmute?", "text": "The host would like you to unmute.", "buttons": ["Unmute", "Stay muted"]}
+        data = (await (await client.get("/api/status")).json())["meeting"]
+        assert data["controls"]["host"]["role"] == "host" and data["participants"]["count"] == 2
+        assert data["chat"]["unread"] == 1 and data["notice"].startswith("This meeting") and data["dialog"]["buttons"] == ["Unmute", "Stay muted"]
+        # Whole, and under the names the table reads: the model's `people` is the status's `participants`.
+        assert data["controls"] == {"mute": {"available": True, "on": True}, "host": {"role": "host"}}
+        assert data["participants"] == {"count": 2, "list": [{"id": 1, "name": "Ann"}]}
+        assert data["chat"] == {"unread": 1, "messages": [{"from": "Ann", "text": "hi", "at": "2026-10-13T20:00:00Z"}]}
+        assert data["notice"] == "This meeting is being recorded."
+        assert data["dialog"] == {"id": 3, "title": "Unmute?", "text": "The host would like you to unmute.", "buttons": ["Unmute", "Stay muted"]}
+        assert data["state"] == "connected" and data["muted"] is False       # and the keys that were there stay
+
+    async def test_a_dialog_that_is_not_waiting_is_null_in_the_status(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        meeting.current_meeting.dialog = {}
+        data = (await (await client.get("/api/status")).json())["meeting"]
+        assert data["dialog"] is None and data["controls"] == {} and data["participants"] == {"count": 0, "list": []}
+
+    async def test_a_control_is_carried_out_and_its_failure_answers_in_words(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.post("/api/meeting/control", json={"name": "raise_hand"})).status == 409   # not in a meeting
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        resp = await client.post("/api/meeting/control", json={"name": "layout", "value": "gallery"})
+        assert resp.status == 200 and meeting.controls_called == [("layout", "gallery")]
+        assert (await client.post("/api/meeting/control", json={})).status == 400
+        meeting.fail_control = MeetingControlError("Zoom's raise hand button is not on the screen yet; try again in a moment")
+        resp = await client.post("/api/meeting/control", json={"name": "raise_hand"})
+        assert resp.status == 409 and "raise hand" in (await resp.json())["error"]
+        meeting.fail_control = RuntimeError("page closed")
+        assert (await client.post("/api/meeting/control", json={"name": "raise_hand"})).status == 409
+
+    async def test_dialog_and_chat_seen_routes(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        resp = await client.post("/api/meeting/dialog", json={"id": 3, "button": "Got it"})
+        assert resp.status == 200 and meeting.controls_called == [("dialog", {"id": 3, "button": "Got it"})]
+        assert (await client.post("/api/meeting/dialog", json={"id": 3})).status == 400
+        resp = await client.post("/api/meeting/chat/seen", json={})
+        assert resp.status == 200 and meeting.controls_called[-1] == ("chat.seen", None)
+
+    async def test_the_value_goes_to_the_meeting_as_sent_and_a_dialog_answer_is_only_its_id_and_button(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        await client.post("/api/meeting/control", json={"name": "host.mute_one", "value": 16777217})
+        await client.post("/api/meeting/control", json={"name": "reactions", "value": "Clap"})
+        await client.post("/api/meeting/control", json={"name": "host.admit", "value": {"id": 5, "names": ["Ann"]}})
+        await client.post("/api/meeting/control", json={"name": "captions"})
+        await client.post("/api/meeting/dialog", json={"id": "3", "button": "Stay muted", "also": "dropped"})
+        assert meeting.controls_called == [
+            ("host.mute_one", 16777217), ("reactions", "Clap"), ("host.admit", {"id": 5, "names": ["Ann"]}), ("captions", None),
+            ("dialog", {"id": "3", "button": "Stay muted"}),
+        ]
+
+    async def test_every_answer_is_the_meeting_block_the_status_carries_as_the_meeting_is_after_the_control(self, client_factory):
+        """One shape for the table to draw from: a 200 from any of the three routes is {"meeting": <what /api/status carries as meeting>},
+        built after the control was carried out."""
+        client, meeting = await joined_meeting(client_factory)
+        info = meeting.current_meeting
+        info.controls = {"raise_hand": {"available": True, "on": False}}
+        info.chat = {"unread": 2, "messages": [{"from": "Ann", "text": "hi", "at": "2026-10-13T20:00:00Z"}]}
+        info.dialog = {"id": 3, "title": "Unmute?", "text": "The host would like you to unmute.", "buttons": ["Unmute", "Stay muted"]}
+
+        def as_the_provider_does(name, value):
+            if name == "raise_hand":
+                info.controls = {"raise_hand": {"available": True, "on": True}}
+            elif name == "dialog":
+                info.dialog = None
+            elif name == "chat.seen":
+                info.chat = dict(info.chat, unread=0)
+        meeting.on_control = as_the_provider_does
+
+        async def status_meeting():
+            return (await (await client.get("/api/status")).json())["meeting"]
+
+        resp = await client.post("/api/meeting/control", json={"name": "raise_hand"})
+        answer = await resp.json()
+        assert resp.status == 200 and list(answer) == ["meeting"]
+        assert answer["meeting"]["controls"]["raise_hand"]["on"] is True and answer["meeting"] == await status_meeting()
+        resp = await client.post("/api/meeting/dialog", json={"id": 3, "button": "Unmute"})
+        answer = await resp.json()
+        assert resp.status == 200 and list(answer) == ["meeting"]
+        assert answer["meeting"]["dialog"] is None and answer["meeting"] == await status_meeting()
+        resp = await client.post("/api/meeting/chat/seen", json={})
+        answer = await resp.json()
+        assert resp.status == 200 and list(answer) == ["meeting"]
+        assert answer["meeting"]["chat"]["unread"] == 0 and answer["meeting"]["chat"]["messages"][0]["text"] == "hi"
+        assert answer["meeting"] == await status_meeting()
+        assert answer["meeting"]["state"] == "connected" and answer["meeting"]["platform"] == "zoom"
+
+    async def test_a_failure_is_a_409_with_one_line_of_words_and_the_stack_stays_in_the_journal(self, client_factory, caplog):
+        client, meeting = await joined_meeting(client_factory)
+
+        async def ask(name="raise_hand"):
+            return await client.post("/api/meeting/control", json={"name": name})
+
+        meeting.fail_control = MeetingControlError("Zoom did not raise the hand; try again\n    at pressNow (meeting.js:1:1)")
+        resp = await ask()
+        assert resp.status == 409 and await resp.json() == {"error": "Zoom did not raise the hand; try again"}
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]                    # Zoom's refusal is not a fault of the agent's
+        meeting.fail_control = MeetingControlError("Unknown control wave")                    # the bridge's own words: no list of names here
+        resp = await ask("wave")
+        assert resp.status == 409 and await resp.json() == {"error": "Unknown control wave"}
+        for ended in (RuntimeError("Not in a meeting\nmore lines"), MeetingControlError("Not in a meeting")):   # the meeting ended as the tap came in
+            meeting.fail_control = ended
+            resp = await ask()
+            assert resp.status == 409 and await resp.json() == {"error": "Not in a meeting"}
+        assert not [r for r in caplog.records if r.levelname == "WARNING"]
+        meeting.fail_control = RuntimeError("Target page, context or browser has been closed\n    at the stack")
+        resp = await ask("host.mute_all")
+        assert resp.status == 409
+        assert await resp.json() == {"error": "Could not carry out host mute all: Target page, context or browser has been closed"}
+        [record] = [r for r in caplog.records if r.levelname == "WARNING"]
+        assert "host mute all" in record.getMessage() and record.exc_info is not None         # the stack goes to the log, not the table
+        meeting.fail_control = KeyError()                                                     # no words at all: what went wrong, by type
+        assert (await (await ask()).json())["error"] == "Could not carry out raise hand: KeyError"
+
+    async def test_the_control_is_named_in_words_for_the_error_line_and_a_line_of_the_journal_stays_one_line(self, client_factory, caplog):
+        client, meeting = await joined_meeting(client_factory)
+        meeting.fail_control = RuntimeError("boom")
+        for name, said in (("host.mute_all", "host mute all"), ("raise_hand", "raise hand"), ("hide_self", "hide self"),
+                           ("wave\nERROR forged line", "wave ERROR forged line"), ("...", "the control")):
+            resp = await client.post("/api/meeting/control", json={"name": name})
+            assert resp.status == 409 and await resp.json() == {"error": f"Could not carry out {said}: boom"}, name
+        warned = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+        assert len(warned) == 5 and all("\n" not in message for message in warned)
+
+    async def test_a_dialog_answer_and_the_chat_seen_fail_in_words_too(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        meeting.fail_control = MeetingControlError("Zoom's dialog did not close when Unmute was pressed; try again in a moment")
+        resp = await client.post("/api/meeting/dialog", json={"id": 3, "button": "Unmute"})
+        assert resp.status == 409 and (await resp.json())["error"] == "Zoom's dialog did not close when Unmute was pressed; try again in a moment"
+        meeting.fail_control = ValueError("a bug\nin two lines")
+        resp = await client.post("/api/meeting/dialog", json={"id": 3, "button": "Unmute"})
+        assert resp.status == 409 and (await resp.json())["error"] == "Could not carry out dialog: a bug"
+        resp = await client.post("/api/meeting/chat/seen", json={})
+        assert resp.status == 409 and (await resp.json())["error"] == "Could not carry out chat seen: a bug"
+
+    async def test_a_cancelled_control_is_never_answered_as_a_failure(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        meeting.fail_control = asyncio.CancelledError()
+        answered = None
+        try:
+            answered = (await client.post("/api/meeting/control", json={"name": "raise_hand"})).status
+        except ClientError:
+            pass                                      # aiohttp drops the connection of a request that was cancelled: nothing was answered
+        assert answered != 409                        # in any case it is not told to the table as a failure of the control
+
+    async def test_a_body_that_cannot_be_acted_on_is_refused_and_nothing_is_carried_out(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        for body in ({}, {"value": "gallery"}, {"name": ""}, {"name": 7}, {"name": None}, {"name": ["raise_hand"]}, ["raise_hand"], "raise_hand", 7):
+            assert (await client.post("/api/meeting/control", json=body)).status == 400, body
+        for body in ({}, {"id": 3}, {"button": "Got it"}, {"id": 3, "button": 7}, {"id": 3, "button": None}, [3, "Got it"], "Got it"):
+            assert (await client.post("/api/meeting/dialog", json=body)).status == 400, body
+        for path in ("/api/meeting/control", "/api/meeting/dialog"):
+            resp = await client.post(path, data="{", headers={"Content-Type": "application/json"})          # not JSON at all
+            assert resp.status == 400, path
+        for path in ("/api/meeting/control", "/api/meeting/dialog", "/api/meeting/chat/seen"):
+            resp = await client.post(path, data="name=raise_hand")                                         # a form, from another site, say
+            assert resp.status == 415, path
+        assert meeting.controls_called == []
+
+    async def test_every_route_says_not_in_a_meeting_outside_one(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        asked = (("/api/meeting/control", {"name": "raise_hand"}), ("/api/meeting/dialog", {"id": 3, "button": "Got it"}), ("/api/meeting/chat/seen", {}))
+        for path, body in asked:
+            resp = await client.post(path, json=body)
+            assert resp.status == 409 and await resp.json() == {"error": "Not in a meeting"}, path
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.set_state(MeetingState.IN_LOBBY)                                                          # waiting to be let in is not being in it
+        for path, body in asked:
+            resp = await client.post(path, json=body)
+            assert resp.status == 409 and await resp.json() == {"error": "Not in a meeting"}, path
+        assert meeting.controls_called == []
+
+    async def test_without_the_meeting_service_every_route_is_a_503_whatever_the_body(self, client_factory):
+        client = await client_factory(make_service())
+        asked = (("/api/meeting/control", {"name": "raise_hand"}), ("/api/meeting/dialog", {"id": 3, "button": "Got it"}), ("/api/meeting/chat/seen", {}),
+                 ("/api/meeting/control", {}), ("/api/meeting/dialog", {}))
+        for path, body in asked:
+            resp = await client.post(path, json=body)
+            assert resp.status == 503 and await resp.json() == {"error": "Meeting service not available"}, (path, body)
 
 
 class TestPage:

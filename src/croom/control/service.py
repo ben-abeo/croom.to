@@ -142,7 +142,8 @@ class ControlService(Service):
         self._calendar = calendar
 
         self._runner: Optional[web.AppRunner] = None
-        self._task: Optional[asyncio.Task] = None
+        self._task: Optional[asyncio.Task] = None            # the running join or leave
+        self._join_task: Optional[asyncio.Task] = None       # the last join: a Leave gives it up while it still runs
         self._last_error: Optional[str] = None
         self._title = ""
         self._joined_at: Optional[datetime] = None
@@ -237,7 +238,7 @@ class ControlService(Service):
                 await self._task
             except (asyncio.CancelledError, Exception):
                 pass
-        self._task = None
+        self._task = self._join_task = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
@@ -657,7 +658,7 @@ class ControlService(Service):
             return self._error_response("A meeting is already in progress", 409)
         self._last_error = None
         self._title = title
-        self._task = asyncio.create_task(self._run_join(url, passcode))
+        self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode))
         return web.json_response({"state": "joining", "url": url}, status=202)
 
     async def _run_join(self, url: str, passcode: Optional[str] = None) -> None:
@@ -675,7 +676,12 @@ class ControlService(Service):
             return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
-        if self._meeting_state() == "idle":
+        if self._join_task is not None and not self._join_task.done():
+            # The join is still running: waiting for the room (the TV is woken first, for up to fifteen seconds) or asking its
+            # provider. Left to go on it would finish after this Leave and put the room in the meeting that was walked away
+            # from, so it ends first (a join that is given up leaves the meeting service as leave_meeting accepts).
+            await self._give_up_join()
+        elif self._meeting_state() == "idle":
             if self._last_error is not None:
                 # Dismissing a join the provider refused before it started.
                 self._last_error = None
@@ -685,6 +691,14 @@ class ControlService(Service):
         self._last_error = None
         self._task = asyncio.create_task(self._run_leave())
         return web.json_response({"state": "leaving"}, status=202)
+
+    async def _give_up_join(self) -> None:
+        """End the join that is running and wait until it is over."""
+        join = self._join_task
+        join.cancel()
+        # asyncio.wait, not await: it waits for the task to finish without raising the task's own cancellation here, and a
+        # cancel aimed at this request itself still gets through
+        await asyncio.wait({join})
 
     async def _run_leave(self) -> None:
         try:

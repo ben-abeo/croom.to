@@ -173,6 +173,25 @@ class RecordingProvider:
         return MeetingInfo(platform="zoom", meeting_id="98765432100", meeting_url=meeting_url)
 
 
+class HoldingProvider(RecordingProvider):
+    """A provider whose join takes a while (its page is loading) and says nothing of joining until it is ready, as the Zoom
+    provider does; it remembers being asked to join and being left."""
+
+    def __init__(self):
+        super().__init__()
+        self.gate = asyncio.Event()
+        self.asked = self.leaves = 0
+
+    async def join_meeting(self, *args, **kwargs):
+        self.asked += 1
+        await self.gate.wait()
+        return await super().join_meeting(*args, **kwargs)
+
+    async def leave_meeting(self):
+        self.leaves += 1
+        self.state = MeetingState.IDLE
+
+
 class TestJoinMeeting:
     """What the service hands the provider it picks for a link."""
 
@@ -412,6 +431,44 @@ class TestBeforeJoinHooks:
         with pytest.raises(asyncio.CancelledError):
             await joining
         assert service.state == MeetingState.IDLE and provider.joins == []
+
+    async def test_a_join_that_is_cancelled_while_its_provider_joins_leaves_the_service_to_leave_meeting(self):
+        """The room page's Leave gives a join up wherever it has got to, and then leaves: here the hooks are over and the
+        provider is the one that was asked."""
+        service = MeetingService(Config())
+        provider = HoldingProvider()
+        service._providers["zoom"] = provider
+        joining = asyncio.ensure_future(service.join_meeting("https://zoom.us/j/98765432100"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        assert provider.asked == 1 and service.state == MeetingState.JOINING      # (the service says so for a provider that does not yet)
+        joining.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await joining
+        assert service.state == MeetingState.IDLE         # nothing is waiting on the provider any more: the state is the provider's
+        await service.leave_meeting()                     # accepted: it reaches the provider that was asked
+        assert provider.leaves == 1 and service.state == MeetingState.IDLE and service.current_meeting is None
+        await service.leave_meeting()                     # and a second one has nothing left to do
+        assert provider.leaves == 1
+
+    async def test_a_join_that_is_cancelled_while_the_hooks_run_has_nothing_for_leave_meeting_to_do(self):
+        service, provider = self.service_with_zoom()
+        gate = asyncio.Event()
+
+        async def slow():
+            await gate.wait()
+        service.add_before_join(slow)
+        joining = asyncio.ensure_future(service.join_meeting("https://zoom.us/j/98765432100"))
+        for _ in range(5):
+            await asyncio.sleep(0)
+        joining.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await joining
+        await service.leave_meeting()                     # (the provider was never asked: there is none to leave)
+        assert service.state == MeetingState.IDLE and provider.joins == []
+        gate.set()
+        await service.join_meeting("https://zoom.us/j/98765432100")        # and the room joins again as if nothing had happened
+        assert len(provider.joins) == 1
 
     async def test_two_joins_waiting_on_the_hooks_do_not_clear_each_others_state(self):
         service, provider = self.service_with_zoom()

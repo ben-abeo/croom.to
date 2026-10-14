@@ -35,6 +35,8 @@ class StubMeeting:
         self.fail_with = None
         self.fail_before_joining = None
         self.fail_next_join = False
+        self.hold_join = None     # an asyncio.Event that a join waits for before it asks its provider, as the real one waits for the TV
+        self.order = []           # "join given up" and "leave", in the order they happened
 
     def get_available_platforms(self):
         return list(self._platforms)
@@ -51,6 +53,14 @@ class StubMeeting:
         self.joins.append((url, display_name, passcode))
         if self.fail_before_joining is not None:
             raise self.fail_before_joining
+        if self.hold_join is not None:
+            self.set_state(MeetingState.JOINING)        # (the real meeting service says joining while the join waits for the room)
+            try:
+                await self.hold_join.wait()
+            except asyncio.CancelledError:
+                self.order.append("join given up")
+                self.set_state(MeetingState.IDLE)       # nothing is left waiting, as in the real one
+                raise
         if self.fail_next_join:
             # Refused at once, before any "joining" shows: the error state and its reason, as a provider reports them.
             self.fail_next_join = False
@@ -78,6 +88,7 @@ class StubMeeting:
         return self.current_meeting
 
     async def leave_meeting(self):
+        self.order.append("leave")
         self.leaves += 1
         self.current_meeting = None
         self.set_state(MeetingState.IDLE)
@@ -1223,3 +1234,75 @@ class TestRoomDevices:
         client = await client_factory(make_service(devices=devices))
         assert (await client.get("/api/status")).status == 200
         assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []
+
+
+class TestLeaveWhileJoining:
+    """A join waits for the room before it asks its provider (the TV is woken, up to fifteen seconds). A person who taps
+    Leave then has changed their mind: the join must not go on, and must not finish after the Leave."""
+
+    URL = "https://zoom.us/j/98765432100"
+
+    async def test_a_leave_while_the_join_waits_for_the_room_gives_the_join_up_before_it_leaves(self, client_factory):
+        meeting = StubMeeting()
+        meeting.hold_join = asyncio.Event()
+        calendar = StubCalendar(events=[event("e1", "Design review", starts_in_minutes=5)])
+        client = await client_factory(make_service(meeting=meeting, calendar=calendar))
+        assert (await client.post("/api/meeting/join", json={"event_id": "e1"})).status == 202
+        await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "joining" and data["meeting"]["title"] == "Design review"
+        response = await client.post("/api/meeting/leave", json={})
+        assert response.status == 202 and await response.json() == {"state": "leaving"}
+        await wait_until(lambda: meeting.leaves == 1)
+        assert meeting.order == ["join given up", "leave"]       # the join was over when the leave began
+        meeting.hold_join.set()                                  # the room answers late: there is no join left to go on
+        await asyncio.sleep(0.05)
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "idle" and data["meeting"]["title"] == ""
+        assert meeting.current_meeting is None and len(meeting.joins) == 1
+
+    async def test_a_leave_after_the_join_has_ended_gives_nothing_up(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": self.URL})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        assert (await client.post("/api/meeting/leave", json={})).status == 202
+        await wait_until(lambda: meeting.leaves == 1)
+        assert meeting.order == ["leave"]
+
+    async def test_a_second_leave_does_not_give_up_the_first(self, client_factory):
+        """The task that is running is a leave this time, and a leave is not given up: it is the way out."""
+        meeting = StubMeeting()
+        gate = asyncio.Event()
+        service = make_service(meeting=meeting)
+        client = await client_factory(service)
+        await client.post("/api/meeting/join", json={"url": self.URL})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        slow_leave = meeting.leave_meeting
+
+        async def held_leave():
+            await gate.wait()
+            await slow_leave()
+        meeting.leave_meeting = held_leave
+        try:
+            assert (await client.post("/api/meeting/leave", json={})).status == 202
+            meeting.set_state(MeetingState.LEAVING)
+            assert (await client.post("/api/meeting/leave", json={})).status == 202
+            await asyncio.sleep(0.02)
+            assert meeting.order == []                             # nothing was cancelled, and neither leave has finished
+        finally:
+            gate.set()
+        await wait_until(lambda: meeting.leaves == 2)
+
+    async def test_stopping_the_service_gives_up_a_join_that_still_waits(self, client_factory):
+        meeting = StubMeeting()
+        meeting.hold_join = asyncio.Event()
+        service = make_service(meeting=meeting)
+        await service.start()
+        client = await client_factory(service)
+        try:
+            assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+            await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        finally:
+            await asyncio.wait_for(service.stop(), 2.0)
+        assert meeting.order == ["join given up"]

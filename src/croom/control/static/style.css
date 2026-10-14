@@ -268,6 +268,9 @@ body.keyboard-open .schedule { display: none; }
 .picker { display: flex; flex-wrap: wrap; gap: 10px; }
 .picker .button { min-height: 48px; padding: 0 18px; }
 .picker .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
+/* Options > Keyboard (spec 2026-10-13, 3.3): the group sits right under the menu's buttons, not at the foot of the screen. */
+.view[data-view="options"] { grid-template-rows: auto auto 1fr; }
+.keyboard-section { align-self: start; margin-top: 12px; }
 
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;

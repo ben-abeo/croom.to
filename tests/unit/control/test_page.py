@@ -1167,6 +1167,330 @@ def test_the_keyboard_hidden_and_shown_in_the_same_breath_keeps_its_touch_listen
         page.close()
 
 
+# --- the key click (spec 2026-10-13, section 3.3): a soft tick for each key a finger presses, on or off in Options > Keyboard ---
+
+# A stand-in for the browser's audio that counts what the click asks of it: contexts made, resumes asked for, and each tick sounded (the
+# pitch it was given, and when its oscillator was started and stopped). Its state and what fails are the test's to set, through
+# window.__audio, in a script that follows this one.
+RECORDED_AUDIO = """window.__audio = { made: 0, resumed: 0, state: 'running', resumeFails: false, oscillatorFails: false, ticks: [] };
+    window.AudioContext = class { constructor() { window.__audio.made += 1; window.__audio.context = this; this.currentTime = 0; this.destination = {}; this.state = window.__audio.state; }
+        createOscillator() { if (window.__audio.oscillatorFails) throw new Error('no oscillator'); const osc = { frequency: { value: 0 }, connect() {},
+            start(at) { osc.tick = { hz: osc.frequency.value, at: at }; window.__audio.ticks.push(osc.tick); }, stop(at) { osc.tick.until = at; } }; return osc; }
+        createGain() { return { connect() {}, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } }; }
+        resume() { window.__audio.resumed += 1; return window.__audio.resumeFails ? Promise.reject(new Error('the browser will not start the audio')) : Promise.resolve(); } };
+"""
+
+
+def open_kiosk_page_with(browser, server, script, stopped=False, touchscreen=False):
+    """The kiosk page with its keys up, loaded with a script that runs before the page's own (a stand-in for the browser's audio or
+    vibration). stopped: its timers wait for page.clock.run_for, as page_on_a_stopped_clock's do. touchscreen: a touch device."""
+    page = browser.new_page(viewport={"width": 1280, "height": 800}, has_touch=touchscreen)
+    if stopped:
+        page.clock.install()
+    page.add_init_script(script)
+    page.goto(f"http://127.0.0.1:{server.port}/?keyboard=1", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    if stopped:
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+    page.click("#link-input")
+    page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+    return page
+
+
+def ticks(page):
+    """The ticks the recording audio has been asked to sound, one for each: {hz, at, until}."""
+    return page.evaluate("window.__audio.ticks")
+
+
+def test_the_key_click_plays_once_per_key_and_the_options_card_turns_it_off(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.add_init_script("""window.__ticks = 0; window.AudioContext = class { constructor() { this.currentTime = 0; this.destination = {}; }
+            createOscillator() { return { connect() {}, start() { window.__ticks += 1; }, stop() {}, frequency: { value: 0 } }; }
+            createGain() { return { connect() {}, gain: { setValueAtTime() {}, exponentialRampToValueAtTime() {} } }; } resume() { return Promise.resolve(); } };""")
+        page.reload(wait_until="networkidle")
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        tap(page, "a", "b", "c")
+        assert page.evaluate("window.__ticks") == 3
+        page.click("#keyboard-toggle")                              # hide, then Options › Keyboard
+        page.click("#open-options")
+        page.locator("#key-click-off").click()
+        page.wait_for_function("window.croomPage.model.status.settings.key_click === false", timeout=5000)
+        page.click("#back-from-options")
+        page.click("#link-input")
+        tap(page, "d")
+        assert page.evaluate("window.__ticks") == 3
+        page.close()
+
+
+def test_the_click_fails_quietly_without_audio(browser):
+    with PageServer() as server:
+        page = open_kiosk_page(browser, server)
+        page.add_init_script("window.AudioContext = class { constructor() { throw new Error('no audio'); } }; window.webkitAudioContext = undefined;")
+        page.reload(wait_until="networkidle")
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        tap(page, "a", "b")
+        assert page.input_value("#link-input") == "ab" and errors == []
+        page.close()
+
+
+@pytest.mark.parametrize("breakage", [
+    "window.__audio.state = 'suspended'; window.__audio.resumeFails = true;",                                     # the browser will not start the audio
+    "window.__audio.oscillatorFails = true;",                                                                     # a context that cannot play
+    "window.__audio.state = 'closed'; window.__audio.resumeFails = true;",                                        # one the system closed
+    "Object.defineProperty(navigator, 'vibrate', { configurable: true, value: () => { throw new Error('no motor'); } });",   # a motor that will not run
+], ids=["audio that will not start", "no oscillator", "a closed context", "no motor"])
+def test_the_click_fails_quietly_whichever_part_of_it_fails(browser, breakage):
+    """No audio at all is one way for the click to fail (the test above). A context that will not start or will not play, one the
+    system has closed, and a device whose motor throws are others: the keys type, and nothing is thrown, not even by the promise
+    that resume() hands back."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO + breakage)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        tap(page, "a", "b", "c")
+        page.wait_for_timeout(100)                                  # a rejected promise reports itself a moment after the press
+        assert page.input_value("#link-input") == "abc" and errors == []
+        assert page.evaluate("document.querySelectorAll('#keyboard .key.down').length") == 0
+        page.close()
+
+
+def test_the_click_sounds_once_for_each_finger_that_lands_and_for_nothing_else(browser):
+    """A tick is for a finger landing on a key, any key: not the repeat of a held Backspace, not a mouse's other buttons, not a
+    press made from code. And nothing is made of the audio before the first key."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO, stopped=True)
+        assert page.evaluate("window.__audio.made") == 0               # lazily: the first key makes it
+        page.fill("#link-input", "x" * 20)                             # something for Backspace to take
+        touch(page, "#keyboard .key[data-key='backspace']", release=False)
+        page.clock.run_for(400 + 83 * 5)                               # it repeats ...
+        lift(page, "#keyboard .key[data-key='backspace']")
+        assert len(page.input_value("#link-input")) < 18 and len(ticks(page)) == 1   # ... and sounds once
+        page.locator("#keyboard .key[data-key='c']").click(button="right")
+        page.locator("#keyboard .key[data-key='d']").click(button="middle")
+        page.evaluate("croomKeyboard.press('e')")                      # a press from code is no finger
+        assert len(ticks(page)) == 1
+        tap(page, "shift", "a", "layer:symbols", "layer:more", "layer:letters", "space")
+        assert len(ticks(page)) == 7                                   # every key a finger lands on, the wide ones and the layer keys too
+        assert page.evaluate("window.__audio.made") == 1               # in the one context
+        assert all(1000 <= tick["hz"] <= 2500 for tick in ticks(page))   # a tick has a pitch, in the range the table's speaker serves
+        assert all(0.002 <= tick["until"] - tick["at"] <= 0.01 for tick in ticks(page))   # and its oscillator is stopped within 10 ms: none is left running
+        page.close()
+
+
+def test_a_real_finger_clicks_once_per_tap_and_two_overlapping_fingers_click_twice(browser):
+    """Not the synthetic events of the tests above: a real touchscreen's finger makes a pointerdown, and the browser follows a
+    lone tap with a click of its own that the keys cancel. Neither may make a second tick."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO, touchscreen=True)
+        cdp = page.context.new_cdp_session(page)
+        finger_tap(page, cdp, "#keyboard .key[data-key='a']")
+        page.wait_for_timeout(100)                                  # room for the click a lone tap gets
+        assert len(ticks(page)) == 1 and page.input_value("#link-input") == "a"
+        first = finger_down(page, cdp, "#keyboard .key[data-key='s']", finger_id=1)
+        second = finger_down(page, cdp, "#keyboard .key[data-key='d']", finger_id=2)   # lands before the first lifts
+        finger_up(cdp, first)
+        finger_up(cdp, second)
+        assert page.input_value("#link-input") == "asd" and len(ticks(page)) == 3
+        page.close()
+
+
+def test_the_click_uses_the_prefixed_audio_where_that_is_all_there_is(browser):
+    """Safari up to 14 (an older iPad opening the page, with the keyboard button) has webkitAudioContext and no AudioContext."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO + "window.webkitAudioContext = window.AudioContext; window.AudioContext = undefined;")
+        tap(page, "a", "b")
+        assert len(ticks(page)) == 2
+        page.close()
+
+
+def test_the_click_makes_its_audio_on_the_first_key_and_piles_no_ticks_up_while_the_browser_holds_it_back(browser):
+    """A browser may keep audio from starting until a tap has led to it. Until it lets the context run, every tick scheduled on it
+    waits, and all of them would sound at once the moment it did: so the context is asked to start on each key, and only the key
+    that made it is queued (it may start a moment later, and that tick is then heard). Once it runs, every key sounds."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO + "window.__audio.state = 'suspended';")
+        assert page.evaluate("window.__audio.made") == 0
+        tap(page, "a", "b", "c")
+        assert page.evaluate("window.__audio.made") == 1                # one context for the page, made by the first key
+        assert page.evaluate("window.__audio.resumed") >= 1             # and asked to start
+        assert len(ticks(page)) == 1                                    # the first key's tick is queued; the others are not piled up behind it
+        page.evaluate("window.__audio.context.state = 'running'")       # a tap has led to it: the browser lets it run
+        tap(page, "d", "e")
+        assert len(ticks(page)) == 3 and page.input_value("#link-input") == "abcde"
+        page.close()
+
+
+def test_the_click_is_a_short_soft_burst_in_a_real_audio_graph(browser):
+    """The tick as the browser's own audio graph makes it, rendered offline (no speaker needed): not silent, not loud, starting with
+    the key and over in 2 to 4 milliseconds. The tests with a recording stand-in cannot tell that a real graph accepts what the click
+    gives it (a ramp to zero, say, is refused by a real one)."""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, "window.AudioContext = class extends OfflineAudioContext { constructor() { super(1, 4800, 48000); window.__context = this; } };")
+        tap(page, "a")
+        samples = page.evaluate("window.__context.startRendering().then((buffer) => Array.from(buffer.getChannelData(0)))")   # 100 ms at 48 kHz
+        peak = max(abs(s) for s in samples)
+        audible = [i for i, s in enumerate(samples) if abs(s) > 0.001]  # louder than -60 dB
+        assert 0.03 <= peak <= 0.25, peak                               # a tick you can hear, and a quiet one
+        assert audible and audible[0] < 48, audible[:1]                 # it begins at the key (inside the first millisecond)
+        assert 2 <= audible[-1] / 48 <= 4, audible[-1] / 48             # and is over in 2 to 4 milliseconds
+        page.close()
+
+
+def test_the_click_buzzes_where_the_device_can_and_off_silences_that_too(browser):
+    """Spec 3.3: the Vibration API is also called when it is there (a tablet may have a motor; the table's panel has none)."""
+    script = RECORDED_AUDIO + "window.__buzzes = []; Object.defineProperty(navigator, 'vibrate', { configurable: true, value: (ms) => { window.__buzzes.push(ms); return true; } });"
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, script, stopped=True)   # a poll between setClick and the tap would hand the room's setting back
+        tap(page, "a", "b")
+        buzzes = page.evaluate("window.__buzzes")
+        assert len(buzzes) == 2 and all(1 <= ms <= 30 for ms in buzzes), buzzes   # a short buzz for each key
+        page.evaluate("croomKeyboard.setClick(false)")
+        tap(page, "c")
+        assert len(page.evaluate("window.__buzzes")) == 2 and len(ticks(page)) == 2   # off is off: no tick and no buzz
+        page.close()
+
+
+def test_the_click_follows_the_rooms_setting_as_the_status_changes(browser):
+    """The setting is the room's: another page, or the service's file, changes it, and this page's keys follow when the status says
+    so, with no tap on this page's own buttons. (setClick is what the page hands the keyboard.)"""
+    with PageServer() as server:
+        page = open_kiosk_page_with(browser, server, RECORDED_AUDIO, stopped=True)   # no poll but the ones the test asks for
+        settings = f"http://127.0.0.1:{server.port}/api/settings"
+        tap(page, "a")
+        assert len(ticks(page)) == 1                                   # on, before the status has said anything about it
+        assert page.request.post(settings, data={"key_click": False}).status == 200
+        page.evaluate("window.croomPage.refreshStatus()")
+        tap(page, "b")
+        assert len(ticks(page)) == 1                                   # off: the status said so
+        assert page.request.post(settings, data={"key_click": True}).status == 200
+        page.evaluate("window.croomPage.refreshStatus()")
+        tap(page, "c")
+        assert len(ticks(page)) == 2 and page.input_value("#link-input") == "abc"
+        page.evaluate("croomKeyboard.setClick(false)")                 # and the keyboard's own switch works by itself
+        tap(page, "d")
+        page.evaluate("croomKeyboard.setClick(true)")
+        tap(page, "e")
+        assert len(ticks(page)) == 3
+        page.close()
+
+
+def test_the_options_screen_has_a_keyboard_group_that_shows_and_changes_the_click(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        group, on, off = page.locator(".keyboard-section"), page.locator("#key-click-on"), page.locator("#key-click-off")
+        settings = f"http://127.0.0.1:{server.port}/api/settings"
+        assert group.is_hidden()                                         # a part of the Options screen: the idle screen has none
+        page.click("#open-options")
+        assert group.is_visible() and group.locator(".kicker").text_content() == "Keyboard"
+        assert page.get_by_role("group", name="Key click").is_visible()  # the two buttons are one group, named for what they set
+        assert (on.inner_text(), off.inner_text()) == ("Key click on", "Key click off")
+        assert (on.get_attribute("aria-pressed"), off.get_attribute("aria-pressed")) == ("true", "false")   # on, until the room says otherwise
+        off.click()
+        page.wait_for_function("document.getElementById('key-click-off').getAttribute('aria-pressed') === 'true'", timeout=5000)
+        assert on.get_attribute("aria-pressed") == "false"
+        assert page.request.get(settings).json()["key_click"] is False   # the service has it
+        page.reload(wait_until="networkidle")                            # and it is the room's: it holds across a reload
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.click("#open-options")
+        assert (on.get_attribute("aria-pressed"), off.get_attribute("aria-pressed")) == ("false", "true")
+        on.click()
+        page.wait_for_function("document.getElementById('key-click-on').getAttribute('aria-pressed') === 'true'", timeout=5000)
+        assert off.get_attribute("aria-pressed") == "false" and page.request.get(settings).json()["key_click"] is True
+        assert page.request.post(settings, data={"key_click": False}).status == 200   # changed from elsewhere: the buttons follow the next status
+        page.evaluate("window.croomPage.refreshStatus()")
+        assert (on.get_attribute("aria-pressed"), off.get_attribute("aria-pressed")) == ("false", "true")
+        for opener in ("#open-camera-setup", "#open-screensaver"):       # no other screen has the group
+            page.click(opener)
+            assert group.is_hidden(), opener
+            page.click("button:visible:has-text('Back')")
+        assert group.is_visible()
+        page.close()
+
+
+def test_a_tap_on_the_key_click_buttons_while_the_page_is_busy_is_refused_like_every_other_button(browser):
+    """The buttons post through the page's act(): one request at a time, and a tap while another is on its way is refused."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        posts = []
+        page.on("request", lambda r: posts.append(r.post_data) if r.method == "POST" and r.url.endswith("/api/settings") else None)
+        page.click("#open-options")
+        page.evaluate("window.croomPage.model.busy = true")             # what act() sets while a request is on its way
+        page.click("#key-click-off")
+        page.wait_for_timeout(200)
+        assert posts == [] and page.get_attribute("#key-click-on", "aria-pressed") == "true"
+        page.evaluate("window.croomPage.model.busy = false")
+        page.click("#key-click-off")
+        page.wait_for_function("document.getElementById('key-click-off').getAttribute('aria-pressed') === 'true'", timeout=5000)
+        assert posts == ['{"key_click":false}']
+        page.close()
+
+
+def test_the_keyboard_group_goes_while_the_room_cannot_be_reached_and_comes_back(browser):
+    """Its buttons need the room, as the screensaver's picker does: the page hides both while it cannot reach it."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        assert page.locator(".keyboard-section").is_visible()
+        page.route("**/api/status", lambda route: route.abort())
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=8000)
+        assert page.locator(".keyboard-section").is_hidden()
+        page.unroute("**/api/status")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        assert page.locator(".keyboard-section").is_visible()
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_options_screen_with_its_keyboard_group_fits_the_kiosk_and_a_portrait_screen(browser, width, height):
+    """The kiosk's 1280 by 800 and a portrait tablet's 800 by 1280 keep fits() on the Options screen with the group on it."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.click("#open-options")
+        group = page.locator(".keyboard-section")
+        buttons_end = "Math.max(...Array.from(document.querySelectorAll('.view[data-view=options] .menu-item')).map(b => b.getBoundingClientRect().bottom))"
+        assert group.is_visible() and fits(page), "the options screen scrolls"
+        box = group.bounding_box()
+        assert 0 <= box["y"] - page.evaluate(buttons_end) <= 60 and box["y"] + box["height"] <= height   # right under the menu's buttons, on the screen
+        # The door sign's branch gives this menu a third entry: with it the group is still under the buttons and on the screen, and nothing scrolls.
+        page.evaluate("""() => { const entry = document.createElement('button'); entry.className = 'button quiet menu-item'; entry.textContent = 'Door sign';
+            document.querySelector('.view[data-view=options] .menu').append(entry); }""")
+        box = group.bounding_box()
+        assert 0 <= box["y"] - page.evaluate(buttons_end) <= 60 and box["y"] + box["height"] <= height
+        assert fits(page), "the options screen scrolls with a third entry"
+        page.close()
+
+
+def test_a_status_without_settings_leaves_the_click_on_and_the_buttons_saying_so(browser):
+    """The page keeps working against a status that carries no settings (an agent from before them): on, as it is by default."""
+    with PageServer() as server:
+        def without_settings(route):
+            body = route.fetch().json()
+            body.pop("settings", None)
+            route.fulfill(json=body)
+
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.route("**/api/status", without_settings)
+        page.add_init_script(RECORDED_AUDIO)
+        page.goto(f"http://127.0.0.1:{server.port}/?keyboard=1", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert "settings" not in page.evaluate("window.croomPage.model.status")
+        page.click("#link-input")
+        page.wait_for_function("!document.getElementById('keyboard').hidden", timeout=5000)
+        tap(page, "a")
+        assert len(ticks(page)) == 1
+        page.click("#keyboard-toggle")
+        page.click("#open-options")
+        assert (page.get_attribute("#key-click-on", "aria-pressed"), page.get_attribute("#key-click-off", "aria-pressed")) == ("true", "false")
+        page.close()
+
+
 def test_the_page_keyboard_opens_on_the_kiosk_and_types_a_meet_link(browser):
     with PageServer() as server:
         page = open_kiosk_page(browser, server)

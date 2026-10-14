@@ -2,7 +2,8 @@
 // finger lands, per finger, so two thumbs typing fast lose nothing; rows are built once per layer and their labels
 // change in place, so nothing under a finger is ever replaced; the keys never take the focus, and hide only for a tap
 // elsewhere, Hide, Join or a view change. The kiosk (?keyboard=1) opens it when a field is tapped; the button beside
-// the link field toggles it on any device.
+// the link field toggles it on any device. Each key a finger lands on can click (spec 2026-10-13, 3.3), as the room's
+// setting says (Options > Keyboard).
 (function () {
   "use strict";
   const P = window.croomPage;
@@ -28,6 +29,9 @@
   const NAMES = { shift: "Shift", backspace: "Delete", hide: "Hide keyboard" };
   const WIDE = new Set(["shift", "backspace", "layer:symbols", "layer:more", "layer:letters", "hide"]);
   const REPEAT_AFTER_MS = 400, REPEAT_EVERY_MS = 83, DOUBLE_TAP_MS = 350, PREVIEW_LINGER_MS = 60;
+  // The click: a soft tick, a 1.2 kHz sine that fades out in 4 ms (heard for about 3) at a low level, made by the browser's audio
+  // (no file), and a short buzz where the device has a motor.
+  const CLICK_HZ = 1200, CLICK_MS = 4, CLICK_LEVEL = 0.15, BUZZ_MS = 8;
   const kiosk = P.kiosk;
   const box = el("keyboard");
   const link = el("link-input");
@@ -51,6 +55,8 @@
   document.body.append(preview);
   let previewOf = null;              // the pointer whose key the pop shows
   let previewTimer = null;
+  let clickOn = true;                // the room's setting (the page hands it over with every status); on until it says otherwise
+  let audio = null;                  // made by the first key, not before: a tap has led to a key, and a browser starts audio made earlier silent
 
   const field = () => (input.hidden ? link : input);
   const inTray = (t) => Boolean(t && t.closest && t.closest(".key, .keyboard"));   // a key may be on the shelf: its row is not under the tray then
@@ -191,9 +197,36 @@
   }
   function hidePreview() { clearTimeout(previewTimer); previewOf = null; preview.hidden = true; }
   function lingerPreview(pointerId) { if (previewOf === pointerId) previewTimer = setTimeout(hidePreview, PREVIEW_LINGER_MS); }
+  // One tick for a finger landing on a key. It never throws: with no audio, or audio that will not play, typing goes on in silence.
+  function sound() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    const fresh = !audio;
+    audio = audio || new Ctx();
+    if (audio.state && audio.state !== "running") {   // held back by the browser until a tap has led to it, or interrupted: ask it to start
+      const asked = audio.resume && audio.resume();
+      if (asked && asked.catch) asked.catch(() => {});
+      if (!fresh) return;   // and queue nothing behind it: every tick waiting would sound at once the moment it started (this key's own may follow it)
+    }
+    const at = audio.currentTime, osc = audio.createOscillator(), gain = audio.createGain();
+    osc.type = "sine";
+    osc.frequency.value = CLICK_HZ;
+    gain.gain.setValueAtTime(CLICK_LEVEL, at);
+    gain.gain.exponentialRampToValueAtTime(0.0001, at + CLICK_MS / 1000);
+    osc.connect(gain);
+    gain.connect(audio.destination);
+    osc.start(at);
+    osc.stop(at + CLICK_MS / 1000 + 0.001);
+  }
+  function tick() {
+    if (!clickOn) return;
+    try { sound(); } catch (err) { /* no audio here */ }
+    try { if (navigator.vibrate) navigator.vibrate(BUZZ_MS); } catch (err) { /* no motor */ }
+  }
   function onDown(e) {
     if (e.pointerType === "mouse" && e.button !== 0) return;   // only the main button types; the tray's own handler keeps the focus for the others
     e.preventDefault();   // the field keeps the focus
+    tick();               // every key a finger lands on, whatever the key does; not a held key's repeat, nor a press made from code
     onUp(e);              // a press of this pointer that never lifted is over: its repeat must not outlive it
     const b = e.currentTarget;
     try { b.setPointerCapture(e.pointerId); } catch (err) { /* synthetic events have no capture */ }
@@ -236,5 +269,7 @@
   toggle.addEventListener("pointerdown", (e) => e.preventDefault());
   toggle.addEventListener("click", () => { if (open) { hide(); return; } show(); field().focus(); });
   P.onViewChange((name) => { if (name !== "idle") hide(); });
-  window.croomKeyboard = { open: show, hide: hide, isOpen: () => open, layer: layer, press: act, onPress: (fn) => listeners.push(fn) };
+  const setClick = (on) => { clickOn = Boolean(on); };
+  P.onRender((s) => { if (s.settings) setClick(s.settings.key_click !== false); });   // the room's setting, with every status
+  window.croomKeyboard = { open: show, hide: hide, isOpen: () => open, layer: layer, press: act, onPress: (fn) => listeners.push(fn), setClick: setClick };
 })();

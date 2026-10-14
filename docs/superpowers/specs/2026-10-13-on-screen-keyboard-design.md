@@ -43,7 +43,7 @@ q w e r t y u i o p
 ### 3.3 Feedback
 
 - Pressed: the key fills navy (navy-800, `#16244F`) within the same frame and shows its glyph in a small pop-up above the key (the iPad's "key preview") for letters and symbols, not for the wide keys. The pop is at least 80 px wide and sits centred just above its key (2 px clear of it); it follows the latest finger and goes 60 ms after that finger lifts.
-- **Key click**: an optional short tick through the browser's audio (Web Audio, a 12 ms sine burst at 1.2 kHz, no file, through the table Pi's audio output), on by default on the kiosk. **Options › Keyboard › Key click: On / Off** stores the choice in the room's settings file through the control service (`/api/settings`), like the screensaver style, so it holds across reloads and devices. The Vibration API is also called when present (the Forzola panel has no motor; a tablet may).
+- **Key click**: an optional short, soft tick through the browser's audio (Web Audio, a 1.2 kHz sine that fades out in 4 ms and is heard for about 3, at a low level, no file, through the table Pi's audio output), one for each key a finger lands on, on by default on the kiosk. **Options › Keyboard › Key click: On / Off** stores the choice in the room's settings file through the control service (`/api/settings`), like the screensaver style, so it holds across reloads and devices. The Vibration API is also called when present (the Forzola panel has no motor; a tablet may).
 
 ### 3.4 Design direction
 

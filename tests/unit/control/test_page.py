@@ -582,7 +582,7 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        bar = ["#icon-settings"] if width > 480 else []                      # Options, in the top bar of every idle screen: not on a phone, where the bar is full
+        bar = ["#icon-settings"] if width > 640 else []                      # Options, in the top bar of every idle screen: not up to 640 px, where the bar is full (style.css)
         assert shown_icons(page) == bar + ["#icon-keyboard", "#icon-video"]  # and the keyboard button and Join beside the link box
         settled(page)
         page.click("#open-options")
@@ -644,14 +644,21 @@ def test_the_icon_helpers_are_there_for_the_other_scripts(browser):
         page.close()
 
 
-@pytest.mark.parametrize("answer", ["fails", "is missing"])
+SPRITE_ANSWERS = {
+    "fails": lambda route: route.abort(),                                                              # the request never gets an answer
+    "is missing": lambda route: route.fulfill(status=404, body="no"),                                  # the server has no such file
+    "is empty": lambda route: route.fulfill(status=200, content_type="image/svg+xml", body=""),        # it answers, with nothing in it
+}
+
+
+@pytest.mark.parametrize("answer", list(SPRITE_ANSWERS))
 def test_a_page_whose_icon_sprite_does_not_come_keeps_its_labels(browser, answer):
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800})
         errors, warnings = [], []
         page.on("pageerror", lambda e: errors.append(str(e)))
         page.on("console", lambda m: warnings.append(m.text) if m.type == "warning" else None)
-        page.route("**/static/icons.svg", (lambda route: route.abort()) if answer == "fails" else (lambda route: route.fulfill(status=404, body="no")))
+        page.route("**/static/icons.svg", SPRITE_ANSWERS[answer])
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert page.evaluate("window.croomPage.iconsReady") is False

@@ -42,6 +42,7 @@ class StubMeeting:
         self.fail_before_joining = None
         self.fail_next_join = False
         self.hold_join = None     # an asyncio.Event that a join waits for before it asks its provider, as the real one waits for the TV
+        self.cancel_gate = None   # an asyncio.Event that a cancelled join waits for before it lets go (a provider that is slow to)
         self.order = []           # "join given up" and "leave", in the order they happened
 
     def get_available_platforms(self):
@@ -64,6 +65,8 @@ class StubMeeting:
             try:
                 await self.hold_join.wait()
             except asyncio.CancelledError:
+                if self.cancel_gate is not None:
+                    await self.cancel_gate.wait()
                 self.order.append("join given up")
                 self.set_state(MeetingState.IDLE)       # nothing is left waiting, as in the real one
                 raise
@@ -1352,15 +1355,19 @@ def json_request(path, body):
 
 
 def watching(service, handler_name):
-    """What reaches a handler, noted as it happens: `.arrived` has a request for each one that has come, and `.cancelled` one for
-    each that was cancelled (the server does that when a client goes away). A test that holds one request in the handler and
-    sends another waits for this to say that the other has arrived, and does not guess at a time."""
-    seen, handler = SimpleNamespace(arrived=[], cancelled=[]), getattr(service, handler_name)
+    """What reaches a handler, noted as it happens: `.arrived` has a path for each request that has come, `.cancelled` a path for
+    each that was cancelled (the test server does that when a client goes away) and `.responses` what the others were answered
+    with. A test that holds one request in the handler and sends another waits for this to say that the other has arrived, and
+    does not guess at a time. Call it before the service is started: the routes are made then."""
+    seen = SimpleNamespace(arrived=[], cancelled=[], responses=[])
+    handler = getattr(service, handler_name)
 
     async def watched(request):
         seen.arrived.append(request.path)
         try:
-            return await handler(request)
+            response = await handler(request)
+            seen.responses.append(response)
+            return response
         except asyncio.CancelledError:
             seen.cancelled.append(request.path)
             raise
@@ -1536,9 +1543,25 @@ class TestTvControl:
             assert response.status == (409 if failure else 200)
         assert [kind for kind, _ in tv.order] == ["start", "end"] * 3
 
+    async def test_a_body_that_is_no_use_is_refused_at_once_while_a_control_is_with_the_tv(self, client_factory):
+        """It has nothing to wait for the TV for: the check is made before the control takes its turn."""
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        client = await client_factory(make_service(tv=tv))
+        try:
+            holding = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+            await wait_until(lambda: tv.order == [("start", "power")])
+            for body in ({}, {"name": ""}, {"value": 3}):
+                response = await asyncio.wait_for(client.post("/api/tv/control", json=body), 2.0)
+                assert response.status == 400, body
+        finally:
+            tv.gate.set()
+        assert (await holding).status == 200
+        assert tv.calls == [("control", "power", "on")]
+
     async def test_without_a_tv_service_a_control_is_a_503_before_its_body_is_looked_at(self, client_factory):
         client = await client_factory(make_service())
-        for body in ({"name": "volume_up"}, {}):
+        for body in ({"name": "volume_up"}, {}, ["not", "an", "object"], []):
             response = await client.post("/api/tv/control", json=body)
             assert response.status == 503 and (await response.json())["error"] == TV_NOT_ENABLED
 
@@ -1612,8 +1635,9 @@ class TestTvPairAndForget:
     async def test_without_a_tv_service_pair_and_forget_are_a_503(self, client_factory):
         client = await client_factory(make_service())
         for path in ("/api/tv/pair", "/api/tv/forget"):
-            response = await client.post(path, json={})
-            assert response.status == 503 and (await response.json())["error"] == TV_NOT_ENABLED
+            for body in ({}, []):                       # (a body that is not an object is not looked at: there is no TV to ask)
+                response = await client.post(path, json=body)
+                assert response.status == 503 and (await response.json())["error"] == TV_NOT_ENABLED
 
     async def test_every_tv_post_wants_a_json_object(self, client_factory):
         tv = StubTv()
@@ -1756,6 +1780,60 @@ class TestTvDiscover:
             await asked
 
 
+class TestTvRequestsInFlight:
+    """The agent's stop must not wait for what is with the TV: the listener's cleanup waits for every request that is in flight, a
+    minute for them and another for what is left, and nothing after the control service in the agent's shutdown (the meeting's
+    leave, the browser, the devices) starts before it is over. These run on the real listener (`service.start()`), whose handlers
+    are not ended when a client goes away, as the test server's are."""
+
+    @staticmethod
+    async def post(http, url, body):
+        async with http.post(url, json=body) as response:
+            return response.status
+
+    @pytest.mark.parametrize("path, body, gate", [("/api/tv/control", {"name": "power", "value": "on"}, "gate"),
+                                                  ("/api/tv/pair", {}, "pair_gate")])
+    async def test_stopping_the_service_does_not_wait_for_a_request_that_is_with_the_tv(self, path, body, gate):
+        """A Turn on takes up to 23 s, and a pairing waits for a person (a minute at most, and it was for ever once)."""
+        tv = StubTv()
+        setattr(tv, gate, asyncio.Event())                 # never opened: the request is with the TV for as long as it is let to be
+        service = make_service(tv=tv)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        async with aiohttp.ClientSession() as http:
+            asked = asyncio.ensure_future(self.post(http, f"http://127.0.0.1:{service.bound_port}{path}", body))
+            try:
+                await wait_until(lambda: tv.calls)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 2.0
+            finally:
+                getattr(tv, gate).set()
+            with pytest.raises(aiohttp.ClientError):       # the page is let go of; it is not told that a Turn on was done
+                await asked
+
+    async def test_stopping_the_service_does_not_wait_for_the_controls_queued_behind_a_turn_on(self):
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        await service.start()
+        url = f"http://127.0.0.1:{service.bound_port}/api/tv/control"
+        async with aiohttp.ClientSession() as http:
+            taps = [asyncio.ensure_future(self.post(http, url, body))
+                    for body in ({"name": "power", "value": "on"}, {"name": "volume_up"}, {"name": "volume_down"})]
+            try:
+                await wait_until(lambda: len(seen.arrived) == 3)      # one is with the TV, and two wait for their turn
+                await asyncio.wait_for(service.stop(), 3.0)
+            finally:
+                tv.gate.set()
+            for tap in taps:
+                with pytest.raises(aiohttp.ClientError):
+                    await tap
+        assert len(seen.cancelled) == 3 and seen.responses == []      # none was answered, as if it had been done
+        assert tv.calls == [("control", "power", "on")]               # and the two that were waiting never had their turn
+
+
 class TestLeaveWhileJoining:
     """A join waits for the room before it asks its provider (the TV is woken, up to fifteen seconds). A person who taps
     Leave then has changed their mind: the join must not go on, and must not finish after the Leave."""
@@ -1780,6 +1858,35 @@ class TestLeaveWhileJoining:
         data = await (await client.get("/api/status")).json()
         assert data["meeting"]["state"] == "idle" and data["meeting"]["title"] == ""
         assert meeting.current_meeting is None and len(meeting.joins) == 1
+
+    async def test_a_join_that_takes_time_to_give_up_is_over_before_the_leave_begins(self, client_factory):
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+        await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        asyncio.get_running_loop().call_later(0.05, meeting.cancel_gate.set)       # the provider lets go of the join in 50 ms
+        response = await client.post("/api/meeting/leave", json={})
+        assert response.status == 202
+        await wait_until(lambda: meeting.leaves == 1)
+        assert meeting.order == ["join given up", "leave"]      # the leave waited for the join to be over, and did not begin beside it
+
+    async def test_a_join_that_does_not_let_go_does_not_hold_the_leave_up(self, client_factory, monkeypatch, caplog):
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.05)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()      # (a provider that has not let go: yet)
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+        await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        try:
+            response = await asyncio.wait_for(client.post("/api/meeting/leave", json={}), 3.0)
+            assert response.status == 202
+            await wait_until(lambda: meeting.leaves == 1)
+            assert meeting.order == ["leave"]                   # the join was still giving itself up: it was not waited for any longer
+            assert "did not end within" in caplog.text
+        finally:
+            meeting.cancel_gate.set()
+        await wait_until(lambda: meeting.order == ["leave", "join given up"])      # and it ends in its own time
 
     async def test_a_leave_after_the_join_has_ended_gives_nothing_up(self, client_factory):
         meeting = StubMeeting()
@@ -1813,6 +1920,21 @@ class TestLeaveWhileJoining:
         finally:
             gate.set()
         await wait_until(lambda: meeting.leaves == 2)
+
+    async def test_stopping_the_service_does_not_wait_for_a_join_that_does_not_let_go(self, client_factory, monkeypatch):
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.05)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()
+        service = make_service(meeting=meeting)
+        await service.start()
+        client = await client_factory(service)
+        try:
+            assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+            await wait_until(lambda: meeting.state == MeetingState.JOINING)
+            await asyncio.wait_for(service.stop(), 3.0)
+        finally:
+            meeting.cancel_gate.set()
+        await wait_until(lambda: meeting.order == ["join given up"])
 
     async def test_stopping_the_service_gives_up_a_join_that_still_waits(self, client_factory):
         meeting = StubMeeting()

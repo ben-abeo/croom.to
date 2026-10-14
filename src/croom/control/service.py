@@ -13,7 +13,7 @@ import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -129,6 +129,8 @@ class ControlService(Service):
         discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
     """
 
+    CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
+
     def __init__(
         self,
         config: Optional[Dict[str, Any]] = None,
@@ -159,6 +161,7 @@ class ControlService(Service):
         self._discover_tvs = discover or discover_tvs
         self._tv_busy = asyncio.Lock()                       # held by the control that is with the TV (see _handle_tv_control)
         self._search: Optional[asyncio.Task] = None          # the search for TVs that is running (see _handle_tv_discover)
+        self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -256,22 +259,30 @@ class ControlService(Service):
         if not self._running:
             return
         self._running = False
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._task = self._join_task = None
-        search, self._search = self._search, None
-        if search is not None and not search.done():
-            # before the listener is cleaned up, which waits for the requests that are waiting for this
-            search.cancel()
-            await asyncio.wait({search})
+        # All that is still running is ended before the listener is cleaned up, since the cleanup waits for every request in flight
+        # (a minute for them and another for what is left: more than the agent's shutdown is given): the join or the leave, the
+        # search for TVs, and the requests that are with the TV (a Turn on, a pairing that waits for a person) or wait their turn
+        # behind them. None of them is given time to finish: the pages that asked are going away with this service.
+        await self._cancel(self._task, self._search, *self._tv_requests)
+        self._task = self._join_task = self._search = None
         if self._runner is not None:
             await self._runner.cleanup()
             self._runner = None
         logger.info("Room control page stopped")
+
+    async def _cancel(self, *tasks: Optional[asyncio.Task]) -> None:
+        """Cancel the tasks that are running among these and wait until they are over, for CANCEL_WAIT_S in all: what has not ended
+        by then does not hold the caller up (a Leave, the agent's stop), and is warned about. asyncio.wait, not an await of the
+        tasks: it does not raise a task's own cancellation here, and a cancel aimed at the caller itself still gets through."""
+        running = [task for task in tasks if task is not None and not task.done()]
+        if not running:
+            return
+        for task in running:
+            task.cancel()
+        _, left = await asyncio.wait(running, timeout=self.CANCEL_WAIT_S)
+        for task in left:
+            logger.warning(f"A task did not end within {self.CANCEL_WAIT_S:g} s of being cancelled, and is left to end by "
+                           f"itself: {task!r}")
 
     def _on_meeting_state(self, state: MeetingState) -> None:
         if state == MeetingState.CONNECTED:
@@ -635,7 +646,19 @@ class ControlService(Service):
         action finds no use for (_BadBody), and 409, in words for the table, when the TV could not do it: the TV service's own
         words for what it refuses (TvError), and a reason on one line for anything else (logged, as it is a bug or a library
         failing). A cancellation is not a failure to answer for and is not caught: the TV service keeps its own from leaking
-        out, so what arrives here is this request's."""
+        out, so what arrives here is this request's (stop() ends the requests that are with the TV, and none of them is
+        answered as if it had been done).
+
+        The request is on the books for as long as it lasts, which is how stop() finds it."""
+        task = asyncio.current_task()
+        self._tv_requests.add(task)
+        try:
+            return await self._tv_answer(request, action)
+        finally:
+            self._tv_requests.discard(task)
+
+    async def _tv_answer(self, request: web.Request, action: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]) -> web.Response:
+        """What _tv_call answers with (see there)."""
         refused = self._require_json(request)
         if refused is not None:
             return refused
@@ -660,7 +683,8 @@ class ControlService(Service):
         One at a time: the TV service does not hold its controls apart (a second tap on Turn on during a wake would start a
         second wake, and a key sent during one goes down the socket the wake is using), so a control that comes while another
         is with the TV waits for it. There is no time limit of its own here: Turn on from the table waits for the TV to come
-        on, up to 23 seconds, and the page's request is made to wait for that."""
+        on, up to 23 seconds, and the page's request is made to wait for that. The body is looked at before the wait, so that one
+        that is no use is refused at once."""
         async def action(data: Dict[str, Any]) -> Dict[str, Any]:
             name = data.get("name")
             if not isinstance(name, str) or not name.strip():
@@ -672,8 +696,9 @@ class ControlService(Service):
 
     async def _handle_tv_pair(self, request: web.Request) -> web.Response:
         """Pair with the TV. The TV shows its prompt and a person accepts it with the TV's own remote, so this request waits
-        for them (the TV service's own single-flight and timeouts apply: a second pairing is refused in words). It is not held
-        behind the controls' one-at-a-time, and holds none of them up."""
+        for them: the TV service gives them a minute (TvService.PAIR_WAIT_S) and then says in words that nobody accepted the
+        prompt, and a second pairing meanwhile is refused in words (it is the service's own single-flight). This route sets
+        no time of its own. It is not held behind the controls' one-at-a-time, and holds none of them up."""
         async def action(data: Dict[str, Any]) -> Dict[str, Any]:
             await self._tv.pair()
             return self._tv.status()
@@ -838,12 +863,9 @@ class ControlService(Service):
         return web.json_response({"state": "leaving"}, status=202)
 
     async def _give_up_join(self) -> None:
-        """End the join that is running and wait until it is over."""
-        join = self._join_task
-        join.cancel()
-        # asyncio.wait, not await: it waits for the task to finish without raising the task's own cancellation here, and a
-        # cancel aimed at this request itself still gets through
-        await asyncio.wait({join})
+        """End the join that is running and wait until it is over, for CANCEL_WAIT_S at most: a join that does not let go is left to
+        finish in its own time (and said so), and does not hold the Leave up."""
+        await self._cancel(self._join_task)
 
     async def _run_leave(self) -> None:
         try:

@@ -444,6 +444,22 @@ class TestReviewFixes:
         finally:
             await shutdown(provider)
 
+    async def test_diagnostics_list_what_the_reactions_picker_and_the_view_dropdown_hold_and_leave_them_closed(self):
+        """The inventory run on the device: the View widget's button beside the footer's, and what each popover holds, by what
+        the client says (the stub draws them as Zoom 6.5.0 does)."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'client';")
+        try:
+            await provider.join_meeting(LINK)
+            data = await provider.diagnostics()
+            assert data["buttons"][-1] == {"label": "View", "where": "view widget"}
+            reactions, view = data["popovers"]["reactions"], data["popovers"]["view"]
+            assert reactions["pressed"] is True and view["pressed"] is True
+            assert {"text": "", "label": "Clap", "tooltip": "Clap", "disabled": False}.items() <= reactions["items"][0].items()
+            assert [i["label"] for i in view["items"]] == ["Speaker View", "Gallery View", "Hide Self View"]
+            assert await provider._page.evaluate("window.ZoomMtg._open") == {"picker": False, "view": False}
+        finally:
+            await shutdown(provider)
+
     async def test_camera_off_join_does_not_press_when_video_is_already_off(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.videoOffOnEntry = true;")
         try:

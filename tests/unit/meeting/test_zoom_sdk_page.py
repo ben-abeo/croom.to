@@ -286,7 +286,7 @@ async def test_the_video_button_is_the_footers_own_and_no_other_that_speaks_of_v
         assert await run.page.evaluate("window.__decoyClicks") == []
 
 
-async def test_diagnostics_list_the_footers_buttons_only():
+async def test_diagnostics_list_the_footers_buttons_and_the_view_widgets_but_no_others():
     async with PageRun(stub=CLIENT_LABELS) as run:
         await run.wait_for("connected")
         await run.page.evaluate(DECOYS)
@@ -1271,6 +1271,27 @@ async def test_a_popover_that_opens_a_moment_after_the_press_is_waited_for():
         await tidy(run)
 
 
+async def test_a_popover_that_is_already_open_is_used_as_it_is():
+    """A person (or a call whose close ran out of time) left it open: its items are on the screen, so the page uses them and
+    does not press the opener, which would close it and say it did not open."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("document.getElementById('stub-reactions').click()")          # open, by somebody else
+        await run.page.evaluate("window.crystalMeet.control('reactions', 'clap')")
+        assert ["reaction", "clap"] in await run.page.evaluate("window.__zoomCalls")
+        assert await presses(run) == ["stub-reactions", "stub-reaction"]                       # the one press of the opener is the test's own
+        await run.page.evaluate("document.getElementById('stub-view').click()")
+        m = await run.page.evaluate("window.crystalMeet.control('hide_self')")
+        assert m["buttons"]["hide_self"] == {"on": True} and (await presses(run))[2:] == ["stub-view", "stub-self"]
+        await tidy(run)
+    async with PageRun(stub=client(popoverStays=True)) as run:                                 # and one Zoom leaves open after the pick is closed as ever
+        await run.wait_for("connected")
+        await run.page.evaluate("document.getElementById('stub-reactions').click()")
+        await run.page.evaluate("window.crystalMeet.control('raise_hand')")
+        assert await presses(run) == ["stub-reactions", "stub-hand", "stub-reactions"]
+        await tidy(run)
+
+
 async def test_a_popover_that_never_opens_says_so_and_is_not_taken_for_a_missing_item():
     async with PageRun(stub=client(openerIgnored=True)) as run:
         await run.wait_for("connected")
@@ -1628,3 +1649,133 @@ async def test_the_stub_notices_a_node_of_the_clients_taken_out_by_anyone_but_it
         await run.page.evaluate("window.ZoomMtg._unmountBystander()")
         errors = await run.page.evaluate("window.__reactErrors")
         assert len(errors) == 2 and all("not a child" in e for e in errors) and await run.page.evaluate("window.__unmounted") != "ok"
+
+
+# ---- Diagnostics: the device inventory looks into the popovers too ----
+
+
+async def test_diagnostics_list_the_view_widgets_button_beside_the_footers():
+    async with PageRun(stub=CLIENT_LABELS) as run:
+        await run.wait_for("connected")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["buttons"] == [{"label": "stop my video", "text": "Video"}, {"label": "Reactions"}, {"label": "Show Captions"},
+                                   {"label": "View", "where": "view widget"}]         # not the Leave box's button, which is in neither place
+
+
+async def test_diagnostics_list_what_the_two_popovers_hold_and_close_them_again():
+    async with PageRun(stub=CLIENT_LABELS) as run:
+        await run.wait_for("connected")
+        data, took = await run.page.evaluate("""async () => {
+            const t = performance.now(), data = await window.crystalMeet.diagnostics();
+            return [data, performance.now() - t];
+        }""")
+        reactions, view = data["popovers"]["reactions"], data["popovers"]["view"]
+        assert reactions["found"] is True and reactions["pressed"] is True and reactions["opener"] == {"label": "Reactions"} and "note" not in reactions
+        assert [i["label"] or i["tooltip"] or i["text"] for i in reactions["items"]] == [
+            "Clap", "Thumbs Up", "Joy", "Open Mouth", "Heart", "Tada", "More", "Raise Hand", "Be Right Back"]
+        clap, hand = reactions["items"][0], reactions["items"][7]
+        assert (clap["text"], clap["label"], clap["tooltip"], clap["disabled"]) == ("", "Clap", "Clap", False)       # an icon, named in attributes
+        assert "reaction-simple-picker__block--reaction" in clap["class"]
+        assert (hand["text"], hand["label"], hand["tooltip"]) == ("Raise Hand", "", "")                                # a row of text
+        assert view["found"] is True and view["pressed"] is True and view["opener"] == {"label": "View"} and "note" not in view
+        assert [i["label"] for i in view["items"]] == ["Speaker View", "Gallery View", "Hide Self View"]
+        assert [i["text"] for i in view["items"]] == ["Speaker View", "Gallery View", "Hide Self View"]
+        assert ["full-screen-widget__pop-menu--checked" in i["class"] for i in view["items"]] == [True, False, False]
+        assert not any(i["disabled"] for i in reactions["items"] + view["items"])
+        assert await presses(run) == ["stub-reactions", "stub-reactions", "stub-view", "stub-view"]               # each opened and closed by its opener
+        await tidy(run)
+        assert took < 500, took                                                       # nothing waited for a close that no pick would bring
+
+
+async def test_diagnostics_find_the_view_widgets_button_by_where_it_is_and_by_what_it_says():
+    """The inventory is for finding out what the client really says, so a button the bridge's own words would miss is listed
+    for where Zoom draws it, and one that is not where it is drawn is listed for what it says."""
+    async with PageRun(stub=CLIENT_LABELS) as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("document.getElementById('stub-view').setAttribute('aria-label', 'Layout options')")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["buttons"][-1] == {"label": "Layout options", "where": "view widget"}
+        await run.page.evaluate("""() => {
+            const view = document.getElementById('stub-view');
+            view.setAttribute('aria-label', 'View'); document.body.append(view);
+            document.querySelector('.full-screen-icon').remove();
+        }""")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["buttons"][-1] == {"label": "View", "where": "view widget"} and len(data["buttons"]) == 4
+
+
+async def test_diagnostics_use_a_popover_that_is_already_open_and_do_not_list_its_items_as_buttons():
+    async with PageRun(stub=CLIENT_LABELS) as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("document.getElementById('stub-reactions').click()")          # open, by somebody else
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert [b["label"] for b in data["buttons"]] == ["stop my video", "Reactions", "Show Captions", "View"]
+        assert data["popovers"]["reactions"]["pressed"] is False and len(data["popovers"]["reactions"]["items"]) == 9
+        assert await presses(run) == ["stub-reactions", "stub-reactions", "stub-view", "stub-view"]     # the test's own opening, then the close; the view's own pair
+        await tidy(run)
+        # One the inventory cannot close (its opener is gone) is still open while the footer is listed: none of its items is a button of the footer's.
+        await run.page.evaluate("document.getElementById('stub-reactions').click()")
+        await run.page.evaluate("document.getElementById('stub-reactions').remove()")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert [b["label"] for b in data["buttons"]] == ["stop my video", "Show Captions", "View"]
+        assert data["popovers"]["reactions"]["found"] is False and data["popovers"]["reactions"]["pressed"] is False
+
+
+async def test_diagnostics_say_which_items_are_disabled():
+    async with PageRun(stub=CLIENT_LABELS) as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const Z = window.ZoomMtg, picker = Z._drawPicker;
+            Z._drawPicker = function () {
+                const node = picker.call(this), blocks = node.querySelectorAll("button");
+                blocks[0].setAttribute("aria-disabled", "true"); blocks[2].disabled = true;
+                return node;
+            };
+        }""")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert [i["disabled"] for i in data["popovers"]["reactions"]["items"]] == [True, False, True, False, False, False, False, False, False]
+
+
+async def test_diagnostics_report_an_opener_that_is_missing_or_disabled_and_press_nothing():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            document.getElementById("stub-view").remove();
+            document.getElementById("stub-reactions").setAttribute("aria-disabled", "true");
+        }""")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["popovers"]["view"] == {"opener": None, "found": False, "pressed": False, "items": [], "note": "the button is not on the screen"}
+        assert data["popovers"]["reactions"] == {"opener": {"label": "Reactions"}, "found": True, "pressed": False, "items": [],
+                                                 "note": "the button is disabled"}
+        assert await run.page.evaluate("window.__presses") == []
+
+
+async def test_diagnostics_press_nothing_before_the_meeting_is_joined():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.silentConnect = true;", params={"connectGraceMs": 4000}) as run:
+        await asyncio.sleep(0.4)
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        for name in ["reactions", "view"]:
+            assert data["popovers"][name]["found"] is True and data["popovers"][name]["pressed"] is False
+            assert data["popovers"][name]["items"] == [] and data["popovers"][name]["note"] == "not in a meeting"
+        assert await run.page.evaluate("window.__presses") == []
+
+
+async def test_diagnostics_say_when_a_popover_did_not_open():
+    async with PageRun(stub=client(openerIgnored=True)) as run:
+        await run.wait_for("connected")
+        data = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.diagnostics()"), timeout=12)
+        assert data["popovers"]["reactions"]["pressed"] is True and data["popovers"]["reactions"]["items"] == []
+        assert data["popovers"]["reactions"]["note"] == "Zoom's reactions menu did not open; try again in a moment"
+        assert data["popovers"]["view"]["note"] == "Zoom's view menu did not open; try again in a moment"
+
+
+async def test_diagnostics_run_among_the_controls_and_never_between_their_presses():
+    async with PageRun(stub=client(popoverOpensAfterMs=300)) as run:
+        await settled(run)
+        results = await run.page.evaluate("""Promise.allSettled([window.crystalMeet.control('layout', 'gallery'), window.crystalMeet.diagnostics(),
+                                              window.crystalMeet.control('reactions', 'clap')]).then((r) => r.map((x) => x.status))""")
+        assert results == ["fulfilled"] * 3 and await run.page.evaluate("window.__maxOpen") == 1
+        assert await presses(run) == ["stub-view", "stub-view-item", "stub-reactions", "stub-reactions", "stub-view", "stub-view",
+                                      "stub-reactions", "stub-reaction"]                  # in the order they were asked
+        await tidy(run)
+

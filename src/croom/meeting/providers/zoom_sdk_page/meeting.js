@@ -263,19 +263,33 @@
     const m = await bridge.readMeeting();
     return Object.assign({}, m.me, { keys: m.keys });
   };
-  // What the page sees, for pinning Zoom's real field names and button wording from a device: the footer's buttons only.
+  // What the page sees, for pinning Zoom's real field names and button wording from a device: the footer's buttons, the View
+  // widget's (outside the footer), and under `popovers` what the reactions picker and the View dropdown hold.
+  const wordsOf = (b) => {
+    const label = (b.getAttribute("aria-label") || "").trim();
+    const text = (b.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+    return text && text !== label ? { label: label, text: text } : { label: label };
+  };
+  // The View widget's buttons, which are outside the footer: where Zoom draws the widget (the icons at the top of the screen),
+  // and the one the bridge itself takes for the View button.
+  function viewButtons() {
+    const found = new Set(document.querySelectorAll(".full-screen-icon button"));
+    const view = findButton("layout");
+    if (view) found.add(view);
+    return Array.from(found).filter((b) => !b.closest("#wc-footer") && !b.closest(POPOVERS));
+  }
   bridge.diagnostics = async function () {
+    const inventory = popoverInventory();      // among the controls, in the order asked: queued now, not after the read
     const state = await bridge.readState();
     const buttons = [];
+    const add = (b, where) => {      // an item of a popover that is open is listed under popovers, not as a button of the footer's
+      const words = wordsOf(b);
+      if ((words.label || words.text) && buttons.length < 40 && !b.closest(POPOVERS)) buttons.push(where ? Object.assign(words, { where: where }) : words);
+    };
     const footer = document.getElementById("wc-footer");
-    for (const b of footer ? footer.querySelectorAll("button") : []) {
-      const label = (b.getAttribute("aria-label") || "").trim();
-      const text = (b.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
-      if (!label && !text) continue;
-      buttons.push(text && text !== label ? { label: label, text: text } : { label: label });
-      if (buttons.length >= 40) break;
-    }
-    return { user_keys: state.keys, state: state, video: bridge.video(), buttons: buttons, page: document.title };
+    for (const b of footer ? footer.querySelectorAll("button") : []) add(b);
+    for (const b of viewButtons()) add(b, "view widget");
+    return { user_keys: state.keys, state: state, video: bridge.video(), buttons: buttons, popovers: await inventory, page: document.title };
   };
   // A change Zoom makes (the host muting the room, someone raising a hand, a person joining, recording starting) reaches
   // the device as a "state" event: the whole meeting is read on every such change and every five seconds, and reported
@@ -371,27 +385,32 @@
     return text;
   }
   const CLICKABLE = 'button, a, [role="button"], [role="menuitem"], [role="option"]';
+  // What the client has on the screen while each popover is open.
+  const OPEN = { reactions: ".reaction-picker", layout: ".full-screen-viev-dropdown .dropdown-menu" };
   // Press the opener of a popover, hand use() the clickable things that appeared because of it (what was on the page before
   // is not looked at: no search of the page, no role to trust), and see the popover closed when use() is done. Zoom closes it
-  // after a pick; when it has not, or nothing was picked, the press a person would make closes it: the opener again, which
-  // toggles it.
+  // after a pick; when it has not, or nothing was picked (use() says so by answering false), the press a person would make
+  // closes it: the opener again, which toggles it. A popover that is open already (a person's, or one a call could not close)
+  // has its items on the screen: it is used as it is, and the opener, which would close it, is left alone.
   async function withPopover(opener, control, use) {
     const button = findButton(opener);
     if (!button) throw noButton(control);
-    if (unready(button)) throw notReady(control);
-    const before = new Set(document.querySelectorAll(CLICKABLE));
-    let items = [];
-    button.click();
-    const opened = await settle(() => {
-      const now = findButton(opener);      // the client may draw its opener again when it is pressed: that is not an item
-      items = Array.from(document.querySelectorAll(CLICKABLE)).filter((e) => !before.has(e) && e !== now);
-      return items.length > 0;
-    }, OPEN_MS);
-    if (!opened) throw new Error("Zoom's " + (opener === "layout" ? "view" : "reactions") + " menu did not open; try again in a moment");
+    const showing = document.querySelector(OPEN[opener]);
+    let items = showing ? Array.from(showing.querySelectorAll(CLICKABLE)) : [];
+    if (!showing) {
+      if (unready(button)) throw notReady(control);
+      const before = new Set(document.querySelectorAll(CLICKABLE));
+      button.click();
+      const opened = await settle(() => {
+        const now = findButton(opener);      // the client may draw its opener again when it is pressed: that is not an item
+        items = Array.from(document.querySelectorAll(CLICKABLE)).filter((e) => !before.has(e) && e !== now);
+        return items.length > 0;
+      }, OPEN_MS);
+      if (!opened) throw new Error("Zoom's " + (opener === "layout" ? "view" : "reactions") + " menu did not open; try again in a moment");
+    }
     const gone = () => items.every((e) => !e.isConnected);
     try {
-      await use(items);
-      await settle(gone, CLOSE_MS);
+      if (await use(items, !showing) !== false) await settle(gone, CLOSE_MS);
     } finally {
       if (!gone()) {
         const again = findButton(opener);
@@ -468,6 +487,28 @@
       if (name === "layout") bridge._layout = viewOf(item);
     });
   }
+  // The inventory's look into the two popovers (the device run of spec section 7): each opener is pressed, what appeared is listed
+  // by what the client says (text, label, tooltip, class, disabled), and the opener closes it again. A button that is missing or
+  // disabled is reported, not pressed, and nothing is pressed before the room is in the meeting.
+  const itemOf = (e) => ({
+    text: (e.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40), label: (e.getAttribute("aria-label") || "").trim(),
+    tooltip: (e.getAttribute("data-tooltip") || "").trim(), class: (e.getAttribute("class") || "").trim().slice(0, 200), disabled: unready(e),
+  });
+  async function look(opener) {
+    const button = findButton(opener);
+    const entry = { opener: button ? wordsOf(button) : null, found: !!button, pressed: false, items: [] };
+    if (!button) entry.note = "the button is not on the screen";
+    else if (bridge.state !== "connected") entry.note = "not in a meeting";
+    else if (unready(button)) entry.note = "the button is disabled";
+    else {
+      entry.pressed = true;
+      try {
+        await withPopover(opener, opener, async (items, pressed) => { entry.pressed = pressed; entry.items = items.map(itemOf); return false; });
+      } catch (e) { entry.note = e.message; }
+    }
+    return entry;
+  }
+  const popoverInventory = () => alone(async () => ({ reactions: await look("reactions"), view: await look("layout") }));
   bridge.control = async function (name, value) {
     if (bridge.state !== "connected") throw new Error("not in a meeting");
     switch (name) {
@@ -480,17 +521,21 @@
     await syncState().catch(() => {});      // a read that fails does not undo a press that worked: the answer is read again
     return bridge.readMeeting();
   };
-  // One control at a time, in the order they came: presses that overlapped would find each other's popovers. A control that
-  // is already waiting or running (the same name and value) is that same press: a double tap is one.
+  // One at a time, in the order they came, the controls and the inventory's presses: presses that overlapped would find each
+  // other's popovers. A control that is already waiting or running (the same name and value) is that same press: a double tap
+  // is one.
   const controlNow = bridge.control;
   let controlChain = Promise.resolve();
+  function alone(fn) {
+    const run = controlChain.then(fn);
+    controlChain = run.then(() => {}, () => {});
+    return run;
+  }
   const controlsInFlight = new Map();
   bridge.control = function (name, value) {
     const key = name + "\u0000" + JSON.stringify(value === undefined ? null : value);
     if (controlsInFlight.has(key)) return controlsInFlight.get(key);
-    const run = controlChain.then(() => controlNow(name, value));
-    controlChain = run.then(() => {}, () => {});
-    const tracked = run.finally(() => controlsInFlight.delete(key));
+    const tracked = alone(() => controlNow(name, value)).finally(() => controlsInFlight.delete(key));
     controlsInFlight.set(key, tracked);
     return tracked;
   };

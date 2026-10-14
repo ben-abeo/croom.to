@@ -1872,13 +1872,14 @@ git commit -m "feat(meeting): Google Meet reports its buttons as controls and pr
 
 ```js
   bridge.diagnostics = async function () {
+    const inventory = popoverInventory();      // the reactions picker and the View dropdown, among the controls: keep it (task 2's fix round)
     const meeting = await bridge.readMeeting();
     const buttons = Array.from(document.querySelectorAll("button")).map((b) => ({
       label: (b.getAttribute("aria-label") || "").trim(), text: (b.textContent || "").trim().slice(0, 40),
     })).filter((b) => b.label || b.text);
     const list = await attendees();
     return { user_keys: meeting.keys, attendee_keys: list.length ? Object.keys(list[0]) : [], state: meeting.me, meeting: meeting,
-             buttons: buttons, dialogs: bridge.dialogs(), dialogs_seen: dialogsSeen, page: document.title };
+             buttons: buttons, popovers: await inventory, dialogs: bridge.dialogs(), dialogs_seen: dialogsSeen, page: document.title };
   };
 ```
 

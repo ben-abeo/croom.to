@@ -58,6 +58,8 @@ class ZoomSdkProvider(MeetingProvider):
     CLOSE_TIMEOUT_S = 5
     PAGE_CALL_TIMEOUT_S = 10  # a call into the page's bridge (reading the state, muting) answers in this time, or never will
     VIDEO_READY_MS = 8000     # a camera press waits this long for Zoom to enable its video button (the encoder starting) ...
+    VIDEO_PRESENT_MS = 1500          # a tap: the button must be there, naming a usable camera, within this
+    VIDEO_PRESENT_AT_JOIN_MS = 6000  # at join the footer and Zoom's camera list arrive a moment after connected
     VIDEO_SWITCH_MS = 10000   # ... and then this long for Zoom to switch the camera
 
     def __init__(self, credentials: ZoomCredentials, room_name: str = "Conference Room",
@@ -376,16 +378,19 @@ class ZoomSdkProvider(MeetingProvider):
         video = zoom.get("videoOn")
         if isinstance(video, bool) and video != camera_on:
             try:
-                await self._set_video(camera_on)
+                await self._set_video(camera_on, at_join=True)
             except MeetingControlError as e:
                 logger.warning(f"The camera was not set at join: {e}")
         await self._read_state_from_zoom()
 
-    async def _set_video(self, on: bool) -> bool:
-        """Press the client's video button when Zoom's state differs. The page waits for Zoom to enable the button and
-        to switch, and says in words what did not happen (no button yet, no usable camera, still starting, no switch)."""
-        waits = {"readyMs": self.VIDEO_READY_MS, "switchMs": self.VIDEO_SWITCH_MS}
-        timeout = (self.VIDEO_READY_MS + self.VIDEO_SWITCH_MS) / 1000 + 2   # the page's own waits, and a margin
+    async def _set_video(self, on: bool, at_join: bool = False) -> bool:
+        """Press the client's video button when Zoom's state differs. The page waits for the button to be there with a
+        usable camera (longer at join: the footer and Zoom's camera list arrive a moment after connected), for Zoom to
+        enable it and to switch, and says in words what did not happen (no button yet, no usable camera, still
+        starting, no switch)."""
+        present_ms = self.VIDEO_PRESENT_AT_JOIN_MS if at_join else self.VIDEO_PRESENT_MS
+        waits = {"readyMs": self.VIDEO_READY_MS, "switchMs": self.VIDEO_SWITCH_MS, "presentMs": present_ms}
+        timeout = (present_ms + self.VIDEO_READY_MS + self.VIDEO_SWITCH_MS) / 1000 + 2   # the page's own waits, and a margin
         result = await self._page_call("([on, waits]) => window.crystalMeet.setVideo(on, waits)", [on, waits],
                                        "Could not switch the camera", timeout=timeout)
         return bool(result)

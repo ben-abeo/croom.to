@@ -90,7 +90,7 @@ def test_zoom_guide_says_how_the_room_joins_muted_or_dark():
         "The microphone setting (mic_default_on) applies only towards muted: a room set to join muted is muted",
         "when the room is set to join with the microphone on and Zoom has it muted (the host's mute on entry, for example), "
         "the room stays muted and the table shows Unmute, one tap away",
-        "answers in Zoom's words on the meeting screen, and the meeting goes on",
+        "answers in words on the meeting screen, Zoom's own where Zoom gave them, and the meeting goes on",
         "http://<device>:8080/api/meeting/diagnostics",
     ):
         assert needle in text, needle

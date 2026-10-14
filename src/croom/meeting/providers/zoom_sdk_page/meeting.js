@@ -97,30 +97,34 @@
     return { on: named[1].toLowerCase() === "stop", usable: true, label: label, disabled: disabled };
   };
   const NO_BUTTON = "Zoom's camera button is not on the screen yet; try again in a moment";
-  // Press the button only when Zoom's state differs: wait for Zoom to enable it (readyMs), press once, and wait for Zoom to
-  // switch (switchMs, disabled meanwhile). Whatever does not happen is said in words: an unchanged state is never a success.
+  // Press the button only when Zoom's state differs: wait for the button to be there and to name a usable camera
+  // (presentMs: the footer and Zoom's camera list arrive a moment after connected), wait for Zoom to enable it (readyMs),
+  // press once, and wait for Zoom to switch (switchMs, disabled meanwhile). Whatever does not happen is said in words:
+  // an unchanged state is never a success.
   bridge.setVideo = function (on, waits) {
     const want = !!on;
     const readyMs = (waits && waits.readyMs) || 8000;
     const switchMs = (waits && waits.switchMs) || 10000;
+    const presentMs = (waits && waits.presentMs) || 1500;
     return new Promise((resolve, reject) => {
-      const first = bridge.video();
-      if (first.label === null) { reject(new Error(NO_BUTTON)); return; }
-      if (!first.usable) { reject(new Error("Zoom cannot use the camera right now")); return; }
-      if (first.on === want) { resolve(want); return; }
+      if (bridge.video().on === want) { resolve(want); return; }
       let pressed = false;
-      let deadline = Date.now() + readyMs;
+      const start = Date.now();
+      let deadline = start + readyMs;
       const step = () => {
         const v = bridge.video();
         if (v.on === want) { resolve(want); return; }
-        if (v.label !== null && !v.usable) { reject(new Error("Zoom cannot use the camera right now")); return; }
-        if (!pressed && v.label !== null && !v.disabled) {
+        if (v.label === null || !v.usable) {   // not there yet, or no camera Zoom can use yet: give it presentMs
+          if (Date.now() - start >= presentMs) { reject(new Error(v.label === null ? NO_BUTTON : "Zoom cannot use the camera right now")); return; }
+          setTimeout(step, 100);
+          return;
+        }
+        if (!pressed && !v.disabled) {
           videoButton().click();
           pressed = true;
           deadline = Date.now() + switchMs;
         } else if (Date.now() >= deadline) {
-          if (v.label === null) reject(new Error(NO_BUTTON));
-          else reject(new Error(pressed ? "Zoom did not switch the camera" : "Zoom's camera button is still starting; try again in a moment"));
+          reject(new Error(pressed ? "Zoom did not switch the camera" : "Zoom's camera button is still starting; try again in a moment"));
           return;
         }
         setTimeout(step, 100);
@@ -189,7 +193,8 @@
     if (bridge.state === "connected") return;
     const finish = () => {
       report("connected", "");
-      if (params.micOn === false && bridge.userId !== null) bridge.mute(true).catch(() => {});
+      // The room's mic-off default, once per join: a reconnect must not undo an unmute the table made since.
+      if (params.micOn === false && bridge.userId !== null && !bridge.mutedAtJoin) { bridge.mutedAtJoin = true; bridge.mute(true).catch(() => {}); }
       syncState().catch(() => {});
       if (poll === null) poll = setInterval(() => { syncState().catch(() => {}); }, 5000);   // one, however often Zoom reconnects
     };

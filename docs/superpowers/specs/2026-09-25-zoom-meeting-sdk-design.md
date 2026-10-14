@@ -160,10 +160,12 @@ room page's links, bare meeting ids and `?pwd=` keep working.
   Zoom can use a camera and just "Video" when it cannot, and it is `aria-disabled="true"`
   while the video encoder starts or a switch is in progress. `crystalMeet.setVideo(on)`
   presses only when Zoom's state differs: it waits up to 8 s for the button to be enabled,
-  presses once, and waits up to 10 s for the switch. What does not happen is a
-  `MeetingControlError` in words (button not on the screen yet, Zoom cannot use the camera,
-  button still starting, Zoom did not switch), answered as `409`; the recorded state is what
-  the button says afterwards, never a flip.
+  presses once, and waits up to 10 s for the switch (and, first, up to 1.5 s for the button to be
+  there naming a usable camera, 6 s at join, when the footer and Zoom's camera list arrive a
+  moment after connected). Whatever does not happen is answered as a `MeetingControlError` in
+  words (button not on the screen yet, Zoom cannot use the camera, button still starting, Zoom
+  did not switch), a `409` to the table; the recorded state is what the button says afterwards,
+  never a flip.
 - `shutdown()`: closes the browser with a five-second guard (then kills it) and stops
   the site.
 - Test hooks: `headless` and `extra_init_script` constructor arguments, and the SDK

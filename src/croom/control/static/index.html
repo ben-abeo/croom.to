@@ -61,6 +61,7 @@
     <div class="menu">
       <button type="button" id="open-camera-setup" class="button quiet menu-item" data-icon="move">Camera framing</button>
       <button type="button" id="open-screensaver" class="button quiet menu-item" data-icon="monitor">Screensaver</button>
+      <button type="button" id="open-tv-options" class="button quiet menu-item" data-icon="tv">TV</button>
     </div>
     <section class="keyboard-section">
       <p class="kicker">Keyboard</p>
@@ -143,6 +144,7 @@
     <div class="menu">
       <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
       <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>
+      <button type="button" id="open-tv-meeting" class="button quiet menu-item" data-icon="tv">TV</button>
     </div>
   </section>
 
@@ -152,6 +154,144 @@
       <p class="kicker">Upcoming meetings</p>
       <ul id="upcoming-list" class="events"></ul>
       <p id="upcoming-empty" class="note" hidden>No more meetings today</p>
+    </section>
+  </section>
+
+  <section class="view" data-view="tv">
+    <div class="tv-head">
+      <button type="button" id="back-from-tv" class="button quiet back">Back</button>
+      <div id="tv-status" class="tv-status">
+        <p class="tv-line"><span id="tv-facts" class="tv-facts"></span><button type="button" id="tv-turn-on" class="button quiet tv-turn-on" data-icon="power" hidden>Turn on</button></p>
+        <p id="tv-words" class="tv-words" role="status" hidden></p>
+      </div>
+    </div>
+
+    <div id="tv-remote" class="tv-remote" hidden>
+      <div id="tv-keys" class="tv-keys">
+        <button type="button" id="tv-power" class="button quiet" data-tv="power:toggle" data-icon="power">Power</button>
+        <button type="button" id="tv-input" class="button quiet" data-tv="input:menu" data-icon="monitor" aria-expanded="false" aria-controls="tv-inputs">Input</button>
+        <button type="button" class="button quiet" data-tv="key:HOME" data-icon="home">Home</button>
+        <button type="button" class="button quiet" data-tv="key:MENU" data-icon="menu">Menu</button>
+        <span class="tv-spacer"></span>
+        <div class="tv-group" role="group" aria-label="Volume">
+          <span class="tv-label">Volume</span>
+          <button type="button" class="button quiet tv-key" data-tv="volume_down" aria-label="Volume down"><span class="tv-sign">&minus;</span></button>
+          <span id="tv-level" class="tv-level" aria-live="polite">&ndash;</span>
+          <button type="button" class="button quiet tv-key" data-tv="volume_up" aria-label="Volume up"><span class="tv-sign">+</span></button>
+          <button type="button" id="tv-mute" class="button quiet" data-tv="mute" data-icon="volume-x" aria-pressed="false">Mute</button>
+        </div>
+        <div class="tv-group" role="group" aria-label="Channel">
+          <span class="tv-label">Channel</span>
+          <button type="button" class="button quiet tv-key" data-tv="channel_up" data-icon="up" aria-label="Channel up"></button>
+          <button type="button" class="button quiet tv-key" data-tv="channel_down" data-icon="down" aria-label="Channel down"></button>
+        </div>
+      </div>
+
+      <div id="tv-inputs" class="tv-inputs" role="group" aria-label="Inputs" hidden>
+        <span class="tv-label">Input</span>
+        <div id="tv-input-list" class="tv-input-list"></div>
+        <span class="tv-spacer"></span>
+        <button type="button" id="tv-inputs-close" class="button quiet" data-icon="exit">Close</button>
+      </div>
+
+      <div class="tv-middle">
+        <div class="tv-left">
+          <div class="tv-dpad" role="group" aria-label="Arrows and OK">
+            <svg class="tv-disc" viewBox="-150 -150 300 300" focusable="false">
+              <path class="tv-sector" data-tv="key:UP" role="button" tabindex="0" aria-label="Up" d="M -104.65 -104.65 A 148 148 0 0 1 104.65 -104.65 L 43.84 -43.84 A 62 62 0 0 0 -43.84 -43.84 Z"/>
+              <path class="tv-sector" data-tv="key:RIGHT" role="button" tabindex="0" aria-label="Right" d="M 104.65 -104.65 A 148 148 0 0 1 104.65 104.65 L 43.84 43.84 A 62 62 0 0 0 43.84 -43.84 Z"/>
+              <path class="tv-sector" data-tv="key:DOWN" role="button" tabindex="0" aria-label="Down" d="M 104.65 104.65 A 148 148 0 0 1 -104.65 104.65 L -43.84 43.84 A 62 62 0 0 0 43.84 43.84 Z"/>
+              <path class="tv-sector" data-tv="key:LEFT" role="button" tabindex="0" aria-label="Left" d="M -104.65 104.65 A 148 148 0 0 1 -104.65 -104.65 L -43.84 -43.84 A 62 62 0 0 0 -43.84 43.84 Z"/>
+              <circle class="tv-ring" r="70"/>
+              <use class="tv-mark" href="#icon-up" x="-17" y="-122" width="34" height="34"/>
+              <use class="tv-mark" href="#icon-right" x="88" y="-17" width="34" height="34"/>
+              <use class="tv-mark" href="#icon-down" x="-17" y="88" width="34" height="34"/>
+              <use class="tv-mark" href="#icon-left" x="-122" y="-17" width="34" height="34"/>
+              <text class="tv-glyph" x="0" y="-105" text-anchor="middle" dominant-baseline="central">&#9650;</text>
+              <text class="tv-glyph" x="105" y="0" text-anchor="middle" dominant-baseline="central">&#9654;</text>
+              <text class="tv-glyph" x="0" y="105" text-anchor="middle" dominant-baseline="central">&#9660;</text>
+              <text class="tv-glyph" x="-105" y="0" text-anchor="middle" dominant-baseline="central">&#9664;</text>
+            </svg>
+            <button type="button" class="tv-ok" data-tv="key:ENTER">OK</button>
+          </div>
+          <div class="tv-nav" role="group" aria-label="Back, exit, info and guide">
+            <button type="button" class="button quiet" data-tv="key:BACK" data-icon="return">Back</button>
+            <button type="button" class="button quiet" data-tv="key:EXIT" data-icon="exit">Exit</button>
+            <button type="button" class="button quiet" data-tv="key:INFO" data-icon="info">Info</button>
+            <button type="button" class="button quiet" data-tv="key:GUIDE" data-icon="list">Guide</button>
+          </div>
+        </div>
+        <div class="tv-right">
+          <div class="tv-numbers" role="group" aria-label="Numbers">
+            <button type="button" class="button quiet" data-tv="digit:1">1</button>
+            <button type="button" class="button quiet" data-tv="digit:2">2</button>
+            <button type="button" class="button quiet" data-tv="digit:3">3</button>
+            <button type="button" class="button quiet" data-tv="digit:4">4</button>
+            <button type="button" class="button quiet" data-tv="digit:5">5</button>
+            <button type="button" class="button quiet" data-tv="digit:6">6</button>
+            <button type="button" class="button quiet" data-tv="digit:7">7</button>
+            <button type="button" class="button quiet" data-tv="digit:8">8</button>
+            <button type="button" class="button quiet" data-tv="digit:9">9</button>
+            <button type="button" class="button quiet" data-tv="key:DASH" aria-label="Dash">&ndash;</button>
+            <button type="button" class="button quiet" data-tv="digit:0">0</button>
+            <button type="button" class="button quiet tv-go" data-tv="key:ENTER">Go</button>
+          </div>
+          <div class="tv-play">
+            <div class="tv-transport" role="group" aria-label="Playback">
+              <button type="button" class="button quiet tv-key" data-tv="key:REWIND" data-icon="rewind" aria-label="Rewind"></button>
+              <button type="button" class="button quiet tv-key" data-tv="key:PLAY" data-icon="play" aria-label="Play"></button>
+              <button type="button" class="button quiet tv-key" data-tv="key:PAUSE" data-icon="pause" aria-label="Pause"></button>
+              <button type="button" class="button quiet tv-key" data-tv="key:FASTFORWARD" data-icon="fast-forward" aria-label="Fast forward"></button>
+            </div>
+            <div class="tv-colours" role="group" aria-label="Colour keys">
+              <button type="button" class="button quiet tv-colour red" data-tv="key:RED" aria-label="Red"><i></i></button>
+              <button type="button" class="button quiet tv-colour green" data-tv="key:GREEN" aria-label="Green"><i></i></button>
+              <button type="button" class="button quiet tv-colour yellow" data-tv="key:YELLOW" aria-label="Yellow"><i></i></button>
+              <button type="button" class="button quiet tv-colour blue" data-tv="key:BLUE" aria-label="Blue"><i></i></button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div id="tv-modes" class="tv-modes"></div>   <!-- the pointer modes' row (spec 5.2): its height is kept so that the remote does not move when they come -->
+    </div>
+
+    <section id="tv-not-set-up" class="tv-card" hidden>
+      <h2>No TV is set up for this room</h2>
+      <p>Find TVs lists the LG TVs on this network, with their addresses.</p>
+      <div class="tv-card-actions">
+        <button type="button" id="tv-find-unset" class="button quiet tv-find" data-icon="locate">Find TVs</button>
+      </div>
+      <div class="tv-found" hidden>
+        <p class="tv-found-label"></p>
+        <ul class="tv-found-list"></ul>
+      </div>
+      <p class="tv-hint">To set one up, put its address in <code>tv.host</code> (and its MAC address in <code>tv.mac</code>, so that the table can turn it on) in <code>/etc/croom/config.yaml</code>, set <code>tv.enabled</code> to <code>true</code>, then restart the agent.</p>
+    </section>
+
+    <section id="tv-pairing" class="tv-card" hidden>
+      <h2>Pair the TV</h2>
+      <p id="tv-pairing-text"></p>
+      <div class="tv-card-actions">
+        <button type="button" id="tv-pair" class="button primary" data-icon="tv">Pair</button>
+        <button type="button" id="tv-find" class="button quiet tv-find" data-icon="locate">Find TVs</button>
+        <button type="button" id="tv-pair-cancel" class="button quiet" data-icon="x-circle" hidden>Cancel</button>
+      </div>
+      <div class="tv-found" hidden>
+        <p class="tv-found-label"></p>
+        <ul class="tv-found-list"></ul>
+      </div>
+      <p class="tv-hint">To use a different TV, put its address in <code>tv.host</code> in <code>/etc/croom/config.yaml</code>, then restart the agent.</p>
+    </section>
+
+    <section id="tv-refused" class="tv-card" hidden>
+      <h2>Pair the TV again</h2>
+      <p>The TV no longer accepts this table: Forget TV, then Pair.</p>
+      <p>The TV shows a new request when you tap Pair. Accept it with the TV's own remote.</p>
+      <div class="tv-card-actions">
+        <button type="button" id="tv-forget" class="button quiet" data-icon="x-circle">Forget TV</button>
+        <button type="button" id="tv-refused-pair" class="button primary" data-icon="tv">Pair</button>
+      </div>
     </section>
   </section>
 </main>

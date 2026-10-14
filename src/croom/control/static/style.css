@@ -60,7 +60,8 @@ body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
 body[data-view="meeting"] .view[data-view="meeting"],
-body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
+body[data-view="upcoming"] .view[data-view="upcoming"],
+body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 .view[data-view="idle"] {
   grid-template-columns: 3fr 2fr;
   grid-template-rows: auto auto 1fr;
@@ -80,7 +81,7 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
-.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }
+.menu { display: grid; grid-template-columns: repeat(3, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* Camera, Screensaver and TV; Camera, Upcoming meetings and TV */
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
 #meeting-message { min-height: auto; }   /* a grid item: .message's explicit minimum would let its row shrink under a long refusal */
@@ -313,6 +314,140 @@ body.keyboard-open .schedule { display: none; }
 .link-button[hidden] { display: none; }   /* likewise */
 .setup { margin-top: 12px; }
 .setup-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+
+/* TV view (spec 2026-10-13 TV remote and touchpad, section 5): the remote on the table, or the card that comes before it (no TV set up,
+   not paired, no longer accepted). One screen at 1280 by 800, built from the page's own buttons; scoped to the view. A key that wears a
+   colour or a fill says so here with enough weight to win over body[data-state] above (a meeting outlines every button in the page,
+   filled ones too), so the remote looks the same in both modes. */
+.view[data-view="tv"] {
+  --tray: #0B1220;                           /* the keyboard's tray: the d-pad's sectors */
+  --line: rgba(189, 206, 255, 0.30);
+  --line-soft: rgba(189, 206, 255, 0.16);
+  --tv-on: #1FA971;
+  grid-template-columns: minmax(0, 1fr);       /* the widest row may not stretch the view past the screen */
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 16px;
+}
+.view[data-view="tv"] .button.quiet { border-color: var(--periwinkle-300); color: #fff; }
+.view[data-view="tv"] .button:active { background: var(--navy-800); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6); }   /* a darker fill and a 1 px inset, in the frame the finger lands */
+.view[data-view="tv"] .button.primary, .view[data-view="tv"] .button.filled { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
+.view[data-view="tv"] .button.primary:hover, .view[data-view="tv"] .button.filled:hover { background: var(--blue-700); border-color: var(--blue-700); }
+.view[data-view="tv"] .button.danger { background: var(--surface-900); border-color: var(--warn-bar); color: #fff; }   /* Power, asked to confirm: amber, as Leave is */
+.view[data-view="tv"] .button.current { border-color: var(--blue-600); background: rgba(27, 82, 229, 0.18); }   /* what the TV is on: the input showing, the sound muted */
+.view[data-view="tv"] .button.refused { border-color: var(--warn-bar); background: rgba(232, 160, 19, 0.2); }   /* the key the TV refused, for a moment: after .current, so that amber wins on a key that is both */
+
+/* The head: Back, then the TV's name and state on one line, and the words of the last refusal under it. */
+.tv-head { display: flex; align-items: center; gap: 22px; min-width: 0; }
+.tv-status { flex: 1 1 auto; min-width: 0; font-size: 0.95rem; color: var(--periwinkle-300); }
+.tv-line { margin: 0; display: flex; align-items: center; gap: 12px; min-width: 0; }
+.tv-facts { min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.3; }
+.tv-facts strong { color: #fff; font-weight: 600; }
+.tv-sep { margin: 0 0.15em; opacity: 0.55; }   /* the spaces in its text are the rest of the gap */
+.tv-on { color: #fff; }
+.tv-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--tv-on); margin-right: 0.45em; vertical-align: 1px; }
+.button.tv-turn-on { flex: 0 0 auto; min-height: 40px; padding: 0 16px; font-size: 0.95rem; }
+.tv-words { margin: 0; line-height: 1.3; color: #FFD7D5; overflow-wrap: anywhere; }   /* wrapped, never cut: a refusal is what the person needs to read. Two lines of it and the line above fit the 64 px of Back, so the keys below do not move */
+.tv-words[hidden] { display: none; }
+
+/* The remote: the top keys, the d-pad with the numbers, and the row the pointer modes will have. A press is never a selection or a callout. */
+.tv-remote { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 16px; min-height: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.tv-remote[hidden] { display: none; }
+.tv-keys, .tv-inputs { grid-row: 1; }   /* placed, not left to auto-placement: the one that is hidden must not move the middle into the row that stretches */
+.tv-middle { grid-row: 2; }
+.tv-modes { grid-row: 3; min-height: 56px; }
+.tv-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }   /* one row at 1280 by 800; narrower, the groups wrap */
+.tv-keys[hidden], .tv-inputs[hidden] { display: none; }
+.tv-spacer { flex: 1 1 auto; }
+.tv-keys .button:not(.tv-key) { padding: 0 20px; }   /* the words keys (Mute among them), as in the mockup; the square ones keep their 16 px */
+.tv-keys > #tv-power { flex: 0 0 129px; text-align: center; }   /* the width of "Power" with its icon, and no more or less when it asks to confirm: "Tap again to turn off" wraps onto two lines in it, and the keys beside it stay where they are */
+#tv-power.danger { font-size: 0.95rem; line-height: 1.15; padding: 0 8px; }   /* the longer line, "Tap again to", is 97 px of the 109 that are left */
+.tv-group { display: flex; align-items: center; gap: 10px; }
+.tv-group + .tv-group { margin-left: 14px; }
+.tv-label { color: var(--periwinkle-300); font-size: 0.95rem; margin-right: 2px; }
+.tv-level { min-width: 58px; text-align: center; font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tv-level.muted { opacity: 0.5; }   /* the level is there, and the sound is not */
+.button.tv-key { min-width: 56px; padding: 0 16px; }
+.tv-sign { font-size: 1.5rem; line-height: 1; font-weight: 400; }
+.no-icons .tv-key[data-icon]::after { content: attr(aria-label); font-size: 0.8rem; }   /* the sprite did not come: a key that was only a picture says its name */
+
+/* Input: the TV's inputs take the top keys' place while the row is open; the one showing carries a check, the room Pi's says whose it is. */
+.tv-inputs { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tv-inputs > .tv-label { margin-right: 6px; }
+.tv-input-list { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; }
+.tv-inputs .button.pi { font-weight: 600; }
+.tv-inputs .tv-sub { color: var(--periwinkle-300); font-weight: 400; }
+
+/* The middle: the d-pad on the left, the numbers on the right; the columns start and end together. */
+.tv-middle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-height: 0; }
+.tv-left, .tv-right { display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 18px; min-height: 0; padding: 4px 0; }
+.tv-dpad { position: relative; width: 300px; height: 300px; flex: 0 0 auto; touch-action: manipulation; }
+.tv-disc { display: block; width: 100%; height: 100%; overflow: visible; }
+.tv-sector { fill: var(--tray); stroke: var(--line); stroke-width: 2; cursor: pointer; outline: none; }
+.tv-sector:active { fill: var(--navy-800); }   /* the sector lights while it is pressed */
+.tv-sector:focus-visible { stroke: var(--periwinkle-300); stroke-width: 4; }
+.tv-sector.refused { fill: rgba(232, 160, 19, 0.28); stroke: var(--warn-bar); }
+.tv-sector[aria-disabled="true"] { opacity: 0.45; pointer-events: none; }
+.tv-ring { fill: none; stroke: var(--line-soft); stroke-width: 10; pointer-events: none; }
+.tv-mark { color: #fff; pointer-events: none; }
+.tv-glyph { display: none; fill: #fff; font-size: 26px; pointer-events: none; }
+.no-icons .tv-glyph { display: inline; }   /* and the disc's arrows, where the sprite did not come */
+.tv-ok {
+  position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  width: 38.67%; aspect-ratio: 1; padding: 0; border-radius: 50%;
+  background: var(--navy-800); border: 2px solid var(--line); color: #fff;
+  font: inherit; font-size: 1.4rem; font-weight: 600; letter-spacing: 0.02em; cursor: pointer; touch-action: manipulation;
+}
+.tv-ok:active { background: var(--navy-900); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6); }
+.tv-ok:disabled { opacity: 0.45; cursor: default; }
+.tv-ok:focus-visible { outline: 3px solid var(--periwinkle-300); outline-offset: 2px; }
+.tv-ok.refused { border-color: var(--warn-bar); }
+.tv-nav { display: flex; gap: 10px; }
+
+.tv-numbers { display: grid; grid-template-columns: repeat(3, 84px); gap: 10px; }
+.view[data-view="tv"] .tv-numbers .button { min-height: 56px; padding: 0; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+.view[data-view="tv"] .tv-numbers .tv-go { font-size: 1.05rem; }
+.tv-play { display: flex; align-items: center; gap: 34px; }
+.tv-transport, .tv-colours { display: flex; align-items: center; gap: 10px; }
+.view[data-view="tv"] .button.tv-colour { width: 52px; min-height: 52px; padding: 0; }
+.tv-colour i { display: block; width: 16px; height: 16px; border-radius: 50%; }
+.tv-colour.red i { background: #E5484D; }
+.tv-colour.green i { background: #1FA971; }
+.tv-colour.yellow i { background: #E8C547; }
+.tv-colour.blue i { background: #4C7BF0; }
+
+/* The cards: in the remote's place when there is no TV to use. A long list of TVs scrolls inside its card, not the page. */
+.tv-card { align-self: start; width: 100%; max-width: 820px; max-height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: var(--radius); background: var(--surface-800); padding: 30px 32px; }
+.tv-card[hidden] { display: none; }
+.tv-card h2 { margin: 0 0 10px; font-size: 1.45rem; font-weight: 600; }
+.tv-card p { margin: 0 0 16px; color: #E6ECFF; }
+.tv-card-actions { display: flex; flex-wrap: wrap; gap: 12px; margin: 0 0 24px; }   /* (the card is a flex column: the paragraph's 16 px above is the gap) */
+.tv-card-actions:last-child { margin-bottom: 0; }
+.tv-found { min-height: 0; display: flex; flex-direction: column; }
+.tv-found[hidden], .tv-found-list[hidden] { display: none; }
+.tv-card .tv-found-label { margin: 0 0 8px; color: var(--periwinkle-300); font-size: 0.95rem; }
+.tv-found-list { list-style: none; margin: 0; padding: 0; min-height: 0; overflow-y: auto; border-top: 1px solid var(--line-soft); }
+.tv-found-list li { display: flex; justify-content: space-between; gap: 16px; padding: 12px 2px; border-bottom: 1px solid var(--line-soft); }
+.tv-who { min-width: 0; overflow-wrap: anywhere; }
+.tv-addr { color: var(--periwinkle-300); font-variant-numeric: tabular-nums; }
+.tv-tag { color: #fff; background: var(--navy-800); border-radius: 6px; padding: 1px 8px; margin-left: 8px; font-size: 0.85rem; white-space: nowrap; }
+.tv-card .tv-hint { margin: 16px 0 0; color: var(--periwinkle-300); font-size: 0.9rem; }
+.tv-card code { font-family: inherit; color: #fff; }
+
+@media (max-width: 1023px) {
+  /* A phone, or a window too small for the fixed screen: the rows stack and the page scrolls. */
+  .tv-head { flex-wrap: wrap; row-gap: 12px; }
+  .tv-keys .tv-spacer { display: none; }
+  .tv-group { flex-wrap: wrap; }
+  .tv-group + .tv-group { margin-left: 0; }
+  .tv-inputs { flex-wrap: wrap; }
+  .tv-inputs .tv-spacer { display: none; }
+  .tv-middle { grid-template-columns: 1fr; gap: 24px; }
+  .tv-dpad { width: min(300px, 100%); height: auto; aspect-ratio: 1; }
+  .tv-nav, .tv-play { flex-wrap: wrap; justify-content: center; }
+  .tv-play { gap: 12px 24px; }
+  .tv-modes { min-height: 0; }
+  .tv-card { padding: 22px 20px; }
+}
 
 /* Viewport layouts (spec 2026-10-12, section 3). Last in the file, so they override the rules above. */
 @media (min-width: 1024px) and (min-height: 700px) {

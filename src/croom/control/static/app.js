@@ -6,8 +6,8 @@
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
-  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera view
-  // belongs to whichever mode showed it, so its Back returns there.
+  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
+  // belong to whichever mode showed them, so their Back returns there.
   const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
@@ -19,6 +19,7 @@
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
+  let tvMode = "idle";      // the mode that opened the TV view
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
   let passcodeCard = false;      // the last render showed the card for a join Zoom refused over the passcode: its landing happens once too
   let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
@@ -75,10 +76,11 @@
 
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
-  const viewMode = (name) => (name === "camera" ? cameraMode : VIEW_MODES[name]);
+  const viewMode = (name) => (name === "camera" ? cameraMode : name === "tv" ? tvMode : VIEW_MODES[name]);
 
   function applyView(name, automatic) {
     if (name === "camera") cameraMode = mode();
+    if (name === "tv") tvMode = mode();
     document.body.dataset.view = name;
     // Every view change, an automatic one too, starts or clears the wait. Before the hooks: a hook may start a timer of
     // its own (the preview's 30 s renewal), and when the two fall due together they run in the order they were set, so
@@ -93,13 +95,16 @@
   }
 
   // Idle mode returns to the idle screen on its own: the kiosk never reloads and nobody presses Back, so a room left on
-  // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns.
+  // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns, except
+  // the TV view opened from one (the remote is a quick look in a call): it goes back to the meeting screen after two minutes.
   const IDLE_RETURN_MS = 10 * 60 * 1000;
+  const TV_RETURN_MS = 2 * 60 * 1000;
   let idleReturnTimer = null;
   function armIdleReturn() {
     clearTimeout(idleReturnTimer);
     idleReturnTimer = null;
     if (mode() === "idle" && view() !== "idle") idleReturnTimer = setTimeout(() => setView("idle", true), IDLE_RETURN_MS);
+    else if (mode() === "meeting" && view() === "tv") idleReturnTimer = setTimeout(() => setView("meeting", true), TV_RETURN_MS);
   }
   document.addEventListener("pointerdown", armIdleReturn, true);
 
@@ -107,7 +112,7 @@
   let lastEventsKey = null;
   let lastPickerKey = null;
   let lastUpcomingKey = null;
-  const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
+  const deviceEpoch = { audio: 0, camera: 0, tv: 0 };   // counts each device's answers (and the TV's), so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
@@ -272,7 +277,7 @@
     submitForm(el("link-form"));
   }
 
-  const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+  const post = (path, body, extra) => api(path, Object.assign({ method: "POST", body: JSON.stringify(body || {}) }, extra));
   const withPasscode = (body, passcode) => (passcode ? Object.assign(body, { passcode: passcode }) : body);
   const joinLink = (url, passcode) => act(() => post("/api/meeting/join", withPasscode({ url: url }, passcode)).then(() => joinAccepted(url)));
   const joinEvent = (id) => { forgetJoin(); return act(() => post("/api/meeting/join", { event_id: id }).then(() => { model.lastEvent = id; })); };
@@ -520,6 +525,7 @@
     renderEvents(cal);
     renderKeyClick(s);
     renderPicker();
+    renderTv();
     for (const fn of renderHooks) fn(s);
     if (landing && kiosk && view() === "idle") focusPasscode();
   }
@@ -645,8 +651,443 @@
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
+  el("open-tv-options").addEventListener("click", () => setView("tv"));
+  el("open-tv-meeting").addEventListener("click", () => setView("tv"));
+  el("back-from-tv").addEventListener("click", () => setView(tvMode === "meeting" ? "meeting" : "options"));
   el("key-click-on").addEventListener("click", () => setKeyClick(true));
   el("key-click-off").addEventListener("click", () => setKeyClick(false));
+
+  // ===========================================================================================================================
+  // The TV view: the remote on the table (spec 2026-10-13 TV remote and touchpad, section 5). The agent's status carries the TV's
+  // block (status.tv) and /api/tv/* are its controls: this section draws the one and sends the other. Which of three cards (no TV
+  // set up, not paired, no longer accepted) or the remote itself shows follows that block alone. Whatever the TV gave (its name, its
+  // inputs, the app and the channel it shows) and whatever the agent said it refused goes onto the page as text, never as markup.
+  // ===========================================================================================================================
+  const TV_CONTROL_MS = 30000;    // the agent waits up to 23 s for a TV to turn on, and a control behind that one waits its turn
+  const TV_SEARCH_MS = 10000;     // Find TVs takes five or six seconds
+  const TV_PAIR_MS = 70000;       // the agent gives the person at the TV a minute, and the TV five seconds more to finish
+  const TV_INPUTS_MS = 10000;     // the row of inputs puts itself away when nobody picks
+  const TV_FLASH_MS = 900;        // a key the TV refused is amber this long
+  const TV_PI = "Crystal Meet";   // what the table calls the input the room Pi is on
+  const TV_APPS = { "com.webos.app.livetv": "Live TV", "com.webos.app.home": "Home screen" };   // apps the status line names in words; any other is named as the TV gives it
+  const TV_PAIR_WAIT = "Accept the request on the TV with its own remote. The table waits a minute for it.";
+  const TV_FOUND_NONE = "No TVs answered. Check that the TV is on, and on the same network as this table.";
+
+  const tvView = {
+    words: "",           // the last refusal or failure in words, under the status line until the next tap
+    turningOn: false,    // a Turn on is with the TV (up to 23 s): the remote waits for it
+    armed: false,        // Power has had its first tap and waits for the second
+    armTimer: null,
+    inputsOpen: false,   // the row of inputs is where the top keys are
+    inputsTimer: null,
+    inputsKey: null,
+    pairing: false,      // a pairing waits for the person at the TV
+    cancelling: false,   // ... and its Cancel is with the agent
+    cancelled: false,    // ... and has been given up, so how it ends is no news
+    forgetting: false,
+    searching: false,    // Find TVs is looking
+    found: null,         // what the last search found, or null before there was one
+    factsKey: null,
+    foundKey: null,
+  };
+  const tvKeyNodes = Array.from(document.querySelectorAll("#tv-remote [data-tv]"));
+  const tvBlock = () => (model.status && model.status.tv) || { configured: false, paired: false };
+  // The inputs the TV lists, as far as they can be drawn: what a device on the network says is not trusted to have the shape it should.
+  const tvInputs = (t) => (Array.isArray(t.inputs) ? t.inputs.filter((i) => i && (typeof i.id === "string" || typeof i.id === "number")) : []);
+  let tvVisit = 0;   // counts the times the view has been left: what comes back from an earlier visit has nothing to say to this one
+  const tvSay = (visit, words) => { if (visit === tvVisit) tvView.words = words; };
+
+  // What the view shows in the remote's place: "not-set-up", "pairing" or "refused", and "" for the remote. Refused is read with
+  // paired: the agent leaves it set after Forget TV, until the next pairing.
+  function tvCardOf(t) {
+    if (!t.configured) return "not-set-up";
+    if (!t.paired) return "pairing";
+    return t.refused ? "refused" : "";
+  }
+
+  // A request to the TV's routes, given up on after `ms`: a TV that does not answer must not leave a key waiting for good.
+  async function tvAsk(ms, what, request) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    try {
+      return await request({ signal: controller.signal });
+    } catch (e) {
+      if (e && e.name === "AbortError") throw new Error(what + " did not answer in time");
+      if (e instanceof TypeError) throw new Error("Can't reach the room");   // fetch's own failure: the agent is not there
+      throw e;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  // An answer carries the TV's block as it stands after the request, and replaces the model's at once. A poll that was already on its way
+  // is older than it, so deviceEpoch tells refreshStatus to keep this block, as it does for the devices.
+  function tvTake(answer) {
+    if (!answer || !answer.tv || !model.status) return;
+    model.status.tv = answer.tv;
+    deviceEpoch.tv += 1;
+  }
+
+  // The key the TV refused flashes amber once. A key refused twice running flashes twice: the class comes off, and goes on again.
+  function tvFlash(node) {
+    if (!node) return;
+    clearTimeout(node.tvFlashTimer);
+    if (node.classList.contains("refused")) {
+      node.classList.remove("refused");
+      void node.getBoundingClientRect();
+    }
+    node.classList.add("refused");
+    node.tvFlashTimer = setTimeout(() => node.classList.remove("refused"), TV_FLASH_MS);
+  }
+
+  // One control: {"name", "value"?}. The TV's answer is its block after the control, which replaces the model's at once. A refusal comes
+  // back in words for the status line, and the key that asked flashes.
+  async function tvControl(name, value, source) {
+    const body = value === undefined ? { name: name } : { name: name, value: value };
+    const visit = tvVisit;
+    tvView.words = "";
+    render();
+    try {
+      tvTake(await tvAsk(TV_CONTROL_MS, "The TV", (extra) => post("/api/tv/control", body, extra)));
+    } catch (e) {
+      tvSay(visit, e.message);
+      tvFlash(source);
+    }
+    render();
+  }
+
+  // Turn on takes a while (the agent wakes the TV and waits for it), and every control behind it waits too: the remote's keys wait with it.
+  async function tvTurnOn() {
+    if (tvView.turningOn) return;
+    tvView.turningOn = true;
+    try {
+      await tvControl("power", "on", el("tv-power"));
+    } finally {
+      tvView.turningOn = false;
+      render();
+    }
+  }
+
+  function tvDisarm() {
+    tvView.armed = false;
+    clearTimeout(tvView.armTimer);
+  }
+
+  // A TV that is on is turned off by two taps on Power, the second within five seconds, as Leave is; a TV that is not on is turned on by one.
+  function tvPower() {
+    if (!tvBlock().on) { tvTurnOn(); return; }
+    if (!tvView.armed) {
+      tvView.armed = true;
+      clearTimeout(tvView.armTimer);
+      tvView.armTimer = setTimeout(() => { tvView.armed = false; render(); }, CONFIRM_MS);
+      render();
+      return;
+    }
+    tvDisarm();
+    tvControl("power", "off", el("tv-power"));
+  }
+
+  function tvOpenInputs() {
+    tvView.inputsOpen = true;
+    clearTimeout(tvView.inputsTimer);
+    tvView.inputsTimer = setTimeout(() => { tvCloseInputs(); render(); }, TV_INPUTS_MS);
+    render();
+  }
+  function tvCloseInputs() {
+    tvView.inputsOpen = false;
+    clearTimeout(tvView.inputsTimer);
+  }
+  function tvPickInput(id) {
+    tvCloseInputs();
+    tvControl("input", id, el("tv-input"));
+  }
+
+  // A key of the remote: its data-tv is "name:value", or the name alone. Power's tap and Input's are the table's own business.
+  function tvKey(node) {
+    if (node.matches("button") ? node.disabled : node.getAttribute("aria-disabled") === "true") return;
+    const spec = node.dataset.tv;
+    const cut = spec.indexOf(":");
+    const name = cut < 0 ? spec : spec.slice(0, cut);
+    const value = cut < 0 ? undefined : spec.slice(cut + 1);
+    if (name === "power") tvPower();
+    else if (name === "input" && value === "menu") tvOpenInputs();
+    else tvControl(name, value, node);
+  }
+
+  // Pair: the TV shows its prompt and a person accepts it with the TV's own remote, so the request waits for them. Cancel is the agent's
+  // Forget, which ends a waiting pairing at once; the pairing's own answer then says it was stopped, which is no news to the one who stopped it.
+  async function tvPair() {
+    if (tvView.pairing) return;
+    const visit = tvVisit;
+    tvView.pairing = true;
+    tvView.cancelled = false;
+    tvView.words = "";
+    render();
+    try {
+      tvTake(await tvAsk(TV_PAIR_MS, "The TV", (extra) => post("/api/tv/pair", {}, extra)));
+    } catch (e) {
+      if (!tvView.cancelled) tvSay(visit, e.message);
+    } finally {
+      tvView.pairing = false;
+      tvView.cancelling = false;
+    }
+    render();
+  }
+
+  async function tvCancelPair() {
+    if (!tvView.pairing || tvView.cancelling) return;
+    const visit = tvVisit;
+    tvView.cancelling = true;
+    tvView.cancelled = true;
+    render();
+    try {
+      tvTake(await tvAsk(TV_CONTROL_MS, "The TV", (extra) => post("/api/tv/forget", {}, extra)));
+    } catch (e) {
+      tvView.cancelled = false;   // it did not end: the pairing is still waiting
+      tvSay(visit, e.message);
+    }
+    tvView.cancelling = false;
+    render();
+  }
+
+  async function tvForget() {
+    if (tvView.forgetting) return;
+    const visit = tvVisit;
+    tvView.forgetting = true;
+    tvView.words = "";
+    render();
+    try {
+      tvTake(await tvAsk(TV_CONTROL_MS, "The TV", (extra) => post("/api/tv/forget", {}, extra)));
+    } catch (e) {
+      tvSay(visit, e.message);
+    }
+    tvView.forgetting = false;
+    render();
+  }
+
+  async function tvFind() {
+    if (tvView.searching) return;
+    const visit = tvVisit;
+    tvView.searching = true;
+    tvView.words = "";
+    render();
+    try {
+      const answer = await tvAsk(TV_SEARCH_MS, "The search for TVs", (extra) => api("/api/tv/discover", extra));
+      if (visit === tvVisit) tvView.found = Array.isArray(answer.tvs) ? answer.tvs : [];
+    } catch (e) {
+      if (visit === tvVisit) tvView.found = null;
+      tvSay(visit, e.message);
+    }
+    tvView.searching = false;
+    render();
+  }
+
+  // The view is left: nothing of it waits for the next person. (A pairing or a Turn on that is with the agent goes on, and its state stays.)
+  function tvLeft() {
+    tvVisit += 1;
+    tvDisarm();
+    tvCloseInputs();
+    tvView.words = "";
+    tvView.found = null;
+  }
+
+  // --- drawing the view from the status (keyed, so that a button is never replaced under a finger) ---
+
+  // Where the TV is: the input it shows (the room Pi's says so), else the app, and the channel it is on.
+  function tvWhere(t) {
+    const listed = tvInputs(t).find((i) => i.id === t.input);
+    let where = "";
+    if (t.input) where = (listed && listed.label) || t.input;
+    else if (t.app) where = TV_APPS[t.app] || t.app;
+    if (where && t.input && t.input === t.pi_input) where += " (" + TV_PI + ")";
+    return where;
+  }
+
+  // The status line: "Boardroom TV \u00B7 On \u00B7 HDMI 1 (Crystal Meet)". A TV that is not on has Turn on in place of its state.
+  function renderTvStatus(t, card) {
+    const parts = [["name", t.name || (card === "pairing" && t.host ? "TV at " + t.host : "TV")]];
+    let turnOn = false;
+    if (card === "not-set-up") parts.push(["text", "Not set up"]);
+    else if (card === "pairing") parts.push(["text", tvView.pairing ? "Pairing\u2026" : "Not paired yet"]);
+    else if (card === "refused") parts.push(["text", "Not accepting this table"]);
+    else if (tvView.turningOn) parts.push(["text", "Turning on\u2026"]);
+    else if (t.on) {
+      parts.push(["on", "On"]);
+      const where = tvWhere(t);
+      if (where) parts.push(["text", where]);
+      if (t.channel) parts.push(["text", "Channel " + t.channel]);
+    } else turnOn = true;
+    const key = JSON.stringify([parts, turnOn]);
+    if (key !== tvView.factsKey) {
+      tvView.factsKey = key;
+      const nodes = [];
+      const separator = () => { const s = document.createElement("span"); s.className = "tv-sep"; s.setAttribute("aria-hidden", "true"); s.textContent = " \u00B7 "; return s; };
+      parts.forEach(([kind, text], i) => {
+        if (i) nodes.push(separator());
+        const node = document.createElement(kind === "name" ? "strong" : "span");
+        if (kind === "on") {
+          node.className = "tv-on";
+          const dot = document.createElement("i");
+          dot.className = "tv-dot";
+          node.append(dot);
+        }
+        node.append(text);
+        nodes.push(node);
+      });
+      if (turnOn) nodes.push(separator());
+      el("tv-facts").replaceChildren(...nodes);
+    }
+    el("tv-turn-on").hidden = !turnOn;
+    el("tv-words").hidden = !tvView.words;
+    if (el("tv-words").textContent !== tvView.words) el("tv-words").textContent = tvView.words;
+  }
+
+  // The remote's keys. A TV that is not on can only be turned on, and one that is turning on is not asked anything: every key waits.
+  function renderTvKeys(t, live) {
+    const off = !t.on && !tvView.turningOn;
+    for (const node of tvKeyNodes) {
+      const allowed = live || (off && node.id === "tv-power");
+      if (node.matches("button")) node.disabled = !allowed;
+      else node.setAttribute("aria-disabled", allowed ? "false" : "true");
+    }
+    const armed = tvView.armed && live;
+    const power = el("tv-power");
+    labelWithIcon(power, armed ? "Tap again to turn off" : "Power", armed ? "" : "power");
+    power.classList.toggle("danger", armed);
+    power.classList.toggle("quiet", !armed && t.on);
+    power.classList.toggle("filled", !t.on);   // the one filled key, while the TV is not on (and while it is turning on)
+    // Mute keeps its words and its picture (the remote's crossed speaker) whatever the sound is doing, so that the keys beside it never
+    // move under a finger; a sound that is off shows as a key that is down, as the input showing does.
+    const mute = el("tv-mute");
+    mute.setAttribute("aria-pressed", t.muted ? "true" : "false");
+    mute.classList.toggle("current", Boolean(t.muted));
+    const level = t.volume === null || t.volume === undefined ? "\u2013" : String(t.volume);
+    if (el("tv-level").textContent !== level) el("tv-level").textContent = level;
+    el("tv-level").classList.toggle("muted", Boolean(t.muted));
+  }
+
+  // The row of inputs takes the top keys' place while it is open. The one the TV shows carries a check; the room Pi's says whose it is.
+  function renderTvInputs(t, live) {
+    const open = tvView.inputsOpen && live;
+    el("tv-inputs").hidden = !open;
+    el("tv-keys").hidden = open;
+    el("tv-input").setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) return;
+    const inputs = tvInputs(t);
+    const key = JSON.stringify([inputs, t.input, t.pi_input, model.busy]);
+    if (key === tvView.inputsKey) return;
+    tvView.inputsKey = key;
+    const none = document.createElement("span");
+    none.className = "tv-label";
+    none.textContent = "The TV lists no inputs";
+    el("tv-input-list").replaceChildren(...(inputs.length ? inputs.map((input) => {
+      const current = input.id === t.input;
+      const pi = input.id === t.pi_input;
+      const b = button(String(input.label || input.id), "quiet" + (current ? " current" : "") + (pi ? " pi" : ""), () => tvPickInput(input.id), false, current ? "check" : null);
+      b.setAttribute("aria-pressed", current ? "true" : "false");
+      if (pi) {
+        const sub = document.createElement("span");
+        sub.className = "tv-sub";
+        sub.textContent = TV_PI;
+        b.querySelector("span").append(" ", sub);
+      }
+      return b;
+    }) : [none]));
+  }
+
+  // The TVs a search found, on the cards that have Find TVs: a name and an address to put in the config, no link. The pairing card
+  // tags the one this room is set up for.
+  function renderTvFound(thisRoom) {
+    const key = JSON.stringify([tvView.found, thisRoom]);
+    if (key === tvView.foundKey) return;
+    tvView.foundKey = key;
+    for (const box of document.querySelectorAll(".tv-found")) {
+      const found = tvView.found;
+      box.hidden = found === null;
+      if (found === null) continue;
+      const mine = box.closest("#tv-pairing") ? thisRoom : "";
+      box.querySelector(".tv-found-label").textContent = found.length ? "Found on the network" : TV_FOUND_NONE;
+      const list = box.querySelector(".tv-found-list");
+      list.hidden = found.length === 0;
+      list.replaceChildren(...found.filter((tv) => tv && typeof tv === "object").map((tv) => {
+        const li = document.createElement("li");
+        const who = document.createElement("span");
+        who.className = "tv-who";
+        who.append((tv.name || "LG TV") + " ");
+        if (mine && tv.host === mine) {
+          const tag = document.createElement("span");
+          tag.className = "tv-tag";
+          tag.textContent = "This room's TV";
+          who.append(tag);
+        }
+        const address = document.createElement("span");
+        address.className = "tv-addr";
+        address.textContent = tv.host || "";
+        li.append(who, address);
+        return li;
+      }));
+    }
+  }
+
+  function renderTvCard(t, card) {
+    if (card === "pairing") {
+      const text = tvView.pairing ? TV_PAIR_WAIT :
+        "This room is set up for the TV at " + (t.host || "its address") + ". Tap Pair, then accept the request that appears on the TV, using the TV's own remote. You only do this once.";
+      if (el("tv-pairing-text").textContent !== text) el("tv-pairing-text").textContent = text;
+      el("tv-pair").hidden = tvView.pairing;
+      el("tv-find").hidden = tvView.pairing;
+      el("tv-pair-cancel").hidden = !tvView.pairing;
+      el("tv-pair-cancel").disabled = tvView.cancelling;
+    }
+    if (card === "refused") el("tv-forget").disabled = tvView.forgetting;
+    for (const b of document.querySelectorAll(".tv-find")) {
+      labelWithIcon(b, tvView.searching ? "Looking\u2026" : "Find TVs", "locate");
+      b.disabled = tvView.searching;
+    }
+    renderTvFound(t.host || "");
+  }
+
+  function renderTv() {
+    if (view() !== "tv") return;
+    const t = tvBlock();
+    const card = tvCardOf(t);
+    const on = card === "" && Boolean(t.on);
+    const live = on && !tvView.turningOn;
+    if (!on) tvDisarm();             // a Power waiting for its second tap, and the row of inputs, go when the TV is not on
+    if (!live) tvCloseInputs();
+    el("tv-remote").hidden = card !== "";
+    el("tv-not-set-up").hidden = card !== "not-set-up";
+    el("tv-pairing").hidden = card !== "pairing";
+    el("tv-refused").hidden = card !== "refused";
+    renderTvStatus(t, card);
+    if (card === "") {
+      renderTvKeys(t, live);
+      renderTvInputs(t, live);
+    } else {
+      renderTvCard(t, card);
+    }
+  }
+
+  for (const node of tvKeyNodes) {
+    keepFocus(node);
+    node.addEventListener("click", () => tvKey(node));
+    if (node.getAttribute("role") === "button") {   // the d-pad's sectors are not buttons to the browser: Enter and Space press them
+      node.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); tvKey(node); } });
+    }
+  }
+  el("tv-remote").addEventListener("contextmenu", (e) => e.preventDefault());   // a long press on a touch screen must not open a menu, as on the camera's pad
+  keepFocus(el("tv-turn-on"));
+  el("tv-turn-on").addEventListener("click", tvTurnOn);
+  el("tv-inputs-close").addEventListener("click", () => { tvCloseInputs(); render(); });
+  for (const b of document.querySelectorAll(".tv-find")) b.addEventListener("click", tvFind);
+  el("tv-pair").addEventListener("click", tvPair);
+  el("tv-refused-pair").addEventListener("click", tvPair);
+  el("tv-pair-cancel").addEventListener("click", tvCancelPair);
+  el("tv-forget").addEventListener("click", tvForget);
+  viewHooks.push((name) => {
+    if (name === "tv") refreshStatus();   // the TV as it is now, not as of the last poll
+    else tvLeft();
+  });
 
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,

@@ -5,7 +5,8 @@
   "use strict";
 
   const STATUS = { 1: "joining", 2: "connected", 3: "left", 4: "reconnecting" };
-  const bridge = { state: "loading", detail: "", userId: null, userName: null, muted: false, _pendingMute: false };
+  // muted is null until Zoom has said (the room's record, or Zoom's answer to a mute): never a guess.
+  const bridge = { state: "loading", detail: "", userId: null, userName: null, muted: null, mutedAtJoin: false, _pendingMute: false };
   window.crystalMeet = bridge;
 
   function report(state, detail) {
@@ -33,9 +34,9 @@
 
   bridge.mute = function (muted) {
     return new Promise((resolve, reject) => {
-      if (bridge.userId === null || bridge.userId === undefined) {
+      if (!known(bridge.userId)) {
         // Connected, but Zoom has not listed the room yet (its record of the current user is built from its roster).
-        reject(new Error(bridge.state === "connected" ? "Zoom has not listed the room yet; try again in a moment" : "not in a meeting"));
+        reject(new Error(bridge.state === "connected" ? "Zoom has not listed the room in the meeting yet; try again in a moment" : "not in a meeting"));
         return;
       }
       ZoomMtg.mute({
@@ -58,6 +59,14 @@
 
   // ---- State as Zoom has it: the current user's record and the client's own buttons ----
   const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined) return obj[n]; } return undefined; };
+  const known = (value) => value !== undefined && value !== null && value !== "";
+  // The room's id and name from Zoom's record, once Zoom lists the room (before that the record has neither).
+  function takeUser(user) {
+    if (!user) return;
+    if (known(user.userId)) bridge.userId = user.userId;
+    const name = pick(user, ["userName", "displayName"]);
+    if (known(name)) bridge.userName = String(name);
+  }
   // Zoom's getAttendeeslist answers only when its roster is not empty and calls neither callback otherwise, and the roster
   // fills a moment after "connected". A reading must never hang on that: nothing here waits longer than ANSWER_MS for Zoom,
   // and a silence is read as the last answer was (the roster at first empty, the current user at first unknown). A silent
@@ -91,48 +100,67 @@
       return user;
     });
   }
-  // Zoom's web client keeps its video button in the footer: #foot-bar .send-video-container__btn. Its visible text is
-  // always "Video"; its accessibility name is "start my video" / "stop my video" only while the camera is usable. Other
-  // builds name it "Start Video" / "Stop Video": a footer button so named is the one when the class is not there.
+  // The footer's own video button, where Zoom's own code finds it (minimized: the widget's footer). Failing that, only a
+  // button in the footer named exactly "start my video" / "stop my video" (or "Start Video" / "Stop Video") will do:
+  // other buttons of Zoom's speak of video too ("Stop Incoming Video" in the More menu blanks every remote video).
   const VIDEO_NAME = /^(start|stop)( my)? video$/i;
   function videoButton() {
-    const real = document.querySelector("#foot-bar .send-video-container__btn");
-    if (real) return real;
+    const own = document.querySelector("#foot-bar .send-video-container__btn")
+      || document.querySelector(".minimize-widget__footer .send-video-container__btn");
+    if (own) return own;
     const footer = document.getElementById("wc-footer");
     if (!footer) return null;
     for (const b of footer.querySelectorAll("button")) {
-      if (VIDEO_NAME.test((b.getAttribute("aria-label") || "").trim()) || VIDEO_NAME.test((b.textContent || "").trim())) return b;
+      if (VIDEO_NAME.test((b.getAttribute("aria-label") || "").trim())) return b;
     }
     return null;
   }
-  // {on, label} when the button says what the camera does; usable: false beside them when the button cannot be pressed now
-  // (while video starts it is aria-disabled and ignores clicks); {on: null, usable: false, label} when it is there but says
-  // just "Video" (the camera is not usable); {on: null, label: null} with no button on the screen.
+  // Zoom names the button "start my video" / "stop my video" only while it can use a camera; with none found, the camera
+  // blocked, or video disabled by the host it is just "Video" (usable: false, on unknown). aria-disabled is "true" while
+  // the video encoder starts and while a switch is in progress, and a click then does nothing.
   bridge.video = function () {
     const b = videoButton();
-    if (!b) return { on: null, label: null };
+    if (!b) return { on: null, usable: false, label: null, disabled: false };
     const label = (b.getAttribute("aria-label") || b.textContent || "").trim();
-    const name = label.toLowerCase();
-    const stop = name.includes("stop"), start = name.includes("start");
-    if (stop === start) return { on: null, usable: false, label: label };
-    if (b.getAttribute("aria-disabled") === "true") return { on: stop, usable: false, label: label };
-    return { on: stop, label: label };
+    const disabled = b.getAttribute("aria-disabled") === "true";
+    const named = VIDEO_NAME.exec(label);
+    if (!named) return { on: null, usable: false, label: label, disabled: disabled };
+    return { on: named[1].toLowerCase() === "stop", usable: true, label: label, disabled: disabled };
   };
-  // Press the button only when Zoom's state differs from the wanted one; settle on what the button says afterwards.
-  bridge.setVideo = function (on) {
+  const NO_BUTTON = "Zoom's camera button is not on the screen yet; try again in a moment";
+  // Press the button only when Zoom's state differs: wait for the button to be there and to name a usable camera
+  // (presentMs: the footer and Zoom's camera list arrive a moment after connected), wait for Zoom to enable it (readyMs),
+  // press once, and wait for Zoom to switch (switchMs, disabled meanwhile). Whatever does not happen is said in words:
+  // an unchanged state is never a success.
+  bridge.setVideo = function (on, waits) {
+    const want = !!on;
+    const readyMs = (waits && waits.readyMs) || 8000;
+    const switchMs = (waits && waits.switchMs) || 10000;
+    const presentMs = (waits && waits.presentMs) || 1500;
     return new Promise((resolve, reject) => {
-      const before = bridge.video();
-      if (before.on === null) { reject(new Error("Zoom's camera button is not on the screen yet; try again in a moment")); return; }
-      if (before.on === !!on) { resolve(before.on); return; }
-      if (before.usable === false) { reject(new Error("Zoom's camera button is not ready yet; try again in a moment")); return; }
-      videoButton().click();
-      let tries = 0;
-      const settle = () => {
-        const now = bridge.video();
-        if (now.on === !!on || tries++ >= 20) { resolve(now.on === null ? before.on : now.on); return; }
-        setTimeout(settle, 100);
+      if (bridge.video().on === want) { resolve(want); return; }
+      let pressed = false;
+      const start = Date.now();
+      let deadline = start + readyMs;
+      const step = () => {
+        const v = bridge.video();
+        if (v.on === want) { resolve(want); return; }
+        if (v.label === null || !v.usable) {   // not there yet, or no camera Zoom can use yet: give it presentMs
+          if (Date.now() - start >= presentMs) { reject(new Error(v.label === null ? NO_BUTTON : "Zoom cannot use the camera right now")); return; }
+          setTimeout(step, 100);
+          return;
+        }
+        if (!pressed && !v.disabled) {
+          videoButton().click();
+          pressed = true;
+          deadline = Date.now() + switchMs;
+        } else if (Date.now() >= deadline) {
+          reject(new Error(pressed ? "Zoom did not switch the camera" : "Zoom's camera button is still starting; try again in a moment"));
+          return;
+        }
+        setTimeout(step, 100);
       };
-      setTimeout(settle, 100);
+      step();
     });
   };
   // An error, or an answer with no list in it, is read as the last list was: a moment's trouble is not everyone leaving.
@@ -167,12 +195,13 @@
     }
     return null;
   }
-  // `videoOn` is what the user's record says of the camera, for a button that cannot say it itself.
+  // `videoOn` is what the user's record says of the camera, for a button that cannot say it itself. The camera is usable
+  // while Zoom's button names a camera it can use and takes a press (not disabled: video starting, a switch in progress).
   function buttonsSeen(videoOn) {
     const out = {};
     const video = bridge.video();
     if (video.label !== null) {
-      out.camera = video.usable === false ? { on: video.on !== null ? video.on : videoOn, usable: false } : { on: video.on };
+      out.camera = video.usable && !video.disabled ? { on: video.on } : { on: video.on !== null ? video.on : videoOn, usable: false };
     }
     for (const name of Object.keys(BUTTONS)) {
       const b = findButton(name);
@@ -186,22 +215,21 @@
   }
   // The whole meeting as Zoom has it. Zoom's records say userId, userName, muted, audio, video, raiseHand, isHost, isCoHost
   // (sometimes ""), isGuest, isHold (in the waiting room) and self; the older names stay as fallbacks. What a record leaves
-  // out is not read as off: the last known mute stays, and a camera nobody speaks of is unknown (null).
+  // out is not read as off: the room's mute is the last Zoom said (null while it has said nothing), video comes from the
+  // footer's button, else from the record, and a camera nobody speaks of is unknown (null).
   bridge.readMeeting = async function () {
     const list = await attendees();       // may wait for Zoom: the user's record is read after it, so it is as new as the read's end
     const user = await currentUser();
     const heardMuted = pick(user, ["muted", "bMuted", "isMuted"]);
+    const recorded = pick(user, ["video", "bVideoOn", "videoOn", "isVideoOn"]);
     const video = bridge.video();
-    const heardVideo = video.on !== null ? video.on : pick(user, ["video", "bVideoOn", "videoOn", "isVideoOn"]);
-    const id = pick(user, ["userId"]);
-    const name = pick(user, ["userName", "displayName"]);
-    if (heardMuted !== undefined) bridge.muted = !!heardMuted;
-    if (id !== undefined && (bridge.userId === null || bridge.userId === undefined)) { bridge.userId = id; applyPendingMute(); }
-    if (name !== undefined && !bridge.userName) bridge.userName = String(name);
+    if (known(heardMuted)) bridge.muted = !!heardMuted;
+    takeUser(user);
+    applyPendingMute();                   // the join's mic-off default, if it waited for the id this record gives
     const me = {
-      userId: id === undefined ? bridge.userId : id,
-      muted: heardMuted === undefined ? bridge.muted : !!heardMuted,
-      videoOn: heardVideo === undefined ? null : !!heardVideo,
+      userId: bridge.userId,
+      muted: known(heardMuted) ? !!heardMuted : bridge.muted,
+      videoOn: video.on !== null ? video.on : (known(recorded) ? !!recorded : null),
       isHost: !!pick(user, ["isHost", "bHost"]),
       isCoHost: !!pick(user, ["isCoHost", "isCohost", "bCoHost"]),
       raisedHand: !!pick(user, ["raiseHand", "bRaiseHand", "isHandRaised", "bHandRaised"]),
@@ -220,18 +248,25 @@
   };
   bridge._recording = false;
   bridge._layout = null;
-  // The current user's own part of it, as the first version of the bridge answered.
+  // The current user's own part of it, as the first version of the bridge answered: mute and video null when Zoom has not
+  // said, never a guess.
   bridge.readState = async function () {
     const m = await bridge.readMeeting();
     return Object.assign({}, m.me, { keys: m.keys });
   };
-  // What the page sees, for pinning Zoom's real field names and button wording from a device.
+  // What the page sees, for pinning Zoom's real field names and button wording from a device: the footer's buttons only.
   bridge.diagnostics = async function () {
     const state = await bridge.readState();
-    const buttons = Array.from(document.querySelectorAll("button")).map((b) => ({
-      label: (b.getAttribute("aria-label") || "").trim(), text: (b.textContent || "").trim().slice(0, 40),
-    })).filter((b) => b.label || b.text);
-    return { user_keys: state.keys, state: state, buttons: buttons, page: document.title };
+    const buttons = [];
+    const footer = document.getElementById("wc-footer");
+    for (const b of footer ? footer.querySelectorAll("button") : []) {
+      const label = (b.getAttribute("aria-label") || "").trim();
+      const text = (b.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
+      if (!label && !text) continue;
+      buttons.push(text && text !== label ? { label: label, text: text } : { label: label });
+      if (buttons.length >= 40) break;
+    }
+    return { user_keys: state.keys, state: state, video: bridge.video(), buttons: buttons, page: document.title };
   };
   // A change Zoom makes (the host muting the room, someone raising a hand, a person joining, recording starting) reaches
   // the device as a "state" event: the whole meeting is read on every such change and every five seconds, and reported
@@ -271,14 +306,15 @@
     return syncing;
   }
   bridge._sync = syncState;      // read now and report what changed: resolves when done, rejects when the last read failed
-  // Zoom calls its listeners from inside its own state reducer, where getCurrentUser throws: a listener only queues the
-  // read, and a burst of changes is read once, 50 ms after the first of them.
+  // Zoom calls its listeners from inside its own state reducer, where getCurrentUser throws ("Minified Redux error #3"): a
+  // listener only queues the read, and a burst of changes is read once, 50 ms after the first of them.
   let syncTimer = null;
   function queueSync() {
     if (syncTimer !== null) return;
     syncTimer = setTimeout(() => { syncTimer = null; syncState().catch(() => {}); }, 50);
   }
-  // The five-second read is one timer for the whole page: a reconnect does not start another.
+  // The five-second read is one timer for the whole page, however often Zoom reconnects, and it never waits on the first
+  // read: a first read that fails still leaves the five-second one running.
   let pollTimer = null;
   function startPolling() {
     if (pollTimer === null) pollTimer = setInterval(() => { syncState().catch(() => {}); }, 5000);
@@ -288,7 +324,7 @@
   // builds the current user's record from its roster, so the first record can have no id), and only once. It is an action,
   // so the meeting is read again once Zoom has answered it: a read that found the id has the record from before the mute.
   function applyPendingMute() {
-    if (bridge._pendingMute && bridge.userId !== null && bridge.userId !== undefined) {
+    if (bridge._pendingMute && known(bridge.userId)) {
       bridge._pendingMute = false;
       bridge.mute(true).catch(() => {}).then(() => queueSync());
     }
@@ -298,7 +334,9 @@
     if (bridge.state === "connected") return;
     const finish = () => {
       report("connected", "");
-      bridge._pendingMute = params.micOn === false;
+      // The room's mic-off default is armed once per join: a reconnect must not undo an unmute the table made since. Armed,
+      // it waits for the room's id, across a reconnect too.
+      if (!bridge.mutedAtJoin) { bridge.mutedAtJoin = true; bridge._pendingMute = params.micOn === false; }
       applyPendingMute();
       syncState().catch(() => {});
       startPolling();
@@ -306,11 +344,8 @@
     ZoomMtg.getCurrentUser({
       success: (result) => {
         const user = result && result.result && result.result.currentUser;
-        if (user) {   // {} this early: readMeeting fills in what is missing
-          if (user.userId !== undefined) bridge.userId = user.userId;
-          if (user.userName !== undefined) bridge.userName = String(user.userName);
-          if (user.muted !== undefined) bridge.muted = !!user.muted;
-        }
+        takeUser(user);   // a few fields and no user this early: readMeeting fills in what is missing
+        if (user && known(user.muted)) bridge.muted = !!user.muted;
         finish();
       },
       error: finish,

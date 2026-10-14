@@ -83,6 +83,8 @@ class StubMeeting:
         self.set_state(MeetingState.IDLE)
 
     async def toggle_mute(self):
+        if getattr(self, "fail_mute", None) is not None:
+            raise self.fail_mute
         self.muted = not self.muted
         if self.current_meeting:
             self.current_meeting.is_muted = self.muted
@@ -97,6 +99,8 @@ class StubMeeting:
         return self.camera_on
 
     async def diagnostics(self):
+        if getattr(self, "fail_diagnostics", None) is not None:
+            raise self.fail_diagnostics
         return {"user_keys": ["userId", "muted"], "buttons": [], "state": {"muted": self.muted}}
 
 
@@ -630,6 +634,46 @@ class TestLeaveMuteCamera:
         meeting.fail_camera = RuntimeError("Target page, context or browser has been closed")
         resp = await client.post("/api/meeting/camera", json={})
         assert resp.status == 409 and "camera" in (await resp.json())["error"]
+
+    async def test_a_mute_zoom_refuses_answers_in_zooms_words(self, client_factory, caplog):
+        """Seen in the test meeting: the table got "Could not change the microphone: Page.evaluate: Error: Host does not
+        allow participants to unmute (code 3008)". The provider now words it; the route passes its first line on."""
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_mute = MeetingControlError("Host does not allow participants to unmute (code 3008)\n    at the page's stack")
+        resp = await client.post("/api/meeting/mute", json={})
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Host does not allow participants to unmute (code 3008)"
+        meeting.fail_mute = RuntimeError("Not in a meeting\nmore lines")      # the meeting ended as the tap came in
+        resp = await client.post("/api/meeting/mute", json={})
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Could not change the microphone: Not in a meeting"
+        [record] = [r for r in caplog.records if r.levelname == "WARNING" and "microphone" in r.getMessage()]
+        assert record.exc_info is not None                                    # the stack goes to the log, not the table
+
+    async def test_a_camera_fault_answers_with_its_first_line(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_camera = MeetingControlError("Zoom did not switch the camera\nsecond line")
+        resp = await client.post("/api/meeting/camera", json={})
+        assert resp.status == 409 and (await resp.json())["error"] == "Zoom did not switch the camera"
+
+    async def test_diagnostics_as_a_meeting_ends_answer_in_words_not_a_500(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_diagnostics = RuntimeError("Not in a meeting")
+        resp = await client.get("/api/meeting/diagnostics")
+        assert resp.status == 409 and (await resp.json())["error"] == "Could not read the meeting page: Not in a meeting"
+        meeting.fail_diagnostics = MeetingControlError("Could not read the meeting page: the meeting page did not answer within 10 seconds")
+        resp = await client.get("/api/meeting/diagnostics")
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Could not read the meeting page: the meeting page did not answer within 10 seconds"
 
     async def test_meeting_diagnostics_are_served_in_a_meeting(self, client_factory):
         meeting = StubMeeting()

@@ -54,6 +54,22 @@ async def join_calls(provider):
     return [c[1] for c in await provider._page.evaluate("window.__zoomCalls") if c[0] == "join"]
 
 
+async def mute_calls(provider):
+    """What the room asked Zoom's mute for, in order (True: mute)."""
+    return [c[1]["mute"] for c in await provider._page.evaluate("window.__zoomCalls") if c[0] == "mute"]
+
+
+def client(**flags):
+    """The stub with Zoom's web-client labels ("start my video" / "stop my video", text "Video") and the given flags."""
+    return (STUB_JS + "window.ZoomMtg._behaviour.labelStyle = 'client';"
+            + "".join(f"window.ZoomMtg._behaviour.{name} = {json.dumps(value)};" for name, value in flags.items()))
+
+
+# Zoom's record before its attendee list has the room: a few fields, no user, no mute, no video.
+NO_RECORD = ("window.ZoomMtg.getCurrentUser = function (opts) { opts.success && opts.success({ result: { currentUser: "
+             "{ isOriginhost: false, isAlternativeHost: false, raiseHand: false, isHold: false } } }); };")
+
+
 class TestJoin:
     async def test_joins_as_the_room_user_and_connects(self):
         api = FakeApi()
@@ -247,21 +263,116 @@ class TestReviewFixes:
         finally:
             await shutdown(provider)
 
-    async def test_the_wanted_mic_and_camera_are_applied_at_join_in_both_directions(self):
-        """A meeting that starts the room muted with video off (the host's settings) gets the room's wanted state:
-        the fault seen in the test meeting, where the room joined muted and dark and the table said otherwise."""
+    async def test_at_join_the_camera_follows_the_room_and_a_host_mute_on_entry_stays(self):
+        """A meeting that starts the room muted with video off (the host's settings): the camera comes on, as the room
+        wants it, and the room stays muted. Unmuting it hung on whether the host's mute landed before or after the join
+        looked; now the room never unmutes itself, and the table offers Unmute, one tap away."""
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true; window.ZoomMtg._behaviour.videoOffOnEntry = true;")
         try:
             info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
-            assert info.is_muted is False and info.is_camera_on is True
+            assert info.is_muted is True and info.is_camera_on is True
             assert await provider._page.get_attribute("#stub-video", "aria-label") == "stop my video"
-            assert [c["mute"] for c in await provider._page.evaluate("window.__zoomCalls.filter(c => c[0] === 'mute').map(c => c[1])")] == [False]
+            assert await mute_calls(provider) == []                      # the room did not unmute itself
+            assert await provider.toggle_mute() is False                 # Unmute, one tap away
+        finally:
+            await shutdown(provider)
+
+    async def test_at_join_a_room_that_should_start_muted_is_muted(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK, mic_on=False)
+            assert info.is_muted is True and await provider._page.evaluate("window.ZoomMtg._muted") is True
+            assert set(await mute_calls(provider)) == {True}
+        finally:
+            await shutdown(provider)
+
+    async def test_the_camera_wanted_on_at_join_waits_for_zooms_button_to_take_the_press(self):
+        """Zoom's video button is disabled while its video encoder starts, two or three seconds after connecting, and a
+        press then does nothing: the room joined dark. The join now waits for the button, and the camera comes on."""
+        provider = await provider_for(api=FakeApi(), stub=client(videoOffOnEntry=True, videoStartsAfterMs=1000))
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True)
+            assert info.is_camera_on is True
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == "stop my video"
+            assert await provider._page.evaluate("window.__videoClicks") == 1
+        finally:
+            await shutdown(provider)
+
+    async def test_without_a_usable_camera_the_status_says_off_and_a_tap_says_why(self):
+        """No camera, the camera blocked, or video disabled by the host: Zoom's button says just "Video". The table shows
+        the camera off, as Zoom has it, and a tap answers in words without pressing anything."""
+        provider = await provider_for(api=FakeApi(), stub=client(videoUnusable=True))
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True)
+            assert provider.state == MeetingState.CONNECTED and info.is_camera_on is False
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.toggle_camera()
+            assert str(failure.value) == "Zoom cannot use the camera right now"
+            assert info.is_camera_on is False and await provider._page.evaluate("window.__videoClicks") == 0
+        finally:
+            await shutdown(provider)
+
+    async def test_a_refused_unmute_reaches_the_table_in_zooms_words(self):
+        """Seen in the test meeting: "Could not change the microphone: Page.evaluate: Error: Host does not allow
+        participants to unmute (code 3008)". The table gets Zoom's words alone."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true;")
+        try:
+            await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { window.ZoomMtg.mute = (o) => o.error({ errorCode: 3008, errorMessage: 'Host does not allow participants to unmute' }); }")
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.toggle_mute()
+            assert str(failure.value) == "Host does not allow participants to unmute (code 3008)"
+            assert provider.current_meeting.is_muted is True and provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_mute_takes_what_zoom_has_afterwards_not_what_was_asked(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { window.ZoomMtg.mute = (o) => o.success(); }")   # Zoom answers, and nothing changes
+            assert await provider.toggle_mute() is False
+            assert provider.current_meeting.is_muted is False
+        finally:
+            await shutdown(provider)
+
+    async def test_a_control_the_page_never_answers_is_answered_in_words(self):
+        provider = await provider_for(api=FakeApi())
+        provider.PAGE_CALL_TIMEOUT_S = 0.5
+        try:
+            await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { window.ZoomMtg.mute = () => {}; }")   # Zoom never calls back
+            with pytest.raises(MeetingControlError) as failure:
+                await asyncio.wait_for(provider.toggle_mute(), timeout=5)
+            assert str(failure.value) == "Could not change the microphone: the meeting page did not answer within 0.5 seconds"
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_join_is_not_held_by_a_page_call_that_never_answers(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg.mute = () => {};")   # Zoom never answers a mute
+        provider.PAGE_CALL_TIMEOUT_S = 0.5
+        try:
+            info = await asyncio.wait_for(provider.join_meeting(LINK, mic_on=False), timeout=10)
+            assert provider.state == MeetingState.CONNECTED and info.is_muted is False   # what Zoom has: the mic is live
+        finally:
+            await shutdown(provider)
+
+    async def test_a_join_starts_from_its_own_wanted_state_never_the_last_meetings(self):
+        """Where Zoom has not said (no button yet, no record yet), the status is what this join wanted, not what the
+        last meeting ended with."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;" + NO_RECORD)
+        provider._muted, provider._camera_on = True, False                   # how the last meeting ended
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
+            assert info.is_muted is False and info.is_camera_on is True
         finally:
             await shutdown(provider)
 
     async def test_entry_state_is_read_from_zoom_not_assumed(self):
         """When Zoom will not turn the video on, the status says off: what Zoom has, never what the room wanted."""
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.videoOffOnEntry = true; window.ZoomMtg._behaviour.videoStuckOff = true;")
+        provider.VIDEO_SWITCH_MS = 300                                       # the wait for a switch that never comes, shortened
         try:
             info = await provider.join_meeting(LINK, camera_on=True, mic_on=True)
             assert info.is_camera_on is False
@@ -298,8 +409,10 @@ class TestReviewFixes:
 
     async def test_the_mic_off_default_survives_a_roster_that_comes_late(self):
         """Zoom's roster, and with it the current user's id, can be a moment late: the join still ends muted when the room
-        wanted the mic off, and the status says what Zoom has."""
-        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 600;")
+        wanted the mic off, and the status says what Zoom has. At 2.5 s the roster comes after the join's first read has
+        given up waiting for it (2 s), so the join's own mute finds no id and is refused: only the page's mic-off default,
+        sent once a later read finds the id, mutes the room."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 2500;")
         try:
             info = await provider.join_meeting(LINK, mic_on=False)
             await asyncio.sleep(0.5)           # whatever the page reported during the join has reached the status by now
@@ -525,14 +638,18 @@ class TestPasscode:
 
 
 class WordsPage:
-    """A page that says the same words to _page_words and has no toolbar, or one whose video button says Stop Video."""
+    """A page that says the same words to _page_words and has no toolbar, or one whose video button has the label given
+    ("Stop Video"; just "Video" when Zoom has no usable camera)."""
 
-    def __init__(self, words, toolbar=False):
+    def __init__(self, words, toolbar=None):
         self.words, self.toolbar = words, toolbar
 
     async def evaluate(self, script, *args):
         if "crystalMeet.video" in script:                               # the bridge's reading of the client's video button
-            return {"on": True, "label": "Stop Video"} if self.toolbar else {"on": None, "label": None}
+            if self.toolbar is None:
+                return {"on": None, "usable": False, "label": None, "disabled": False}
+            named = self.toolbar.lower() in ("start video", "stop video")
+            return {"on": self.toolbar.lower() == "stop video" if named else None, "usable": named, "label": self.toolbar, "disabled": False}
         return self.words
 
 
@@ -562,8 +679,15 @@ class TestPasscodeWordsDuringTheWait:
     async def test_the_deadline_still_takes_the_meeting_controls_over_the_words(self):
         """A meeting whose toolbar is up is connected, whatever its page says: the deadline looks for that first, as it always did."""
         provider = self.waiting("Join parameters: password are invalid!", connect_timeout_s=0.3)
-        provider._page = WordsPage("Join parameters: password are invalid!", toolbar=True)
+        provider._page = WordsPage("Join parameters: password are invalid!", toolbar="Stop Video")
         provider.PASSCODE_CHECK_S = 5                                   # as shipped: the deadline comes before the first reading
+        await provider._wait_for_connection()
+
+    async def test_a_video_button_that_says_only_video_is_the_toolbar_too(self):
+        """Zoom names the button just "Video" when it has no usable camera: the meeting's controls are on the screen all the same."""
+        provider = self.waiting("In the meeting", connect_timeout_s=0.3)
+        provider._page = WordsPage("In the meeting", toolbar="Video")
+        provider.PASSCODE_CHECK_S = 5
         await provider._wait_for_connection()
 
     async def test_the_waiting_room_is_not_read_for_a_complaint(self):
@@ -573,6 +697,60 @@ class TestPasscodeWordsDuringTheWait:
         asyncio.get_running_loop().call_later(0.3, provider._events.put_nowait, ("connected", ""))
         await provider._wait_for_connection()                           # about six readings' worth of waiting, none made
         assert provider.state == MeetingState.IN_LOBBY
+
+
+class BridgePage:
+    """A page whose bridge answers with Zoom's state as given and records what it was asked to do (no browser)."""
+
+    def __init__(self, muted, video_on):
+        self.state = {"muted": muted, "videoOn": video_on}
+        self.calls = []
+
+    async def evaluate(self, script, arg=None):
+        if "readState" in script:
+            return dict(self.state)
+        if ".mute(" in script:
+            self.calls.append(("mute", arg))
+            self.state["muted"] = bool(arg)
+            return bool(arg)
+        if "setVideo" in script:
+            self.calls.append(("setVideo", arg[0]))
+            self.state["videoOn"] = arg[0]
+            return arg[0]
+        raise AssertionError(f"unexpected page call: {script}")
+
+
+class TestTheRoomsDefaultsAtJoin:
+    """The controller's ruling: at join the camera follows the room's default both ways, the microphone only towards
+    muted. A room the host muted on entry stays muted whenever the host's mute landed, and Unmute is one tap away."""
+
+    async def applied(self, zoom_muted, zoom_video, mic_on, camera_on):
+        provider = ZoomSdkProvider(SDK_ONLY)
+        provider._page = BridgePage(zoom_muted, zoom_video)
+        zoom = await provider._read_state_from_zoom()
+        await provider._apply_wanted_state(zoom, camera_on=camera_on, mic_on=mic_on)
+        return provider._page.calls
+
+    @pytest.mark.parametrize("zoom_muted, mic_on, calls", [
+        (True, True, []),                    # muted by the host on entry, the mic wanted on: it stays muted
+        (False, True, []),
+        (True, False, []),
+        (False, False, [("mute", True)]),    # live, the mic wanted off: muted
+        (None, False, [("mute", True)]),     # Zoom has not said: muted, the safe way
+        (None, True, []),
+    ])
+    async def test_the_microphone_is_set_towards_muted_only(self, zoom_muted, mic_on, calls):
+        assert await self.applied(zoom_muted, True, mic_on, True) == calls
+
+    @pytest.mark.parametrize("zoom_video, camera_on, calls", [
+        (False, True, [("setVideo", True)]),
+        (True, False, [("setVideo", False)]),
+        (True, True, []),
+        (False, False, []),
+        (None, True, []),                    # no button and no record: nothing to press
+    ])
+    async def test_the_camera_is_set_both_ways(self, zoom_video, camera_on, calls):
+        assert await self.applied(False, zoom_video, True, camera_on) == calls
 
 
 class TestPasscodeErrors:

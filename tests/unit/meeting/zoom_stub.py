@@ -1,26 +1,46 @@
 """
 A stand-in for Zoom's Meeting SDK (window.ZoomMtg) so the page and the provider
-can be driven in the venv's Chromium without reaching Zoom. Behaviour flags:
-window.ZoomMtg._behaviour = {waiting, errorFor, errorCode, errorMessage, neverConnect, delayMs, pageSays, ...}; join
-fails with {errorCode, errorMessage} for the meeting number errorFor, and pageSays is text join puts on the page, as
-Zoom's own dialogs do. labelStyle "client" (the default) names the video button the way Zoom's web client does
-(aria-label "start my video" / "stop my video"; its visible text is always "Video"), "sdk" the way other builds do
-("Start Video" / "Stop Video"); noToolbar leaves the buttons out; videoStuckOff makes the video button ignore clicks.
-window.ZoomMtg._setMuted(bool) is the host muting or unmuting the room: it changes what getCurrentUser says and fires
-onUserUpdate, as Zoom does. window.__videoClicks counts clicks on the video button.
+can be driven in the venv's Chromium without reaching Zoom. Where the bridge
+depends on Zoom's behaviour it mirrors Zoom 6.5.0 as its own bundle has it:
 
-The rest of the meeting: role (participant, co-host, host), attendees, recording, refuseHostCalls; _setAttendee(id,
-patch), _setRecording(on); the client's hand, reactions, captions, view and self-view buttons under .footer (the real
-client's #wc-footer > #foot-bar), with window.__presses logging each press; host calls are recorded and refused for a
-participant. getCurrentUser and getAttendeeslist answer in Zoom's own field names (userId, userName, muted, audio,
-video, raiseHand, isHost, isCoHost - "" when not -, isGuest, isHold, self) while the stub keeps its own flags (bVideoOn,
-bRaiseHand, waiting). onUserUpdate, onUserJoin and onUserLeave are fired from inside what Zoom calls its reducer, where
-both calls throw, so a listener that reads the meeting at once fails here as it does there. onRecordingChange is an
-effect, not a reducer: it sends {recording: "stop" | "recording" | "pause", hasLocalRecord} and fires once, with "stop",
-as the meeting UI mounts. Zoom's getAttendeeslist calls neither callback while its roster is empty: silentAttendees
-never answers, rosterAfterMs stays silent until that long after join; and since Zoom builds getCurrentUser's record
-from that roster, rosterAfterMs also gives an empty record, with no userId, until then. window.__pollFns holds the
-page's 5000 ms setInterval callbacks (a test can call one as the tick), window.__rejections its unhandled rejections.
+- getCurrentUser answers with the SDK's public record of the room: {userId, self, userName, muted, audio, isHost,
+  isCoHost ("" when not), isGuest, isHold, video, raiseHand, ...}. The store's own names (bVideoOn, bRaiseHand) are not in
+  it. getAttendeeslist answers with every participant's record in the same names, the room's first.
+- Zoom builds the room's record from its roster, and getAttendeeslist calls neither callback while the roster is empty:
+  until the roster has the room, getCurrentUser's record is four fields and no user ({isOriginhost, isAlternativeHost,
+  raiseHand, isHold}: no userId, no mute, no video).
+- Zoom fires onUserUpdate, onUserJoin and onUserLeave from inside its Redux reducer. While those listeners run,
+  getCurrentUser and getAttendeeslist throw "Minified Redux error #3", as Redux's getState does while a reducer runs.
+  onRecordingChange is an effect, not a reducer: it sends {recording: "stop" | "recording" | "pause", hasLocalRecord} and
+  fires once, with "stop", as the meeting UI mounts.
+- The Client View's footer is <div id="wc-footer"><div id="foot-bar">, and its video button is
+  button.send-video-container__btn (id stub-video here), whose visible text is always "Video". labelStyle "client" (the
+  default) names it as Zoom's web client does: the aria-label is "start my video" or "stop my video". labelStyle "sdk"
+  names it the way other builds do: "Start Video" or "Stop Video". aria-disabled is always set. After it come the
+  client's hand, reactions (a menu), captions, view (a menu) and self-view buttons; window.__presses logs their presses.
+
+Behaviour flags, window.ZoomMtg._behaviour = {...}:
+- waiting, errorFor, errorCode, errorMessage, neverConnect, delayMs, endAfterMs, pageSays, silentConnect, statusField: the
+  join's course. Join fails with {errorCode, errorMessage} for the meeting number errorFor, and pageSays is text join puts
+  on the page, as Zoom's own dialogs do.
+- mutedOnEntry and videoOffOnEntry: the room's state when the meeting starts.
+- noToolbar leaves the footer out. videoStuckOff makes the video button ignore clicks.
+- videoStartsAfterMs keeps the video button aria-disabled="true" for that long after connect and after each press it
+  takes (the camera switches at the end), and the button ignores clicks meanwhile, as Zoom's onClick does while its video
+  encoder starts or an action is in progress.
+- videoUnusable is Zoom without a usable camera (none found, permission denied, video disabled by the host): the
+  button's aria-label and text are just "Video", the record's video is false, and a click does nothing.
+- role (participant, co-host, host), attendees (the other participants, in the stub's own flags bVideoOn, bRaiseHand and
+  waiting), recording and refuseHostCalls: the rest of the meeting. Host calls (muteAll, record, lockMeeting, putOnHold,
+  expel, endMeeting) are recorded in window.__zoomCalls and refused for a participant.
+- silentAttendees: getAttendeeslist never answers. rosterAfterMs: it stays silent until that long after join, and
+  getCurrentUser gives the four-field record until then.
+
+window.ZoomMtg._setMuted(bool) is the host muting or unmuting the room, _setAttendee(id, patch) a change to another
+participant, _setRecording(on) recording starting or stopping: each changes what Zoom says and fires Zoom's event. mute()
+and a camera switch fire onUserUpdate too, as Zoom's roster update does. window.__videoClicks counts every click on the
+video button, the ignored ones too. window.__pollFns holds the page's 5000 ms setInterval callbacks (a test can call one
+as the tick), window.__rejections its unhandled rejections.
 """
 
 STUB_JS = r"""
@@ -39,28 +59,44 @@ window.ZoomMtg = {
   _behaviour: { waiting: false, errorFor: "999", errorCode: 3712, errorMessage: "This meeting ID is not valid",
                 neverConnect: false, delayMs: 50, endAfterMs: 0, pageSays: "",
                 mutedOnEntry: false, videoOffOnEntry: false, silentConnect: false, statusField: "meetingStatus",
-                labelStyle: "client", noToolbar: false, videoStuckOff: false,
+                labelStyle: "client", noToolbar: false, videoStuckOff: false, videoStartsAfterMs: 0, videoUnusable: false,
                 role: "participant", recording: false, refuseHostCalls: true, silentAttendees: false, rosterAfterMs: 0,
                 attendees: [{ userId: 16777217, userName: "Ann Lee", muted: false, bVideoOn: true, bRaiseHand: false, isHost: true },
                             { userId: 16777218, userName: "Raj Patel", muted: true, bVideoOn: false, bRaiseHand: true, isHost: false }] },
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
-  _attendees: [], _dispatching: false, _joinedAt: 0,
+  _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
-  _setMuted(muted) { this._muted = !!muted; this._fire("onUserUpdate", { userId: 16777216 }); },
+  _setMuted(muted) { this._muted = !!muted; this._fire("onUserUpdate", { userId: 16777216, muted: this._muted }); },
   _setAttendee(id, patch) { const a = this._attendees.find((x) => x.userId === id); if (a) Object.assign(a, patch); this._fire("onUserUpdate", { userId: id }); },
   _setRecording(on) { this._behaviour.recording = !!on; this._fire("onRecordingChange", { recording: on ? "recording" : "stop", hasLocalRecord: false }); },
-  _me() { const b = this._behaviour; return { userId: 16777216, userName: "Room 1", muted: this._muted, audio: "computer", video: this._videoOn,
-           isHost: b.role === "host", isCoHost: b.role === "co-host" || "", isGuest: false, raiseHand: this._hand, isHold: false, self: true }; },
+  // The SDK's public record of the room (its getCurrentUser maps the store's attendee to these names).
+  _me() {
+    const b = this._behaviour;
+    return { userId: 16777216, self: true, userName: "Room 1", muted: this._muted, audio: "computer", isHost: b.role === "host",
+             isCoHost: b.role === "co-host" || "", isGuest: false, isHold: false, persistentID: "", participantUUID: "",
+             customerKey: "", video: this._videoOn, raiseHand: this._hand, sharingStatus: 0, isBotUser: false,
+             botBrandName: "", botAuthorizerName: "", isOriginhost: false, isAlternativeHost: false };
+  },
+  // Another participant's record, in the same names, from the stub's own flags.
   _record(a) { return { userId: a.userId, userName: a.userName, muted: a.muted, audio: "computer", video: !!a.bVideoOn,
            isHost: !!a.isHost, isCoHost: "", isGuest: false, raiseHand: !!a.bRaiseHand, isHold: !!a.waiting, self: false }; },
-  _labelVideo(button) {
-    const on = this._videoOn;
+  _paintVideo() {
+    const button = this._videoButton, b = this._behaviour, on = this._videoOn;
+    if (!button) return;
+    let label;
+    if (b.videoUnusable) label = "Video";
+    else if (b.labelStyle === "client") label = on ? "stop my video" : "start my video";
+    else label = on ? "Stop Video" : "Start Video";
+    button.setAttribute("aria-label", label);
     button.textContent = "Video";
-    if (this._behaviour.labelStyle === "client") {
-      button.setAttribute("aria-label", on ? "stop my video" : "start my video");
-    } else {
-      button.setAttribute("aria-label", on ? "Stop Video" : "Start Video");
-    }
+    button.setAttribute("aria-disabled", String(this._videoBusy));
+  },
+  // Disabled for ms (the encoder starting, a press in progress), then whatever comes next.
+  _busyVideo(ms, then) {
+    if (ms <= 0) { if (then) then(); this._paintVideo(); return; }
+    this._videoBusy = true;
+    this._paintVideo();
+    setTimeout(() => { this._videoBusy = false; if (then) then(); this._paintVideo(); }, ms);
   },
   _button(bar, id, label, onClick) {
     const b = document.createElement("button"); b.id = id; b.setAttribute("aria-label", label); b.textContent = label;
@@ -81,8 +117,16 @@ window.ZoomMtg = {
     const b = this._behaviour;
     const footer = document.createElement("div"); footer.id = "wc-footer"; footer.className = "footer";
     const bar = document.createElement("div"); bar.id = "foot-bar"; footer.appendChild(bar);
-    const video = document.createElement("button"); video.id = "stub-video"; video.className = "send-video-container__btn"; this._labelVideo(video);
-    video.addEventListener("click", () => { window.__videoClicks += 1; if (b.videoStuckOff) return; this._videoOn = !this._videoOn; this._labelVideo(video); });
+    const video = document.createElement("button"); video.id = "stub-video"; video.className = "footer-button-base__button send-video-container__btn";
+    this._videoButton = video;
+    video.addEventListener("click", () => {
+      window.__videoClicks += 1;
+      if (b.videoUnusable || b.videoStuckOff || this._videoBusy) return;   // Zoom's onClick returns at once
+      this._busyVideo(b.videoStartsAfterMs, () => {
+        this._videoOn = !this._videoOn;
+        this._fire("onUserUpdate", { userId: 16777216, video: this._videoOn });
+      });
+    });
     bar.appendChild(video);
     this._button(bar, "stub-hand", "Raise Hand", (btn) => { this._hand = !this._hand; btn.setAttribute("aria-label", this._hand ? "Lower Hand" : "Raise Hand"); btn.textContent = btn.getAttribute("aria-label"); });
     this._button(bar, "stub-reactions", "Reactions", () => this._menu("stub-reaction-menu",
@@ -93,18 +137,20 @@ window.ZoomMtg = {
       (value) => { this._layout = value; }));
     this._button(bar, "stub-self", "Hide Self View", (btn) => { this._selfHidden = !this._selfHidden; btn.setAttribute("aria-label", this._selfHidden ? "Show Self View" : "Hide Self View"); btn.textContent = btn.getAttribute("aria-label"); });
     document.body.appendChild(footer);
+    this._busyVideo(b.videoStartsAfterMs);   // the encoder starts after connect
   },
   setZoomJSLib(path, av) { window.__zoomCalls.push(["setZoomJSLib", path, av]); },
   preLoadWasm() { window.__zoomCalls.push(["preLoadWasm"]); },
   prepareWebSDK() { window.__zoomCalls.push(["prepareWebSDK"]); },
   inMeetingServiceListener(name, cb) { this._listeners[name] = cb; },
+  // onUserUpdate, onUserJoin and onUserLeave come from inside Zoom's reducer: the store cannot be read while they run.
   _fire(name, data) {
     const listener = this._listeners[name];
     if (!listener) return;
     this._dispatching = ["onUserUpdate", "onUserJoin", "onUserLeave"].includes(name);
     try { listener(data); } finally { this._dispatching = false; }
   },
-  _guard() { if (this._dispatching) throw new Error("Minified Redux error #3"); },
+  _readStore() { if (this._dispatching) throw new Error("Minified Redux error #3"); },
   init(opts) {
     const copy = Object.assign({}, opts); delete copy.success; delete copy.error;
     window.__zoomCalls.push(["init", copy]);
@@ -125,7 +171,7 @@ window.ZoomMtg = {
     }
     if (b.neverConnect) return;
     this._muted = b.mutedOnEntry;
-    this._videoOn = !b.videoOffOnEntry;
+    this._videoOn = !b.videoOffOnEntry && !b.videoUnusable;
     this._attendees = b.attendees.map((a) => Object.assign({}, a));
     this._joinedAt = Date.now();
     window.__videoClicks = 0;
@@ -139,15 +185,16 @@ window.ZoomMtg = {
       if (b.endAfterMs > 0) setTimeout(() => this._status(3), b.endAfterMs);
     }, b.waiting ? 300 : b.delayMs);
   },
+  _listed() { return Date.now() - this._joinedAt >= this._behaviour.rosterAfterMs; },
   getCurrentUser(opts) {
-    this._guard();
-    const early = Date.now() - this._joinedAt < this._behaviour.rosterAfterMs;      // no roster yet, so no record to build it from
-    opts.success && opts.success({ result: { currentUser: early ? {} : this._me() } });
+    this._readStore();
+    const user = this._listed() ? this._me()     // before the roster has the room, the SDK's record of nobody
+      : { isOriginhost: false, isAlternativeHost: false, raiseHand: false, isHold: false };
+    opts.success && opts.success({ result: { currentUser: user } });
   },
   getAttendeeslist(opts) {
-    this._guard();
-    const b = this._behaviour;
-    if (b.silentAttendees || Date.now() - this._joinedAt < b.rosterAfterMs) return;
+    this._readStore();
+    if (this._behaviour.silentAttendees || !this._listed()) return;
     opts.success && opts.success({ result: { attendeesList: [this._me()].concat(this._attendees.map((a) => this._record(a))) } });
   },
   _hostCall(name, args, opts) {
@@ -155,7 +202,13 @@ window.ZoomMtg = {
     if (this._behaviour.role === "participant" && this._behaviour.refuseHostCalls) { opts.error && opts.error({ errorCode: 1, errorMessage: "Not the host" }); return false; }
     opts.success && opts.success(); return true;
   },
-  mute(opts) { window.__zoomCalls.push(["mute", { userId: opts.userId, mute: opts.mute }]); if (opts.userId === 16777216) this._muted = !!opts.mute; else { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.muted = !!opts.mute; } opts.success && opts.success(); },
+  mute(opts) {
+    window.__zoomCalls.push(["mute", { userId: opts.userId, mute: opts.mute }]);
+    if (opts.userId === 16777216) this._muted = !!opts.mute;
+    else { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.muted = !!opts.mute; }
+    this._fire("onUserUpdate", { userId: opts.userId, muted: !!opts.mute });
+    opts.success && opts.success();
+  },
   muteAll(opts) { if (this._hostCall("muteAll", { muteAll: opts.muteAll }, opts)) this._attendees.forEach((a) => { a.muted = !!opts.muteAll; }); },
   record(opts) { if (this._hostCall("record", { record: opts.record }, opts)) this._setRecording(opts.record); },
   lockMeeting(opts) { this._hostCall("lockMeeting", { lockMeeting: opts.lockMeeting }, opts); },

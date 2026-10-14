@@ -10,7 +10,11 @@
   const SCORE_EVERY_MS = 8000;   // with several schools on, the scoreboard strip moves to the next one this often
 
   const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css) ...
-  const NAME_LINES = 2;   // ... and so does a shorter one that would take more lines than this at the large size (fitRoomName)
+  const NAME_LINES = 2;   // ... and so does a shorter one that would take more lines than this at the large size (fitRoomName),
+  const SHORT_NAME_LINES = 1;   // or than this on a short sign
+  // A short sign, 560 px high or less (the 7-inch 800 by 480 panel is one): sign.css gives up detail there, the chip says only the status (the booking's
+  // title is in the Today list beside it), and a room name takes the smaller type as soon as it would take two lines, so that nothing runs off the screen.
+  const shortSign = window.matchMedia("(max-height: 560px)");
   const PHOTO_TIMEOUT_MS = 20 * 1000;   // a photograph not decoded by then counts as failed: a connection gone half open neither answers nor fails
 
   // The backgrounds are photographs the room serves, static/backgrounds/<key>.jpg; "plain" has none. The sign shows the one the
@@ -149,13 +153,13 @@
     const room = el("room-name");
     const name = room.textContent;
     const data = document.body.dataset;
-    const fitted = [name, window.innerWidth, window.innerHeight, data.view, "strip" in data, fontsArrived].join("|");
+    const fitted = [name, window.innerWidth, window.innerHeight, data.view, "strip" in data, fontsArrived].join("|");   // the height decides shortSign too
     if (fitted === nameFit) return;
     nameFit = fitted;
     let long = name.length > LONG_NAME;
     if (!long) {
       room.classList.remove("long");
-      long = Math.round(room.getBoundingClientRect().height / parseFloat(getComputedStyle(room).lineHeight)) > NAME_LINES;
+      long = Math.round(room.getBoundingClientRect().height / parseFloat(getComputedStyle(room).lineHeight)) > (shortSign.matches ? SHORT_NAME_LINES : NAME_LINES);
     }
     room.classList.toggle("long", long);
   }
@@ -202,7 +206,9 @@
       setStatus("occupied", "Booked until " + fmtTime(new Date(current.end_time)), current.title);
     } else if (next && new Date(next.start_time).getTime() - now <= SOON_MS) {
       const minutes = Math.max(0, Math.round((new Date(next.start_time).getTime() - now) / 60000));
-      setStatus("soon", minutes === 0 ? next.title + " is starting" : next.title + " starts in " + plural(minutes, "minute"), fmtTime(new Date(next.start_time)) + " to " + fmtTime(new Date(next.end_time)));
+      const when = minutes === 0 ? "is starting" : "starts in " + plural(minutes, "minute");
+      const chip = shortSign.matches ? (minutes === 0 ? "Starting now" : "Starts in " + plural(minutes, "minute")) : next.title + " " + when;   // a short sign: no title in the chip
+      setStatus("soon", chip, fmtTime(new Date(next.start_time)) + " to " + fmtTime(new Date(next.end_time)));
     } else if (next) {
       setStatus("free", "Free until " + fmtTime(new Date(next.start_time)), "Next: " + next.title);
     } else {
@@ -458,6 +464,7 @@
   }
 
   window.addEventListener("resize", fitRoomName);
+  if (shortSign.addEventListener) shortSign.addEventListener("change", render);   // the chip's words and the name's type follow the sign across 560 px
   if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", () => { fontsArrived += 1; fitRoomName(); });
   el("this-week").addEventListener("click", openWeek);
   el("week-back").addEventListener("click", closeWeek);

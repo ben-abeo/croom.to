@@ -43,7 +43,7 @@
         <label class="visually-hidden" for="link-input">Meeting link or Zoom meeting ID</label>
         <input id="link-input" type="text" inputmode="url" autocomplete="off" spellcheck="false"
                placeholder="Paste a meeting link or a Zoom meeting ID">
-        <button type="button" id="keyboard-toggle" class="button quiet keyboard-toggle" aria-label="Show keyboard" aria-pressed="false">&#9000;</button>
+        <button type="button" id="keyboard-toggle" class="button quiet keyboard-toggle" aria-label="Show keyboard" aria-pressed="false" data-icon="keyboard"></button>
         <button type="submit" class="button primary" data-icon="video">Join</button>
         <input id="passcode-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
                placeholder="Passcode, if the meeting has one" aria-label="Meeting passcode" hidden>
@@ -65,8 +65,8 @@
     <section class="keyboard-section">
       <p class="kicker">Keyboard</p>
       <div class="picker" role="group" aria-label="Key click">
-        <button type="button" id="key-click-on" class="button quiet" aria-pressed="true">Key click on</button>
-        <button type="button" id="key-click-off" class="button quiet" aria-pressed="false">Key click off</button>
+        <button type="button" id="key-click-on" class="button quiet" aria-pressed="true" data-icon="volume">Key click on</button>
+        <button type="button" id="key-click-off" class="button quiet" aria-pressed="false" data-icon="volume-x">Key click off</button>
       </div>
     </section>
   </section>
@@ -92,19 +92,19 @@
               <span></span>
             </div>
             <div class="zoom-buttons">
-              <button type="button" id="zoom-out" class="button quiet" data-zoom="-25">Zoom out</button>
-              <button type="button" id="zoom-in" class="button quiet" data-zoom="25">Zoom in</button>
+              <button type="button" id="zoom-out" class="button quiet" data-zoom="-25" data-icon="zoom-out">Zoom out</button>
+              <button type="button" id="zoom-in" class="button quiet" data-zoom="25" data-icon="zoom-in">Zoom in</button>
             </div>
           </div>
           <div class="camera-right">
             <div id="preset-row" class="presets" hidden></div>
-            <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" hidden>Save</button>
+            <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" data-icon="save" hidden>Save</button>
             <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
             <div id="camera-setup" class="setup" hidden>
               <p class="note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
               <div class="setup-buttons">
-                <button type="button" id="find-stops" class="button quiet">Find the stops</button>
-                <button type="button" id="save-home" class="button primary" disabled>Save as Home</button>
+                <button type="button" id="find-stops" class="button quiet" data-icon="locate">Find the stops</button>
+                <button type="button" id="save-home" class="button primary" data-icon="home" disabled>Save as Home</button>
               </div>
             </div>
           </div>

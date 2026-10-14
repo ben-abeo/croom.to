@@ -43,10 +43,12 @@
     svg.firstChild.setAttribute("href", "#icon-" + name);
     return svg;
   }
-  // A button's content: its icon, if it has one, then its label. The icon is hidden from a screen reader: the label is the name.
+  // A button's content: its icon, if it has one, then its label. The icon is hidden from a screen reader: the label is the name
+  // (a button with an icon and no label, the keyboard toggle, is named by its aria-label).
   function labelWithIcon(node, label, name) {
     node.replaceChildren();
     if (name) node.append(icon(name));
+    if (!label) return;
     const text = document.createElement("span");
     text.textContent = label;
     node.append(text);
@@ -475,7 +477,7 @@
       el("detail").textContent = meetingDetail(m);
       specs = [
         { label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
-        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video-off" : "video", onClick: () => toggle("camera") },
+        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
         leaveSpec(),
       ];
     } else if (m.state === "error") {

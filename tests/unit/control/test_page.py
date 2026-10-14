@@ -315,6 +315,7 @@ SPRITE_ICONS = ["mic", "mic-off", "video", "video-off", "hand", "smile", "captio
                 "record", "lock", "unlock", "door", "x-circle", "volume", "move", "monitor", "settings", "calendar", "back", "check"]
 TV_REMOTE_ICONS = ["tv", "power", "home", "menu", "up", "down", "left", "right", "volume-x", "hash", "info", "list", "play", "pause",
                    "stop", "rewind", "fast-forward", "exit", "return", "pointer", "touchpad", "keyboard"]   # for the TV remote's buttons, which come with another branch
+CAMERA_ICONS = ["zoom-in", "zoom-out", "save", "locate"]   # the camera screen's Zoom in, Zoom out, Save and Find the stops
 DRAWABLE = {"path", "line", "circle", "rect", "polyline", "polygon", "ellipse"}
 
 
@@ -325,7 +326,7 @@ def test_the_icon_sprite_holds_every_symbol_and_each_one_draws_something():
     symbols = list(ElementTree.parse(STATIC_DIR / "icons.svg").getroot().iter(svg + "symbol"))
     ids = [s.get("id") for s in symbols]
     assert len(ids) == len(set(ids)), "a symbol is there twice"
-    assert {f"icon-{name}" for name in SPRITE_ICONS + TV_REMOTE_ICONS} <= set(ids)
+    assert {f"icon-{name}" for name in SPRITE_ICONS + TV_REMOTE_ICONS + CAMERA_ICONS} <= set(ids)
     for symbol in symbols:
         who = symbol.get("id")
         assert [symbol.get(a) for a in ("viewBox", "fill", "stroke", "stroke-width", "stroke-linecap", "stroke-linejoin")] == \
@@ -369,17 +370,18 @@ def test_the_idle_buttons_carry_icons_too(browser):
         page.close()
 
 
-def test_the_mute_camera_and_leave_icons_follow_their_buttons(browser):
+def test_the_mute_and_camera_icons_show_the_state_and_their_labels_the_action(browser):
+    """As Zoom's own buttons do: the picture is what the microphone and the camera are doing now, the words what a tap will do."""
     with PageServer() as server:
         page = open_page(browser, server)
         join_by_id(page)
         page.wait_for_function("document.querySelector('#meeting-actions .button svg use')", timeout=5000)
-        assert drawn_icons(page, "#meeting-actions") == ["Mute: #icon-mic", "Turn camera off: #icon-video-off", "Leave: #icon-phone-off"]
+        assert drawn_icons(page, "#meeting-actions") == ["Mute: #icon-mic", "Turn camera off: #icon-video", "Leave: #icon-phone-off"]   # both are live
         page.click("#meeting-actions button:has-text('Mute')")
         page.wait_for_selector("#meeting-actions button:has-text('Unmute')", timeout=5000)
         page.click("#meeting-actions button:has-text('Turn camera off')")
         page.wait_for_selector("#meeting-actions button:has-text('Turn camera on')", timeout=5000)
-        assert drawn_icons(page, "#meeting-actions") == ["Unmute: #icon-mic-off", "Turn camera on: #icon-video", "Leave: #icon-phone-off"]
+        assert drawn_icons(page, "#meeting-actions") == ["Unmute: #icon-mic-off", "Turn camera on: #icon-video-off", "Leave: #icon-phone-off"]   # both are off
         page.click("#meeting-actions button:has-text('Leave')")
         assert drawn_icons(page, "#meeting-actions")[-1] == "Tap again to leave: #icon-phone-off"   # the second tap keeps its picture
         page.close()
@@ -429,6 +431,10 @@ STATIC_BUTTON_ICONS = [
     ("#open-camera-live", "move", "Camera"), ("#open-upcoming", "calendar", "Upcoming meetings"),
     ("#link-form button[type=submit]", "video", "Join"),
     ("#quieter", "volume", "Quieter"), ("#louder", "volume", "Louder"), ("#speaker-mute", "volume", "Mute speaker"),
+    ("#zoom-out", "zoom-out", "Zoom out"), ("#zoom-in", "zoom-in", "Zoom in"), ("#preset-save-mode", "save", "Save"),
+    ("#find-stops", "locate", "Find the stops"), ("#save-home", "home", "Save as Home"),
+    ("#key-click-on", "volume", "Key click on"), ("#key-click-off", "volume-x", "Key click off"),
+    ("#keyboard-toggle", "keyboard", ""),                                    # the toggle is the picture alone: its name is its aria-label
 ]
 
 
@@ -444,6 +450,35 @@ def test_the_buttons_in_the_page_carry_their_icons_and_keep_their_labels(browser
             assert b.text_content().strip() == label, selector
         backs = page.locator(".back").all()
         assert backs and all(b.locator("svg.icon use").get_attribute("href") == "#icon-back" and b.text_content().strip() == "Back" for b in backs)
+        assert page.get_by_role("button", name="Show keyboard", exact=True).count() == 1       # the toggle still has its name
+        page.close()
+
+
+def test_the_presets_the_pad_and_the_screensaver_picker_keep_their_plain_labels(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.evaluate("window.croomPage.iconsReady")
+        assert page.locator("#arrow-pad .button").count() == 5 and page.locator("#arrow-pad svg").count() == 0   # the pad keeps its arrows
+        presets = page.locator("#preset-row .button")
+        assert presets.count() >= 1 and page.locator("#preset-row svg").count() == 0
+        assert all(label.strip() for label in presets.all_inner_texts())
+        page.click("#back-from-camera")
+        page.click("#open-screensaver")
+        assert page.locator("#screen-picker .button").count() == 4 and page.locator("#screen-picker svg").count() == 0
+        page.close()
+
+
+def test_the_save_button_keeps_its_icon_when_it_changes_its_words(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        assert drawn_icons(page, "#camera-setup") == ["Find the stops: #icon-locate", "Save as Home: #icon-home"]
+        assert drawn_icons(page, ".zoom-buttons") == ["Zoom out: #icon-zoom-out", "Zoom in: #icon-zoom-in"]
+        page.click("#preset-save-mode")
+        page.wait_for_function("document.getElementById('preset-save-mode').innerText.trim() === 'Tap a preset to save it here'", timeout=5000)
+        assert page.locator("#preset-save-mode svg.icon use").get_attribute("href") == "#icon-save"
+        assert page.locator("#preset-save-mode svg.icon").count() == 1
         page.close()
 
 
@@ -495,13 +530,16 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         bar = ["#icon-settings"] if width > 480 else []                      # Options, in the top bar of every idle screen: not on a phone, where the bar is full
-        assert shown_icons(page) == bar + ["#icon-video"]                    # and Join beside the link box
+        assert shown_icons(page) == bar + ["#icon-keyboard", "#icon-video"]  # and the keyboard button and Join beside the link box
         settled(page)
         page.click("#open-options")
-        assert shown_icons(page) == bar + ["#icon-back", "#icon-move", "#icon-monitor"]
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-volume", "#icon-volume-x"]   # the last two are Key click on and off
         settled(page)
         page.click("#open-camera-setup")
-        assert shown_icons(page) == bar + ["#icon-back"]
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-save"]
+        settled(page)
+        page.click("#setup-link")
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-save", "#icon-locate", "#icon-home"]   # with Set up open
         settled(page)
         page.click("#back-from-camera")
         page.click("#open-screensaver")
@@ -510,8 +548,12 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         page.click("#back-from-screensaver")
         page.click("#back-from-options")
         join_by_id(page)
-        assert shown_icons(page) == ["#icon-mic", "#icon-video-off", "#icon-phone-off", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-move", "#icon-calendar"]
+        assert shown_icons(page) == ["#icon-mic", "#icon-video", "#icon-phone-off", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-move", "#icon-calendar"]
         settled(page)
+        page.click("#open-camera-live")
+        assert shown_icons(page) == ["#icon-back", "#icon-zoom-out", "#icon-zoom-in"]    # a meeting's camera screen has no Save or Set up
+        settled(page)
+        page.click("#back-from-camera")
         page.click("#open-upcoming")
         assert shown_icons(page) == ["#icon-back"]
         settled(page)
@@ -556,6 +598,7 @@ def test_a_page_whose_icon_sprite_does_not_come_keeps_its_labels(browser, answer
         assert page.evaluate("window.croomPage.iconsReady") is False
         assert page.locator("#open-options").inner_text().strip() == "Options"
         assert page.locator("#link-form button[type=submit]").inner_text().strip() == "Join"
+        assert page.get_by_role("button", name="Show keyboard", exact=True).count() == 1   # the keyboard button is its name alone, and is still there
         join_by_id(page)
         assert page.locator("#meeting-actions .button").all_inner_texts() == ["Mute", "Turn camera off", "Leave"]
         assert errors == []

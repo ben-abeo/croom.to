@@ -159,6 +159,7 @@ the plan holds the how, step by step with the code.
 | The TV screensaver and the one page on the TV: `TvDisplay` owns the browser, providers borrow its page, the `/tv` page with four styles, `/api/screensaver`, the picker on the room page | [spec](docs/superpowers/specs/2026-10-07-tv-screensaver-and-one-page-design.md) | [plan](docs/superpowers/plans/2026-10-07-tv-screensaver-and-one-page.md) |
 | Sound and camera from the room page: volume through PipeWire, MeetUp framing with timed presets, the idle camera preview on the TV | [spec](docs/superpowers/specs/2026-10-08-sound-and-camera-controls-design.md) | [plan](docs/superpowers/plans/2026-10-08-sound-and-camera-controls.md) |
 | The room page in two modes: an idle screen and a meeting screen behind one view switch, Options with Camera framing and Screensaver, Back on every sub-screen, the ten-minute return to the idle screen, the kiosk at 1.5 times scale, a placeholder location counted as none | [spec](docs/superpowers/specs/2026-10-12-room-page-modes-design.md) | [plan](docs/superpowers/plans/2026-10-12-room-page-modes.md) |
+| The TV remote and the touchpad: the LG C6 over webOS with pairing from the table, Wake-on-LAN and keep-on, every remote key from the table, the d-pad disc as a trackpad for the TV's cursor, a virtual mouse on the room Pi and a full-screen touchpad | [spec](docs/superpowers/specs/2026-10-13-tv-remote-and-touchpad-design.md) | [plan](docs/superpowers/plans/2026-10-13-tv-remote-and-touchpad.md) |
 
 Decisions worth knowing before changing things:
 

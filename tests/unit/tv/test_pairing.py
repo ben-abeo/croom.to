@@ -231,6 +231,35 @@ async def test_a_key_the_tv_issues_anew_is_kept_once(tmp_path):
         await service.stop()
 
 
+async def test_a_key_file_edited_by_hand_is_left_alone_across_a_reconnect(tmp_path):
+    """The client keeps the key it was built with. A reconnect that finds the file different is no reason to write that
+    key over the edit: only a key the TV changed during the connect is the TV's to give."""
+    service = build_service(tmp_path, keystore=Counting)
+    assert await service._connect_once() is True          # the client is built with the stored key-9
+    (tmp_path / KEY).write_text("key-by-hand")
+    FakeTvClient.instances[-1].connected = False          # the link drops
+    assert await service._connect_once() is True          # and is made again, by the same client
+    assert (tmp_path / KEY).read_text() == "key-by-hand" and service._keys.written == []
+
+
+async def test_a_key_the_tv_changes_in_a_reconnect_is_kept_even_over_a_hand_edit(tmp_path):
+    class Rotating(FakeTvClient):
+        """A TV that issues a new key at every connect."""
+        issued = 1
+
+        async def connect(self):
+            await super().connect()
+            self.issued += 1
+            self.client_key = f"key-{self.issued}"
+            return True
+    service = build_service(tmp_path, Rotating, keystore=Counting)
+    assert await service._connect_once() is True          # key-2 is issued, and kept
+    (tmp_path / KEY).write_text("key-by-hand")
+    FakeTvClient.instances[-1].connected = False
+    assert await service._connect_once() is True          # key-3 is the TV's own word, and the TV is the one that knows
+    assert (tmp_path / KEY).read_text() == "key-3" and service._keys.written == ["key-2", "key-3"]
+
+
 async def test_a_new_key_that_cannot_be_kept_costs_nothing_but_a_log_line(tmp_path, caplog):
     class Failing(KeyStore):
         def write(self, key):

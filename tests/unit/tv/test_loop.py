@@ -224,6 +224,7 @@ async def test_a_bug_in_one_round_does_not_end_the_loop(tmp_path, caplog):
     service._connect_once = flaky
     await asyncio.wait_for(service.start(), 1.0)          # the first look is over when the round has failed, however it failed
     try:
+        assert len(rounds) == 1                           # and the loop backs off before it goes round again
         gate.set()
         await until(lambda: service.status()["reachable"])
         assert len(rounds) >= 2 and "a bug in the first round" in caplog.text

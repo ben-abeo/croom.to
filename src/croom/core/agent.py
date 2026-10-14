@@ -79,6 +79,18 @@ class CroomAgent:
             except ImportError as e:
                 logger.warning(f"AI service not available: {e}")
 
+        # The room's TV (spec 2026-10-13 TV remote and touchpad): kept on, and woken before a meeting is joined. Registered
+        # ahead of the services the meeting depends on, so that it starts first; the meeting is wired to it below.
+        tv_service = None
+        if self.config.tv.enabled:
+            try:
+                from croom.tv.service import TvService
+                tv_service = TvService.from_config(self.config)
+                self.service_manager.register(tv_service)
+                logger.info("TV service registered")
+            except ImportError as e:
+                logger.warning(f"TV service not available: {e}")
+
         # Audio Service
         try:
             from croom.audio.service import AudioService
@@ -110,7 +122,11 @@ class CroomAgent:
         try:
             from croom.meeting.service import MeetingService
             meeting_service = MeetingService(self.config)
-            self.service_manager.register(meeting_service, dependencies=["audio", "video"])
+            if tv_service is not None:
+                meeting_service.add_before_join(tv_service.before_join)   # a join waits for the TV, then goes on without it
+            self.service_manager.register(
+                meeting_service, dependencies=["audio", "video"] + (["tv"] if tv_service is not None else [])
+            )
             logger.info("Meeting service registered")
         except ImportError as e:
             logger.warning(f"Meeting service not available: {e}")

@@ -64,6 +64,54 @@ class TestServiceRegistration:
         assert dashboard.config["device_info"]["name"] == agent.config.room.name
 
 
+class TestTvRegistration:
+    def with_a_tv(self, tmp_path, enabled=True) -> Config:
+        config = make_config(tmp_path)
+        config.tv.enabled, config.tv.host = enabled, "10.0.0.41"
+        return config
+
+    def test_a_room_without_a_tv_has_no_tv_service(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path))
+        agent._initialize_services()
+        assert agent.service_manager.get_service("tv") is None
+        assert agent.service_manager.get_service("meeting")._before_join == []
+
+    def test_a_tv_that_is_switched_off_in_the_config_is_not_registered(self, tmp_path, no_hardware):
+        agent = make_agent(self.with_a_tv(tmp_path, enabled=False))
+        agent._initialize_services()
+        assert agent.service_manager.get_service("tv") is None
+
+    def test_the_tv_is_registered_ahead_of_the_meeting_and_the_meeting_waits_for_it_before_a_join(self, tmp_path, no_hardware):
+        config = self.with_a_tv(tmp_path)
+        agent = make_agent(config)
+        agent._initialize_services()
+        tv = agent.service_manager.get_service("tv")
+        meeting = agent.service_manager.get_service("meeting")
+        assert tv is not None and tv.name == "tv" and tv._config is config.tv
+        assert meeting._before_join == [tv.before_join]
+        order = agent.service_manager._start_order
+        assert order.index("tv") < order.index("audio") and order.index("tv") < order.index("meeting")
+
+    def test_the_tv_starts_before_the_meeting_whatever_else_is_registered(self, tmp_path, no_hardware):
+        config = self.with_a_tv(tmp_path)
+        config.ai.enabled = True                          # the services that depend on ai are put right after it in the start order
+        agent = make_agent(config)
+        agent._initialize_services()
+        order = agent.service_manager._start_order
+        assert order.index("tv") < order.index("meeting")
+
+    async def test_an_agent_whose_tv_is_not_paired_starts_and_stops_without_touching_it(self, tmp_path, no_hardware):
+        agent = make_agent(self.with_a_tv(tmp_path))
+        agent._initialize_services()
+        try:
+            assert await agent.service_manager.start_all() is True
+            tv = agent.service_manager.get_service("tv")
+            assert tv._state == ServiceState.RUNNING and tv.status()["paired"] is False and tv._client is None
+        finally:
+            await agent.service_manager.stop_all()
+        assert agent.service_manager.get_service("tv")._state == ServiceState.STOPPED
+
+
 class TestStartup:
     async def test_start_all_runs_without_hardware(self, tmp_path, no_hardware):
         agent = make_agent(make_config(tmp_path))

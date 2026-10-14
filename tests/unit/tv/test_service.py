@@ -1,6 +1,6 @@
+import asyncio
 import subprocess
 import sys
-import types
 from pathlib import Path
 
 import pytest
@@ -9,19 +9,9 @@ from croom.core.service import ServiceManager, ServiceState
 from croom.tv.errors import TvError
 from croom.tv.keystore import KeyStore
 from croom.tv.service import TvService
+from croom.tv.wake import wake
 from tests.unit.tv.fake_client import FakeTvClient
-
-
-def service_for(tmp_path, **overrides):
-    config = TvConfig(**dict({"enabled": True, "host": "10.0.0.41", "mac": "AA:BB:CC:DD:EE:FF"}, **overrides))
-    woken = []
-
-    async def waker(mac):
-        woken.append(mac)
-    FakeTvClient.instances.clear()
-    service = TvService(config, KeyStore(tmp_path / "tv-client-key"), FakeTvClient, waker)
-    service.woken = woken
-    return service
+from tests.unit.tv.helpers import service_for
 
 
 async def test_pairing_stores_the_key_privately_and_forget_removes_it(tmp_path):
@@ -83,6 +73,95 @@ async def test_a_tv_that_refuses_is_unreachable_in_words_and_retried(tmp_path):
         await service.stop()
 
 
+# The controls, Wake-on-LAN and keeping the TV on: the brief's own tests, as written. They pass with a waker that only
+# records the MAC address as well as with service_for's, which brings the TV on as a real wake does. More of the same, and
+# the edges, are in test_controls.py and test_keep_on.py.
+
+async def test_controls_map_to_the_tv_and_re_read_the_state(tmp_path):
+    (tmp_path / "tv-client-key").write_text("key-9")
+    service = service_for(tmp_path)
+    await service.start()
+    try:
+        client = FakeTvClient.instances[-1]
+        await service.control("volume_up"); await service.control("volume", 55); await service.control("mute")
+        await service.control("channel", "12"); await service.control("input", "pi"); await service.control("key", "HOME")
+        await service.control("digit", "7"); await service.control("toast", "Hello")
+        names = [c[0] for c in client.calls if c[0] not in ("connect", "get_inputs", "get_volume", "get_power_state")]
+        assert names == ["volume_up", "set_volume", "set_mute", "set_channel", "set_input", "button", "button", "send_message"]
+        assert ("set_input", "HDMI_1") in client.calls and ("button", "7") in client.calls and ("set_mute", True) in client.calls
+        with pytest.raises(TvError):
+            await service.control("key", "SELF_DESTRUCT")
+        with pytest.raises(TvError):
+            await service.control("volume", 150)
+    finally:
+        await service.stop()
+
+
+async def test_power_off_holds_against_keep_on_and_on_wakes(tmp_path):
+    (tmp_path / "tv-client-key").write_text("key-9")
+    service = service_for(tmp_path)
+    await service.start()
+    try:
+        client = FakeTvClient.instances[-1]
+        await service.control("power", "off")
+        assert ("power_off",) in client.calls and service.status()["held_off"] is True
+        await client.update(power_state={"state": "Off"})
+        await service.ensure_on(timeout=0.2)                        # keep_on would wake; the hold says no
+        assert service.woken == []
+        await service.control("power", "on")
+        assert service.woken == ["AA:BB:CC:DD:EE:FF"] and service.status()["held_off"] is False
+    finally:
+        await service.stop()
+
+
+async def test_a_manual_off_holds_until_on_or_a_join(tmp_path):
+    (tmp_path / "tv-client-key").write_text("key-9")
+    service = service_for(tmp_path)
+    await service.start()
+    try:
+        await service.control("power", "off")
+        await FakeTvClient.instances[-1].update(power_state={"state": "Off"})
+        await service.before_join()                                 # a meeting wants the TV
+        assert service.woken == ["AA:BB:CC:DD:EE:FF"] and service.status()["held_off"] is False
+    finally:
+        await service.stop()
+
+
+async def test_a_join_waits_at_most_fifteen_seconds_for_a_tv_that_never_wakes(tmp_path):
+    (tmp_path / "tv-client-key").write_text("key-9")
+    service = service_for(tmp_path)
+    service.WAKE_TIMEOUT_S = 0.3
+    service.WAKE_POLL_S = 0.05
+    await service.start()
+    try:
+        client = FakeTvClient.instances[-1]
+        await client.update(power_state={"state": "Off"})
+        client.refuse = True
+        import time
+        t0 = time.monotonic()
+        assert await service.before_join() is False                 # the join goes on without the TV
+        assert time.monotonic() - t0 < 1.0 and service.woken == ["AA:BB:CC:DD:EE:FF"]
+        assert service.status()["on"] is False
+    finally:
+        await service.stop()
+
+
+async def test_an_unexpected_off_is_woken_when_keep_on(tmp_path):
+    (tmp_path / "tv-client-key").write_text("key-9")
+    service = service_for(tmp_path)
+    service.REWAKE_AFTER_S = 0.05
+    await service.start()
+    try:
+        await FakeTvClient.instances[-1].update(power_state={"state": "Off"})
+        for _ in range(40):
+            if service.woken:
+                break
+            await asyncio.sleep(0.02)
+        assert service.woken == ["AA:BB:CC:DD:EE:FF"]
+    finally:
+        await service.stop()
+
+
 # What follows is the service's own: it runs under the manager, is built from the config, and imports nothing it can do without.
 
 async def test_the_service_runs_under_the_service_manager(tmp_path):
@@ -111,16 +190,14 @@ async def test_a_client_that_fails_to_hang_up_does_not_keep_the_service_from_sto
     assert service.status()["reachable"] is False and service._client is None
 
 
-def test_from_config_keeps_the_key_in_the_data_dir(tmp_path, monkeypatch):
-    async def wake(mac):
-        pass
-    monkeypatch.setitem(sys.modules, "croom.tv.wake", types.SimpleNamespace(wake=wake))    # that module comes with the controls
+def test_from_config_keeps_the_key_in_the_data_dir(tmp_path):
     config = Config(data_dir=str(tmp_path / "data"))
     config.tv = TvConfig(enabled=True, host="10.0.0.41")
     service = TvService.from_config(config)
     assert service.name == "tv" and service.status()["configured"] is True and service.status()["paired"] is False
     (tmp_path / "data" / "tv-client-key").write_text("key-9")
     assert service.status()["paired"] is True
+    assert service._wake is wake                          # the real Wake-on-LAN, which imports its library only when it sends
 
 
 def test_importing_the_service_leaves_the_tv_libraries_alone():
@@ -129,7 +206,7 @@ def test_importing_the_service_leaves_the_tv_libraries_alone():
     import croom
     src = Path(croom.__file__).resolve().parent.parent
     code = (f"import sys; sys.path.insert(0, {str(src)!r}); "
-            "import croom.tv.client, croom.tv.errors, croom.tv.keystore, croom.tv.service; "
+            "import croom.tv.client, croom.tv.errors, croom.tv.keystore, croom.tv.service, croom.tv.wake; "
             "print(sorted(m for m in ('aiowebostv', 'wakeonlan', 'evdev') if m in sys.modules))")
     result = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr

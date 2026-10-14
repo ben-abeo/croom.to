@@ -17,7 +17,7 @@ from urllib.parse import urlsplit
 from aiohttp import web
 
 from croom.control.settings import SettingsStore
-from croom.core.config import Config
+from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
@@ -108,8 +108,9 @@ class ControlService(Service):
     Room control service ("control" under the ServiceManager).
 
     Args:
-        config: dict with host, port, room_name, room_location, static_dir, screensaver
-            (the default idle style) and settings_file (where the chosen style is kept).
+        config: dict with host, port, room_name, room_location, room_company (the practice's name on the
+            door sign), static_dir, screensaver (the default idle style) and settings_file (where the chosen
+            style is kept).
         meeting: the MeetingService instance, or None.
         calendar: the CalendarService instance, or None.
         devices: the room devices the page controls (sound and camera), or None.
@@ -130,6 +131,7 @@ class ControlService(Service):
         self._port = int(self.config.get("port", 8080))
         self._room_name = self.config.get("room_name", "Conference Room")
         self._room_location = self.config.get("room_location", "")
+        self._room_company = self.config.get("room_company", DEFAULT_COMPANY)
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
         self._store = store or SettingsStore(
             self.config.get("settings_file", "control-settings.json")
@@ -160,6 +162,7 @@ class ControlService(Service):
                 "port": config.control.port,
                 "room_name": config.room.name,
                 "room_location": config.room.location,
+                "room_company": config.room.company,
                 "static_dir": str(STATIC_DIR),
                 "screensaver": config.control.screensaver,
                 "settings_file": str(config.resolve_data_dir() / "control-settings.json"),
@@ -315,7 +318,7 @@ class ControlService(Service):
             state = "error"
         platforms = list(self._meeting.get_available_platforms()) if self._meeting is not None else []
         return {
-            "room": {"name": self._room_name, "location": self._room_location},
+            "room": {"name": self._room_name, "location": self._room_location, "company": self._room_company},
             "server_time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "platforms": platforms,
             "meeting": {

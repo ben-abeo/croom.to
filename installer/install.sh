@@ -221,6 +221,7 @@ room:
   name: "Conference Room"
   location: ""
   timezone: "UTC"
+  company: "Crystal Practice Management"
 
 meeting:
   platforms:

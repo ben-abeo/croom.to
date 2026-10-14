@@ -7,15 +7,18 @@
 <link rel="icon" href="/static/crystalpm-logo-white.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/static/sign.css">
 </head>
-<body data-state="loading">
+<body data-state="loading" data-bg="skyline">
 <main class="sign">
+  <div class="backdrop" aria-hidden="true">
+    <div class="glow"></div>
+    <div id="scene" class="scene"></div>
+  </div>
+  <div class="rail"></div>
+
   <header class="top">
     <div class="brand">
       <img class="logo" src="/static/crystalpm-logo-white.svg" alt="Crystal PM">
-      <div>
-        <h1 id="room-name">Room</h1>
-        <p id="room-location" class="location"></p>
-      </div>
+      <span id="company" class="company"></span>
     </div>
     <div class="when">
       <p id="clock" class="clock"></p>
@@ -23,17 +26,30 @@
     </div>
   </header>
 
-  <section class="status" aria-live="polite">
-    <p id="kicker" class="kicker">Connecting</p>
-    <p id="headline" class="headline">Connecting</p>
-    <p id="detail" class="detail"></p>
+  <section class="main">
+    <div class="status">
+      <h1 id="room-name" class="room"></h1>
+      <p id="room-location" class="location" hidden></p>
+      <div aria-live="polite">
+        <div class="chip"><span class="dot"></span><span id="chip-text">Connecting</span></div>
+        <p id="detail" class="detail"></p>
+      </div>
+    </div>
+
+    <div id="today" class="today" hidden>
+      <div class="today-head">
+        <h2>Today</h2>
+        <button id="this-week" class="button" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>This week</button>
+      </div>
+      <ul id="events" class="events"></ul>
+      <p id="calendar-note" class="note"></p>
+    </div>
   </section>
 
-  <section id="upcoming" class="upcoming">
-    <p class="kicker">Today</p>
-    <ul id="events" class="events"></ul>
-    <p id="calendar-note" class="note"></p>
-  </section>
+  <footer id="score" class="score" hidden>
+    <span id="score-last" class="last"></span>
+    <span id="score-next" class="next"></span>
+  </footer>
 </main>
 <script src="/static/sign.js"></script>
 </body>

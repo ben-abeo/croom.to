@@ -35,6 +35,7 @@ def _writable_dir(path: Path) -> bool:
 
 
 PLACEHOLDER_PREFIX = "REPLACE_WITH_"
+DEFAULT_COMPANY = "Crystal Practice Management"   # whose room it is, on the door sign, when a config does not say
 
 
 def without_placeholder(value: Any) -> str:
@@ -49,6 +50,7 @@ class RoomConfig:
     name: str = "Conference Room"
     location: str = ""   # what people call the place; "" shows the room's name alone
     timezone: str = "UTC"
+    company: str = DEFAULT_COMPANY   # the practice's name beside the logo on the door sign; "" shows the logo alone
 
     def __post_init__(self):
         self.location = without_placeholder(self.location)
@@ -244,6 +246,7 @@ class Config:
                 "name": self.room.name,
                 "location": self.room.location,
                 "timezone": self.room.timezone,
+                "company": self.room.company,
             },
             "meeting": {
                 "platforms": self.meeting.platforms,

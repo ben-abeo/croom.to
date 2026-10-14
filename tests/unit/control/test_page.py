@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from croom.calendar.providers.base import MeetingPlatform
 from croom.control.service import ControlService
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
@@ -28,10 +29,12 @@ playwright = pytest.importorskip("playwright.sync_api")
 class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
-    def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None):
+    def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
+                 room_company=None):
         self.events = list(calendar_events)
         self.room_name = room_name
         self.room_location = room_location
+        self.room_company = room_company   # None: the config says nothing, so the service's own default shows
         self.calendar_connected = calendar_connected
         self.port_arg = port
         self.devices = devices if devices is not None else StubDevices()
@@ -52,9 +55,12 @@ class PageServer:
 
     async def _main(self):
         self.meeting = StubMeeting()
+        config = {"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
+                  "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")}
+        if self.room_company is not None:
+            config["room_company"] = self.room_company
         service = ControlService(
-            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
-                    "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")},
+            config=config,
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
             devices=self.devices,
         )
@@ -186,20 +192,33 @@ def test_long_names_do_not_overflow_on_phone(browser):
         page.close()
 
 
+SIGN_GREEN, SIGN_AMBER, SIGN_RED, SIGN_NAVY = "rgb(31, 169, 113)", "rgb(232, 160, 19)", "rgb(229, 72, 77)", "rgb(0, 22, 54)"   # #1FA971 #E8A013 #E5484D #001636
+
+
+def sign_colors(page):
+    rail = page.locator(".rail").evaluate("e => getComputedStyle(e).backgroundColor")
+    chip = page.locator(".chip").evaluate("e => getComputedStyle(e).backgroundColor")
+    body = page.evaluate("getComputedStyle(document.body).backgroundColor")
+    return rail, chip, body
+
+
 def test_door_sign_follows_the_room_state(browser):
+    skip_if_day_ends_within(1)   # the booking is 25 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1") as server:
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        assert page.locator("#headline").inner_text().startswith("Free until")
-        assert page.locator("#kicker").inner_text().upper() == "AVAILABLE"
-        assert page.locator("button").count() == 0  # a sign has nothing to press
+        assert page.locator("#chip-text").inner_text().startswith("Free until")
+        assert sign_colors(page) == (SIGN_GREEN, SIGN_GREEN, SIGN_NAVY)   # a green rail and chip on navy, never a green wall
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY   # navy words on green
+        assert [b.get_attribute("id") for b in page.locator("button").all()] == ["this-week"]  # a sign has one thing to press
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
                           data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
         page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=8000)
-        assert page.locator("#headline").inner_text() == "In use"
-        assert page.locator("#kicker").inner_text().upper() == "IN USE"
+        assert page.locator("#chip-text").inner_text() == "In use"
+        assert sign_colors(page) == (SIGN_RED, SIGN_RED, SIGN_NAVY)
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == "rgb(255, 255, 255)"   # white words on red
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave",
                           data="{}", headers={"Content-Type": "application/json"})
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
@@ -216,19 +235,22 @@ def test_door_sign_shows_bookings_without_a_video_link(browser):
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=5000)
-        assert page.locator("#headline").inner_text().startswith("Booked until")
-        assert page.locator("#kicker").inner_text().upper() == "BOOKED"
+        assert page.locator("#chip-text").inner_text().startswith("Booked until")
         assert page.locator("#detail").inner_text() == "Board lunch"
+        assert sign_colors(page) == (SIGN_RED, SIGN_RED, SIGN_NAVY)   # a booking holds the room as much as a call does
+        assert page.locator("#events .event.now .title").inner_text() == "Board lunch"   # the booking in progress is ringed, and only it
+        assert page.locator("#events .event.now").count() == 1 and page.locator("#events .event").first.get_attribute("class") == "event now"
         page.close()
 
 
 def test_door_sign_warns_before_the_next_meeting(browser):
+    skip_if_day_ends_within(1)   # the booking is 6 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Standup", 6)], room_name="Room 1") as server:
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
-        assert page.locator("#headline").inner_text().startswith("Standup starts in")
-        assert page.locator("#kicker").inner_text().upper() == "STARTING SOON"
+        assert page.locator("#chip-text").inner_text().startswith("Standup starts in")
+        assert page.locator("#detail").inner_text().count(" to ") == 1   # "1:06 PM to 1:36 PM"
         page.close()
 
 
@@ -237,8 +259,10 @@ def test_door_sign_hides_the_schedule_without_a_calendar(browser):
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        assert page.locator("#headline").inner_text() == "Free"
-        assert page.locator("#upcoming").count() == 1 and not page.locator("#upcoming").is_visible()
+        assert page.locator("#chip-text").inner_text() == "Free"
+        assert page.locator("#today").count() == 1 and not page.locator("#today").is_visible()
+        assert page.locator("#room-name").inner_text() == "Lab" and page.locator("#company").is_visible()   # the brand row and the name stay
+        assert page.locator("#clock").inner_text() and page.locator("#date").inner_text()
         page.close()
 
 
@@ -276,6 +300,158 @@ def test_the_door_sign_shows_the_location_line_when_the_room_has_one(browser):
         page.close()
 
 
+def test_the_sign_shows_the_status_as_a_rail_a_chip_and_a_tint_on_navy(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 8)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        rail, chip, body = sign_colors(page)
+        assert rail == chip == "rgb(232, 160, 19)" and body == "rgb(0, 22, 54)"      # amber on navy, never an amber wall
+        assert page.locator("#chip-text").inner_text() == "Design review starts in 8 minutes"
+        assert page.locator("#scene svg").count() == 1
+        assert page.locator("#scene .fill").first.evaluate("e => getComputedStyle(e).fill") == "rgb(232, 160, 19)"
+        assert page.locator("#company").inner_text() == "Crystal Practice Management"
+        assert fits(page)
+        page.close()
+
+
+def test_the_sign_without_a_calendar_keeps_its_brand_name_and_clock(browser):
+    with PageServer(calendar_connected=False) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#chip-text").inner_text() == "Free"
+        assert page.locator("#today").is_hidden() and page.locator("#this-week").is_hidden()
+        assert page.locator("#company").is_visible() and page.locator("#clock").inner_text()
+        assert fits(page)
+        page.close()
+
+
+def test_long_names_wrap_inside_the_sign_at_both_sizes(browser):
+    skip_if_day_ends_within(1)
+    title = "Quarterly planning review with the regional leadership teams and the partners"
+    for width, height in ((1280, 800), (800, 1280)):
+        with PageServer(calendar_events=[event("e1", title, 30)], room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen") as server:
+            page = browser.new_page(viewport={"width": width, "height": height})
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            clock = page.locator("#clock").bounding_box()
+            assert clock["x"] + clock["width"] <= width
+            assert fits(page)
+            page.close()
+
+
+def drawn_top(page):
+    """The top edge of what the scenery draws (its tallest shape): lower than the top of its box, which is mostly sky."""
+    return page.evaluate("""() => Math.min(...[...document.querySelectorAll('#scene svg path, #scene svg rect, #scene svg circle, #scene svg ellipse')]
+        .filter(e => !e.closest('defs')).map(e => e.getBoundingClientRect()).filter(r => r.width > 0 && r.height > 0).map(r => r.top))""")
+
+
+def test_the_sign_keeps_its_words_clear_of_the_scenery_when_names_are_long(browser):
+    """The words end above the skyline at both sizes, with a long room name, location, company and title, free or about to start."""
+    skip_if_day_ends_within(1)
+    title = "Quarterly planning review with the regional leadership teams and the partners"
+    for width, height in ((1280, 800), (800, 1280)):
+        for minutes, state in ((30, "free"), (8, "soon")):   # soon puts the long title in the chip too, at 1.5 rem
+            with PageServer(calendar_events=[event("e1", title, minutes)], room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen",
+                            room_company="Lone Star Eye Care and Surgery Partners") as server:
+                page = browser.new_page(viewport={"width": width, "height": height})
+                page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+                page.wait_for_function(f"document.body.dataset.state === '{state}'", timeout=5000)
+                top = drawn_top(page)
+                assert height / 2 < top < height                                     # it found the drawing, in the lower half
+                for selector in (".status", "#today"):
+                    box = page.locator(selector).bounding_box()
+                    assert box["y"] + box["height"] <= top, (width, height, state, selector)
+                assert fits(page)
+                page.close()
+
+
+def test_the_sign_names_the_company_from_the_room_config(browser):
+    with PageServer(room_company="Lone Star Eye Care") as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#company").inner_text() == "Lone Star Eye Care"
+        page.close()
+    with PageServer(room_company="") as server:   # a practice that wants the logo alone
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#company").is_hidden() and page.locator(".brand img").is_visible()
+        assert page.locator("#room-name").inner_text() == "Lab" and fits(page)
+        page.close()
+
+
+def test_the_sign_lists_the_next_three_bookings_as_rows_with_their_platform(browser):
+    skip_if_day_ends_within(3)   # the last booking is 100 minutes out
+    bookings = [event("e1", "Customer call", 40),
+                event("e2", "Design review", 70, url="https://meet.google.com/abc-defg-hij", platform=MeetingPlatform.GOOGLE_MEET),
+                event("e3", "Offsite lunch", 100, url=None, platform=MeetingPlatform.UNKNOWN),
+                event("e4", "Fourth booking", 130)]
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        import re
+        rows = page.locator("#events .event")
+        assert rows.count() == 3                                                    # the next three, not the fourth
+        assert page.locator("#events .title").all_text_contents() == ["Customer call", "Design review", "Offsite lunch"]
+        assert page.locator("#events .who").all_text_contents() == ["Zoom", "Google Meet"]   # an in-person booking names no platform
+        assert all(re.match(TWELVE_HOUR, t) for t in page.locator("#events time").all_text_contents())
+        assert page.locator("#events .event.now").count() == 0                       # nothing is in progress
+        assert page.locator("#chip-text").inner_text().startswith("Free until") and page.locator("#detail").inner_text() == "Next: Customer call"
+        assert page.locator("#today h2").inner_text() == "Today" and page.locator("#this-week").inner_text() == "This week"
+        assert page.locator("#score").is_hidden()                                   # the scoreboard strip is off until it has a score
+        assert errors == []
+        page.close()
+
+
+def test_the_sign_without_bookings_says_so_instead_of_showing_an_empty_list(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#chip-text").inner_text() == "Free for the rest of the day"
+        assert page.locator("#detail").inner_text() == "Nothing else is booked in here today."
+        assert page.locator("#events .event").count() == 0 and page.locator("#calendar-note").inner_text() == "Nothing else scheduled today."
+        assert page.locator("#today").is_visible() and fits(page)
+        page.close()
+
+
+def test_the_sign_sits_side_by_side_in_landscape_and_stacks_in_portrait(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 30)]) as server:
+        for (width, height), stacked, scenery in (((1280, 800), False, 0.34), ((800, 1280), True, 0.22)):
+            page = browser.new_page(viewport={"width": width, "height": height})
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            status, today = page.locator(".status").bounding_box(), page.locator("#today").bounding_box()
+            if stacked:
+                assert today["y"] >= status["y"] + status["height"]                  # the bookings under the status
+            else:
+                assert today["x"] >= status["x"] + status["width"]                   # the bookings beside it
+            sign, scene = page.locator("main").bounding_box(), page.locator("#scene").bounding_box()
+            assert abs(scene["height"] / sign["height"] - scenery) < 0.01            # the scenery is shorter when stacked
+            assert scene["y"] + scene["height"] == pytest.approx(sign["y"] + sign["height"], abs=1) and scene["width"] == pytest.approx(width, abs=1)
+            assert fits(page)
+            page.close()
+
+
+def test_the_sign_loads_nothing_but_its_own_files(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        urls = []
+        page.on("request", lambda r: urls.append(r.url))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert urls and all(u.startswith(f"http://127.0.0.1:{server.port}/") for u in urls), urls
+        page.close()
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -289,7 +465,9 @@ def test_door_sign_goes_offline_and_recovers(browser):
         page.goto(f"http://127.0.0.1:{port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
     page.wait_for_function("document.body.dataset.state === 'offline'", timeout=10000)
-    assert page.locator("#headline").inner_text() == "Sign not connected"
+    assert page.locator("#chip-text").inner_text() == "Sign not connected"
+    rail, chip, body = sign_colors(page)
+    assert rail == chip and rail not in (SIGN_GREEN, SIGN_AMBER, SIGN_RED) and body == SIGN_NAVY   # a sign that lost its room claims no status
     with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1", port=port):
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=10000)
     page.close()

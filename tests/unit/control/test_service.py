@@ -332,6 +332,7 @@ class TestControlServiceBasics:
         config = Config()
         config.room.name = "Board Room"
         config.room.location = "HQ 3rd floor"
+        config.room.company = "Lone Star Eye Care"
         config.control.host = "127.0.0.1"
         config.control.port = 9090
         meeting, calendar = StubMeeting(), StubCalendar()
@@ -340,6 +341,7 @@ class TestControlServiceBasics:
         assert service.config["port"] == 9090
         assert service.config["room_name"] == "Board Room"
         assert service.config["room_location"] == "HQ 3rd floor"
+        assert service.config["room_company"] == "Lone Star Eye Care"
         assert service.config["static_dir"].endswith("croom/control/static")
         assert service._meeting is meeting
         assert service._calendar is calendar
@@ -376,7 +378,7 @@ class TestStatus:
         resp = await client.get("/api/status")
         assert resp.status == 200
         data = await resp.json()
-        assert data["room"] == {"name": "Lab", "location": "2nd floor"}
+        assert data["room"] == {"name": "Lab", "location": "2nd floor", "company": "Crystal Practice Management"}
         assert data["platforms"] == []
         assert data["meeting"] == {
             "state": "idle", "platform": None, "meeting_id": None, "title": "", "url": None,
@@ -384,6 +386,20 @@ class TestStatus:
         }
         assert data["calendar"] == {"connected": False, "provider": None, "current": None, "next": None}
         datetime.fromisoformat(data["server_time"])
+
+    async def test_the_status_names_the_company(self, client_factory):
+        """The sign beside the logo says whose room it is: the stock name when the config says nothing, else the config's."""
+        client = await client_factory(make_service())
+        assert (await (await client.get("/api/status")).json())["room"]["company"] == "Crystal Practice Management"
+        client = await client_factory(make_service(room_company="Lone Star Eye Care"))
+        assert (await (await client.get("/api/status")).json())["room"]["company"] == "Lone Star Eye Care"
+        client = await client_factory(make_service(room_company=""))   # a blank name is the config's choice, not a missing one
+        assert (await (await client.get("/api/status")).json())["room"]["company"] == ""
+
+    def test_the_company_travels_from_the_config_to_the_service(self):
+        assert ControlService.from_config(Config()).config["room_company"] == "Crystal Practice Management"
+        config = Config.from_dict({"room": {"name": "Room 1", "company": "Lone Star Eye Care"}})
+        assert ControlService.from_config(config).config["room_company"] == "Lone Star Eye Care"
 
     async def test_status_reports_platforms_and_calendar(self, client_factory):
         nxt = event("e1", "Design review", starts_in_minutes=20)

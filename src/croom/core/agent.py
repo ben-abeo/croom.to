@@ -11,7 +11,7 @@ import sys
 from typing import Optional, Dict, Any
 
 from croom.core.config import Config, load_config
-from croom.core.service import ServiceManager, Service, ServiceState
+from croom.core.service import ServiceManager, Service
 from croom.platform.detector import PlatformDetector, PlatformInfo
 from croom.platform.capabilities import CapabilityDetector, Capabilities
 
@@ -147,21 +147,45 @@ class CroomAgent:
         except ImportError as e:
             logger.warning(f"Room devices not available: {e}")
 
-        # Room control page (local web UI for the room)
+        # Room control page (local web UI for the room), with the door sign's football scoreboard it shows
         if self.config.control.enabled:
             try:
                 from croom.control.service import ControlService
+                scores_service = self._register_scores(settings_store)
                 control_service = ControlService.from_config(
                     self.config,
                     meeting=self.service_manager.get_service("meeting"),
                     calendar=self.service_manager.get_service("calendar"),
                     devices=self.service_manager.get_service("devices"),
                     store=settings_store,
+                    scores=scores_service,
                 )
-                self.service_manager.register(control_service, dependencies=["meeting", "calendar", "devices"])
+                dependencies = ["meeting", "calendar", "devices"] + (["scores"] if scores_service is not None else [])
+                self.service_manager.register(control_service, dependencies=dependencies)
                 logger.info("Room control page registered")
             except ImportError as e:
                 logger.warning(f"Room control page not available: {e}")
+
+    def _register_scores(self, settings_store) -> Optional[Service]:
+        """Register the door sign's football scoreboard (spec 2026-10-13, section 2.5) and return it; None when it cannot be had.
+
+        It reads the schools the room has turned on from the control page's own settings store, each time they are needed and through
+        the same check the page loads them with, so that a switch turned on from the table is picked up by the service's next look, and
+        the page and the scoreboard cannot disagree. Until a school is on it reads nothing from ESPN.
+        """
+        if settings_store is None:
+            return None
+        try:
+            from croom.control.service import read_setting
+            from croom.scores import espn
+            from croom.scores.service import ScoresService
+        except ImportError as e:
+            logger.warning(f"Football scores not available: {e}")
+            return None
+        scores_service = ScoresService(espn.fetch, lambda: read_setting(settings_store, "sign_scores"))
+        self.service_manager.register(scores_service)
+        logger.info("Football scores registered")
+        return scores_service
 
     async def start(self) -> None:
         """Start the Croom agent and all services."""

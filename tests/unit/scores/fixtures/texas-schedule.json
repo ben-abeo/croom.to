@@ -1,0 +1,226 @@
+{
+  "timestamp": "2026-10-13T11:16:23Z",
+  "status": "success",
+  "season": {"year": 2026, "type": 2, "name": "Regular Season", "displayName": "2026", "half": 1},
+  "team": {"id": "251", "abbreviation": "TEX", "location": "Texas", "name": "Longhorns", "displayName": "Texas Longhorns", "recordSummary": "6-0"},
+  "events": [
+    {
+      "id": "401001",
+      "date": "2026-09-05T19:30Z",
+      "name": "Texas State Bobcats at Texas Longhorns",
+      "shortName": "TXST VS TEX",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401001",
+          "date": "2026-09-05T19:30Z",
+          "timeValid": true,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "251",
+              "homeAway": "home",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "score": {"value": 59.0, "displayValue": "59"},
+              "curatedRank": {"current": 5}
+            },
+            {
+              "id": "326",
+              "homeAway": "away",
+              "team": {"id": "326", "location": "Texas State", "abbreviation": "TXST", "displayName": "Texas State Bobcats", "shortDisplayName": "Texas St"},
+              "score": {"value": 7.0, "displayValue": "7"},
+              "curatedRank": {"current": 99}
+            }
+          ],
+          "status": {"type": {"id": "3", "name": "STATUS_FINAL", "state": "post", "completed": true, "description": "Final"}}
+        }
+      ]
+    },
+    {
+      "id": "401002",
+      "date": "2026-09-12T23:30Z",
+      "name": "Ohio State Buckeyes at Texas Longhorns",
+      "shortName": "OSU VS TEX",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401002",
+          "date": "2026-09-12T23:30Z",
+          "timeValid": true,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "251",
+              "homeAway": "home",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "score": {"value": 24.0, "displayValue": "24"},
+              "curatedRank": {"current": 4}
+            },
+            {
+              "id": "194",
+              "homeAway": "away",
+              "team": {"id": "194", "location": "Ohio State", "abbreviation": "OSU", "displayName": "Ohio State Buckeyes", "shortDisplayName": "Ohio State"},
+              "score": {"value": 23.0, "displayValue": "23"},
+              "curatedRank": {"current": 1}
+            }
+          ],
+          "status": {"type": {"id": "3", "name": "STATUS_FINAL", "state": "post", "completed": true, "description": "Final"}}
+        }
+      ]
+    },
+    {
+      "id": "401003",
+      "date": "2026-09-26T16:00Z",
+      "name": "Texas Longhorns at Tennessee Volunteers",
+      "shortName": "TEX @ TENN",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401003",
+          "date": "2026-09-26T16:00Z",
+          "timeValid": true,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "2633",
+              "homeAway": "home",
+              "team": {"id": "2633", "location": "Tennessee", "abbreviation": "TENN", "displayName": "Tennessee Volunteers", "shortDisplayName": "Tennessee"},
+              "score": {"value": 17.0, "displayValue": "17"},
+              "curatedRank": {"current": 14}
+            },
+            {
+              "id": "251",
+              "homeAway": "away",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "score": {"value": 20.0, "displayValue": "20"},
+              "curatedRank": {"current": 1}
+            }
+          ],
+          "status": {"type": {"id": "3", "name": "STATUS_FINAL", "state": "post", "completed": true, "description": "Final"}}
+        }
+      ]
+    },
+    {
+      "id": "401004",
+      "date": "2026-10-13T00:30Z",
+      "name": "Texas A&M Aggies at Texas Longhorns",
+      "shortName": "TA&M VS TEX",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401004",
+          "date": "2026-10-13T00:30Z",
+          "timeValid": true,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "251",
+              "homeAway": "home",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "score": {"value": 45.0, "displayValue": "45"},
+              "curatedRank": {"current": 4}
+            },
+            {
+              "id": "245",
+              "homeAway": "away",
+              "team": {"id": "245", "location": "Texas A&M", "abbreviation": "TA&M", "displayName": "Texas A&M Aggies", "shortDisplayName": "Texas A&M"},
+              "score": {"value": 42.0, "displayValue": "42"}
+            }
+          ],
+          "status": {"type": {"id": "3", "name": "STATUS_FINAL", "state": "post", "completed": true, "description": "Final"}}
+        }
+      ]
+    },
+    {
+      "id": "401005",
+      "date": "2026-10-19T19:00Z",
+      "name": "Texas Longhorns at Missouri Tigers",
+      "shortName": "TEX @ MIZ",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401005",
+          "date": "2026-10-19T19:00Z",
+          "timeValid": true,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "142",
+              "homeAway": "home",
+              "team": {"id": "142", "location": "Missouri", "abbreviation": "MIZ", "displayName": "Missouri Tigers", "shortDisplayName": "Missouri"},
+              "curatedRank": {"current": 9}
+            },
+            {
+              "id": "251",
+              "homeAway": "away",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "curatedRank": {"current": 4}
+            }
+          ],
+          "status": {"type": {"id": "1", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false, "description": "Scheduled"}}
+        }
+      ]
+    },
+    {
+      "id": "401006",
+      "date": "2026-10-26T04:00Z",
+      "name": "Florida Gators at Texas Longhorns",
+      "shortName": "FLA VS TEX",
+      "timeValid": false,
+      "competitions": [
+        {
+          "id": "401006",
+          "date": "2026-10-26T04:00Z",
+          "timeValid": false,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "251",
+              "homeAway": "home",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "curatedRank": {"current": 4}
+            },
+            {
+              "id": "57",
+              "homeAway": "away",
+              "team": {"id": "57", "location": "Florida", "abbreviation": "FLA", "displayName": "Florida Gators", "shortDisplayName": "Florida"},
+              "curatedRank": {"current": 99}
+            }
+          ],
+          "status": {"type": {"id": "1", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false, "description": "Scheduled"}}
+        }
+      ]
+    },
+    {
+      "id": "401007",
+      "date": "2026-11-14T01:00Z",
+      "name": "Arkansas Razorbacks at Texas Longhorns",
+      "shortName": "ARK VS TEX",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401007",
+          "date": "2026-11-14T01:00Z",
+          "timeValid": true,
+          "neutralSite": false,
+          "competitors": [
+            {
+              "id": "251",
+              "homeAway": "home",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "curatedRank": {"current": 4}
+            },
+            {
+              "id": "8",
+              "homeAway": "away",
+              "team": {"id": "8", "location": "Arkansas", "abbreviation": "ARK", "displayName": "Arkansas Razorbacks", "shortDisplayName": "Arkansas"},
+              "curatedRank": {"current": 99}
+            }
+          ],
+          "status": {"type": {"id": "1", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false, "description": "Scheduled"}}
+        }
+      ]
+    }
+  ],
+  "requestedSeason": {"year": 2026, "type": 2, "name": "Regular Season", "displayName": "2026"}
+}

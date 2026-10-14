@@ -8,7 +8,6 @@ and record what the control service asked them to do.
 import asyncio
 import json
 import socket
-import time
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -19,8 +18,11 @@ from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.core.config import Config
 from croom.core.service import Service
 from croom.meeting.providers.base import MeetingInfo, MeetingState, detect_platform
+from croom.scores.service import ScoresService
+from tests.unit.scores.schedules import Clock, Feed
 from croom.control import service as control_service
-from croom.control.service import ControlService
+from croom.control.service import ControlService, read_setting
+from croom.control.settings import SettingsStore
 
 
 class StubMeeting:
@@ -294,10 +296,10 @@ def skip_if_day_ends_within(hours: float) -> None:
         pytest.skip(f"less than {hours} hours left in the local day")
 
 
-def make_service(meeting=None, calendar=None, devices=None, **config):
+def make_service(meeting=None, calendar=None, devices=None, scores=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
-    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices)
+    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, scores=scores)
 
 
 @pytest.fixture
@@ -458,17 +460,6 @@ class TestCalendarEvents:
         assert [e["joinable"] for e in data["events"]] == [True, False, False]
         assert data["events"][0]["title"] == "Design review"
         assert data["events"][0]["meeting_platform"] == "zoom"
-
-
-@pytest.fixture
-def central_time(monkeypatch):
-    """The device's clock set to US Central time (daylight saving from the second Sunday of March to the first of November), whatever
-    zone the machine running the tests keeps: "the device's local day" is a test only where local time is not UTC."""
-    monkeypatch.setenv("TZ", "CST6CDT,M3.2.0,M11.1.0")
-    time.tzset()
-    yield
-    monkeypatch.undo()
-    time.tzset()
 
 
 def at(text, offset="Z", hours=1, **kwargs):
@@ -1233,6 +1224,75 @@ class TestRoomSettings:
         assert response.status == 200 and (await response.json())["sign_background"] == "capitol"
         assert (await self.read(client))["sign_background"] == "capitol"
         assert "No space left on device" in caplog.text
+
+
+class TestScoresInTheStatus:
+    """The status carries the football scores for the door sign, one entry per school that is on, and nothing while none is (spec
+    2026-10-13, section 2.5). The scores service reads the schools from the same settings store the room page changes them in."""
+
+    def scoreboard(self, tmp_path, feed=None):
+        store = SettingsStore(tmp_path / "control-settings.json")
+        feed = Feed() if feed is None else feed
+        scores = ScoresService(feed, lambda: read_setting(store, "sign_scores"), clock=Clock())
+        service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=store, scores=scores)
+        return service, scores, feed
+
+    async def test_the_status_carries_no_scores_while_every_school_is_off(self, client_factory, tmp_path):
+        service, scores, feed = self.scoreboard(tmp_path)
+        client = await client_factory(service)
+        await scores.refresh()
+        status = await (await client.get("/api/status")).json()
+        assert "scores" not in status and feed.asked == []                   # no key at all, not an empty list, and nothing was fetched
+
+    async def test_the_status_carries_one_entry_per_school_that_is_on_and_only_then(self, client_factory, tmp_path, central_time):
+        service, scores, feed = self.scoreboard(tmp_path)
+        client = await client_factory(service)
+        status = lambda: client.get("/api/status")
+        assert (await client.post("/api/settings", json={"sign_scores": ["michigan", "texas"]})).status == 200
+        entries = (await (await status()).json())["scores"]
+        assert [(e["school"], e["name"], e["last"], e["next"]) for e in entries] == [("michigan", "Michigan", None, None), ("texas", "Texas", None, None)]   # on, and not read yet
+        await scores.refresh()
+        entries = (await (await status()).json())["scores"]
+        assert [e["school"] for e in entries] == ["michigan", "texas"] and all(set(e) == {"school", "name", "last", "next"} for e in entries)
+        assert entries[1]["last"]["home_score"] == 45 and entries[1]["next"]["date"] == "2026-10-19"
+        assert feed.asked == [130, 251]
+        assert (await client.post("/api/settings", json={"sign_scores": ["texas"]})).status == 200
+        assert [e["school"] for e in (await (await status()).json())["scores"]] == ["texas"]
+        assert (await client.post("/api/settings", json={"sign_scores": []})).status == 200
+        assert "scores" not in await (await status()).json()                  # off again: the key goes with the last school
+        assert (await (await client.get("/api/settings")).json())["sign_scores"] == []
+
+    async def test_the_status_has_no_scores_without_a_scores_service_whatever_the_setting(self, client_factory, tmp_path):
+        client = await client_factory(make_service(settings_file=str(tmp_path / "control-settings.json")))
+        assert (await client.post("/api/settings", json={"sign_scores": ["texas"]})).status == 200
+        status = await (await client.get("/api/status")).json()
+        assert status["settings"]["sign_scores"] == ["texas"] and "scores" not in status
+
+    async def test_the_status_still_answers_when_the_scores_service_fails_and_says_so_once(self, client_factory, caplog):
+        class Broken:
+            def current(self):
+                raise RuntimeError("the scoreboard broke")
+
+        client = await client_factory(make_service(scores=Broken()))
+        for _ in range(3):
+            response = await client.get("/api/status")
+            assert response.status == 200 and "scores" not in await response.json()
+        said = [r.getMessage() for r in caplog.records if r.levelno >= 30 and "scoreboard broke" in r.getMessage()]
+        assert len(said) == 1 and "football scores" in said[0]
+
+    def test_a_setting_is_read_as_the_page_loads_it_a_missing_broken_or_no_longer_valid_value_being_its_default(self, tmp_path):
+        store = SettingsStore(tmp_path / "control-settings.json")
+        assert read_setting(store, "sign_scores") == [] and read_setting(store, "sign_background") == "skyline"
+        store.save("sign_scores", ["texas_am", "texas", "texas_am"])
+        store.save("sign_background", "capitol")
+        assert read_setting(store, "sign_scores") == ["texas_am", "texas"] and read_setting(store, "sign_background") == "capitol"
+        store.save("sign_scores", ["texas", "ohio_state"])
+        store.save("sign_background", "disco")
+        assert read_setting(store, "sign_scores") == [] and read_setting(store, "sign_background") == "skyline"
+        store.save("sign_scores", "texas")
+        assert read_setting(store, "sign_scores") == []
+        read_setting(store, "sign_scores").append("texas")
+        assert read_setting(store, "sign_scores") == []                       # a list of its own each time, never the default itself
 
 
 class TestRoomDevices:

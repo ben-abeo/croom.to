@@ -7,6 +7,7 @@
   const IN_PROGRESS = ["joining", "in_lobby", "connected", "leaving"];
   const TODAY_ROWS = 3;
   const WEEK_IDLE_MS = 30 * 1000;   // the week view goes back to Today after this long without a tap inside it
+  const SCORE_EVERY_MS = 8000;   // with several schools on, the scoreboard strip moves to the next one this often
 
   const LONG_NAME = 24;   // a room name longer than this takes smaller type (.room.long in sign.css)
   const PHOTO_TIMEOUT_MS = 20 * 1000;   // a photograph not decoded by then counts as failed: a connection gone half open neither answers nor fails
@@ -186,6 +187,7 @@
 
     renderEvents(cal, now, current);
     drawView();
+    drawScore();
   }
 
   // The next bookings as rows: the time, the title and, for a video meeting, the platform. The one in progress is ringed
@@ -339,6 +341,85 @@
     }
   }
 
+  // The scoreboard strip (spec 2026-10-13, section 2.5), along the bottom: the last game of a school the room has on at the left, its next
+  // game at the right, the ranks in burnt orange (sign.css). The status carries "scores" only while a school is on, one entry for each:
+  // {school, name, last, next}, where last and next are null when the feed has told the room nothing yet. An entry with neither is left
+  // out; with none left, or none sent, the strip is hidden, and nothing else on the sign moves for it. With several schools on, the strip
+  // shows one at a time, its name leading the line, and moves to the next every eight seconds on the page's own clock. The status is the
+  // room's own, but what it carries is checked all the same: an entry that is not a whole game is left out and is not an error.
+  let scoreShown = null;   // the school whose lines are on the strip
+  let scoreKey = null;     // what they were drawn from, so that a poll that changes nothing writes nothing
+
+  const isName = (value) => typeof value === "string" && value.trim() !== "";
+  const isScore = (value) => typeof value === "number" && Number.isFinite(value);
+  const rankOf = (value) => (Number.isInteger(value) && value >= 1 && value <= 25 ? value : null);   // a place in the Top 25, or no rank
+  const dayText = (iso) => { const [, month, day] = iso.split("-").map(Number); return month + "/" + day; };
+
+  // The last game as its two sides in the order they are printed: the school's own first, whether it was at home or away.
+  function lastGame(game) {
+    if (!game || !isName(game.home) || !isName(game.away) || !isScore(game.home_score) || !isScore(game.away_score)) return null;
+    const home = { name: game.home, rank: rankOf(game.home_rank), score: game.home_score };
+    const away = { name: game.away, rank: rankOf(game.away_rank), score: game.away_score };
+    return game.school_home === false ? [away, home] : [home, away];
+  }
+
+  function nextGame(game) {
+    if (!game || !isName(game.home) || !isName(game.away) || !/^\d{4}-\d{2}-\d{2}$/.test(game.date)) return null;
+    return { date: game.date, away: { name: game.away, rank: rankOf(game.away_rank) }, home: { name: game.home, rank: rankOf(game.home_rank) } };
+  }
+
+  function scoreEntries() {
+    const sent = model.status && Array.isArray(model.status.scores) ? model.status.scores : [];
+    const entries = sent.filter((entry) => entry && typeof entry.school === "string");
+    const usable = [];
+    for (const entry of entries) {
+      const last = lastGame(entry.last), next = nextGame(entry.next);
+      if (last || next) usable.push({ school: entry.school, name: isName(entry.name) ? entry.name : entry.school, last, next });
+    }
+    return { usable, several: entries.length > 1 };
+  }
+
+  // "Texas (#4) 45": a team, its rank in orange and its score, one unit that does not split across lines.
+  function side(team, score) {
+    const unit = make("span", "side");
+    unit.append(team.name);
+    if (team.rank) unit.append(" ", make("span", "rank", "(#" + team.rank + ")"));
+    if (score !== undefined) unit.append(" " + score);
+    return unit;
+  }
+
+  function drawScore() {
+    const { usable, several } = scoreEntries();
+    const strip = el("score");
+    if (!usable.length) {
+      if (!strip.hidden) strip.hidden = true;
+      scoreShown = scoreKey = null;
+      return;
+    }
+    const entry = usable.find((e) => e.school === scoreShown) || usable[0];
+    scoreShown = entry.school;
+    const lead = several ? entry.name : null;
+    const key = JSON.stringify([lead, entry]);
+    if (key !== scoreKey) {
+      scoreKey = key;
+      const last = [];
+      if (lead) last.push(lead + (entry.last ? ": " : ""));
+      if (entry.last) last.push(side(entry.last[0], entry.last[0].score), " \u2013 ", side(entry.last[1], entry.last[1].score));
+      el("score-last").replaceChildren(...last);
+      const next = entry.next;
+      el("score-next").replaceChildren(...(next ? ["Next: " + dayText(next.date) + " \u00b7 ", side(next.away), " @ ", side(next.home)] : []));
+    }
+    if (strip.hidden) strip.hidden = false;
+  }
+
+  function rotateScore() {
+    const { usable } = scoreEntries();
+    if (usable.length < 2) return;
+    const at = usable.findIndex((e) => e.school === scoreShown);
+    scoreShown = usable[(at + 1) % usable.length].school;
+    drawScore();
+  }
+
   function tick() {
     el("clock").textContent = fmtTime(new Date());
     el("date").textContent = fmtDate(new Date());
@@ -354,4 +435,5 @@
   refreshEvents();
   setInterval(refreshStatus, STATUS_EVERY_MS);
   setInterval(refreshEvents, EVENTS_EVERY_MS);
+  setInterval(rotateScore, SCORE_EVERY_MS);
 })();

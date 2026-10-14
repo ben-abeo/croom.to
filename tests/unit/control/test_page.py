@@ -14,6 +14,7 @@ import socket
 import struct
 import tempfile
 import threading
+import time
 import urllib.request
 import zlib
 from datetime import datetime, time as time_of_day, timedelta
@@ -25,11 +26,15 @@ from aiohttp import web
 
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.control import service as control_service
-from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService
+from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService, read_setting
+from croom.control.settings import SettingsStore
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASKED
+from croom.scores.espn import ScheduleUnavailable
+from croom.scores.service import ScoresService
 from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
+from tests.unit.scores.schedules import Feed, every_school, game, schedule, texas_sample
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -38,13 +43,15 @@ class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
-                 room_company=None):
+                 room_company=None, schedules=None):
         self.events = list(calendar_events)
         self.room_name = room_name
         self.room_location = room_location
         self.room_company = room_company   # None: the config says nothing, so the service's own default shows
         self.calendar_connected = calendar_connected
         self.port_arg = port
+        self.schedules = schedules      # team id -> the schedule ESPN would answer; None leaves the room without a scoreboard
+        self.feed = None                # the scoreboard's fake feed, once the server runs: what it was asked, and `down` to fail it
         self.devices = devices if devices is not None else StubDevices()
         self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
         self.meeting = None
@@ -67,10 +74,18 @@ class PageServer:
                   "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")}
         if self.room_company is not None:
             config["room_company"] = self.room_company
+        store = SettingsStore(config["settings_file"])
+        scores = None
+        if self.schedules is not None:
+            # The agent's wiring, over a fake feed: the schools come from the page's own store, and a school is read within a moment of
+            # being turned on and again every fifth of a second, so that what a test changes in the feed shows at the sign's next poll.
+            self.feed = Feed(self.schedules)
+            scores = ScoresService(self.feed, lambda: read_setting(store, "sign_scores"), interval_s=0.2, retry_s=0.2, check_s=0.05)
+            await scores.start()
         service = ControlService(
             config=config,
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
-            devices=self.devices,
+            devices=self.devices, store=store, scores=scores,
         )
         await service.start()
         self.port = service.bound_port
@@ -78,6 +93,8 @@ class PageServer:
         self._ready.set()
         await self._stop.wait()
         await service.stop()
+        if scores is not None:
+            await scores.stop()
 
     def __enter__(self):
         self._thread.start()
@@ -714,9 +731,13 @@ def luminance(colour):
 WEEK_WORDS = {"week heading": ".week-head h2", "Back": "#week-back", "day name": "#week .day-name", "date": "#week .day-date",
               "booking time": "#week .slot:not([hidden]) time", "booking title": "#week .slot:not([hidden]) .title", "booking platform": "#week .slot:not([hidden]) .who",
               "nothing booked": "#week .none", "more": "#week .more:not([hidden])"}
+# The scoreboard strip's words (spec 2.5), found while a school is on: the score line, its ranks (burnt orange) and the next game.
+SCORE_WORDS = {"score line": "#score-last", "score rank": "#score .rank", "next game": "#score-next"}
 LABELS = {"This week", "Back"}    # a button's label: measured over its own text, so that a fill behind it counts
-HIDE_TODAYS_WORDS = ".top *, .status *, .today-head h2, .event > * { visibility: hidden !important; } #this-week { color: transparent !important; }"   # the rows keep their own veil, the buttons their border and fill
-HIDE_THE_WEEKS_WORDS = ".top *, .status *, .week-head h2, .day-head *, .slot > *, .none, .more { visibility: hidden !important; } #week-back { color: transparent !important; }"
+HIDE_TODAYS_WORDS = (".top *, .status *, .today-head h2, .event > *, .score .last, .score .next { visibility: hidden !important; } "     # the rows keep their own veil, the buttons their border and fill, the strip its dark band
+                     "#this-week { color: transparent !important; }")
+HIDE_THE_WEEKS_WORDS = (".top *, .status *, .week-head h2, .day-head *, .slot > *, .none, .more, .score .last, .score .next { visibility: hidden !important; } "
+                        "#week-back { color: transparent !important; }")
 
 
 def contrast_of_every_word(page, browser, selectors, hide):
@@ -756,7 +777,8 @@ def test_every_word_keeps_its_contrast_over_every_photograph(browser, key, width
     """Measured, not looked at: with the words hidden, the brightest 1 % of the picture behind each word (so each word is judged at the
     hardest it is to read over this photograph) against the word's own colour: 4.5 to 1 for text, 3 to 1 for large text (WCAG AA). A
     photograph swapped in later that is too bright where the words are fails here, by name. At both sizes (the photograph is cropped
-    differently on a tall sign, and the words sit elsewhere on it), on the Today list and on the week view.
+    differently on a tall sign, and the words sit elsewhere on it), on the Today list with the scoreboard strip up along the bottom (its score line,
+    its orange ranks and its next game) and on the week view.
 
     The page's clock is pinned. The date and the clock are right-aligned, so a short one is a narrow box at the very edge, where the
     brightest part of a photograph is (the stadium's floodlights are under the date); a long one reaches over darker picture. Friday,
@@ -765,8 +787,9 @@ def test_every_word_keeps_its_contrast_over_every_photograph(browser, key, width
     skip_if_day_ends_within(2)
     bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 70), event("e3", "Sales pipeline", 100)]
     bookings += [event_on(f"w{n}", f"Planning review {n}", 1, 8 + n, 0, url=None, platform=MeetingPlatform.UNKNOWN if n % 2 else MeetingPlatform.ZOOM) for n in range(8)]   # a busy tomorrow
-    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
-        choose(server, sign_background=key)
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        choose(server, sign_background=key, sign_scores=["texas"])        # with the scoreboard strip up along the bottom
+        scoreboard_has(server, ["texas"])
         page = browser.new_page(viewport={"width": width, "height": height})
         page.clock.install(time=datetime(2026, 5, 1, 1, 5))
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
@@ -774,8 +797,9 @@ def test_every_word_keeps_its_contrast_over_every_photograph(browser, key, width
         assert page.locator("#date").inner_text() == "Friday, May 1, 2026" and page.locator("#clock").inner_text() == "1:05\u00a0AM"   # the pin took
         page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
         page.wait_for_selector("#events .event", timeout=5000)
+        page.wait_for_selector("#score:not([hidden])", timeout=5000)
         wait_for_the_photograph_to_paint(page)
-        for name, contrast, least in contrast_of_every_word(page, browser, SIGN_WORDS, HIDE_TODAYS_WORDS):
+        for name, contrast, least in contrast_of_every_word(page, browser, {**SIGN_WORDS, **SCORE_WORDS}, HIDE_TODAYS_WORDS):
             assert contrast >= least, (key, width, height, "Today", name, round(contrast, 2))
         open_the_week(page)
         wait_for_the_photograph_to_paint(page)
@@ -1426,14 +1450,18 @@ def test_the_week_view_refits_when_the_sign_is_turned(browser):
         page.close()
 
 
-def test_the_week_view_gives_way_to_the_scoreboard_strip_when_it_comes_up(browser):
-    """The strip (spec section 2.5) takes the bottom of the sign when it has a score; the days refit above it, and nothing runs under it."""
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_week_view_gives_way_to_the_scoreboard_strip_when_it_comes_up(browser, width, height, central_time):
+    """The strip (spec section 2.5) takes the bottom of the sign when a school is on and has a score: the days refit above it and nothing
+    runs under it, while the status, the head and the tops of the days stay exactly where they were."""
     skip_if_day_ends_within(3)
-    with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
-        page = open_sign(browser, server)
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        page = open_sign(browser, server, width, height)
         open_the_week(page)
-        before = week_fit(page)
-        page.evaluate("""() => { document.getElementById('score-last').textContent = 'Texas (#4) 45 - Texas A&M 42'; document.getElementById('score').hidden = false; }""")
+        before, kept = week_fit(page), boxes(page, ".top", ".status", ".week-head")
+        tops = page.locator("#week .day").evaluate_all("days => days.map((d) => d.getBoundingClientRect().top)")
+        choose(server, sign_scores=["texas"])
+        page.wait_for_function("!document.getElementById('score').hidden", timeout=8000)
         for _ in range(50):                                                  # the box shrinks at once; the days are fitted to it a moment later
             after = week_fit(page)
             if after != before and not any(clipped for _, _, _, clipped in after):
@@ -1441,6 +1469,9 @@ def test_the_week_view_gives_way_to_the_scoreboard_strip_when_it_comes_up(browse
             page.wait_for_timeout(100)
         assert sum(shown for _, shown, _, _ in after) < sum(shown for _, shown, _, _ in before)           # less room, so fewer bookings
         assert not any(clipped for _, _, _, clipped in after) and fits(page)
+        assert boxes(page, ".top", ".status", ".week-head") == kept          # nothing above the days moved
+        now = page.locator("#week .day").evaluate_all("days => days.map((d) => d.getBoundingClientRect().top)")
+        assert now[0] == tops[0] and (now == tops if width > height else True)   # the first day starts where it did; side by side they all do (stacked, the rows share what is left)
         assert page.locator("#week-days").evaluate("e => e.getBoundingClientRect().bottom") <= page.locator("#score").evaluate("e => e.getBoundingClientRect().top")
         page.close()
 
@@ -1669,6 +1700,383 @@ def test_on_a_short_screen_the_week_gives_up_the_status_detail_and_the_dates_to_
         page = open_sign(browser, server, 1024, 561)                         # one pixel more height and the detail stays
         open_the_week(page)
         assert page.locator("#detail").is_visible()
+        page.close()
+
+
+# --- the scoreboard strip (spec 2026-10-13, section 2.5): the last score and the next game of each school the room has on, along the bottom ---
+
+BURNT_ORANGE = "rgb(255, 179, 102)"      # #FFB366, the rank: the one colour the strip adds to the sign's
+PERIWINKLE = "rgb(189, 206, 255)"         # #BDCEFF
+WHITE = "rgb(255, 255, 255)"
+TEXAS_LAST, TEXAS_NEXT = "Texas (#4) 45 \u2013 Texas A&M 42", "Next: 10/19 \u00b7 Texas (#4) @ Missouri (#9)"          # the spec's own words
+MICHIGAN_LAST, MICHIGAN_NEXT = "Michigan (#12) 31 \u2013 Ohio State 24", "Next: 10/24 \u00b7 Michigan (#12) @ Purdue"
+
+
+def status_of(server):
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/api/status", timeout=5) as response:
+        return json.loads(response.read())
+
+
+def wait_for(what, condition, seconds=5):
+    for _ in range(int(seconds / 0.05)):
+        if condition():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def scoreboard_has(server, schools):
+    """Waits until exactly `schools` have something to show (the server's own loop reads a school a moment after it is turned on)."""
+    wait_for(f"the scoreboard to hold {schools}", lambda: [e["school"] for e in status_of(server).get("scores", []) if e["last"] or e["next"]] == schools)
+
+
+def strip_text(page):
+    return [page.locator("#score-last").inner_text(), page.locator("#score-next").inner_text()]
+
+
+def strip_is_up(page):
+    page.wait_for_function("!document.getElementById('score').hidden", timeout=8000)      # the sign's own poll (5 s) brings it
+
+
+def boxes(page, *selectors):
+    """Where each element of each selector is, as [x, y, width, height] in whole tenths of a pixel."""
+    return page.evaluate("""(selectors) => selectors.map((s) => [...document.querySelectorAll(s)].map((e) => {
+        const r = e.getBoundingClientRect();
+        return [r.x, r.y, r.width, r.height].map((v) => Math.round(v * 10) / 10);
+    }))""", list(selectors))
+
+
+def test_the_strip_is_hidden_until_a_school_is_on_and_nothing_is_read_for_a_room_that_has_none(browser):
+    with PageServer(schedules=every_school()) as server:
+        page = open_sign(browser, server)
+        page.wait_for_timeout(300)                                           # the scoreboard's loop has looked a good many times
+        assert page.locator("#score").is_hidden() and server.feed.asked == []
+        assert "scores" not in status_of(server) and fits(page)
+        page.close()
+
+
+def test_the_strip_shows_the_last_score_and_the_next_game_in_the_specs_words_with_the_ranks_in_burnt_orange(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        page = open_sign(browser, server)
+        errors, urls = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("request", lambda r: urls.append(r.url))
+        choose(server, sign_scores=["texas"])
+        strip_is_up(page)
+        assert strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]                  # one school: no name leading
+        ranks = page.locator("#score .rank")
+        assert ranks.all_inner_texts() == ["(#4)", "(#4)", "(#9)"]            # the ranks of both lines, and only a rank
+        assert set(ranks.evaluate_all("els => els.map((e) => getComputedStyle(e).color)")) == {BURNT_ORANGE}
+        inks = page.locator("#score").evaluate("""strip => { const seen = new Set(), walk = (node) => { for (const child of node.childNodes) {
+            if (child.nodeType === 3 && child.textContent.trim()) seen.add(getComputedStyle(node).color); else if (child.nodeType === 1) walk(child); } };
+            walk(strip); return [...seen]; }""")
+        assert sorted(inks) == sorted([WHITE, PERIWINKLE, BURNT_ORANGE])     # white and periwinkle as elsewhere: the orange of the ranks is the one new colour
+        assert page.locator("#score-last").evaluate("e => getComputedStyle(e).color") == WHITE
+        assert page.locator("#score-next").evaluate("e => getComputedStyle(e).color") == PERIWINKLE
+        assert page.locator("#score").evaluate("e => getComputedStyle(e).textTransform") == "none"      # no capitals
+        assert fits(page) and errors == []
+        assert urls and all(u.startswith(f"http://127.0.0.1:{server.port}/") for u in urls)             # the sign asks nobody but its own room
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, root", [(1280, 800, 16), (1920, 1080, 24)])
+def test_the_strip_is_set_in_the_signs_own_type_and_sits_flush_along_the_bottom_edge(browser, width, height, root, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, width, height)
+        strip_is_up(page)
+        style = lambda selector, prop: page.locator(selector).evaluate(f"e => getComputedStyle(e).{prop}")
+        assert page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)") == root
+        assert float(style("#score", "fontSize").removesuffix("px")) == pytest.approx(1.1 * root) and style("#score", "fontFamily").startswith("Lexend")   # 1.1 rem: between the sign's 1.05 and 1.15
+        assert (style("#score-last", "fontWeight"), style("#score-next", "fontWeight")) == ("600", "400")                   # the score in the sign's bold, the next game in its regular
+        assert style("#score", "backgroundColor") == "rgba(0, 0, 0, 0.35)"
+        box = page.locator("#score").bounding_box()
+        assert box["x"] == 0 and abs(box["x"] + box["width"] - width) <= 0.5 and abs(box["y"] + box["height"] - height) <= 0.5      # across the sign, on its bottom edge
+        last, following = page.locator("#score-last").bounding_box(), page.locator("#score-next").bounding_box()
+        assert abs(last["x"] - page.locator("#room-name").bounding_box()["x"]) <= 1                          # its words start where the others do, past the rail
+        assert following["x"] >= last["x"] + last["width"]                                                  # the last game on the left, the next on the right ...
+        margin = float(style("#score", "paddingRight").removesuffix("px"))
+        assert abs(following["x"] + following["width"] - (width - margin)) <= 1                              # ... to the sign's right margin
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        wait_for_the_photograph_to_paint(page)
+        assert screenshot_pixel(page, 10, height - 10) == (31, 169, 113)    # the status rail runs on, solid, past the strip to the bottom edge (#1FA971)
+        assert screenshot_pixel(page, 10, height // 2) == (31, 169, 113)
+        page.close()
+
+
+def test_with_several_schools_on_the_strip_moves_to_the_next_every_eight_seconds_with_the_schools_name_leading(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas", "michigan"])
+        scoreboard_has(server, ["texas", "michigan"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        assert strip_text(page) == ["Texas: " + TEXAS_LAST, TEXAS_NEXT]      # the name leads the line, and the first school in the settings' order is first
+        page.clock.run_for(3000)
+        page.wait_for_timeout(150)
+        assert strip_text(page)[0].startswith("Texas: ")                       # not yet: a school stays 8 seconds
+        page.clock.run_for(5500)
+        page.wait_for_timeout(150)
+        assert strip_text(page) == ["Michigan: " + MICHIGAN_LAST, MICHIGAN_NEXT]       # the next school: 8 seconds after the first came up
+        assert page.locator("#score .rank").all_inner_texts() == ["(#12)", "(#12)"]    # the ranks are burnt orange here too, wherever a line has them
+        page.clock.run_for(8000)
+        page.wait_for_timeout(150)
+        assert strip_text(page) == ["Texas: " + TEXAS_LAST, TEXAS_NEXT]      # and round again
+        assert fits(page) and errors == []
+        page.close()
+
+
+def test_a_school_with_nothing_to_show_is_left_out_of_the_rotation_and_the_strip_goes_when_none_has_anything(browser, central_time):
+    with PageServer(schedules={**every_school(), 130: {"events": []}}) as server:       # Michigan's feed has no games in it
+        choose(server, sign_scores=["michigan", "texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == ["Texas: " + TEXAS_LAST, TEXAS_NEXT]      # two schools are on, so the name leads; only Texas has anything to say
+        page.clock.run_for(8500)
+        page.wait_for_timeout(150)
+        assert strip_text(page)[0] == "Texas: " + TEXAS_LAST                  # and the rotation has nowhere else to go
+        choose(server, sign_scores=["michigan"])
+        scoreboard_has(server, [])
+        poll(page)
+        assert page.locator("#score").is_hidden()                            # one school on, with nothing to say: no strip
+        page.close()
+
+
+def test_a_school_with_only_a_last_game_or_only_a_next_one_shows_that_one(browser, central_time):
+    schedules = every_school()
+    schedules[251]["events"] = [e for e in schedules[251]["events"] if e["competitions"][0]["status"]["type"]["completed"]]          # the season is over
+    schedules[130]["events"] = [e for e in schedules[130]["events"] if not e["competitions"][0]["status"]["type"]["completed"]]      # it has not begun
+    with PageServer(schedules=schedules) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == [TEXAS_LAST, ""] and page.locator("#score-next").evaluate("e => getComputedStyle(e).display") == "none"      # a half with nothing in it takes no room
+        choose(server, sign_scores=["michigan"])
+        scoreboard_has(server, ["michigan"])
+        page.wait_for_function("document.getElementById('score-last').innerText === ''", timeout=8000)
+        assert strip_text(page) == ["", MICHIGAN_NEXT] and page.locator("#score-last").evaluate("e => getComputedStyle(e).display") == "none"
+        box, nxt = page.locator("#score").bounding_box(), page.locator("#score-next").bounding_box()
+        assert nxt["x"] + nxt["width"] > box["x"] + box["width"] * 0.6      # the next game stays on the right when it is alone
+        choose(server, sign_scores=["texas", "michigan"])                    # with two on, the name leads a school that has only a next game to give
+        scoreboard_has(server, ["texas", "michigan"])
+        page.wait_for_function("document.getElementById('score-last').innerText === 'Michigan'", timeout=8000)    # Michigan stays up: a poll does not move the strip on
+        assert strip_text(page) == ["Michigan", MICHIGAN_NEXT]
+        page.close()
+
+
+def test_a_game_lost_on_the_road_reads_with_the_school_first_and_the_next_one_with_the_visitor_first(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas_am"])                             # Texas A&M lost at LSU, 24 to 21: LSU is the home side, listed first in the feed
+        scoreboard_has(server, ["texas_am"])
+        page = open_sign(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == ["Texas A&M (#20) 21 \u2013 LSU (#18) 24", "Next: 10/17 \u00b7 Arkansas @ Texas A&M (#20)"]   # the school's own score first; the visitor "@" the host
+        page.close()
+
+
+def test_the_strip_hides_when_its_data_goes_and_a_feed_that_fails_keeps_the_last_score_up(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        strip_is_up(page)
+        asked = len(server.feed.asked)
+        server.feed.down = ScheduleUnavailable("ESPN answered 503")          # the feed goes down: the scoreboard keeps what it has, and so does the strip
+        wait_for("failed reads", lambda: len(server.feed.asked) >= asked + 3)
+        assert status_of(server)["scores"][0]["last"]["home_score"] == 45
+        poll(page)
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]
+        server.feed.down = None
+        server.schedules[251] = {"events": []}                               # the feed answers, with no games in it: nothing to show
+        scoreboard_has(server, [])
+        poll(page)
+        assert page.locator("#score").is_hidden() and fits(page)
+        server.schedules[251] = texas_sample()                               # and the data comes back
+        scoreboard_has(server, ["texas"])
+        poll(page)
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]
+        choose(server, sign_scores=[])                                       # every school off: the strip goes, and nothing is read after
+        poll(page)
+        assert page.locator("#score").is_hidden() and "scores" not in status_of(server)
+        asked = len(server.feed.asked)
+        time.sleep(0.3)
+        assert len(server.feed.asked) == asked and errors == []
+        page.close()
+
+
+def test_a_feed_that_is_down_from_the_start_leaves_the_sign_with_no_strip_and_no_error(browser):
+    with PageServer(calendar_events=[event("e1", "Design review", 40)], schedules=every_school()) as server:
+        server.feed.down = ScheduleUnavailable("ESPN could not be reached: no route to host")
+        choose(server, sign_scores=["texas", "michigan"])
+        wait_for("the first reads", lambda: len(server.feed.asked) >= 2)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        problems = []
+        page.on("pageerror", lambda e: problems.append(str(e)))
+        page.on("console", lambda m: problems.append(m.text) if m.type in ("error", "warning") else None)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        scores = status_of(server)["scores"]                                  # the status answers, listing the schools with nothing to show
+        assert [(e["school"], e["last"], e["next"]) for e in scores] == [("texas", None, None), ("michigan", None, None)]
+        assert page.locator("#score").is_hidden() and fits(page)
+        assert "ESPN" not in page.locator("body").inner_text() and "score" not in page.locator("body").inner_text().lower()      # no error to read on the sign
+        assert page.locator("#chip-text").inner_text().startswith("Free until") and problems == []
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_strip_coming_up_moves_nothing_on_the_today_list_and_the_sign_still_fits(browser, width, height, central_time):
+    skip_if_day_ends_within(3)
+    bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 100), event("e3", "Sales pipeline", 160)]
+    with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        page = open_sign(browser, server, width, height)
+        page.wait_for_selector("#events .event", timeout=5000)
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        parts = (".top", ".brand", ".when", ".status", ".chip", "#detail", "#today", ".today-head", "#events .event")
+        before = boxes(page, *parts)
+        assert fits(page)
+        choose(server, sign_scores=["texas"])
+        strip_is_up(page)
+        assert boxes(page, *parts) == before                                  # every box of the sign above the strip is where it was
+        strip, today = page.locator("#score").bounding_box(), page.locator("#today").bounding_box()
+        assert today["y"] + today["height"] <= strip["y"]                    # the strip takes room of its own and covers nothing
+        assert abs(strip["y"] + strip["height"] - height) <= 0.5 and fits(page)
+        choose(server, sign_scores=[])                                       # and its going moves nothing either
+        page.wait_for_function("document.getElementById('score').hidden", timeout=8000)
+        assert boxes(page, *parts) == before and fits(page)
+        page.close()
+
+
+def test_the_strip_with_the_longest_lines_it_gets_wraps_inside_the_sign_and_the_sign_still_fits(browser, central_time):
+    skip_if_day_ends_within(3)
+    long_season = schedule("Texas A&M", [
+        game("Mississippi State", "Texas A&M", "2026-10-10T20:00Z", home_score=24, away_score=21, home_rank=16, away_rank=20, state="post"),
+        game("Louisiana State", "Texas A&M", "2026-10-17T19:00Z", home_rank=18, away_rank=20)])
+    bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 100), event("e3", "Sales pipeline", 160)]
+    with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen, past the elevators",
+                    room_company="Lone Star Eye Care and Surgery Partners", schedules={245: long_season}) as server:
+        choose(server, sign_scores=["texas_am"])
+        scoreboard_has(server, ["texas_am"])
+        for width, height in ((1280, 800), (800, 1280), (1920, 1080)):
+            page = open_sign(browser, server, width, height)
+            strip_is_up(page)
+            assert strip_text(page) == ["Texas A&M (#20) 21 \u2013 Mississippi State (#16) 24", "Next: 10/17 \u00b7 Texas A&M (#20) @ Louisiana State (#18)"]
+            assert page.locator("#score").evaluate("e => e.scrollWidth <= e.clientWidth"), (width, height)      # nothing runs off the side
+            assert fits(page), (width, height)
+            last, following = page.locator("#score-last").bounding_box(), page.locator("#score-next").bounding_box()
+            for part in (last, following):
+                assert part["x"] >= 0 and part["x"] + part["width"] <= width, (width, height)
+            lines = page.locator("#score-last, #score-next").evaluate_all("els => els.map((e) => e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight))")
+            assert all(abs(n - 1) < 0.05 for n in lines), (width, height, lines)                            # each line is one line, whole: it moves, it does not wrap in two
+            if width >= 1280:
+                assert abs(last["y"] - following["y"]) <= 2 and following["x"] > last["x"] + last["width"], (width, height)    # side by side where they fit
+            else:
+                assert following["y"] >= last["y"] + last["height"], (width, height)                          # one under the other where they do not
+            page.close()
+
+
+def test_on_a_sign_too_narrow_for_a_line_it_breaks_between_the_teams_and_never_inside_one(browser, central_time):
+    long_season = schedule("Texas A&M", [
+        game("Mississippi State", "Texas A&M", "2026-10-10T20:00Z", home_score=24, away_score=21, home_rank=16, away_rank=20, state="post"),
+        game("Louisiana State", "Texas A&M", "2026-10-17T19:00Z", home_rank=18, away_rank=20)])
+    with PageServer(schedules={245: long_season}) as server:
+        choose(server, sign_scores=["texas_am"])
+        scoreboard_has(server, ["texas_am"])
+        page = open_sign(browser, server, 420, 900)
+        strip_is_up(page)
+        sides = page.locator("#score .side").evaluate_all("""els => els.map((e) => [e.textContent, new Set([...e.getClientRects()].map((r) => Math.round(r.top))).size])""")
+        assert [name for name, _ in sides] == ["Texas A&M (#20) 21", "Mississippi State (#16) 24", "Texas A&M (#20)", "Louisiana State (#18)"]
+        assert all(lines == 1 for _, lines in sides), sides                  # each team and its score is on one line, whole
+        tops = page.locator("#score-last .side, #score-next .side").evaluate_all("els => els.map((e) => Math.round(e.getBoundingClientRect().top))")
+        assert len(set(tops)) > 1, tops                                       # and the line did have to break, between them
+        assert page.locator("#score").evaluate("e => e.scrollWidth <= e.clientWidth")
+        page.close()
+
+
+def test_a_date_is_the_month_and_the_day_without_leading_zeros(browser):
+    """The strip's date is "10/19" for the 19th of October and "9/5" for the 5th of September, as Americans write it."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        dates = ["2026-09-05", "2026-12-31", "2027-01-09", "2026-10-19"]
+
+        def status(route):
+            body = route.fetch().json()
+            body["scores"] = [{"school": "texas", "name": "Texas", "last": None,
+                               "next": {"date": dates[0], "home": "Texas", "home_rank": None, "away": "Rice", "away_rank": None}}]
+            route.fulfill(json=body)
+
+        page.route("**/api/status", status)
+        for date, shown in zip(dates, ["9/5", "12/31", "1/9", "10/19"]):
+            dates[0] = date
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            strip_is_up(page)
+            assert page.locator("#score-next").inner_text() == f"Next: {shown} \u00b7 Rice @ Texas", date
+        page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_strip(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || '') + ':' + r.target.nodeName)))
+                .observe(document.getElementById('score'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == []                         # the same score: the strip is not drawn again
+        page.close()
+
+
+def test_a_scores_list_with_junk_in_it_draws_what_it_can_and_throws_nothing(browser):
+    """The status is the room's own, but the sign never takes its shape on trust."""
+    junk = [None, 7, "texas", {}, {"school": "texas"}, {"school": "texas", "name": "Texas", "last": {"home": "Texas"}, "next": {"date": "soon", "home": "A", "away": "B"}},
+            {"school": "michigan", "name": "Michigan", "last": {"home": "Michigan", "home_score": 3, "home_rank": "x", "away": "Ohio State", "away_score": 0, "away_rank": 99.5},
+             "next": {"date": "2026-10-24", "home": "", "away": "Purdue"}}]
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors, served = [], {"scores": junk}
+
+        def status(route):
+            body = route.fetch().json()
+            if served["scores"] is not None:
+                body["scores"] = served["scores"]
+            route.fulfill(json=body)
+
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/api/status", status)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        strip_is_up(page)
+        assert strip_text(page) == ["Michigan: Michigan 3 \u2013 Ohio State 0", ""]      # the one entry that holds a whole game; ranks that are no ranks are left out
+        for nothing in ([None, 7, "x", {}], "texas", {"school": "texas"}, [], None):
+            served["scores"] = nothing                                         # nothing a strip can be drawn from
+            page.reload(wait_until="networkidle")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            assert page.locator("#score").is_hidden(), nothing
+        assert errors == []
+        page.close()
+
+
+def test_the_strip_stays_as_it_was_while_the_sign_cannot_reach_the_room(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]    # as the rest of what the sign last knew stays
         page.close()
 
 

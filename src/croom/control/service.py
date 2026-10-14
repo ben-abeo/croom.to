@@ -84,6 +84,16 @@ ROOM_SETTINGS: Dict[str, Tuple[Any, Callable[[Any], Any]]] = {
 }
 
 
+def read_setting(store, key: str) -> Any:
+    """A room setting as the store holds it, else its default: a missing, broken or no longer valid value is not an error. What the page
+    loads at start, and what the scoreboard reads each time it needs the schools that are on, so that they cannot disagree."""
+    default, check = ROOM_SETTINGS[key]
+    try:
+        return check(store.get(key, default))
+    except ValueError:
+        return check(default)
+
+
 def _register_font_types() -> None:
     """Serve the bundled fonts with their real media type (aiohttp's table lacks woff2)."""
     mimetypes.add_type("font/woff2", ".woff2")
@@ -154,6 +164,7 @@ class ControlService(Service):
         calendar: the CalendarService instance, or None.
         devices: the room devices the page controls (sound and camera), or None.
         store: the SettingsStore for the page's choices, or None to open settings_file.
+        scores: the scores service (current() lists the football scores of the schools that are on), or None.
     """
 
     def __init__(
@@ -163,6 +174,7 @@ class ControlService(Service):
         calendar=None,
         devices=None,
         store=None,
+        scores=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -182,6 +194,8 @@ class ControlService(Service):
         self._settings = self._load_settings()
         self._meeting = meeting
         self._calendar = calendar
+        self._scores = scores
+        self._scores_failure: Optional[str] = None
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None
@@ -193,7 +207,7 @@ class ControlService(Service):
 
     @classmethod
     def from_config(
-        cls, config: Config, meeting=None, calendar=None, devices=None, store=None
+        cls, config: Config, meeting=None, calendar=None, devices=None, store=None, scores=None
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         return cls(
@@ -211,6 +225,7 @@ class ControlService(Service):
             calendar=calendar,
             devices=devices,
             store=store,
+            scores=scores,
         )
 
     @property
@@ -381,7 +396,7 @@ class ControlService(Service):
             # The provider refused the link before it started joining.
             state = "error"
         platforms = list(self._meeting.get_available_platforms()) if self._meeting is not None else []
-        return {
+        status = {
             "room": {"name": self._room_name, "location": self._room_location, "company": self._room_company},
             "server_time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "platforms": platforms,
@@ -402,6 +417,24 @@ class ControlService(Service):
             "audio": self._audio_state(),
             "camera": self._camera_state(),
         }
+        scores = self._scores_status()
+        if scores:
+            status["scores"] = scores   # only while a school is on: no key, not an empty list, when none is
+        return status
+
+    def _scores_status(self) -> List[Dict[str, Any]]:
+        """The football scores of the schools that are on, one entry each (spec 2026-10-13, section 2.5); nothing when none is on, there
+        is no scores service, or it fails: the status must always answer, and the door sign and the table both depend on it."""
+        if self._scores is None:
+            return []
+        try:
+            return list(self._scores.current())
+        except Exception as e:  # noqa: BLE001 - the status must always answer
+            message = f"Could not read the football scores: {type(e).__name__}: {e}"
+            if message != self._scores_failure:   # warned about once with its traceback, per distinct message, as the devices' reads are
+                self._scores_failure = message
+                logger.warning(message, exc_info=True)
+            return []
 
     # ------------------------------------------------------------------
     # The screensaver style
@@ -449,13 +482,7 @@ class ControlService(Service):
 
     def _load_settings(self) -> Dict[str, Any]:
         """Each setting as stored, else its default: a missing, broken or no longer valid value is not an error."""
-        settings: Dict[str, Any] = {}
-        for key, (default, check) in ROOM_SETTINGS.items():
-            try:
-                settings[key] = check(self._store.get(key, default))
-            except ValueError:
-                settings[key] = check(default)
-        return settings
+        return {key: read_setting(self._store, key) for key in ROOM_SETTINGS}
 
     def _settings_payload(self) -> Dict[str, Any]:
         """Every setting, as copies: what an answer carries is not the room's own list."""

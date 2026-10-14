@@ -1,6 +1,6 @@
 /* Crystal Meet door sign: a photograph of Austin under a navy overlay, with the room's status in a rail down the left
-   edge and a solid chip under the room's name. Nothing else is coloured, so the sign reads from the hallway and still
-   looks calm up close. */
+   edge and a solid chip under the room's name. Nothing else is coloured (but the ranks on the scoreboard strip, when a
+   school's score is up, in burnt orange), so the sign reads from the hallway and still looks calm up close. */
 @font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
 
@@ -44,8 +44,9 @@ body {
   grid-template-rows: auto 1fr auto;
   padding: var(--gutter) var(--gutter) 0 var(--inset);
 }
-/* The status rail: the one place the status colour is solid, with the chip. */
-.rail { position: absolute; z-index: 1; left: 0; top: 0; bottom: 0; width: var(--rail); background: var(--status); }
+/* The status rail: the one place the status colour is solid, with the chip. Above everything, the scoreboard strip's band too, so that
+   it runs on to the bottom edge as it does without one (nothing else is that far left). */
+.rail { position: absolute; z-index: 2; left: 0; top: 0; bottom: 0; width: var(--rail); background: var(--status); }
 
 /* Behind everything. The room's choice is body[data-bg] (sign.js reads it from the status). When the room has the choice's
    photograph, sign.js sets body[data-photo] and puts its address in --photo, and the two layers below draw it. "plain" has
@@ -172,7 +173,11 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
 .slot.now { box-shadow: inset 0 0 0 2px var(--status); }   /* the booking in progress, ringed as on the Today list */
 .more { flex: none; padding: 0 0.5rem; color: var(--periwinkle-300); font-size: 0.75rem; }
 
-/* The scoreboard strip along the bottom edge: hidden until the sign has a score to show. */
+/* The scoreboard strip along the bottom edge (spec 2.5): hidden until a school the room has on has a score to show. It takes a row of
+   its own under the week or the Today list while it is up, and none while it is not, so that the status, the head and the tops of the
+   days never move for it. The last game is on the left and the next one on the right (on a line of its own on a narrow sign, where
+   they do not fit side by side); a team and its score are one unit that never splits across lines; the ranks are burnt orange,
+   the one colour the strip adds. */
 .score {
   position: relative;
   z-index: 1;
@@ -181,14 +186,19 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   background: rgba(0, 0, 0, 0.35);
   border-top: 1px solid rgba(255, 255, 255, 0.12);
   display: flex;
+  flex-wrap: wrap;
   justify-content: space-between;
   align-items: center;
-  gap: 24px;
+  gap: 4px 24px;
   font-size: 1.1rem;
 }
+.score .last, .score .next { min-width: 0; }
 .score .last { font-weight: 600; }
-.score .last b { color: #FFB366; font-weight: 600; }
 .score .next { color: var(--periwinkle-300); }
+.score .last:empty, .score .next:empty { display: none; }
+.score .last:empty + .next { margin-left: auto; }   /* a next game with no last one beside it stays on the right */
+.score .side { white-space: nowrap; }
+.score .rank { color: #FFB366; }
 
 /* A short screen (a 7-inch panel, 800 by 480) has no height to spare in the week view: the status gives up its detail line, which the
    days need for what each leaves out ("+8 more"), and a day gives up its date, since its name says which day it is. */

@@ -154,8 +154,10 @@ body[data-state="error"] .detail { color: var(--ink-900); }
 body[data-state="error"] .message { color: #A3260F; }
 body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the page's pale red would not read on it */
 
-/* Buttons */
+/* Buttons. An icon (icons.svg, drawn by app.js) goes before the label, in the label's own colour; it adds width to a
+   button, never height. */
 .button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 10px;
   min-height: 56px;
   padding: 0 26px;
   border-radius: var(--radius);
@@ -167,6 +169,16 @@ body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the pa
   background: var(--blue-600);
   cursor: pointer;
   touch-action: manipulation;
+}
+.button[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute (Save, on the camera screen) */
+.button .icon { width: 1.3em; height: 1.3em; flex: 0 0 auto; }
+.button.menu-item .icon { width: 1.6em; height: 1.6em; }
+.no-icons .icon { display: none; }   /* the sprite did not come (app.js): no empty boxes, and the words are in the middle of their buttons again */
+@media (max-width: 640px) {
+  /* The top bar is already full below this: the logo, the name, the clock and Options share one row, and the icon's 32 px would
+     squeeze the name ("Lab" breaks as "La" and "b" at 390 px; "Conference Room Alpha" takes two lines at 600 px). Options keeps to
+     its word there; every other button keeps its icon. */
+  .button.nav .icon { display: none; }
 }
 .button:hover { background: var(--blue-700); }
 .button.quiet { background: transparent; border-color: var(--periwinkle-300); color: inherit; }
@@ -218,39 +230,60 @@ body[data-state="error"] .status-card .button.quiet { border-color: var(--blue-7
 /* The passcode field: a row of its own under the link box, its keyboard button and Join (a basis of the whole form cannot
    share a line with them). Shown only for a Zoom meeting whose link carries no passcode; hidden, it takes no room. */
 .link-form #passcode-input { flex: 1 1 100%; }
-.keyboard-toggle { padding: 0 16px; font-size: 1.4rem; line-height: 1; }
+.keyboard-toggle { padding: 0 16px; font-size: 1.4rem; line-height: 1; }   /* the font size sizes the icon (1.3em of it); with no sprite, the glyph below */
+.no-icons .keyboard-toggle::after { content: "\2328"; }   /* the glyph the button had before the icons */
 
-/* The page's own keyboard: fixed to the bottom while open, the page gets room above it. */
+/* The page's own keyboard (spec 2026-10-13, section 3): iPad-style key caps on the room's tray colour, fixed to the bottom
+   while open; the page gets room above it. A key is 52 px tall at the kiosk's scale, 44 px on a phone. */
 .keyboard {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
-  padding: 10px 8px calc(10px + env(safe-area-inset-bottom, 0px));
-  background: #0B1220; border-top: 1px solid var(--surface-800);
+  padding: 8px 6px calc(8px + env(safe-area-inset-bottom, 0px));
+  background: #0B1220;
   display: grid; gap: 6px;
+  touch-action: none;   /* a finger on a key is a key press, never a scroll or a zoom */
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;   /* nor a selection or a callout, held or dragged */
 }
 .keyboard[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
-.keyboard .row { display: flex; gap: 6px; }
+.keyboard .row { display: flex; gap: 6px; justify-content: center; box-sizing: border-box; width: 100%; max-width: calc(10 * 118px + 9 * 6px); margin: 0 auto; }   /* every row as wide as the first: ten keys at their widest */
 .keyboard .key {
-  flex: 1 1 0; min-width: 0; min-height: 48px; padding: 0;
-  border: 0; border-radius: var(--radius-sm); background: var(--surface-800); color: #fff;
-  font: inherit; font-size: 1.1rem; font-weight: 600; touch-action: manipulation; cursor: pointer;
+  flex: 1 1 0; min-width: 0; height: 52px; padding: 0;
+  border: 0; border-radius: 8px; background: var(--surface-800); color: #fff;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08), 0 1px 0 rgba(0, 0, 0, 0.5);   /* a lighter top edge, a dark one beneath */
+  font: inherit; font-size: 1.15rem; font-weight: 500; cursor: pointer; position: relative;
 }
-.keyboard .key.wide { flex: 1.6 1 0; font-size: 0.95rem; }
-.keyboard .key.space { flex: 4 1 0; }
-.keyboard .key.join { flex: 2 1 0; background: var(--blue-600); }
-.keyboard .key.active { background: var(--blue-700); }
-.keyboard .key:active { background: var(--blue-700); }
+.keyboard .key .cap { pointer-events: none; }
+.keyboard[data-layer="letters"] .key { max-width: 118px; }   /* a letter is never wider than the first row's, so the nine of the middle row stay half a key in from each end */
+.keyboard .key.wide { flex: 1.5 1 0; max-width: none; font-size: 1rem; background: #172033; }   /* the wide keys take what the letters leave, so the rows end together */
+.keyboard .key .cap svg { display: block; margin: 0 auto; }   /* Shift, delete and hide are drawn (keyboard.js), 24 px, in the key's own colour */
+.keyboard .key.space { flex: 5 1 0; max-width: none; font-size: 0.95rem; }
+.keyboard .key.join { flex: 1.8 1 0; max-width: 180px; background: var(--blue-600); font-weight: 600; }
+/* The pressed look is the .down class the script puts on the key that was pressed, not :active: after a layer switch the
+   :active key would be the one that came up under the finger. */
+.keyboard .key.down { background: var(--navy-800); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6); transform: translateY(1px); }
+.keyboard[data-shift="once"] .key[data-key="shift"], .keyboard[data-shift="lock"] .key[data-key="shift"] { background: #fff; color: var(--navy-900); }
+.keyboard[data-shift="lock"] .key[data-key="shift"] .cap::after { content: "\2022"; position: absolute; bottom: 1px; left: 50%; transform: translateX(-50%); font-size: 0.9rem; line-height: 1; }
+/* The pop above a pressed letter or symbol (keyboard.js places it): one element, in the body so that no row clips it. */
+#key-preview {
+  position: fixed; z-index: 60; min-width: 80px; height: 64px; padding: 0 12px; border-radius: 10px;
+  background: var(--navy-800); color: #fff; font-size: 1.6rem; font-weight: 600; display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45); pointer-events: none;
+}
+#key-preview[hidden] { display: none; }   /* likewise */
 /* The link box stays above the keys because the page makes room under them (the padding) and may grow into it (height:
    auto): the field scrolls up above the keys however tall the status card is. Hiding the Today box moves nothing above
    or beside the link box; it only keeps the keys from covering the lower half of a list. */
 body.keyboard-open .screen { padding-bottom: 290px; }
 body.keyboard-open { height: auto; min-height: 100vh; }
 body.keyboard-open .schedule { display: none; }
-@media (max-width: 480px) { .keyboard .key { min-height: 44px; font-size: 0.95rem; } .keyboard .key.wide { font-size: 0.8rem; } }
+@media (max-width: 480px) { .keyboard .key { height: 44px; font-size: 1rem; } }
 
 /* Screensaver: the picker; the chosen style stays filled in every room state. */
 .picker { display: flex; flex-wrap: wrap; gap: 10px; }
 .picker .button { min-height: 48px; padding: 0 18px; }
 .picker .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
+/* Options > Keyboard (spec 2026-10-13, 3.3): the group sits right under the menu's buttons, not at the foot of the screen. */
+.view[data-view="options"] { grid-template-rows: auto auto 1fr; }
+.keyboard-section { align-self: start; margin-top: 12px; }
 
 .visually-hidden {
   position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0;

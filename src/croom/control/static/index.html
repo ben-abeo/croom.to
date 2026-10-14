@@ -25,7 +25,7 @@
       <p id="clock" class="clock"></p>
       <p id="date" class="date"></p>
     </div>
-    <button type="button" id="open-options" class="button quiet nav">Options</button>
+    <button type="button" id="open-options" class="button quiet nav" data-icon="settings">Options</button>
   </div>
 </header>
 <main class="screen">
@@ -43,8 +43,8 @@
         <label class="visually-hidden" for="link-input">Meeting link or Zoom meeting ID</label>
         <input id="link-input" type="text" inputmode="url" autocomplete="off" spellcheck="false"
                placeholder="Paste a meeting link or a Zoom meeting ID">
-        <button type="button" id="keyboard-toggle" class="button quiet keyboard-toggle" aria-label="Show keyboard" aria-pressed="false">&#9000;</button>
-        <button type="submit" class="button primary">Join</button>
+        <button type="button" id="keyboard-toggle" class="button quiet keyboard-toggle" aria-label="Show keyboard" aria-pressed="false" data-icon="keyboard"></button>
+        <button type="submit" class="button primary" data-icon="video">Join</button>
         <input id="passcode-input" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false"
                placeholder="Passcode, if the meeting has one" aria-label="Meeting passcode" hidden>
       </form>
@@ -59,9 +59,16 @@
   <section class="view" data-view="options">
     <button type="button" id="back-from-options" class="button quiet back">Back</button>
     <div class="menu">
-      <button type="button" id="open-camera-setup" class="button quiet menu-item">Camera framing</button>
-      <button type="button" id="open-screensaver" class="button quiet menu-item">Screensaver</button>
+      <button type="button" id="open-camera-setup" class="button quiet menu-item" data-icon="move">Camera framing</button>
+      <button type="button" id="open-screensaver" class="button quiet menu-item" data-icon="monitor">Screensaver</button>
     </div>
+    <section class="keyboard-section">
+      <p class="kicker">Keyboard</p>
+      <div class="picker" role="group" aria-label="Key click">
+        <button type="button" id="key-click-on" class="button quiet" aria-pressed="true" data-icon="volume">Key click on</button>
+        <button type="button" id="key-click-off" class="button quiet" aria-pressed="false" data-icon="volume-x">Key click off</button>
+      </div>
+    </section>
   </section>
 
   <section class="view" data-view="camera">
@@ -85,19 +92,19 @@
               <span></span>
             </div>
             <div class="zoom-buttons">
-              <button type="button" id="zoom-out" class="button quiet" data-zoom="-25">Zoom out</button>
-              <button type="button" id="zoom-in" class="button quiet" data-zoom="25">Zoom in</button>
+              <button type="button" id="zoom-out" class="button quiet" data-zoom="-25" data-icon="zoom-out">Zoom out</button>
+              <button type="button" id="zoom-in" class="button quiet" data-zoom="25" data-icon="zoom-in">Zoom in</button>
             </div>
           </div>
           <div class="camera-right">
             <div id="preset-row" class="presets" hidden></div>
-            <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" hidden>Save</button>
+            <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" data-icon="save" hidden>Save</button>
             <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
             <div id="camera-setup" class="setup" hidden>
               <p class="note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
               <div class="setup-buttons">
-                <button type="button" id="find-stops" class="button quiet">Find the stops</button>
-                <button type="button" id="save-home" class="button primary" disabled>Save as Home</button>
+                <button type="button" id="find-stops" class="button quiet" data-icon="locate">Find the stops</button>
+                <button type="button" id="save-home" class="button primary" data-icon="home" disabled>Save as Home</button>
               </div>
             </div>
           </div>
@@ -126,16 +133,16 @@
         <label class="visually-hidden" for="volume-slider">Volume</label>
         <input id="volume-slider" type="range" min="0" max="100" step="1" value="0">
         <div class="sound-buttons">
-          <button type="button" id="quieter" class="button quiet">Quieter</button>
+          <button type="button" id="quieter" class="button quiet" data-icon="volume">Quieter</button>
           <span id="volume-level" class="level" aria-live="polite"></span>
-          <button type="button" id="louder" class="button quiet">Louder</button>
-          <button type="button" id="speaker-mute" class="button quiet" aria-pressed="false">Mute speaker</button>
+          <button type="button" id="louder" class="button quiet" data-icon="volume">Louder</button>
+          <button type="button" id="speaker-mute" class="button quiet" aria-pressed="false" data-icon="volume">Mute speaker</button>
         </div>
       </div>
     </section>
     <div class="menu">
-      <button type="button" id="open-camera-live" class="button quiet menu-item">Camera</button>
-      <button type="button" id="open-upcoming" class="button quiet menu-item">Upcoming meetings</button>
+      <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
+      <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>
     </div>
   </section>
 

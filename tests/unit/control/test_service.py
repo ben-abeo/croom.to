@@ -26,7 +26,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.core.config import Config, TvConfig
 from croom.core.service import Service
-from croom.meeting.providers.base import MeetingInfo, MeetingState, detect_platform
+from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, detect_platform
 from croom.control.service import ControlService
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TvError
@@ -110,16 +110,25 @@ class StubMeeting:
         self.set_state(MeetingState.IDLE)
 
     async def toggle_mute(self):
+        if getattr(self, "fail_mute", None) is not None:
+            raise self.fail_mute
         self.muted = not self.muted
         if self.current_meeting:
             self.current_meeting.is_muted = self.muted
         return self.muted
 
     async def toggle_camera(self):
+        if getattr(self, "fail_camera", None) is not None:
+            raise self.fail_camera
         self.camera_on = not self.camera_on
         if self.current_meeting:
             self.current_meeting.is_camera_on = self.camera_on
         return self.camera_on
+
+    async def diagnostics(self):
+        if getattr(self, "fail_diagnostics", None) is not None:
+            raise self.fail_diagnostics
+        return {"user_keys": ["userId", "muted"], "buttons": [], "state": {"muted": self.muted}}
 
 
 class StubCalendar:
@@ -825,6 +834,68 @@ class TestLeaveMuteCamera:
         assert data["meeting"]["camera_on"] is False
         assert await (await client.post("/api/meeting/mute", json={})).json() == {"muted": False}
 
+    async def test_a_camera_fault_answers_with_its_words_not_a_500(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_camera = MeetingControlError("Zoom's camera button is not on the screen yet; try again in a moment")
+        resp = await client.post("/api/meeting/camera", json={})
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Zoom's camera button is not on the screen yet; try again in a moment"
+        meeting.fail_camera = RuntimeError("Target page, context or browser has been closed")
+        resp = await client.post("/api/meeting/camera", json={})
+        assert resp.status == 409 and "camera" in (await resp.json())["error"]
+
+    async def test_a_mute_zoom_refuses_answers_in_zooms_words(self, client_factory, caplog):
+        """Seen in the test meeting: the table got "Could not change the microphone: Page.evaluate: Error: Host does not
+        allow participants to unmute (code 3008)". The provider now words it; the route passes its first line on."""
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_mute = MeetingControlError("Host does not allow participants to unmute (code 3008)\n    at the page's stack")
+        resp = await client.post("/api/meeting/mute", json={})
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Host does not allow participants to unmute (code 3008)"
+        meeting.fail_mute = RuntimeError("Not in a meeting\nmore lines")      # the meeting ended as the tap came in
+        resp = await client.post("/api/meeting/mute", json={})
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Could not change the microphone: Not in a meeting"
+        [record] = [r for r in caplog.records if r.levelname == "WARNING" and "microphone" in r.getMessage()]
+        assert record.exc_info is not None                                    # the stack goes to the log, not the table
+
+    async def test_a_camera_fault_answers_with_its_first_line(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_camera = MeetingControlError("Zoom did not switch the camera\nsecond line")
+        resp = await client.post("/api/meeting/camera", json={})
+        assert resp.status == 409 and (await resp.json())["error"] == "Zoom did not switch the camera"
+
+    async def test_diagnostics_as_a_meeting_ends_answer_in_words_not_a_500(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        meeting.fail_diagnostics = RuntimeError("Not in a meeting")
+        resp = await client.get("/api/meeting/diagnostics")
+        assert resp.status == 409 and (await resp.json())["error"] == "Could not read the meeting page: Not in a meeting"
+        meeting.fail_diagnostics = MeetingControlError("Could not read the meeting page: the meeting page did not answer within 10 seconds")
+        resp = await client.get("/api/meeting/diagnostics")
+        assert resp.status == 409
+        assert (await resp.json())["error"] == "Could not read the meeting page: the meeting page did not answer within 10 seconds"
+
+    async def test_meeting_diagnostics_are_served_in_a_meeting(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.get("/api/meeting/diagnostics")).status == 409
+        await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        resp = await client.get("/api/meeting/diagnostics")
+        assert resp.status == 200 and (await resp.json())["user_keys"] == ["userId", "muted"]
+
     async def test_without_meeting_service_controls_are_unavailable(self, client_factory):
         client = await client_factory(make_service())
         for path in ("/api/meeting/leave", "/api/meeting/mute", "/api/meeting/camera"):
@@ -880,6 +951,7 @@ class TestPage:
         client = await client_factory(make_service())
         for path, content_type in (
             ("/static/crystalpm-logo-white.svg", "image/svg+xml"),
+            ("/static/icons.svg", "image/svg+xml"),
             ("/static/fonts/lexend-400.woff2", "font/woff2"),
             ("/static/fonts/lexend-600.woff2", "font/woff2"),
             ("/static/fonts/OFL.txt", "text/plain"),
@@ -2781,3 +2853,114 @@ class TestLeaveWhileJoining:
         finally:
             await asyncio.wait_for(service.stop(), 2.0)
         assert meeting.order == ["join given up"]
+
+
+class TestKeyClickSetting:
+    """The on-screen keyboard's key click, a room setting chosen on the room page (spec 2026-10-13, 3.3): one route over a
+    whitelist of keys (key -> default and check), kept in the settings file beside the screensaver's choice. This branch
+    holds the one key; the route is shaped as the door sign's branch shapes it, and that branch adds its keys to the same
+    dict, so these tests read only key_click out of what the route answers."""
+
+    def settings(self, tmp_path, **overrides):
+        config = {"settings_file": str(tmp_path / "control-settings.json")}
+        config.update(overrides)
+        return config
+
+    async def test_key_click_setting_round_trips_and_shows_in_the_status(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await client.get("/api/settings")).json())["key_click"] is True
+        assert (await client.post("/api/settings", json={"key_click": False})).status == 200
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is False
+        assert (await client.post("/api/settings", json={"key_click": "no"})).status == 400
+
+    async def test_the_click_is_on_until_the_room_turns_it_off_and_a_restart_keeps_the_choice(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is True     # on by default
+        # The answer is every setting, as the status and a later GET give them; the file holds the key the services read.
+        response = await client.post("/api/settings", json={"key_click": False})
+        assert response.status == 200 and (await response.json())["key_click"] is False
+        file = tmp_path / "control-settings.json"
+        assert json.loads(file.read_text())["key_click"] is False
+        assert oct(file.stat().st_mode & 0o777) == "0o600"
+        again = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await again.get("/api/settings")).json())["key_click"] is False
+        assert (await (await again.get("/api/status")).json())["settings"]["key_click"] is False
+        response = await again.post("/api/settings", json={"key_click": True})
+        assert response.status == 200 and (await response.json())["key_click"] is True
+        assert (await (await again.get("/api/settings")).json())["key_click"] is True
+        assert json.loads(file.read_text())["key_click"] is True
+
+    async def test_only_a_true_or_false_is_taken_and_a_refusal_says_what_is_allowed_and_changes_nothing(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/settings", json={"key_click": False})
+        file = tmp_path / "control-settings.json"
+        on_disk = file.read_text()
+        refused = [
+            ({"key_click": "no"}, ["key click", "'no'", "true or false"]),   # in words that name the setting, what was sent and what is allowed
+            ({"key_click": "false"}, ["'false'", "true or false"]),
+            ({"key_click": "true"}, ["'true'", "true or false"]),
+            ({"key_click": 1}, ["1", "true or false"]),                # a number is not a switch: 0 and 1 are refused too
+            ({"key_click": 0}, ["0", "true or false"]),
+            ({"key_click": None}, ["None", "true or false"]),
+            ({"key_click": []}, ["true or false"]),
+            ({"key_click": {"on": True}}, ["true or false"]),
+            ({"colour": "red"}, ["colour", "key_click"]),              # an unknown key is refused by name, with the ones that are allowed
+            ({"key_click": True, "colour": "red"}, ["colour"]),        # one bad key spoils the whole request: the good one, which
+            ({}, ["key_click"]),                                       # differs from what is kept, is not kept either
+        ]
+        for body, words in refused:
+            response = await client.post("/api/settings", json=body)
+            assert response.status == 400, body
+            message = (await response.json())["error"]
+            assert all(word in message for word in words), (body, message)
+        assert (await client.post("/api/settings", data="key_click=true")).status == 415      # a form from another site
+        assert (await client.post("/api/settings", json=[True])).status == 400
+        assert (await (await client.get("/api/settings")).json())["key_click"] is False and file.read_text() == on_disk
+
+    async def test_only_the_whitelisted_keys_are_served_or_changed(self, client_factory, tmp_path):
+        """The settings file holds the screensaver and the camera's presets too: none of that is this route's."""
+        file = tmp_path / "control-settings.json"
+        file.write_text(json.dumps({"screensaver": "bounce", "camera_home": {"pan": 1}}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        served = await (await client.get("/api/settings")).json()
+        assert served["key_click"] is True and "screensaver" not in served and "camera_home" not in served
+        assert (await client.post("/api/settings", json={"screensaver": "quiet"})).status == 400
+        assert (await client.post("/api/settings", json={"camera_home": None})).status == 400
+        assert json.loads(file.read_text()) == {"screensaver": "bounce", "camera_home": {"pan": 1}}
+        assert (await (await client.get("/api/screensaver")).json())["style"] == "bounce"
+
+    async def test_one_save_leaves_the_screensaver_choice_alone(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/screensaver", json={"style": "bounce"})
+        await client.post("/api/settings", json={"key_click": False})
+        stored = json.loads((tmp_path / "control-settings.json").read_text())
+        assert stored["screensaver"] == "bounce" and stored["key_click"] is False
+        await client.post("/api/screensaver", json={"style": "quiet"})
+        stored = json.loads((tmp_path / "control-settings.json").read_text())
+        assert stored["screensaver"] == "quiet" and stored["key_click"] is False
+
+    @pytest.mark.parametrize("stored", ["no", "false", 0, 1, None, [], {"on": True}],
+                             ids=["no", "false", "zero", "one", "null", "list", "object"])
+    async def test_a_stored_value_that_is_no_longer_a_true_or_false_falls_back_to_on(self, client_factory, tmp_path, stored):
+        (tmp_path / "control-settings.json").write_text(json.dumps({"key_click": stored}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await client.get("/api/settings")).json())["key_click"] is True
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is True
+
+    async def test_a_settings_write_that_fails_still_applies_the_choice_and_says_so_in_the_log(self, client_factory, tmp_path, caplog):
+        """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
+        class FullDisk:
+            path = tmp_path / "control-settings.json"
+
+            def get(self, key, default=None):
+                return default
+
+            def save(self, key, value):
+                raise OSError(28, "No space left on device")
+
+        service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
+        client = await client_factory(service)
+        response = await client.post("/api/settings", json={"key_click": False})
+        assert response.status == 200 and (await response.json())["key_click"] is False
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is False
+        assert "No space left on device" in caplog.text

@@ -22,6 +22,11 @@ class MeetingState(Enum):
     ERROR = "error"
 
 
+class MeetingControlError(RuntimeError):
+    """A control the platform could not carry out just now (a button not on the screen yet, a page that does not
+    answer): its words are for the person at the table, and the meeting goes on."""
+
+
 @dataclass
 class MeetingInfo:
     """Information about a meeting."""

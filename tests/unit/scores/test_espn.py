@@ -22,13 +22,15 @@ from tests.unit.scores.schedules import AUCKLAND, CENTRAL, LOS_ANGELES, UTC, gam
 # the 12th, and Texas (#4) at Missouri (#9) on the 19th.
 LAST = {"home": "Texas", "home_rank": 4, "home_score": 45, "away": "Texas A&M", "away_rank": None, "away_score": 42,
         "date": "2026-10-12", "school_home": True}
-NEXT = {"date": "2026-10-19", "home": "Missouri", "home_rank": 9, "away": "Texas", "away_rank": 4}
+NEXT = {"date": "2026-10-19", "home": "Missouri", "home_rank": 9, "away": "Texas", "away_rank": 4, "neutral": False}
 ROAD_GAME = {"home": "Tennessee", "home_rank": 14, "home_score": 17, "away": "Texas", "away_rank": 1, "away_score": 20,
              "date": "2026-09-26", "school_home": False}                    # the game before the last one, which Texas played away
-THEN_FLORIDA = {"date": "2026-10-26", "home": "Texas", "home_rank": 4, "away": "Florida", "away_rank": None}   # the game after the next one
+THEN_FLORIDA = {"date": "2026-10-26", "home": "Texas", "home_rank": 4, "away": "Florida", "away_rank": None, "neutral": False}   # the game after the next one
+CHAMPIONSHIP = {"date": "2026-12-05", "home": "Georgia", "home_rank": 2, "away": "Texas", "away_rank": 4, "neutral": True}       # the last game of the season, at a neutral site
 
-# The sample's events by id: four played (the last of them Texas A&M's), three to come (Florida's has no kickoff time yet).
-TEXAS_STATE, OHIO_STATE, TENNESSEE, TEXAS_AM, MISSOURI, FLORIDA, ARKANSAS = (f"40100{n}" for n in range(1, 8))
+# The sample's events by id: four played (the last of them Texas A&M's), four to come (Florida's has no kickoff time yet, Georgia's is at a
+# neutral site).
+TEXAS_STATE, OHIO_STATE, TENNESSEE, TEXAS_AM, MISSOURI, FLORIDA, ARKANSAS, GEORGIA = (f"40100{n}" for n in range(1, 9))
 
 
 def event_of(data, event_id):
@@ -110,6 +112,26 @@ def test_only_the_first_competition_of_an_event_is_read_and_its_time_flag_may_si
     assert parse_schedule(data)["next"]["date"] == "2026-11-13"
 
 
+def test_a_next_game_at_a_neutral_site_says_so_and_keeps_the_order_espn_lists_it_in(device_zone):
+    """A bowl, a championship, the Red River game: ESPN marks the competition neutralSite and still lists a home side, which the sign must not
+    present as the host. The last game's line is unchanged (it has no "@")."""
+    device_zone(CENTRAL)
+    data = without(texas_sample(), MISSOURI, FLORIDA, ARKANSAS)
+    assert parse_schedule(data)["next"] == CHAMPIONSHIP                      # Georgia listed home, Texas away, neutral: the sign says "Texas (#4) vs Georgia (#2)"
+    assert parse_schedule(texas_sample())["next"]["neutral"] is False       # the games before it were at somebody's home
+    assert "neutral" not in parse_schedule(texas_sample())["last"]
+
+
+@pytest.mark.parametrize("flag, neutral", [(True, True), (False, False), (None, False), ("true", False), ("yes", False), (1, False), ([True], False), ({}, False)])
+def test_a_game_is_at_a_neutral_site_only_when_espn_says_true(device_zone, flag, neutral):
+    device_zone(CENTRAL)
+    data = without(texas_sample(), MISSOURI, FLORIDA, ARKANSAS)
+    event_of(data, GEORGIA)["competitions"][0]["neutralSite"] = flag
+    assert parse_schedule(data)["next"]["neutral"] is neutral
+    del event_of(data, GEORGIA)["competitions"][0]["neutralSite"]
+    assert parse_schedule(data)["next"]["neutral"] is False                  # no flag at all: somebody's home
+
+
 def test_ranks_present_and_absent(device_zone):
     device_zone(CENTRAL)
     assert (LAST["home_rank"], LAST["away_rank"]) == (4, None)             # present for Texas; Texas A&M's competitor has no rank object at all
@@ -152,7 +174,7 @@ def test_a_postponed_or_cancelled_game_is_neither(device_zone, name):
 def test_no_next_game_at_the_end_of_the_season_and_no_last_game_before_it_begins(device_zone):
     device_zone(CENTRAL)
     data = texas_sample()
-    assert parse_schedule(without(data, MISSOURI, FLORIDA, ARKANSAS)) == {"last": LAST, "next": None}                     # the season is over
+    assert parse_schedule(without(data, MISSOURI, FLORIDA, ARKANSAS, GEORGIA)) == {"last": LAST, "next": None}           # the season is over
     assert parse_schedule(without(data, TEXAS_STATE, OHIO_STATE, TENNESSEE, TEXAS_AM)) == {"last": None, "next": NEXT}   # it has not begun
     assert parse_schedule({**data, "events": []}) == {"last": None, "next": None}
 
@@ -324,6 +346,8 @@ def test_no_single_value_of_the_saved_schedule_can_make_the_parser_raise_or_answ
                     continue
                 assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", drawn["date"]) and drawn["home"] and drawn["away"], (path, junk, drawn)
                 assert all(drawn[key] is None or (type(drawn[key]) is int and 1 <= drawn[key] <= 25) for key in ("home_rank", "away_rank")), (path, junk, drawn)
+            if upcoming is not None:
+                assert type(upcoming["neutral"]) is bool, (path, junk, upcoming)
             if last is not None:
                 assert type(last["home_score"]) is int and type(last["away_score"]) is int and last["school_home"] in (True, False, None), (path, junk, last)
 

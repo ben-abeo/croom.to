@@ -365,7 +365,10 @@
 
   function nextGame(game) {
     if (!game || !isName(game.home) || !isName(game.away) || !/^\d{4}-\d{2}-\d{2}$/.test(game.date)) return null;
-    return { date: game.date, away: { name: game.away, rank: rankOf(game.away_rank) }, home: { name: game.home, rank: rankOf(game.home_rank) } };
+    return {
+      date: game.date, neutral: game.neutral === true,   // at a neutral site the side listed home is no host: "vs", not "@"
+      away: { name: game.away, rank: rankOf(game.away_rank) }, home: { name: game.home, rank: rankOf(game.home_rank) },
+    };
   }
 
   function scoreEntries() {
@@ -407,7 +410,7 @@
       if (entry.last) last.push(side(entry.last[0], entry.last[0].score), " \u2013 ", side(entry.last[1], entry.last[1].score));
       el("score-last").replaceChildren(...last);
       const next = entry.next;
-      el("score-next").replaceChildren(...(next ? ["Next: " + dayText(next.date) + " \u00b7 ", side(next.away), " @ ", side(next.home)] : []));
+      el("score-next").replaceChildren(...(next ? ["Next: " + dayText(next.date) + " \u00b7 ", side(next.away), next.neutral ? " vs " : " @ ", side(next.home)] : []));
     }
     if (strip.hidden) strip.hidden = false;
   }

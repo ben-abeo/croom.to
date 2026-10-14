@@ -1998,6 +1998,40 @@ def test_on_a_sign_too_narrow_for_a_line_it_breaks_between_the_teams_and_never_i
         page.close()
 
 
+def test_a_next_game_at_a_neutral_site_reads_vs_in_the_order_espn_lists_it_and_a_last_game_is_unchanged(browser, central_time):
+    """The Red River game is marked neutralSite with Oklahoma listed home: "Texas (#4) @ Oklahoma" would call Oklahoma the host. A bowl or a
+    championship game would read the same way. The line of the last game is the same at a neutral site as anywhere."""
+    red_river = schedule("Texas", [game("Oklahoma", "Texas", "2026-10-10T19:30Z", home_score=27, away_score=24, away_rank=1, state="post", neutral=True),
+                                   game("Oklahoma", "Texas", "2026-10-17T19:00Z", away_rank=4, neutral=True)])
+    with PageServer(schedules={251: red_river}) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == ["Texas (#1) 24 \u2013 Oklahoma 27", "Next: 10/17 \u00b7 Texas (#4) vs Oklahoma"]     # the visitor first, "vs" and not "@"
+        assert page.locator("#score .rank").all_inner_texts() == ["(#1)", "(#4)"]
+        page.close()
+
+
+def test_the_next_game_reads_at_unless_the_status_says_neutral_is_true(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        flag = {}
+
+        def status(route):
+            body = route.fetch().json()
+            game = {"date": "2026-10-17", "home": "Oklahoma", "home_rank": None, "away": "Texas", "away_rank": 4}
+            body["scores"] = [{"school": "texas", "name": "Texas", "last": None, "next": {**game, **flag}}]
+            route.fulfill(json=body)
+
+        page.route("**/api/status", status)
+        for flag, shown in (({"neutral": True}, "vs"), ({"neutral": False}, "@"), ({}, "@"), ({"neutral": "yes"}, "@"), ({"neutral": 1}, "@"), ({"neutral": None}, "@")):
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            strip_is_up(page)
+            assert page.locator("#score-next").inner_text() == f"Next: 10/17 \u00b7 Texas (#4) {shown} Oklahoma", flag
+        page.close()
+
+
 def test_a_date_is_the_month_and_the_day_without_leading_zeros(browser):
     """The strip's date is "10/19" for the 19th of October and "9/5" for the 5th of September, as Americans write it."""
     with PageServer() as server:

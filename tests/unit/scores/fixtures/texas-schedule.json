@@ -220,6 +220,36 @@
           "status": {"type": {"id": "1", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false, "description": "Scheduled"}}
         }
       ]
+    },
+    {
+      "id": "401008",
+      "date": "2026-12-06T01:00Z",
+      "name": "Texas Longhorns vs Georgia Bulldogs",
+      "shortName": "TEX VS UGA",
+      "timeValid": true,
+      "competitions": [
+        {
+          "id": "401008",
+          "date": "2026-12-06T01:00Z",
+          "timeValid": true,
+          "neutralSite": true,
+          "competitors": [
+            {
+              "id": "61",
+              "homeAway": "home",
+              "team": {"id": "61", "location": "Georgia", "abbreviation": "UGA", "displayName": "Georgia Bulldogs", "shortDisplayName": "Georgia"},
+              "curatedRank": {"current": 2}
+            },
+            {
+              "id": "251",
+              "homeAway": "away",
+              "team": {"id": "251", "location": "Texas", "abbreviation": "TEX", "displayName": "Texas Longhorns", "shortDisplayName": "Texas"},
+              "curatedRank": {"current": 4}
+            }
+          ],
+          "status": {"type": {"id": "1", "name": "STATUS_SCHEDULED", "state": "pre", "completed": false, "description": "Scheduled"}}
+        }
+      ]
     }
   ],
   "requestedSeason": {"year": 2026, "type": 2, "name": "Regular Season", "displayName": "2026"}

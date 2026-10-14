@@ -153,6 +153,7 @@ def _game(event: Any, school_id: Optional[str]) -> Optional[Dict[str, Any]]:
         "day": day,
         "home": names["home"], "home_rank": _rank(sides["home"]), "home_score": _whole_number(sides["home"].get("score")),
         "away": names["away"], "away_rank": _rank(sides["away"]), "away_score": _whole_number(sides["away"].get("score")),
+        "neutral": competition.get("neutralSite") is True,
         "school_home": None if school_id is None or school_id not in ids.values() else ids["home"] == school_id,
     }
 
@@ -161,13 +162,14 @@ def parse_schedule(data: Any) -> Dict[str, Optional[Dict[str, Any]]]:
     """The last game played and the next one to play, from a team's schedule as ESPN sends it.
 
     {"last": {"home", "home_rank", "home_score", "away", "away_rank", "away_score", "date", "school_home"} or None,
-     "next": {"date", "home", "home_rank", "away", "away_rank"} or None}
+     "next": {"date", "home", "home_rank", "away", "away_rank", "neutral"} or None}
 
     The last game is the latest one that is over and has both scores; the next is the earliest one still to play. A game in progress is
     neither (the line before it stays up until it ends), nor is one postponed or cancelled. A rank is None for a team outside the Top 25;
     date is the day it was or will be played, as the device keeps days ("2026-10-19"); school_home says whether the team the schedule
-    belongs to was the home side (None when the schedule does not say whose it is). Anything the feed leaves out is survived: a schedule
-    with nothing usable in it is {"last": None, "next": None}.
+    belongs to was the home side (None when the schedule does not say whose it is); neutral is True for a game ESPN marks as at a neutral
+    site (a bowl, a championship, a rivalry played away from both campuses), where the side it lists as home is not the host. Anything
+    the feed sends or leaves out is survived: a schedule with nothing usable in it is {"last": None, "next": None}.
     """
     data = _object(data)
     school_id = _object(data.get("team")).get("id")
@@ -186,5 +188,6 @@ def parse_schedule(data: Any) -> Dict[str, Optional[Dict[str, Any]]]:
             "date": upcoming["day"],
             "home": upcoming["home"], "home_rank": upcoming["home_rank"],
             "away": upcoming["away"], "away_rank": upcoming["away_rank"],
+            "neutral": upcoming["neutral"],
         },
     }

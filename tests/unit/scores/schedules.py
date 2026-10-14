@@ -36,12 +36,14 @@ def competitor(name: str, side: str, score: Optional[int] = None, rank: Optional
 
 
 def game(home: str, away: str, date: str, *, home_score: Optional[int] = None, away_score: Optional[int] = None,
-         home_rank: Optional[int] = None, away_rank: Optional[int] = None, state: str = "pre", time_valid: bool = True) -> Dict[str, Any]:
-    """One event: state is "pre" (to play), "in" (in progress) or "post" (over)."""
+         home_rank: Optional[int] = None, away_rank: Optional[int] = None, state: str = "pre", time_valid: bool = True,
+         neutral: bool = False) -> Dict[str, Any]:
+    """One event: state is "pre" (to play), "in" (in progress) or "post" (over); neutral marks a game at a neutral site (the side listed
+    home is then only the one ESPN lists first)."""
     done = state == "post"
     status = {"type": {"state": state, "completed": done, "name": "STATUS_FINAL" if done else "STATUS_SCHEDULED"}}
     return {"id": f"{home}-{away}-{date}", "date": date, "timeValid": time_valid,
-            "competitions": [{"date": date, "timeValid": time_valid, "status": status,
+            "competitions": [{"date": date, "timeValid": time_valid, "neutralSite": neutral, "status": status,
                               "competitors": [competitor(home, "home", home_score, home_rank), competitor(away, "away", away_score, away_rank)]}]}
 
 

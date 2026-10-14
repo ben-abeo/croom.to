@@ -19,11 +19,11 @@ TEXAS_ID, MICHIGAN_ID, TEXAS_AM_ID, MISSOURI_ID = (SCHOOLS[key][0] for key in ("
 TEXAS = {"school": "texas", "name": "Texas",                                  # the spec's own example, from the saved schedule
          "last": {"home": "Texas", "home_rank": 4, "home_score": 45, "away": "Texas A&M", "away_rank": None, "away_score": 42,
                   "date": "2026-10-12", "school_home": True},
-         "next": {"date": "2026-10-19", "home": "Missouri", "home_rank": 9, "away": "Texas", "away_rank": 4}}
+         "next": {"date": "2026-10-19", "home": "Missouri", "home_rank": 9, "away": "Texas", "away_rank": 4, "neutral": False}}
 MICHIGAN = {"school": "michigan", "name": "Michigan",
             "last": {"home": "Michigan", "home_rank": 12, "home_score": 31, "away": "Ohio State", "away_rank": None, "away_score": 24,
                      "date": "2026-10-10", "school_home": True},
-            "next": {"date": "2026-10-24", "home": "Purdue", "home_rank": None, "away": "Michigan", "away_rank": 12}}
+            "next": {"date": "2026-10-24", "home": "Purdue", "home_rank": None, "away": "Michigan", "away_rank": 12, "neutral": False}}
 
 
 async def wait_until(predicate, timeout=3.0):

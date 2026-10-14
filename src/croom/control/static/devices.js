@@ -74,7 +74,7 @@
     el("volume-slider").value = audio.level;
     el("volume-level").textContent = String(audio.level);
     el("speaker-mute").setAttribute("aria-pressed", audio.muted ? "true" : "false");
-    el("speaker-mute").textContent = audio.muted ? "Unmute speaker" : "Mute speaker";
+    P.labelWithIcon(el("speaker-mute"), audio.muted ? "Unmute speaker" : "Mute speaker", audio.muted ? "volume-x" : "volume");   // the picture is the speaker's state, the words are the tap's action
   }
 
   const setVolume = (body) => deviceCall("audio", "/api/audio/volume", body);
@@ -116,7 +116,7 @@
     el("save-home").disabled = !camera.position_known || camera.busy;
     el("find-stops").disabled = camera.busy;
     el("preset-save-mode").setAttribute("aria-pressed", presetSaveMode ? "true" : "false");
-    el("preset-save-mode").textContent = presetSaveMode ? "Tap a preset to save it here" : "Save";
+    P.labelWithIcon(el("preset-save-mode"), presetSaveMode ? "Tap a preset to save it here" : "Save", el("preset-save-mode").dataset.icon);
     el("preset-row").replaceChildren(...camera.presets.map((p) => {
       const b = button(p.name, p.saved ? "quiet saved" : "quiet", () => presetAction(p.slot), camera.busy);
       b.dataset.slot = String(p.slot);

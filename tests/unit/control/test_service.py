@@ -6,6 +6,7 @@ and record what the control service asked them to do.
 """
 
 import asyncio
+import json
 import socket
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -739,6 +740,7 @@ class TestPage:
         client = await client_factory(make_service())
         for path, content_type in (
             ("/static/crystalpm-logo-white.svg", "image/svg+xml"),
+            ("/static/icons.svg", "image/svg+xml"),
             ("/static/fonts/lexend-400.woff2", "font/woff2"),
             ("/static/fonts/lexend-600.woff2", "font/woff2"),
             ("/static/fonts/OFL.txt", "text/plain"),
@@ -1294,3 +1296,114 @@ class TestRoomDevices:
         client = await client_factory(make_service(devices=devices))
         assert (await client.get("/api/status")).status == 200
         assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []
+
+
+class TestKeyClickSetting:
+    """The on-screen keyboard's key click, a room setting chosen on the room page (spec 2026-10-13, 3.3): one route over a
+    whitelist of keys (key -> default and check), kept in the settings file beside the screensaver's choice. This branch
+    holds the one key; the route is shaped as the door sign's branch shapes it, and that branch adds its keys to the same
+    dict, so these tests read only key_click out of what the route answers."""
+
+    def settings(self, tmp_path, **overrides):
+        config = {"settings_file": str(tmp_path / "control-settings.json")}
+        config.update(overrides)
+        return config
+
+    async def test_key_click_setting_round_trips_and_shows_in_the_status(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await client.get("/api/settings")).json())["key_click"] is True
+        assert (await client.post("/api/settings", json={"key_click": False})).status == 200
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is False
+        assert (await client.post("/api/settings", json={"key_click": "no"})).status == 400
+
+    async def test_the_click_is_on_until_the_room_turns_it_off_and_a_restart_keeps_the_choice(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is True     # on by default
+        # The answer is every setting, as the status and a later GET give them; the file holds the key the services read.
+        response = await client.post("/api/settings", json={"key_click": False})
+        assert response.status == 200 and (await response.json())["key_click"] is False
+        file = tmp_path / "control-settings.json"
+        assert json.loads(file.read_text())["key_click"] is False
+        assert oct(file.stat().st_mode & 0o777) == "0o600"
+        again = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await again.get("/api/settings")).json())["key_click"] is False
+        assert (await (await again.get("/api/status")).json())["settings"]["key_click"] is False
+        response = await again.post("/api/settings", json={"key_click": True})
+        assert response.status == 200 and (await response.json())["key_click"] is True
+        assert (await (await again.get("/api/settings")).json())["key_click"] is True
+        assert json.loads(file.read_text())["key_click"] is True
+
+    async def test_only_a_true_or_false_is_taken_and_a_refusal_says_what_is_allowed_and_changes_nothing(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/settings", json={"key_click": False})
+        file = tmp_path / "control-settings.json"
+        on_disk = file.read_text()
+        refused = [
+            ({"key_click": "no"}, ["key click", "'no'", "true or false"]),   # in words that name the setting, what was sent and what is allowed
+            ({"key_click": "false"}, ["'false'", "true or false"]),
+            ({"key_click": "true"}, ["'true'", "true or false"]),
+            ({"key_click": 1}, ["1", "true or false"]),                # a number is not a switch: 0 and 1 are refused too
+            ({"key_click": 0}, ["0", "true or false"]),
+            ({"key_click": None}, ["None", "true or false"]),
+            ({"key_click": []}, ["true or false"]),
+            ({"key_click": {"on": True}}, ["true or false"]),
+            ({"colour": "red"}, ["colour", "key_click"]),              # an unknown key is refused by name, with the ones that are allowed
+            ({"key_click": True, "colour": "red"}, ["colour"]),        # one bad key spoils the whole request: the good one, which
+            ({}, ["key_click"]),                                       # differs from what is kept, is not kept either
+        ]
+        for body, words in refused:
+            response = await client.post("/api/settings", json=body)
+            assert response.status == 400, body
+            message = (await response.json())["error"]
+            assert all(word in message for word in words), (body, message)
+        assert (await client.post("/api/settings", data="key_click=true")).status == 415      # a form from another site
+        assert (await client.post("/api/settings", json=[True])).status == 400
+        assert (await (await client.get("/api/settings")).json())["key_click"] is False and file.read_text() == on_disk
+
+    async def test_only_the_whitelisted_keys_are_served_or_changed(self, client_factory, tmp_path):
+        """The settings file holds the screensaver and the camera's presets too: none of that is this route's."""
+        file = tmp_path / "control-settings.json"
+        file.write_text(json.dumps({"screensaver": "bounce", "camera_home": {"pan": 1}}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        served = await (await client.get("/api/settings")).json()
+        assert served["key_click"] is True and "screensaver" not in served and "camera_home" not in served
+        assert (await client.post("/api/settings", json={"screensaver": "quiet"})).status == 400
+        assert (await client.post("/api/settings", json={"camera_home": None})).status == 400
+        assert json.loads(file.read_text()) == {"screensaver": "bounce", "camera_home": {"pan": 1}}
+        assert (await (await client.get("/api/screensaver")).json())["style"] == "bounce"
+
+    async def test_one_save_leaves_the_screensaver_choice_alone(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/screensaver", json={"style": "bounce"})
+        await client.post("/api/settings", json={"key_click": False})
+        stored = json.loads((tmp_path / "control-settings.json").read_text())
+        assert stored["screensaver"] == "bounce" and stored["key_click"] is False
+        await client.post("/api/screensaver", json={"style": "quiet"})
+        stored = json.loads((tmp_path / "control-settings.json").read_text())
+        assert stored["screensaver"] == "quiet" and stored["key_click"] is False
+
+    @pytest.mark.parametrize("stored", ["no", "false", 0, 1, None, [], {"on": True}],
+                             ids=["no", "false", "zero", "one", "null", "list", "object"])
+    async def test_a_stored_value_that_is_no_longer_a_true_or_false_falls_back_to_on(self, client_factory, tmp_path, stored):
+        (tmp_path / "control-settings.json").write_text(json.dumps({"key_click": stored}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert (await (await client.get("/api/settings")).json())["key_click"] is True
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is True
+
+    async def test_a_settings_write_that_fails_still_applies_the_choice_and_says_so_in_the_log(self, client_factory, tmp_path, caplog):
+        """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
+        class FullDisk:
+            path = tmp_path / "control-settings.json"
+
+            def get(self, key, default=None):
+                return default
+
+            def save(self, key, value):
+                raise OSError(28, "No space left on device")
+
+        service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
+        client = await client_factory(service)
+        response = await client.post("/api/settings", json={"key_click": False})
+        assert response.status == 200 and (await response.json())["key_click"] is False
+        assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is False
+        assert "No space left on device" in caplog.text

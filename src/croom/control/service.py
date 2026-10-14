@@ -6,12 +6,13 @@ meeting and calendar services on behalf of whoever is in the room.
 """
 
 import asyncio
+import copy
 import logging
 import mimetypes
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import urlsplit
 
 from aiohttp import web
@@ -23,6 +24,17 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 
 logger = logging.getLogger(__name__)
+
+
+def _a_bool(label: str) -> Callable[[Any], Any]:
+    """A check for a setting that is on or off: the bool, or ValueError saying what is allowed. Only true and false are taken: a
+    string such as "no" or a number is refused, not guessed at."""
+    def check(value: Any) -> Any:
+        if not isinstance(value, bool):
+            raise ValueError(f"The {label} setting must be true or false, not {value!r}")
+        return value
+    return check
+
 
 STATIC_DIR = Path(__file__).parent / "static"
 MAX_BODY_BYTES = 4096
@@ -43,6 +55,11 @@ PLATFORM_HOSTS = {
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
+# The room settings the page may change through /api/settings: each key's default and the check that turns what was sent
+# into what is kept (or raises ValueError, in words). Only these keys are served or changed; the settings file holds more.
+ROOM_SETTINGS: Dict[str, Tuple[Any, Callable[[Any], Any]]] = {
+    "key_click": (True, _a_bool("key click")),
+}
 
 
 def first_line(error: BaseException) -> str:
@@ -144,6 +161,7 @@ class ControlService(Service):
         self._read_failures: Dict[str, str] = {}
         self._default_style = str(self.config.get("screensaver", "info"))
         self._screensaver = self._load_style()
+        self._settings = self._load_settings()
         self._meeting = meeting
         self._calendar = calendar
 
@@ -203,6 +221,8 @@ class ControlService(Service):
         app.router.add_get("/api/meeting/diagnostics", self._handle_diagnostics)
         app.router.add_get("/api/screensaver", self._handle_screensaver)
         app.router.add_post("/api/screensaver", self._handle_set_screensaver)
+        app.router.add_get("/api/settings", self._handle_settings)
+        app.router.add_post("/api/settings", self._handle_set_settings)
         app.router.add_get("/api/audio/volume", self._handle_volume)
         app.router.add_post("/api/audio/volume", self._handle_set_volume)
         app.router.add_post("/api/camera/move", self._handle_camera_move)
@@ -338,6 +358,7 @@ class ControlService(Service):
             },
             "calendar": self._calendar_status(),
             "screensaver": self._screensaver,
+            "settings": self._settings_payload(),
             "audio": self._audio_state(),
             "camera": self._camera_state(),
         }
@@ -381,6 +402,54 @@ class ControlService(Service):
         self._screensaver = style
         logger.info(f"Screensaver style set to {style}")
         return web.json_response(self._screensaver_payload())
+
+    # ------------------------------------------------------------------
+    # Room settings: what the room page may change for the room (spec 2026-10-13 on-screen keyboard, 3.3)
+    # ------------------------------------------------------------------
+
+    def _load_settings(self) -> Dict[str, Any]:
+        """Each setting as stored, else its default: a missing, broken or no longer valid value is not an error."""
+        settings: Dict[str, Any] = {}
+        for key, (default, check) in ROOM_SETTINGS.items():
+            try:
+                settings[key] = check(self._store.get(key, default))
+            except ValueError:
+                settings[key] = check(default)
+        return settings
+
+    def _settings_payload(self) -> Dict[str, Any]:
+        """Every setting, as copies: what an answer carries is not the room's own list."""
+        return copy.deepcopy(self._settings)
+
+    async def _handle_settings(self, request: web.Request) -> web.Response:
+        return web.json_response(self._settings_payload())
+
+    async def _handle_set_settings(self, request: web.Request) -> web.Response:
+        """Change one or more settings: a JSON object of keys to values. Every value is checked before any is kept, so a
+        request with one bad value changes nothing; the answer is every setting, as the status carries them."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if not data:
+            return self._error_response(f"Send a JSON object with a setting to change: {', '.join(ROOM_SETTINGS)}", 400)
+        values: Dict[str, Any] = {}
+        for key, value in data.items():
+            if key not in ROOM_SETTINGS:
+                return self._error_response(f"Unknown setting {key!r}; use {', '.join(ROOM_SETTINGS)}", 400)
+            try:
+                values[key] = ROOM_SETTINGS[key][1](value)
+            except ValueError as e:
+                return self._error_response(str(e), 400)
+        try:
+            for key, value in values.items():
+                self._store.save(key, value)
+        except OSError as e:
+            # As the screensaver's choice: it holds until the restart, and the log says why it will not last.
+            logger.warning(f"Could not save the room settings to {self._store.path}: {e}")
+        self._settings.update(values)
+        logger.info(f"Room settings changed: {', '.join(f'{key} = {value}' for key, value in values.items())}")
+        return web.json_response(self._settings_payload())
 
     # ------------------------------------------------------------------
     # Room devices: the speaker's volume and the camera (spec 2026-10-08)

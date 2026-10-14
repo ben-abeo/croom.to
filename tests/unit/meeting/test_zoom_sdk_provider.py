@@ -994,6 +994,18 @@ def test_a_notice_that_only_says_a_state_changed_has_no_disclosure_line(words):
     assert DialogPolicy(DEFAULT_ACKNOWLEDGE).disclosure({"text": words, "buttons": ["OK"]}) == ""
 
 
+def test_a_stop_is_judged_by_its_own_sentence_and_does_not_take_the_disclosure_beside_it_away():
+    """One notice can say that a recording stopped and that the meeting is being recorded again: the first sentence is a state that changed,
+    the second is what the meeting discloses. The stop phrases were looked for in the whole title and text, so the stop silenced the line."""
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    assert policy.disclosure({"text": "The previous recording has stopped. This meeting is being recorded again.", "buttons": ["OK"]}) == "This meeting is being recorded again."
+    assert policy.disclosure({"title": "Recording", "text": "Transcription has stopped. AI Companion is on.", "buttons": ["OK"]}) == "AI Companion is on."
+    assert policy.disclosure({"text": "You have been muted by the host. This meeting is being recorded.", "buttons": ["OK"]}) == "This meeting is being recorded."
+    # The stop is still no line of its own, and a notice whose only sentence naming the list is the stop has none either.
+    assert policy.disclosure({"text": "This meeting is being recorded again. The previous recording has stopped.", "buttons": ["OK"]}) == "This meeting is being recorded again."
+    assert policy.disclosure({"text": "The recording has stopped. Anyone with access may still view it.", "buttons": ["OK"]}) == ""
+
+
 # ---- The provider's model, its controls and its dialogs, against the stub page (spec 2026-10-13, sections 3 to 5) ----
 
 
@@ -1749,6 +1761,15 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         provider._on_dialog({"id": 7, "title": "Recording", "text": "This meeting is being recorded.", "buttons": ["OK"]})      # said again: not taken again
         await settle_background(provider)
         assert [(i, label) for _, i, label in page.pressed] == [(7, "OK")] and len(provider._dialogs) == 1       # never the same dialog twice
+
+    async def test_a_notice_whose_press_fails_waits_behind_the_dialog_that_was_waiting_first(self):
+        page = FakePage(press_failure="The dialog's OK button is not ready yet; try again in a moment")
+        provider = in_a_meeting(page)
+        info = provider.current_meeting
+        provider._on_dialog({"id": 1, "title": "Unmute?", "text": "", "buttons": ["Stay muted", "Unmute"]})       # waits for a tap
+        provider._on_dialog({"id": 2, "title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]})  # a notice whose press fails
+        await settle_background(provider)
+        assert [d["id"] for d in provider._dialogs] == [1, 2] and info.dialog["id"] == 1     # the oldest is the one on show
 
     async def test_a_tap_on_a_notice_the_provider_could_not_press_gets_the_pages_words_and_is_done_once_the_dialog_is_gone(self):
         page = FakePage(press_failure="The dialog's OK button is not ready yet; try again in a moment")

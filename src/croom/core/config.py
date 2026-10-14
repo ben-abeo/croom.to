@@ -64,12 +64,36 @@ DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companio
 DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
 
 
-def _listed(value: Any, defaults: List[str]) -> Any:
-    """A list setting as a file gives it: nothing at all (`reactions:` with its lines deleted) is the defaults, and a bare word is one
-    item, not the letters it is spelt with."""
+def _listed(value: Any, defaults: List[str], where: str = "a list setting") -> Any:
+    """A list setting as a file gives it: nothing at all (`reactions:` with its lines deleted) is the defaults, a bare word is one item
+    (not the letters it is spelt with), and anything else that is not a list (`reactions: no` is False in YAML) is the defaults with a
+    warning, not a crash the first time the config is written out."""
     if value is None:
         return list(defaults)
-    return [value] if isinstance(value, str) else value
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, (list, tuple)):
+        logger.warning(f"{where} should be a list, not {value!r}: using the defaults")
+        return list(defaults)
+    return value
+
+
+def _flag(value: Any, default: bool, where: str) -> bool:
+    """An on/off setting as a file gives it. YAML turns a bare true/yes/on or false/no/off into a bool, but the same word in quotes is a
+    string (and a string is true to Python, whatever it says): those words are read as they say. Nothing at all is the default, and
+    anything else is the default with a warning, not a guess."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("true", "yes", "on"):
+            return True
+        if word in ("false", "no", "off"):
+            return False
+    logger.warning(f"{where} should be true or false, not {value!r}: using {str(default).lower()}")
+    return default
 
 
 @dataclass
@@ -79,7 +103,8 @@ class DialogsConfig:
     ask_everything: bool = False   # every dialog waits for a tap on the table, the acknowledgeable ones too
 
     def __post_init__(self):
-        self.acknowledge = _listed(self.acknowledge, DEFAULT_ACKNOWLEDGE)
+        self.acknowledge = _listed(self.acknowledge, DEFAULT_ACKNOWLEDGE, "meeting.dialogs.acknowledge")
+        self.ask_everything = _flag(self.ask_everything, False, "meeting.dialogs.ask_everything")
 
 
 @dataclass
@@ -88,7 +113,7 @@ class ControlsConfig:
     reactions: List[str] = field(default_factory=lambda: list(DEFAULT_REACTIONS))   # by the names Zoom's picker gives them
 
     def __post_init__(self):
-        self.reactions = _listed(self.reactions, DEFAULT_REACTIONS)
+        self.reactions = _listed(self.reactions, DEFAULT_REACTIONS, "meeting.controls.reactions")
 
 
 def _section(cls, value: Any, where: str):

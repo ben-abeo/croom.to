@@ -452,6 +452,52 @@ class TestDialogAndControlConfig:
         assert config.meeting.dialogs.acknowledge == ["is being recorded"] and config.meeting.controls.reactions == ["Clap"]
         assert config.to_dict()["meeting"]["controls"] == {"reactions": ["Clap"]}
 
+    @pytest.mark.parametrize("value", [False, True, 0, 7, 1.5, {"a": "b"}])
+    def test_a_list_setting_that_is_not_a_list_is_the_defaults_with_a_warning_naming_the_key(self, value, caplog):
+        """YAML reads `reactions: no` as False and `acknowledge: on` as True. The file still loads, the config still writes out (it crashed
+        in to_dict), and the journal says which key was not a list."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"dialogs": {"acknowledge": value}, "controls": {"reactions": value}}})
+        assert config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE and config.meeting.controls.reactions == DEFAULT_REACTIONS
+        assert config.meeting.dialogs.acknowledge is not DEFAULT_ACKNOWLEDGE and config.meeting.controls.reactions is not DEFAULT_REACTIONS
+        written = config.to_dict()["meeting"]
+        assert written["dialogs"]["acknowledge"] == DEFAULT_ACKNOWLEDGE and written["controls"]["reactions"] == DEFAULT_REACTIONS
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warned) == 2 and "meeting.dialogs.acknowledge" in warned[0] and "meeting.controls.reactions" in warned[1]
+        assert all(repr(value) in message and "defaults" in message for message in warned)
+
+    def test_a_list_or_a_tuple_is_kept_as_it_is_without_a_word_in_the_journal(self, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        assert DialogsConfig(acknowledge=[]).acknowledge == [] and ControlsConfig(reactions=("Clap", "Tada")).reactions == ("Clap", "Tada")
+        assert not caplog.records
+
+    @pytest.mark.parametrize("words, expected", [
+        ("true", True), ("True", True), ("yes", True), ("ON", True), (" on ", True),
+        ("false", False), ("False", False), ("no", False), ("Off", False), (" off ", False),
+    ])
+    def test_ask_everything_written_as_a_quoted_word_reads_as_the_word_says(self, words, expected, caplog):
+        """A quoted "false" is a string, which Python calls true: left as it was it made every dialog wait for a tap in a room whose admin
+        wrote false."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"dialogs": {"ask_everything": words}}})
+        assert config.meeting.dialogs.ask_everything is expected
+        assert config.to_dict()["meeting"]["dialogs"]["ask_everything"] is expected
+        assert not caplog.records
+
+    @pytest.mark.parametrize("value", ["maybe", "", "  ", "1", "enabled", 1, 0, 2.5, [True], {"on": True}])
+    def test_ask_everything_that_is_not_a_bool_or_one_of_those_words_is_the_default_with_a_warning(self, value, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"dialogs": {"ask_everything": value}}})
+        assert config.meeting.dialogs.ask_everything is False
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warned) == 1 and "meeting.dialogs.ask_everything" in warned[0] and repr(value) in warned[0]
+
+    def test_ask_everything_left_blank_or_given_as_a_bool_is_taken_as_it_is(self, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        assert DialogsConfig(ask_everything=None).ask_everything is False
+        assert DialogsConfig(ask_everything=True).ask_everything is True and DialogsConfig(ask_everything=False).ask_everything is False
+        assert not caplog.records
+
     def test_a_key_the_section_does_not_know_is_ignored_with_a_warning_and_the_rest_of_the_section_loads(self, caplog):
         caplog.set_level(logging.WARNING, logger="croom.core.config")
         config = Config.from_dict({"meeting": {"dialogs": {"ask_evrything": True, "ask_everything": True}, "controls": {"reactons": ["Clap"], "reactions": ["Tada"]}}})

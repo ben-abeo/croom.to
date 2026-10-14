@@ -164,18 +164,24 @@ class DialogPolicy:
         buttons = dialog.get("buttons") or []
         return str(buttons[-1]) if buttons else ""
 
+    @classmethod
+    def _only_a_state(cls, sentence: str) -> bool:
+        """The sentence only says that a state changed (the room was muted, a recording stopped)."""
+        return any(p in sentence.lower() for p in cls.STATE_ONLY)
+
     def disclosure(self, dialog: Dict[str, Any]) -> str:
         """The sentence the table keeps for an acknowledged notice: the first that holds a phrase of the list (what the notice is about:
-        recorded, transcribed, AI Companion), else the first; empty for a notice that only says a state changed."""
-        if any(p in self._words(dialog) for p in self.STATE_ONLY):
-            return ""
+        recorded, transcribed, AI Companion) without only saying that a state changed, else the first; empty when the one chosen only says
+        a state changed. A stop is judged by its own sentence: the one beside it ("This meeting is being recorded again") may be what the
+        meeting discloses, and the stop must not take it away."""
         text = (dialog.get("text") or dialog.get("title") or "").strip()
         sentences = [part.strip().rstrip(".") for part in text.split(". ")]
         sentences = [sentence for sentence in sentences if sentence]
         if not sentences:
             return ""
-        about = next((sentence for sentence in sentences if any(p in sentence.lower() for p in self.acknowledge)), sentences[0])
-        return about + "."
+        about = next((sentence for sentence in sentences
+                      if not self._only_a_state(sentence) and any(p in sentence.lower() for p in self.acknowledge)), sentences[0])
+        return "" if self._only_a_state(about) else about + "."
 
 
 class MeetingProvider(ABC):

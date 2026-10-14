@@ -5,7 +5,7 @@
   "use strict";
 
   const STATUS = { 1: "joining", 2: "connected", 3: "left", 4: "reconnecting" };
-  const bridge = { state: "loading", detail: "", userId: null, userName: null, muted: false };
+  const bridge = { state: "loading", detail: "", userId: null, userName: null, muted: false, _pendingMute: false };
   window.crystalMeet = bridge;
 
   function report(state, detail) {
@@ -33,7 +33,11 @@
 
   bridge.mute = function (muted) {
     return new Promise((resolve, reject) => {
-      if (bridge.userId === null) { reject(new Error("not in a meeting")); return; }
+      if (bridge.userId === null || bridge.userId === undefined) {
+        // Connected, but Zoom has not listed the room yet (its record of the current user is built from its roster).
+        reject(new Error(bridge.state === "connected" ? "Zoom has not listed the room yet; try again in a moment" : "not in a meeting"));
+        return;
+      }
       ZoomMtg.mute({
         userId: bridge.userId, mute: !!muted,
         success: () => { bridge.muted = !!muted; resolve(bridge.muted); },
@@ -56,19 +60,28 @@
   const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined) return obj[n]; } return undefined; };
   // Zoom's getAttendeeslist answers only when its roster is not empty and calls neither callback otherwise, and the roster
   // fills a moment after "connected". A reading must never hang on that: nothing here waits longer than ANSWER_MS for Zoom,
-  // and a silence is read as the last answer was (the roster at first empty, the current user at first unknown).
+  // and a silence is read as the last answer was (the roster at first empty, the current user at first unknown). A silent
+  // call registers nothing, so a call may be made again: with `again`, the question is asked that often until Zoom answers.
   const ANSWER_MS = 2000;
+  const ASK_AGAIN_MS = 250;
   let lastRoster = [];
   let lastUser = null;
-  function ask(method, silence, take) {
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => resolve(silence()), ANSWER_MS);
-      try {
-        ZoomMtg[method]({
-          success: (result) => { clearTimeout(timer); resolve(take(result)); },
-          error: () => { clearTimeout(timer); resolve(take(null)); },
-        });
-      } catch (e) { clearTimeout(timer); throw e; }
+  function ask(method, silence, take, again) {
+    return new Promise((resolve, reject) => {
+      let over = false, deadline = null, redo = null;
+      const stop = () => { over = true; clearTimeout(deadline); clearTimeout(redo); };
+      deadline = setTimeout(() => { if (!over) { stop(); resolve(silence()); } }, ANSWER_MS);
+      const call = () => {
+        if (over) return;
+        try {
+          ZoomMtg[method]({
+            success: (result) => { const value = take(result); if (!over) { stop(); resolve(value); } },
+            error: () => { const value = take(null); if (!over) { stop(); resolve(value); } },
+          });
+        } catch (e) { stop(); reject(e); return; }
+        if (!over && again) redo = setTimeout(call, again);
+      };
+      call();
     });
   }
   function currentUser() {
@@ -122,12 +135,13 @@
       setTimeout(settle, 100);
     });
   };
+  // An error, or an answer with no list in it, is read as the last list was: a moment's trouble is not everyone leaving.
   function attendees() {
     return ask("getAttendeeslist", () => lastRoster, (result) => {
       const list = result && result.result && result.result.attendeesList;
-      if (list) lastRoster = list;
-      return list || [];
-    });
+      if (Array.isArray(list)) lastRoster = list;
+      return lastRoster;
+    }, ASK_AGAIN_MS);
   }
   // The client's buttons the table may press, each found by what it says. The inventory run on the device
   // (spec section 7) confirms these words; a button not found is simply not offered.
@@ -174,15 +188,15 @@
   // (sometimes ""), isGuest, isHold (in the waiting room) and self; the older names stay as fallbacks. What a record leaves
   // out is not read as off: the last known mute stays, and a camera nobody speaks of is unknown (null).
   bridge.readMeeting = async function () {
+    const list = await attendees();       // may wait for Zoom: the user's record is read after it, so it is as new as the read's end
     const user = await currentUser();
-    const list = await attendees();
     const heardMuted = pick(user, ["muted", "bMuted", "isMuted"]);
     const video = bridge.video();
     const heardVideo = video.on !== null ? video.on : pick(user, ["video", "bVideoOn", "videoOn", "isVideoOn"]);
     const id = pick(user, ["userId"]);
     const name = pick(user, ["userName", "displayName"]);
     if (heardMuted !== undefined) bridge.muted = !!heardMuted;
-    if (id !== undefined && (bridge.userId === null || bridge.userId === undefined)) bridge.userId = id;
+    if (id !== undefined && (bridge.userId === null || bridge.userId === undefined)) { bridge.userId = id; applyPendingMute(); }
     if (name !== undefined && !bridge.userName) bridge.userName = String(name);
     const me = {
       userId: id === undefined ? bridge.userId : id,
@@ -227,6 +241,7 @@
   async function readAndReport() {
     if (bridge.state !== "connected") return;
     const now = await bridge.readMeeting();
+    if (bridge.state !== "connected") return;      // left, or reconnecting, while it read: no "state" event after that
     const copy = Object.assign({}, now); delete copy.keys;
     const key = JSON.stringify(copy);
     if (key === lastSeen) return;
@@ -237,18 +252,25 @@
     }
   }
   // One read at a time: a request that comes while a read is in progress waits for it and is answered by one more read after
-  // it, so a late answer can never overtake a newer one and a change made during a read is not lost.
+  // it, so a late answer can never overtake a newer one and a change made during a read is not lost, not even when that
+  // read fails: the failure is kept, the request is still read, and only a failure of the last read is passed on.
   let syncing = null;
   let syncAgain = false;
   function syncState() {
     if (syncing) { syncAgain = true; return syncing; }
     syncing = (async () => {
+      let failure = null;
       try {
-        do { syncAgain = false; await readAndReport(); } while (syncAgain);
+        do {
+          syncAgain = false;
+          try { await readAndReport(); failure = null; } catch (e) { failure = e; }
+        } while (syncAgain);
       } finally { syncing = null; syncAgain = false; }
+      if (failure) throw failure;
     })();
     return syncing;
   }
+  bridge._sync = syncState;      // read now and report what changed: resolves when done, rejects when the last read failed
   // Zoom calls its listeners from inside its own state reducer, where getCurrentUser throws: a listener only queues the
   // read, and a burst of changes is read once, 50 ms after the first of them.
   let syncTimer = null;
@@ -262,12 +284,22 @@
     if (pollTimer === null) pollTimer = setInterval(() => { syncState().catch(() => {}); }, 5000);
   }
 
-  // Connected is reported once the current user is known, so mute works right away.
+  // The join's mic-off default goes out as soon as the room's id is known: at once, or when a later read first finds it (Zoom
+  // builds the current user's record from its roster, so the first record can have no id), and only once. It is an action,
+  // so the meeting is read again once Zoom has answered it: a read that found the id has the record from before the mute.
+  function applyPendingMute() {
+    if (bridge._pendingMute && bridge.userId !== null && bridge.userId !== undefined) {
+      bridge._pendingMute = false;
+      bridge.mute(true).catch(() => {}).then(() => queueSync());
+    }
+  }
+  // Connected is reported once the current user's record has been asked for.
   function connected(params) {
     if (bridge.state === "connected") return;
     const finish = () => {
       report("connected", "");
-      if (params.micOn === false && bridge.userId !== null) bridge.mute(true).catch(() => {});
+      bridge._pendingMute = params.micOn === false;
+      applyPendingMute();
       syncState().catch(() => {});
       startPolling();
     };
@@ -313,9 +345,12 @@
       report(state, "");
     });
     // Zoom also sends this to a host for other people entering or leaving the waiting room (self: false), and with
-    // isInWaitingRoom: false when this room is let in: only this room's own wait is a state of the page.
+    // isInWaitingRoom: false when this room is let in: only this room's own wait is a state of the page. It can also come up
+    // to a second and a half late: a room that is already in the meeting is not waiting.
     ZoomMtg.inMeetingServiceListener("onUserIsInWaitingRoom", (data) => {
-      if (data && (data.self === undefined || data.self) && data.isInWaitingRoom) report("waiting", "Waiting for the host to let the room in");
+      if (bridge.state !== "connected" && data && (data.self === undefined || data.self) && data.isInWaitingRoom) {
+        report("waiting", "Waiting for the host to let the room in");
+      }
     });
     ZoomMtg.inMeetingServiceListener("onUserUpdate", () => queueSync());
     ZoomMtg.inMeetingServiceListener("onUserJoin", () => queueSync());

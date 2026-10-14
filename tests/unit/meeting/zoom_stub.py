@@ -18,8 +18,9 @@ bRaiseHand, waiting). onUserUpdate, onUserJoin and onUserLeave are fired from in
 both calls throw, so a listener that reads the meeting at once fails here as it does there. onRecordingChange is an
 effect, not a reducer: it sends {recording: "stop" | "recording" | "pause", hasLocalRecord} and fires once, with "stop",
 as the meeting UI mounts. Zoom's getAttendeeslist calls neither callback while its roster is empty: silentAttendees
-never answers, rosterAfterMs stays silent until that long after join. window.__pollFns holds the page's 5000 ms
-setInterval callbacks (a test can call one as the tick) and window.__rejections its unhandled promise rejections.
+never answers, rosterAfterMs stays silent until that long after join; and since Zoom builds getCurrentUser's record
+from that roster, rosterAfterMs also gives an empty record, with no userId, until then. window.__pollFns holds the
+page's 5000 ms setInterval callbacks (a test can call one as the tick), window.__rejections its unhandled rejections.
 """
 
 STUB_JS = r"""
@@ -138,7 +139,11 @@ window.ZoomMtg = {
       if (b.endAfterMs > 0) setTimeout(() => this._status(3), b.endAfterMs);
     }, b.waiting ? 300 : b.delayMs);
   },
-  getCurrentUser(opts) { this._guard(); opts.success && opts.success({ result: { currentUser: this._me() } }); },
+  getCurrentUser(opts) {
+    this._guard();
+    const early = Date.now() - this._joinedAt < this._behaviour.rosterAfterMs;      // no roster yet, so no record to build it from
+    opts.success && opts.success({ result: { currentUser: early ? {} : this._me() } });
+  },
   getAttendeeslist(opts) {
     this._guard();
     const b = this._behaviour;

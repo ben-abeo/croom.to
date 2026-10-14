@@ -284,6 +284,7 @@ class TestReviewFixes:
         provider = await provider_for(api=FakeApi())
         try:
             await provider.join_meeting(LINK)
+            await asyncio.sleep(0.3)           # the page's own reads at join are over: none in progress to take the change for theirs
             assert provider.current_meeting.is_muted is False
             await provider._page.evaluate("window.ZoomMtg._setMuted(true)")
             for _ in range(40):
@@ -292,6 +293,18 @@ class TestReviewFixes:
                 await asyncio.sleep(0.05)
             assert provider.current_meeting.is_muted is True and provider.state == MeetingState.CONNECTED
             assert await provider.toggle_mute() is False                  # the next tap unmutes: the table and Zoom agree
+        finally:
+            await shutdown(provider)
+
+    async def test_the_mic_off_default_survives_a_roster_that_comes_late(self):
+        """Zoom's roster, and with it the current user's id, can be a moment late: the join still ends muted when the room
+        wanted the mic off, and the status says what Zoom has."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 600;")
+        try:
+            info = await provider.join_meeting(LINK, mic_on=False)
+            await asyncio.sleep(0.5)           # whatever the page reported during the join has reached the status by now
+            assert await provider._page.evaluate("window.ZoomMtg._muted") is True
+            assert info.is_muted is True
         finally:
             await shutdown(provider)
 

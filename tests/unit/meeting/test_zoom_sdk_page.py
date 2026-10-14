@@ -272,7 +272,7 @@ async def test_zoom_firing_updates_inside_its_reducer_is_read_after_it_returns_a
     """Zoom calls onUserUpdate from inside its own state reducer, where getCurrentUser throws (the stub does the same):
     the bridge reads a moment later, so a host-side mute still reaches the device, exactly once, with no error."""
     async with PageRun() as run:
-        await run.wait_for("connected")
+        await settled(run)                       # no read in progress: it would take a synchronous listener's call for its own
         errors = []
         run.page.on("pageerror", lambda error: errors.append(str(error)))
         await run.page.evaluate("window.ZoomMtg._setMuted(true)")
@@ -519,21 +519,40 @@ async def test_a_current_user_that_never_answers_does_not_hang_the_read_either()
         assert state["muted"] is False and state["userId"] == 16777216 and "video" in state["keys"]     # as last known
 
 
-async def test_a_roster_that_arrives_late_is_read_once_it_is_there_and_no_older_read_overtakes_it():
-    """The first read finds the roster silent and waits out its two seconds with the empty list; a change that arrives
-    meanwhile, once the roster is there, must be read after that one, not answered by it finishing later."""
-    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 400;") as run:
+async def test_a_roster_that_arrives_within_the_wait_ends_the_wait_with_the_roster():
+    """A silent getAttendeeslist registers nothing, so the read asks again every 250 ms: it is done when Zoom answers, not
+    after the full two seconds (and a join reads twice)."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 600;") as run:
         await run.wait_for("connected")
-        await asyncio.sleep(0.6)                                                         # the roster has arrived by now
-        await run.page.evaluate("window.ZoomMtg._fire('onUserUpdate', { userId: 16777217 })")
-        [first] = await states(run, 1, timeout=4.0)
-        assert first["count"] == 3 and first["participants"][2]["name"] == "Raj Patel"
-        await asyncio.sleep(0.3)
-        assert [s["count"] for s in await states(run, 1)] == [3]                         # no stale event with the empty list after it
+        started = time.monotonic()
+        m = await asyncio.wait_for(run.page.evaluate("window.crystalMeet.readMeeting()"), timeout=3.0)
+        assert time.monotonic() - started < 1.5
+        assert m["count"] == 3 and m["me"]["userId"] == 16777216          # the roster, and the user's record built from it
+
+
+async def test_reads_run_one_at_a_time_and_a_request_during_a_read_is_answered_by_one_more():
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("""() => {
+            window.__active = 0; window.__maxActive = 0; window.__reads = 0;
+            const real = window.crystalMeet.readMeeting;
+            window.crystalMeet.readMeeting = async function () {              // a slow read, whose answer is as of its start
+                window.__active += 1; window.__maxActive = Math.max(window.__maxActive, window.__active); window.__reads += 1;
+                try { const seen = await real.call(this); await new Promise((r) => setTimeout(r, 400)); return seen; }
+                finally { window.__active -= 1; }
+            };
+            window.ZoomMtg._fire("onUserUpdate", { userId: 1 });              // starts a read in 50 ms
+        }""")
+        await asyncio.sleep(0.2)                                              # that read is in progress
+        await run.page.evaluate("window.ZoomMtg._setMuted(true)")             # a change it has not seen
+        [detail] = await states(run, 1, timeout=3.0)
+        assert detail["muted"] is True
+        assert await run.page.evaluate("[window.__maxActive, window.__reads]") == [1, 2]
 
 
 async def test_the_current_user_is_filled_in_from_a_later_record_when_the_first_was_empty():
-    """getCurrentUser may answer {} while Zoom is still starting: neither the id nor the name is known until a record has them."""
+    """getCurrentUser may answer {} while Zoom is still starting: neither the id nor the name is known until a record has
+    them, and the join's mic-off default, which needs the id, goes out then, once."""
     emptyAtFirst = STUB_JS + """
     (function () {
       const real = window.ZoomMtg.getCurrentUser;
@@ -545,11 +564,14 @@ async def test_the_current_user_is_filled_in_from_a_later_record_when_the_first_
     """
     async with PageRun({"micOn": False}, stub=emptyAtFirst) as run:
         await run.wait_for("connected")
-        assert await run.page.evaluate("[window.crystalMeet.userId, window.crystalMeet.userName]") == [None, None]
-        assert await run.calls("mute") == []                           # no mute is sent for a user nobody knows the id of
+        assert await run.page.evaluate("[window.crystalMeet.userId === null, window.crystalMeet.userName === null]") == [True, True]
+        assert await run.calls("mute") == []                           # no mute is sent for a user nobody knows the id of ...
         await run.page.evaluate("window.__emptyUser = false")
         assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["me"]["userId"] == 16777216
         assert await run.page.evaluate("[window.crystalMeet.userId, window.crystalMeet.userName]") == [16777216, "Room 1"]
+        assert [c[1] for c in await run.calls("mute")] == [{"userId": 16777216, "mute": True}]      # ... until there is one: then it goes out
+        await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert len(await run.calls("mute")) == 1                                                    # and only once
 
 
 async def test_the_five_second_read_reports_a_change_nothing_else_announced():
@@ -649,13 +671,137 @@ async def test_a_build_that_names_the_video_button_start_video_is_read_too():
 async def test_another_persons_waiting_room_event_does_not_make_the_room_wait():
     """Zoom also sends onUserIsInWaitingRoom to a host for other people entering or leaving its waiting room (self: false),
     and with isInWaitingRoom false when this room is let in: only this room's own wait is a state of the page."""
-    async with PageRun() as run:
-        await run.wait_for("connected")
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;") as run:
+        await run.wait_for("joining")
         await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 99, self: false, isInWaitingRoom: true })")
         await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 99, self: false, isInWaitingRoom: false })")
         await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 16777216, self: true, isInWaitingRoom: false })")
-        assert await run.page.evaluate("window.crystalMeet.state") == "connected"
-        await run.page.evaluate("window.ZoomMtg._setMuted(true)")                        # and what changes is still reported
-        await states(run, 1)
-        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { isInWaitingRoom: true })")   # an older shape: no self
+        assert await run.page.evaluate("window.crystalMeet.state") == "joining"
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 16777216, self: true, isInWaitingRoom: true })")
         assert await run.page.evaluate("window.crystalMeet.state") == "waiting"
+
+
+# ---- fix round 2: the order of a read, the id that comes late, and the edges of one-at-a-time ----
+
+
+async def test_the_mic_off_default_is_applied_when_the_room_is_first_listed():
+    """Zoom builds the current user's record from its roster: until the roster is there the record has no id, and there is
+    nobody to mute. The join's mic-off default waits for the id, then goes out once, and the table is told it happened."""
+    async with PageRun({"micOn": False}, stub=STUB_JS + "window.ZoomMtg._behaviour.rosterAfterMs = 2500;") as run:
+        await run.wait_for("connected")
+        with pytest.raises(Exception, match="has not listed the room yet"):
+            await run.page.evaluate("window.crystalMeet.mute(true)")
+        assert await run.calls("mute") == []
+        for _ in range(100):                                  # the roster is there 2.5 s after the join: the next read finds the id
+            if await run.calls("mute"):
+                break
+            await asyncio.sleep(0.05)
+        assert [c[1] for c in await run.calls("mute")] == [{"userId": 16777216, "mute": True}]
+        for _ in range(40):                                   # that read had the record from before the mute: it is read again
+            if any(json.loads(d)["muted"] for s, d in run.events if s == "state"):
+                break
+            await asyncio.sleep(0.05)
+        assert any(json.loads(d)["muted"] is True for s, d in run.events if s == "state")
+
+
+async def test_mute_says_it_is_not_in_a_meeting_before_the_meeting_is_joined():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;") as run:
+        await run.wait_for("joining")
+        with pytest.raises(Exception, match="not in a meeting"):
+            await run.page.evaluate("window.crystalMeet.mute(true)")
+
+
+async def test_a_read_takes_the_current_user_after_the_roster_wait_not_before_it():
+    """A read that waits for a silent roster must not carry a current user from before the wait: a mute made during it would
+    be reported as it was, the table showing unmuted for a room Zoom has muted."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.silentAttendees = true;") as run:
+        await run.wait_for("connected")
+        read = asyncio.ensure_future(run.page.evaluate("window.crystalMeet.readMeeting()"))
+        await asyncio.sleep(0.5)
+        await run.page.evaluate("window.ZoomMtg._muted = true")               # during the wait
+        m = await asyncio.wait_for(read, timeout=3.5)
+        assert m["me"]["muted"] is True
+
+
+async def test_a_request_queued_during_a_read_that_fails_is_read_again():
+    """A read that throws after waiting must not take down with it the request that came while it ran."""
+    failsOnce = STUB_JS + """
+    (function () {
+      const real = document.querySelector.bind(document);       // the read looks at the client's buttons once its answers are in
+      document.querySelector = function (selector) {
+        if (window.__break) { window.__break = false; throw new Error("the page broke"); }
+        return real(selector);
+      };
+    })();
+    """
+    async with PageRun(stub=failsOnce) as run:
+        await settled(run)
+        await run.page.evaluate("() => { window.ZoomMtg._behaviour.silentAttendees = true; window.ZoomMtg._setMuted(true); }")   # a read starts and waits
+        await asyncio.sleep(0.3)
+        await run.page.evaluate("window.ZoomMtg._fire('onUserUpdate', { userId: 1 })")                    # a request while it runs
+        await asyncio.sleep(0.1)
+        await run.page.evaluate("() => { window.ZoomMtg._behaviour.silentAttendees = false; window.__break = true; }")   # it fails once the roster is in
+        [detail] = await states(run, 1, timeout=2.0)
+        assert detail["muted"] is True
+        assert await run.page.evaluate("window.__rejections") == []
+
+
+async def test_no_state_event_follows_left():
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("() => { window.ZoomMtg._behaviour.silentAttendees = true; window.ZoomMtg._setMuted(true); }")   # a read starts and waits
+        await asyncio.sleep(0.4)
+        await run.page.evaluate("window.crystalMeet.leave()")
+        await asyncio.sleep(2.1)                                              # past the end of that read
+        order = [s for s, _ in run.events]
+        assert "left" in order and "state" not in order[order.index("left"):]
+
+
+async def test_the_rooms_own_waiting_room_event_arriving_after_it_connected_is_ignored():
+    """Zoom delivers the room's own waiting-room event up to a second and a half late: once the room is in, it is not
+    waiting, and the page goes on reporting what changes."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { userId: 16777216, self: true, isInWaitingRoom: true })")
+        assert await run.page.evaluate("window.crystalMeet.state") == "connected"
+        await run.page.evaluate("window.ZoomMtg._setMuted(true)")
+        [detail] = await states(run, 1)
+        assert detail["muted"] is True
+
+
+async def test_an_older_waiting_room_event_without_self_means_this_room():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.neverConnect = true;") as run:
+        await run.wait_for("joining")
+        await run.page.evaluate("window.ZoomMtg._fire('onUserIsInWaitingRoom', { isInWaitingRoom: true })")
+        assert await run.page.evaluate("window.crystalMeet.state") == "waiting"
+
+
+async def test_a_roster_error_keeps_the_last_list():
+    """A transient error must not be reported as every participant having gone."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["count"] == 3
+        await run.page.evaluate("() => { window.ZoomMtg.getAttendeeslist = (o) => o.error({ errorCode: 1, errorMessage: 'not now' }); }")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["count"] == 3
+
+
+async def test_a_roster_answer_that_is_not_a_list_is_read_as_the_last_list_was():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["count"] == 3
+        await run.page.evaluate("() => { window.ZoomMtg.getAttendeeslist = (o) => o.success({ result: { attendeesList: { notAList: true } } }); }")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert m["count"] == 3
+        await run.page.evaluate("() => { window.ZoomMtg.getAttendeeslist = (o) => o.success({ result: {} }); }")
+        assert (await run.page.evaluate("window.crystalMeet.readMeeting()"))["count"] == 3          # nor does an answer with no list
+
+
+async def test_a_read_that_fails_is_passed_on_to_whoever_waits_for_it():
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("() => { window.__real = window.ZoomMtg.getCurrentUser; window.ZoomMtg.getCurrentUser = () => { throw new Error('the roster broke'); }; }")
+        with pytest.raises(Exception, match="the roster broke"):
+            await run.page.evaluate("window.crystalMeet._sync()")
+        await run.page.evaluate("() => { window.ZoomMtg.getCurrentUser = window.__real; }")
+        await run.page.evaluate("window.crystalMeet._sync()")                 # and when it works, it just finishes

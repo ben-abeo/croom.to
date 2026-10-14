@@ -316,6 +316,11 @@ def main() -> None:
         help="Check the room's Zoom Meeting SDK credentials and exit",
         action="store_true"
     )
+    parser.add_argument(
+        "--check-tv",
+        help="Check that the room's LG TV answers (or, with no TV configured, list the LG TVs on the network) and exit",
+        action="store_true"
+    )
 
     parser.add_argument(
         "--check-meet",
@@ -348,6 +353,10 @@ def main() -> None:
     if args.check_zoom:
         from croom.meeting.zoom_check import check_zoom
         raise SystemExit(asyncio.run(check_zoom(load_config(args.config))))
+
+    if args.check_tv:
+        from croom.tv.check import check_tv
+        raise SystemExit(asyncio.run(check_tv(load_config(args.config))))
 
     if args.check_meet:
         import tempfile

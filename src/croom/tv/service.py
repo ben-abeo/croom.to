@@ -10,12 +10,13 @@ import asyncio
 import contextlib
 import logging
 import re
+from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from croom.core.config import TvConfig
 from croom.core.service import Service
 from croom.tv.client import ClientFactory, TvClient
-from croom.tv.errors import TvError
+from croom.tv.errors import TvError, TvTimeout
 from croom.tv.keystore import KeyStore
 
 logger = logging.getLogger(__name__)
@@ -200,6 +201,11 @@ class TvService(Service):
     def configured(self) -> bool:
         return bool(self._config.enabled and self._config.host)
 
+    @property
+    def key_path(self) -> Path:
+        """Where the key the TV handed out is kept."""
+        return self._keys.path
+
     def status(self) -> Dict[str, Any]:
         """What the room page draws from (spec section 6). Reachable is asked now, not as of the last try: a
         connection that has just closed is not reachable, and a TV that cannot be reached is not known to be on."""
@@ -310,6 +316,26 @@ class TvService(Service):
         finally:
             if self._started and not self._refused and self._keys.read() is not None:
                 self._run_loop()                 # the key is still there, so the TV is still wanted
+
+    async def probe(self, timeout: float) -> None:
+        """One look at the TV with the key it was paired with, for `croom --check-tv`: returns once the TV has answered (status()
+        then says what it shows), and raises TvError, in words, when it cannot be asked or does not answer, the look being cut
+        off after `timeout` seconds (a TvTimeout, as is a look that ended in the library's own timeout). A look is no more than
+        that: the service is not started, nothing is woken, and a service with no key is not connected at all, because a
+        connect without a key is a pairing. Hang up with stop()."""
+        self._require_paired()
+        try:
+            answered = await asyncio.wait_for(self._connect_once(), timeout)
+        except asyncio.TimeoutError:
+            raise TvTimeout(f"The TV at {self._config.host} did not answer within {timeout:g} seconds") from None
+        if answered:
+            return
+        if self._refused:
+            raise TvError(REFUSED)
+        words = self._last_failure or f"The TV at {self._config.host} is not answering"
+        if self._timed_out:                      # the library's own timeout: the same as the look's own, for the one who reads it
+            raise TvTimeout(words)
+        raise TvError(words)
 
     async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
         """One thing the table asks of the TV; answers with the status as the TV shows it now. What the TV cannot do

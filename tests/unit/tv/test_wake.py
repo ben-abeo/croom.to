@@ -98,3 +98,31 @@ async def test_a_packet_that_cannot_be_sent_is_explained(monkeypatch, error):
     with pytest.raises(TvError) as failure:
         await wake(MAC)
     assert "could not be sent" in str(failure.value) and str(error) in str(failure.value)
+
+
+# What is wrong with a MAC address, in words: what the check of the room's TV says without sending anything
+
+def test_a_mac_that_can_be_woken_has_nothing_wrong_with_it():
+    from croom.tv.wake import mac_problem
+    for mac in ("AA:BB:CC:DD:EE:FF", "aa-bb-cc-dd-ee-ff", "aabbccddeeff", "  AA:BB:CC:DD:EE:FF\n"):
+        assert mac_problem(mac) is None
+
+
+@pytest.mark.parametrize("mac, words", [
+    ("", "not set"), (None, "not set"), ("   ", "not set"),
+    ("not a mac", "'not a mac' is not a MAC address"), ("AA:BB:CC:DD:EE", "'AA:BB:CC:DD:EE' is not a MAC address"),
+    (8041827059, "'8041827059' is not a MAC address"),
+])
+def test_what_is_wrong_with_a_mac_is_said_in_the_words_a_wake_is_refused_with(mac, words):
+    from croom.tv.wake import mac_problem
+    problem = mac_problem(mac)
+    assert words in problem and "tv.mac" in problem
+
+
+async def test_a_wake_is_refused_with_the_same_words(sent):
+    from croom.tv.wake import mac_problem
+    for mac in ("", "nonsense", 8041827059):
+        with pytest.raises(TvError) as failure:
+            await wake(mac)
+        assert str(failure.value) == mac_problem(mac)
+    assert sent == []

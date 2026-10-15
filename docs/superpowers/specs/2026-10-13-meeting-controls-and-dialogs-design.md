@@ -68,7 +68,7 @@ The agent describes what the table may do right now, and the table draws from th
 - `host.role` is `participant`, `co-host` or `host`; the host block's items are available only for a role that allows them (Zoom refuses otherwise, and the refusal would be the table's error line).
 - `participants.list` is capped at 50 entries on the wire (the count is always exact); the table shows the list on its own sub-screen.
 - `chat.messages` holds the last 20 incoming messages of this meeting; `unread` counts those since the table last opened the chat sub-screen (the table tells the agent with `POST /api/meeting/chat/seen`).
-- `notice` is the disclosure line from acknowledged notices and banners (recording, transcription, AI Companion), joined with "and"; empty when none.
+- `notice` is the disclosure line from acknowledged notices and banners (recording, transcription, AI Companion): each disclosure is a sentence of its own, in the order they came, a repeat dropped, and a notice that only says a state changed (the room was muted, a recording or a transcription stopped) discloses nothing, the state being read again; empty when none.
 - `dialog` is the one dialog waiting for an answer (section 5), or absent.
 
 The provider interface (`providers/base.py`) grows one generic method beside the existing `toggle_mute`/`toggle_camera`/`leave_meeting`:

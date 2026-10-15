@@ -404,3 +404,6 @@ body.keyboard-open .schedule { display: none; }
   .sound input[type="range"] { width: 100%; }
   .sound-buttons { margin-top: 8px; }
 }
+
+/* The meeting screen ignores taps while it settles after its layout has moved (app.js, guardLayoutShift). */
+body.settling .view[data-view="meeting"] { pointer-events: none; }

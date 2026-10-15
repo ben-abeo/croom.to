@@ -561,6 +561,24 @@
     el("meeting-secondary").hidden = picking;
     renderReactionRow(picking ? choices : null);
   }
+  // The meeting screen's controls are under a finger that was aimed at where they were: when the screen's layout shifts (a dialog's card comes up
+  // or goes, a notice or a refusal appears, the secondary row wraps, the Sound strip comes or goes) everything below the shift is somewhere else, and
+  // a tap that was on its way lands on the wrong control (Captions on Mute, a button on the volume slider). The screen ignores taps for half a
+  // second after it moves (body.settling, in style.css; each move starts the half second again). The primary row and the menu at its foot are
+  // where a shift above or between them shows. A drag already under way is not cut short (the browser keeps it), and a scroll is not a move: the
+  // positions are taken on the page, whatever its scroll. Called at the end of render(), when every renderer has had its say.
+  let lastAnchors = null, settleTimer = null;
+  function guardLayoutShift() {
+    if (document.body.dataset.view !== "meeting") { lastAnchors = null; return; }
+    const at = (node) => node.getBoundingClientRect().top + window.scrollY + document.querySelector("main").scrollTop;   // where it is on the page, whatever the scroll
+    const anchors = [at(el("meeting-actions")), at(document.querySelector('.view[data-view="meeting"] .menu'))];
+    if (lastAnchors && anchors.some((top, i) => Math.abs(top - lastAnchors[i]) > 6)) {
+      document.body.classList.add("settling");
+      clearTimeout(settleTimer);
+      settleTimer = setTimeout(() => document.body.classList.remove("settling"), UNCOVERED_TAP_MS);
+    }
+    lastAnchors = anchors;
+  }
   // ===== end of the meeting screen =====
 
   // A meeting began or ended: land on the new mode's main screen. What the last action said (a refusal on one mode's
@@ -740,6 +758,7 @@
     renderKeyClick(s);
     renderPicker();
     for (const fn of renderHooks) fn(s);
+    guardLayoutShift();   // last: the Sound strip (devices.js) and the rest have moved the screen by now
     if (landing && kiosk && view() === "idle") focusPasscode();
   }
 

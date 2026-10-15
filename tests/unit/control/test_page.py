@@ -5209,7 +5209,7 @@ def centre(page, selector, has_text=None):
 
 def button_under(page, x, y):
     """What a finger at this point of the page is over now: the words of the button there, or "" for anything else."""
-    return page.evaluate("([x, y]) => { const b = document.elementFromPoint(x, y).closest('button'); return b ? b.textContent.trim() : ''; }", [x, y])
+    return page.evaluate("([x, y]) => { const b = [...document.querySelectorAll('button')].find((n) => { const r = n.getBoundingClientRect(); return r.width && x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }); return b ? b.textContent.trim() : ''; }", [x, y])
 
 
 def test_a_waiting_dialog_is_answered_from_the_table(browser):
@@ -5322,6 +5322,190 @@ def test_the_dialog_that_takes_the_place_of_the_one_answered_ignores_a_tap_for_h
         page.mouse.click(x, y)
         wait_for_calls(page, server, 2)
         assert server.meeting.controls_called[-1] == ("dialog", {"id": 2, "button": "Got it"})
+        page.close()
+
+
+def test_a_tap_aimed_at_the_secondary_row_does_not_land_on_mute_when_a_card_comes_up_under_it(browser):
+    """The card moves the whole screen, not only its own buttons' place: a thumb on its way to Captions meets Mute when the card comes up
+    under it. The screen ignores taps for half a second after it moves (the clock is stopped: the half second is the test's to spend)."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, touchscreen=True)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        x, y = centre(page, "#meeting-secondary .button", "Captions")                      # where the thumb is going
+        put_up(server, ZOOMS_DIALOG)
+        poll_until(page, CARD)                                                              # the card pushes both rows down: Mute is under the thumb now
+        assert button_under(page, x, y) == "Mute", "the thumb is not over Mute: this test means nothing"
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)                                                          # a slow one, 450 ms after
+        page.wait_for_timeout(300)                                                          # (real time) long enough for a request to have gone out
+        assert server.meeting.muted is False and server.meeting.controls_called == []
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)                                                          # 750 ms: a tap meant for what is there now works
+        page.wait_for_function("document.querySelector('#meeting-actions .button').textContent.trim() === 'Unmute'", timeout=5000)
+        assert server.meeting.muted is True
+        page.close()
+
+
+def test_a_tap_aimed_at_the_secondary_row_does_not_move_the_volume_when_the_card_goes_from_over_it(browser):
+    """The other way: the card goes and everything moves up, so a thumb on its way to the lower part of Hide self view meets the volume slider."""
+    with PageServer() as server:
+        page = a_meeting_with_a_dialog(browser, server, touchscreen=True)
+        box = page.locator("#meeting-secondary .button", has_text="Hide self").bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] - 8                    # where the thumb is going
+        server.meeting.current_meeting.dialog = None
+        poll_until(page, "document.querySelector('#meeting-dialog').hidden")
+        assert page.evaluate("([x, y]) => { const r = document.getElementById('volume-slider').getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }", [x, y]), \
+            "the thumb is not over the volume slider: this test means nothing"
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)
+        page.wait_for_timeout(300)
+        assert server.devices.volume.calls == []
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)                                                          # 750 ms: a tap on what is there now is a tap on it
+        for _ in range(100):
+            if server.devices.volume.calls:
+                break
+            page.wait_for_timeout(50)
+        assert server.devices.volume.calls, "a tap made after the screen has settled is a tap on what is there"
+        page.close()
+
+
+def test_a_tap_aimed_at_the_menu_does_not_set_the_volume_when_the_speaker_comes_back_above_it(browser):
+    """Every renderer moves the screen, not only the card's: the Sound strip comes back (the speaker is plugged in) and the menu under it goes
+    down, so a thumb on its way to Camera meets the volume slider. The screen is settling in the very render that moved it, not one poll later."""
+    with PageServer(devices=StubDevices(volume=StubVolume(available=False))) as server:
+        page = page_on_a_stopped_clock(browser, server, touchscreen=True)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        assert page.locator("#sound-panel").is_hidden()
+        page.clock.run_for(600)                                                             # the screen has settled, without a speaker
+        box = page.locator("#open-camera-live").bounding_box()
+        x, y = box["x"] + box["width"] * 0.8, box["y"] + 15                                 # where the thumb is going: the upper right of Camera (a level of 40 is where the middle would set it)
+        server.devices.volume.available, server.devices.volume.reason = True, None
+        poll_until(page, "!document.getElementById('sound-panel').hidden")                  # the strip is back, and the menu is lower
+        assert page.evaluate("([x, y]) => { const r = document.getElementById('volume-slider').getBoundingClientRect(); return x >= r.left && x <= r.right && y >= r.top && y <= r.bottom; }", [x, y]), \
+            "the thumb is not over the volume slider: this test means nothing"
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)
+        page.wait_for_timeout(300)
+        assert server.devices.volume.calls == []
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)                                                          # 750 ms: a tap on what is there now is a tap on it
+        for _ in range(100):
+            if server.devices.volume.calls:
+                break
+            page.wait_for_timeout(50)
+        assert server.devices.volume.calls, "a tap made after the screen has settled is a tap on what is there"
+        page.close()
+
+
+def test_a_volume_drag_under_way_is_not_cut_short_when_the_screen_moves(browser):
+    """The screen ignores taps while it settles, not a drag that began before it moved: the thumb on the slider (a notice comes in above it,
+    and the slider goes down) is still dragging, and the level follows it to the end."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        box = page.locator("#volume-slider").bounding_box()
+        page.mouse.move(box["x"] + box["width"] * 0.40, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        page.mouse.move(box["x"] + box["width"] * 0.55, box["y"] + box["height"] / 2, steps=5)
+        server.meeting.current_meeting.notice = "This meeting is being recorded."
+        poll_until(page, "document.getElementById('meeting-notice').textContent !== ''")     # the notice moves the slider down: the screen is settling
+        assert page.evaluate("document.body.classList.contains('settling')")
+        box = page.locator("#volume-slider").bounding_box()
+        page.mouse.move(box["x"] + box["width"] * 0.80, box["y"] + box["height"] / 2, steps=8)
+        page.mouse.up()
+        for _ in range(100):
+            if server.devices.volume.calls and server.devices.volume.calls[-1][1] >= 75:
+                break
+            page.wait_for_timeout(50)
+        assert server.devices.volume.calls[-1][1] >= 75, server.devices.volume.calls         # it went on to the end of the drag (the slider was at 55 when the screen moved)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, scroll", [
+    (1280, 700, "document.querySelector('main').scrollTop = 40"),       # the kiosk's fixed screen scrolls inside main when it cannot fit (the shortest window it still gets)
+    (390, 844, "window.scrollTo(0, 120)"),                              # a phone's page scrolls
+])
+def test_scrolling_the_screen_is_not_the_screen_moving(browser, width, height, scroll):
+    """Where a control is on the page does not change when the page is scrolled: the screen is not settling after the person has scrolled it."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server, width, height)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        meeting = server.meeting.current_meeting
+        meeting.notice = TWO_LINES_OF_NOTICE
+        put_up(server, dict(ZOOMS_DIALOG, text=LONGEST_TEXT))
+        poll_until(page, CARD)
+        page.clock.run_for(600)                                                             # settled
+        assert not page.evaluate("document.body.classList.contains('settling')")
+        page.evaluate(scroll)
+        assert page.evaluate("document.querySelector('main').scrollTop + window.scrollY") > 0, "the screen did not scroll: this test means nothing"
+        page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
+        assert not page.evaluate("document.body.classList.contains('settling')")
+        page.close()
+
+
+def test_each_move_of_the_screen_starts_its_half_second_again(browser):
+    """A second move 300 ms after the first (the card, then a notice) keeps the screen settling until half a second after the second."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server, touchscreen=True)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        put_up(server, ZOOMS_DIALOG)
+        poll_until(page, CARD)                                                              # the first move
+        page.clock.run_for(300)
+        server.meeting.current_meeting.notice = "This meeting is being recorded."
+        poll_until(page, "document.getElementById('meeting-notice').textContent !== ''")    # the second move, 300 ms after
+        x, y = centre(page, "#meeting-actions .button", "Mute")
+        page.clock.run_for(300)                                                             # 600 ms after the first move, 300 after the second
+        page.touchscreen.tap(x, y)
+        page.wait_for_timeout(300)
+        assert server.meeting.muted is False
+        page.clock.run_for(250)                                                             # 550 ms after the second
+        page.touchscreen.tap(x, y)
+        page.wait_for_function("document.querySelector('#meeting-actions .button').textContent.trim() === 'Unmute'", timeout=5000)
+        assert server.meeting.muted is True
+        page.close()
+
+
+@pytest.mark.parametrize("pixels, settles", [(3, False), (8, True)])
+def test_only_a_move_of_more_than_a_few_pixels_settles_the_screen(browser, pixels, settles):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        page.evaluate("(px) => { document.getElementById('meeting-detail').style.marginTop = px + 'px'; window.croomPage.render(); }", pixels)
+        assert page.evaluate("document.body.classList.contains('settling')") is settles
+        page.close()
+
+
+def test_coming_back_from_a_sub_screen_is_not_the_screen_moving(browser):
+    """The meeting screen changed while it was out of sight (a notice came in): the person who comes back from Participants has not had it move
+    under a finger, and it is not settling."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        page.locator("#meeting-secondary .button", has_text="Participants").click()
+        page.wait_for_function("document.body.dataset.view === 'participants'", timeout=5000)
+        server.meeting.current_meeting.notice = "This meeting is being recorded."
+        poll_until(page, "document.getElementById('meeting-notice').textContent !== ''")
+        page.click("#back-from-participants")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert not page.evaluate("document.body.classList.contains('settling')")
         page.close()
 
 
@@ -5463,6 +5647,7 @@ def test_a_refusal_of_a_dialogs_answer_is_said_in_the_card_and_its_buttons_come_
         assert page.locator("#meeting-dialog").is_visible() and texts(page, "#dialog-actions") == ["Leave Meeting", "Got it"]
         assert page.locator("#dialog-actions .button:disabled").count() == 0                 # the buttons are back
         server.meeting.fail_control = None
+        page.clock.run_for(600)                                                              # the refusal's line moved the screen: it has settled
         page.locator("#dialog-actions .button", has_text="Got it").click()                   # the next action clears the words
         page.wait_for_function("document.querySelector('#meeting-dialog').hidden", timeout=5000)
         assert page.locator("#dialog-message").inner_text() == "" and page.locator("#meeting-message").inner_text() == ""
@@ -5595,6 +5780,7 @@ def test_the_screen_of_a_host_with_everything_and_a_waiting_dialog_still_fits(br
         meeting.notice = TWO_LINES_OF_NOTICE
         put_up(server, dict(ZOOMS_DIALOG, text=LONGEST_TEXT))
         poll_until(page, CARD)
+        page.clock.run_for(600)                                              # the screen has settled
         assert texts(page, "#dialog-actions") == ["Leave Meeting", "Got it"]
         notice = page.evaluate("() => { const n = document.getElementById('meeting-notice'); return Math.round(n.getBoundingClientRect().height / parseFloat(getComputedStyle(n).lineHeight)); }")
         assert notice == 2, "the notice is not the two lines this test is for"

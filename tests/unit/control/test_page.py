@@ -5009,6 +5009,102 @@ def test_the_rows_are_not_rebuilt_while_nothing_about_them_changes(browser):
         page.close()
 
 
+@pytest.mark.parametrize("row, words, sent, change, shows", [
+    ("meeting-secondary", "Gallery view", ("layout", "gallery"), lambda m: setattr(m, "chat", {"unread": 1, "messages": []}), "Chat (1)"),          # a chat message comes in
+    ("meeting-secondary", "Hide self view", ("hide_self", None), lambda m: setattr(m, "people", {"count": 4, "list": []}), "Participants (4)"),   # someone joins
+    ("meeting-actions", "Raise hand", ("raise_hand", None), lambda m: setattr(m, "is_muted", True), "Unmute"),                                      # the host mutes the room
+])
+def test_a_finger_down_on_a_button_still_finds_it_when_the_words_of_another_in_the_row_change(browser, row, words, sent, change, shows):
+    """The words of a neighbour change while a thumb is down (a status poll carries them): the row is patched where it stands, so the lift
+    is a tap on the button the thumb is on, and it does what that button says. A browser drops the tap of a button that has been replaced."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        box = page.locator(f"#{row} .button", has_text=words).bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.evaluate("([row, words]) => { window.__under = [...document.querySelectorAll('#' + row + ' .button')].find((b) => b.textContent.includes(words)); }", [row, words])
+        page.mouse.move(x, y)
+        page.mouse.down()
+        change(server.meeting.current_meeting)
+        poll_until(page, f"document.getElementById('{row}').textContent.includes('{shows}')")
+        assert page.evaluate("window.__under.isConnected"), "the button under the thumb was replaced"
+        page.mouse.up()
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [sent]
+        page.close()
+
+
+def test_a_reaction_under_a_thumb_is_still_there_when_another_tap_holds_the_page_for_a_moment(browser):
+    """A quick action (Mute, with another finger) holds every button inert while it runs and lets them go: the reaction row is patched
+    both ways where it stands, and the thumb that was on Clap all the while is still a tap on Clap."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        open_reactions(page)
+        box = page.locator("#reaction-row .button", has_text="Clap").bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.evaluate("window.__clap = [...document.querySelectorAll('#reaction-row .button')].find((b) => b.textContent.includes('Clap'))")
+        page.mouse.move(x, y)
+        page.mouse.down()
+        page.evaluate("() => { window.croomPage.model.busy = true; window.croomPage.render(); }")
+        assert page.evaluate("window.__clap.isConnected && window.__clap.disabled")
+        page.evaluate("() => { window.croomPage.model.busy = false; window.croomPage.render(); }")
+        assert page.evaluate("window.__clap.isConnected && !window.__clap.disabled")
+        page.mouse.up()
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("reactions", "Clap")]
+        page.close()
+
+
+def test_a_button_whose_own_words_change_is_the_same_button_and_runs_what_it_says_now(browser):
+    """The View button's words say its next tap (Gallery view, then Speaker view): patched in place, it still goes to the handler the
+    status has now, not the one it was drawn with."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.evaluate("window.__view = [...document.querySelectorAll('#meeting-secondary .button')][1]")
+        page.locator("#meeting-secondary .button", has_text="Gallery view").click()
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Speaker view')", timeout=5000)
+        assert page.evaluate("window.__view.isConnected && window.__view.textContent.trim() === 'Speaker view'")
+        page.locator("#meeting-secondary .button", has_text="Speaker view").click()
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Gallery view')", timeout=5000)
+        assert server.meeting.controls_called == [("layout", "gallery"), ("layout", "speaker")]
+        page.close()
+
+
+def test_a_row_whose_buttons_change_is_drawn_again_with_the_buttons_it_has_now(browser):
+    """Another set of buttons (a host's Host button comes and goes with the role) is not a change of words: the row is built again, and
+    every button in it goes to its own screen."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        meeting = server.meeting.current_meeting
+        page.evaluate("window.__captions = document.querySelector('#meeting-secondary .button')")
+        meeting.controls["host"]["role"] = "co-host"
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Host')", timeout=5000)
+        assert texts(page, "#meeting-secondary") == ["Captions on", "Gallery view", "Hide self view", "Participants (3)", "Chat", "Host"]
+        assert not page.evaluate("window.__captions.isConnected")                       # a new set of buttons: the row was drawn again
+        page.locator("#meeting-secondary .button", has_text="Host").click()
+        page.wait_for_function("document.body.dataset.view === 'host'", timeout=5000)
+        page.click("#back-from-host")
+        meeting.controls["host"]["role"] = "participant"
+        page.wait_for_function("!document.getElementById('meeting-secondary').textContent.includes('Host')", timeout=5000)
+        assert texts(page, "#meeting-secondary") == ["Captions on", "Gallery view", "Hide self view", "Participants (3)", "Chat"]
+        page.locator("#meeting-secondary .button", has_text="Chat").click()
+        page.wait_for_function("document.body.dataset.view === 'chat'", timeout=5000)
+        page.click("#back-from-chat")
+        page.evaluate("window.__first = document.querySelector('#meeting-secondary .button')")
+        meeting.controls["captions"] = {"available": False}                             # as many buttons as before, and not the same ones: Captions goes as Host comes
+        meeting.controls["host"]["role"] = "host"
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Host')", timeout=5000)
+        assert texts(page, "#meeting-secondary") == ["Gallery view", "Hide self view", "Participants (3)", "Chat", "Host"]
+        assert not page.evaluate("window.__first.isConnected")
+        page.close()
+
+
 def test_the_meeting_screen_on_a_phone_wraps_its_rows_and_never_scrolls_sideways(browser):
     with PageServer(role="host") as server:
         page = browser.new_page(viewport={"width": 390, "height": 844})

@@ -301,27 +301,46 @@
     return b;
   }
 
+  // A button kept where it stands: its words and symbol in place (labelWithIcon), its class, and whether it can be pressed.
+  function patchButton(b, s) {
+    labelWithIcon(b, s.label, s.icon);
+    b.className = "button " + s.className;
+    b.disabled = Boolean(s.disabled) || model.busy;
+  }
+
   function setActions(specs, containerId, keyHolder) {
-    // Replace the buttons only when their labels, icons, availability or target change, so a click in progress is never
+    // Draw the buttons again only when their labels, icons, availability or target change, so a click in progress is never
     // lost to a re-render (the timer ticks every second), and a Join never acts on a booking it no longer shows (two
-    // bookings back to back both say "Join now").
+    // bookings back to back both say "Join now"). A row whose specs carry an id (which button each is) and are the same
+    // buttons in the same order as the row on the screen is patched where it stands: another button's words changed (a
+    // chat message came in), and a finger that is down on this one must still find it at the lift, or the browser drops the
+    // tap. A row whose set or order of buttons changes is built again. A tap goes to the spec the row is drawn from now
+    // (keyHolder.specs), not to the one its button was drawn with, so a button that is kept runs what it says now.
     const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null, s.icon || null]));
+    keyHolder.specs = specs;
     if (key === keyHolder.key) return;
     keyHolder.key = key;
-    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled, s.icon)));
+    const container = el(containerId);
+    const ids = specs.every((s) => s.id) ? specs.map((s) => s.id) : null;
+    if (ids && JSON.stringify(ids) === JSON.stringify(keyHolder.ids) && container.children.length === specs.length) {
+      specs.forEach((s, i) => patchButton(container.children[i], s));
+      return;
+    }
+    keyHolder.ids = ids;
+    container.replaceChildren(...specs.map((s, i) => button(s.label, s.className, (e) => { const now = keyHolder.specs[i]; if (now) now.onClick(e); }, s.disabled, s.icon)));
   }
   const idleActionsKey = { key: null };
   const meetingActionsKey = { key: null };
 
   function leaveSpec() {
     if (model.confirmLeave) {
-      return { label: "Tap again to leave", className: "danger", icon: "phone-off", onClick: () => {
+      return { id: "leave", label: "Tap again to leave", className: "danger", icon: "phone-off", onClick: () => {
         clearTimeout(confirmTimer);
         model.confirmLeave = false;
         leave();
       } };
     }
-    return { label: "Leave", className: "danger", icon: "phone-off", onClick: () => {
+    return { id: "leave", label: "Leave", className: "danger", icon: "phone-off", onClick: () => {
       model.confirmLeave = true;
       clearTimeout(confirmTimer);
       confirmTimer = setTimeout(() => { model.confirmLeave = false; render(); }, CONFIRM_MS);
@@ -347,7 +366,8 @@
   // The agent describes what the table may do now (status.meeting.controls) and this draws exactly that: a control that is not
   // available is not drawn, and a button says what the platform has, never the last thing that was pressed. A status with no model
   // (a platform that has none yet) keeps the three buttons the screen began with. The icon shows the state and the label the action,
-  // as on Mute and Camera. Every row is drawn with setActions and a key, so a button is not rebuilt under a finger.
+  // as on Mute and Camera. Every row is drawn with setActions and a key (and its specs' ids), so a button is not rebuilt, or
+  // replaced, under a finger.
 
   const REACTIONS_OPEN_MS = 10 * 1000;     // how long the reaction row stays in the secondary row's place
   const UNCOVERED_TAP_MS = 500;            // the secondary row's buttons, uncovered by a reaction row that closed, ignore a tap this long: the second tap of a double tap
@@ -404,18 +424,18 @@
   }
   // One control's button: inert while that control's request is out.
   const controlSpec = (name, label, icon, className, value) =>
-    ({ label: label, icon: icon, className: className, disabled: model.pending.has(name), onClick: () => control(name, value) });
+    ({ id: name, label: label, icon: icon, className: className, disabled: model.pending.has(name), onClick: () => control(name, value) });
 
   // The primary row: Mute, Camera, Raise hand, Reactions, Leave. Mute and Camera keep their own routes and their state in the block;
   // the rest are the model's, and are drawn when available.
   function meetingPrimary(m) {
     const c = m.controls || {};
     const specs = [
-      { label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
-      { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
+      { id: "mute", label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
+      { id: "camera", label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
     ];
     if (c.raise_hand && c.raise_hand.available) specs.push(controlSpec("raise_hand", c.raise_hand.on ? "Lower hand" : "Raise hand", "hand", ""));
-    if (reactionChoices(c).length) specs.push({ label: "Reactions", icon: "smile", className: "", disabled: model.pending.has("reactions"), onClick: openReactions });
+    if (reactionChoices(c).length) specs.push({ id: "reactions", label: "Reactions", icon: "smile", className: "", disabled: model.pending.has("reactions"), onClick: openReactions });
     specs.push(leaveSpec());
     return specs;
   }
@@ -433,9 +453,9 @@
       specs.push(controlSpec("layout", gallery ? "Speaker view" : "Gallery view", "layout", "quiet", gallery ? "speaker" : "gallery"));
     }
     if (has("hide_self")) specs.push(controlSpec("hide_self", c.hide_self.on ? "Show self view" : "Hide self view", "user", "quiet"));
-    if (m.participants && m.participants.count) specs.push({ label: "Participants (" + m.participants.count + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
-    if (m.chat) specs.push({ label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
-    if (c.host && c.host.role && c.host.role !== "participant") specs.push({ label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
+    if (m.participants && m.participants.count) specs.push({ id: "participants", label: "Participants (" + m.participants.count + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
+    if (m.chat) specs.push({ id: "chat", label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
+    if (c.host && c.host.role && c.host.role !== "participant") specs.push({ id: "host", label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
     // A reaction row that closes uncovers these buttons under the finger that picked: the second tap of a double tap (or a tap at the
     // moment the row lapses) is not meant for them.
     return specs.map((spec) => Object.assign({}, spec, { onClick: () => { if (Date.now() >= model.ignoreUntil) spec.onClick(); } }));
@@ -450,7 +470,7 @@
     let row = el("reaction-row");
     if (!choices) {
       if (row) row.remove();
-      reactionKey.key = null;
+      reactionKey.key = reactionKey.ids = null;
       return;
     }
     if (!row) {
@@ -460,13 +480,13 @@
       row.setAttribute("role", "group");
       row.setAttribute("aria-label", "Reactions");
       el("meeting-secondary").before(row);
-      reactionKey.key = null;
+      reactionKey.key = reactionKey.ids = null;           // a row that is new has no buttons to patch
     }
     const specs = choices.map((name) => {
       const look = reactionLook(name);
-      return { label: look.label, icon: look.icon, className: "quiet", target: name, onClick: () => pickReaction(name) };
+      return { id: "reaction:" + name, label: look.label, icon: look.icon, className: "quiet", target: name, onClick: () => pickReaction(name) };
     });
-    specs.push({ label: "Cancel", icon: "x-circle", className: "quiet", onClick: closeReactions });
+    specs.push({ id: "cancel", label: "Cancel", icon: "x-circle", className: "quiet", onClick: closeReactions });
     setActions(specs, "reaction-row", reactionKey);
   }
 

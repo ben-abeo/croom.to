@@ -597,3 +597,27 @@ async def test_meet_diagnostics_list_the_labels_the_page_draws_what_the_reader_m
 
 async def test_meet_diagnostics_are_empty_without_a_call():
     assert await GoogleMeetProvider(FakeDisplay()).diagnostics() == {}
+
+
+@pytest.mark.parametrize("which", [1, 2, 3], ids=["the labels", "the keyboard", "the reading"])
+async def test_meet_diagnostics_from_a_page_that_stops_answering_are_a_refusal_in_words(meet_page, which):
+    """The support route reads the page three times (the labels it draws, what has the keyboard, the reader's view of them); each is given up on
+    after LOOK_TIMEOUT_S, so a frozen tab ends the request in words and does not hold it open for good."""
+    provider, info = await meet_page(replica())
+    provider.LOOK_TIMEOUT_S = 0.5
+    page = provider._page
+    real = page.evaluate
+    asked = []
+
+    async def evaluate(script, *args):
+        asked.append(script)
+        if len(asked) == which:
+            await asyncio.sleep(3600)
+        return await real(script, *args)
+
+    page.evaluate = evaluate
+    with pytest.raises(MeetingControlError, match="^Meet's page did not answer within 0.5 seconds$"):
+        await asyncio.wait_for(provider.diagnostics(), 5)      # without the bound the first two never end: the guard turns that into a TimeoutError
+    assert len(asked) == which
+    page.evaluate = real
+    assert (await provider.diagnostics())["reading"]["mute"] == {"on": True}     # and the next request is answered

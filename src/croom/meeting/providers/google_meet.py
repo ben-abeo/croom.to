@@ -496,10 +496,10 @@ class GoogleMeetProvider(MeetingProvider):
         makes of them, and what has the keyboard. Meet's labels are the controls plan's English until a real call confirms them."""
         if self._page is None:
             return {}
-        labels = await self._page.evaluate(
+        labels = await self._answered(self._page.evaluate(
             "() => [...document.querySelectorAll('[aria-label]')].filter((e) => e.getClientRects().length > 0)"
-            ".map((e) => ({ tag: e.tagName.toLowerCase(), role: e.getAttribute('role') || '', label: e.getAttribute('aria-label') }))")
-        held = await self._page.evaluate("() => { const h = document.activeElement; return h ? h.tagName.toLowerCase() + (h.getAttribute('role') ? '[role=' + h.getAttribute('role') + ']' : '') : ''; }")
+            ".map((e) => ({ tag: e.tagName.toLowerCase(), role: e.getAttribute('role') || '', label: e.getAttribute('aria-label') }))"))
+        held = await self._answered(self._page.evaluate("() => { const h = document.activeElement; return h ? h.tagName.toLowerCase() + (h.getAttribute('role') ? '[role=' + h.getAttribute('role') + ']' : '') : ''; }"))
         return {"labels": labels, "reading": await self._look(), "focus": held}
 
     # ------------------------------------------------------------------
@@ -508,8 +508,12 @@ class GoogleMeetProvider(MeetingProvider):
 
     async def _look(self) -> Dict[str, Any]:
         """One reading of Meet's call page (READ_CALL), which the page must answer within LOOK_TIMEOUT_S."""
+        return await self._answered(self._page.evaluate(READ_CALL))
+
+    async def _answered(self, evaluation) -> Any:
+        """What the page answers to a call, or, when it has not within LOOK_TIMEOUT_S (a frozen tab), the words for the table."""
         try:
-            return await asyncio.wait_for(self._page.evaluate(READ_CALL), self.LOOK_TIMEOUT_S)
+            return await asyncio.wait_for(evaluation, self.LOOK_TIMEOUT_S)
         except asyncio.TimeoutError:
             raise MeetingControlError(f"Meet's page did not answer within {self.LOOK_TIMEOUT_S:g} seconds") from None
 

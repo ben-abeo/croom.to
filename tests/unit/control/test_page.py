@@ -1266,9 +1266,12 @@ def test_this_week_shows_seven_columns_and_back_returns(browser):
                 assert all(abs(b["y"] - boxes[0]["y"]) <= 0.5 and abs(b["height"] - boxes[0]["height"]) <= 0.5 for b in boxes)
                 assert all(abs(b["width"] - boxes[0]["width"]) <= 1 for b in boxes)
                 assert all(a["x"] + a["width"] <= b["x"] for a, b in zip(boxes, boxes[1:]))
-            else:                                                           # portrait: stacked, one under the next, the same height
+            else:                                                           # portrait: stacked, one under the next; the days with bookings share the height, a day with nothing booked is as tall as its words
                 assert all(abs(b["x"] - boxes[0]["x"]) <= 0.5 and abs(b["width"] - boxes[0]["width"]) <= 0.5 for b in boxes)
-                assert all(abs(b["height"] - boxes[0]["height"]) <= 1 for b in boxes)
+                booked = days.evaluate_all("days => days.map((d) => d.querySelector('.slots') !== null)")
+                busy = [b["height"] for b, has in zip(boxes, booked) if has]
+                empty = [b["height"] for b, has in zip(boxes, booked) if not has]
+                assert busy and empty and max(busy) - min(busy) <= 1 and max(empty) - min(empty) <= 1 and max(empty) < min(busy), (busy, empty)
                 assert all(a["y"] + a["height"] <= b["y"] for a, b in zip(boxes, boxes[1:]))
                 assert abs(boxes[0]["y"] - (week_head["y"] + week_head["height"]) - 10) <= 1       # the head and the days, ten pixels apart
             assert all(b["x"] >= 0 and b["x"] + b["width"] <= width and b["y"] >= 0 and b["y"] + b["height"] <= height for b in boxes)
@@ -1835,7 +1838,7 @@ def test_a_long_room_name_in_the_week_on_a_short_sign_steps_down_and_the_sign_fi
 
 
 @pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
-def test_in_portrait_the_days_with_nothing_booked_take_one_line_and_the_others_share_the_rest(browser, scores, central_time):
+def test_in_portrait_the_weeks_days_with_nothing_booked_take_one_line_and_the_others_share_the_rest(browser, scores, central_time):
     """Seven rows of one seventh each gave "Nothing booked" a whole row and a day with bookings a seventh of the height, "+N more" and little else. Now a day
     with nothing booked is the height of its own words (the name and the date), and the days with bookings share what is left, equally."""
     skip_if_day_ends_within(3)
@@ -2585,7 +2588,7 @@ def test_on_a_short_sign_a_long_booking_title_is_clamped_in_today_so_that_the_si
 
 
 @pytest.mark.parametrize("height, lines", [(560, 1), (561, 2)])
-def test_a_long_booking_title_in_today_is_one_line_at_560_px_high_and_two_lines_at_561(browser, height, lines, central_time):
+def test_on_the_sign_a_long_booking_title_in_today_is_one_line_at_560_px_high_and_two_lines_at_561(browser, height, lines, central_time):
     """The edge of the short sign's rule for the Today list, pinned to the pixel: the title is cut after one line on a sign 560 px high or less and after two on a
     sign one pixel taller, with every character in the page either way."""
     skip_if_day_ends_within(3)
@@ -2693,20 +2696,25 @@ def test_the_room_names_type_is_fitted_again_when_the_week_is_left_on_a_short_si
         page.close()
 
 
-def test_the_room_names_type_is_fitted_again_when_the_strip_goes_while_the_week_is_up(browser, central_time):
-    """With the strip up the week sets the name in a size of its own on a short sign, and without it the name is set as it is in Today: the one it
-    was fitted to a moment before is not the one it has now."""
+def test_the_weeks_name_keeps_its_size_when_the_strip_goes_while_the_week_is_up_and_has_todays_type_back_in_today(browser, central_time):
+    """The week sets the name in a size of its own on a short sign by height alone, with the strip up or down, so the strip going changes nothing in the week; the
+    name is set as it is in Today once the week is left. The page's polls are stopped here: the test brings the one that takes the strip away."""
     skip_if_day_ends_within(3)
     bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
     with PageServer(calendar_events=bookings, room_name="Sales Conference Room", room_location="2nd floor", schedules=every_school()) as server:
         choose(server, sign_scores=["texas"])
         scoreboard_has(server, ["texas"])
-        page = open_sign(browser, server, 1280, 480)
+        page = sign_on_a_stopped_clock(browser, server, 1280, 480)
         strip_is_up(page)
         open_the_week(page)
-        assert not room_name_is_long(page)                                       # at the week's own size the name takes one line: the large type is fitted to it
+        week_type = room_name_type(page)
+        assert not room_name_is_long(page) and week_type[2] == 1                   # at the week's own size the name takes one line: the large type is fitted to it
         choose(server, sign_scores=[])
-        page.wait_for_function("!('strip' in document.body.dataset)", timeout=8000)    # the next poll takes the strip away, and the week's own size with it
+        poll(page)                                                                 # the next poll takes the strip away
+        assert page.evaluate("'strip' in document.body.dataset") is False
+        assert room_name_type(page) == week_type and fits(page)                    # and the week's size, being by height alone, has not moved
+        page.click("#week-back")
+        page.wait_for_function("document.body.dataset.view === 'today'", timeout=3000)
         assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
         page.close()
 

@@ -216,24 +216,35 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }
 }
 
-/* The scoreboard strip takes 53 px of a short screen's height (81 under 1100 px wide, where it is two lines; body[data-strip], set by sign.js
-   while it is up), which the rule above did not count: with a long room name the days were 74 px tall at 1024 by 600, 43 at 900 by 500 and
-   20 at 800 by 480, and their "+N more" was cut off. So while the strip is up the week gives the days room up to 700 px of height. Without
-   the rule a long name's "+N more" is cut off up to 641 px high on a 1024 px sign, 650 on a 1280 px one, 686 on a 1366 px one and 700 on a
-   1400 px one (above 1280 px the root font, and the status with it, grows with the long side), so 700 takes in all four; a panel wider than
-   2 to 1 (1440 by 710) would be cut off still. The status gives up its detail line and its location and shrinks the room's name (to a size
-   that still reads across a room); the days keep their dates until 560 px, where the rule above takes them. On a screen of 560 or less the
-   Today list gives up its detail line too (the status would not fit above the strip at 800 by 480 with a long name), and each booking's title keeps
-   to one line (three of two lines pushed the strip 33 to 58 px past the bottom of an 800 by 480, 900 by 500, 1024 by 480 or 1024 by 500 sign). The
-   two rules sign.js keeps for the same 560 px (its shortSign) are not in this file: the chip says only the status, without the booking's title that
-   Today shows beside it ("Starts in 8 minutes"), and a room name takes the smaller type, .room.long above, as soon as it would take two lines. */
+/* Up to 700 px of height the week has no room for the status in full either, strip or no strip: with the strip down the days were 133 px tall at 800 by
+   480 and 100 at 1024 by 600, and today's three bookings showed as "+3 more" and nothing else. So by height alone the status gives up its detail line and
+   its location and shrinks the room's name (to a size that still reads across a room: "Conference Room Twelve" is one line of it at 800 px wide), and
+   on a landscape sign a booking is the time and a title of one line (below). The days keep their dates until 560 px, where the rule above takes them.
+   The scoreboard strip takes 53 px of a short screen's height (81 under 1100 px wide, where it is two lines; body[data-strip], set by sign.js while it is
+   up), and its rules are those of Today, below. Without the 700 a long name's "+N more" is cut off up to 641 px high on a 1024 px sign, 650 on a 1280 px one, 686 on a 1366 px one and
+   700 on a 1400 px one (above 1280 px the root font, and the status with it, grows with the long side), so 700 takes in all four; a panel wider than 2 to 1
+   (1440 by 710) would be cut off still. On a screen of 560 or less, with the strip up, the Today list gives up its detail line too (the status would not
+   fit above the strip at 800 by 480 with a long name), and each booking's title keeps to one line (three of two lines pushed the strip 33 to 58 px past the
+   bottom of an 800 by 480, 900 by 500, 1024 by 480 or 1024 by 500 sign). The two rules sign.js keeps for the same 560 px (its shortSign) are not in this
+   file: the chip says only the status, without the booking's title that Today shows beside it ("Starts in 8 minutes"), and a room name takes the smaller
+   type, .room.long above, as soon as it would take two lines. */
 @media (max-height: 700px) {
-  body[data-view="week"][data-strip] .detail, body[data-view="week"][data-strip] .location { display: none; }
-  body[data-view="week"][data-strip] .room { font-size: clamp(1.8rem, 4vw, 2.6rem); }
+  body[data-view="week"] .detail, body[data-view="week"] .location { display: none; }
+  body[data-view="week"] .room { font-size: clamp(1.8rem, 3.6vw, 2.6rem); }
 }
 @media (max-height: 560px) {
   body[data-strip] .detail { display: none; }
   .event .title { -webkit-line-clamp: 1; }
+}
+/* A day on a landscape sign is a seventh of the width, 95 px at 800, narrower than a time and a title side by side as they are in portrait, and up to 700
+   px high it is short too: a booking in full (the time, a title of two lines, the platform) is 86 px, and a day's room for them is 85 to 165 px at 800
+   by 480. A booking is the time with a title of one line under it, 46 px, and the platform is left out: today's column holds all three of its bookings at
+   800 by 480 with the strip down and one with it up, and "+N more" counts the rest. */
+@media (orientation: landscape) and (max-height: 700px) {
+  .slots { margin-top: 0.375rem; gap: 0.25rem; }
+  .slot { padding: 0.25rem 0.5rem; }
+  .slot .title { -webkit-line-clamp: 1; }
+  .slot .who { display: none; }
 }
 
 @media (orientation: portrait) {
@@ -243,8 +254,9 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   body[data-view="week"] .main { grid-template-rows: auto auto minmax(0, 1fr); row-gap: var(--gap); }   /* the head where the Today head was */
   .week-head { grid-column: 1; grid-row: 2; margin-bottom: calc(10px - var(--gap)); }   /* and the days ten pixels under it */
   .week .note { grid-row: 3; }
-  .days { grid-row: 3; grid-template-columns: minmax(0, 1fr); grid-template-rows: repeat(7, minmax(0, 1fr)); }
-  .day { flex-direction: row; gap: 1rem; padding: 0.5rem 0.75rem; }
+  .days { grid-row: 3; display: flex; flex-direction: column; }   /* the days under one another: those with bookings share the height ... */
+  .day { flex: 1 1 0; flex-direction: row; gap: 1rem; padding: 0.5rem 0.75rem; }
+  .day.empty { flex: none; }   /* ... and one with nothing booked takes the height of its own words, not a share */
   .day-head { width: 7rem; }
   .none { align-self: center; margin: 0; }
   .slots { margin: 0; gap: 0.25rem; }

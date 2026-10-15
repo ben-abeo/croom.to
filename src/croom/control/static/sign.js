@@ -17,6 +17,8 @@
   // A short sign, 560 px high or less (the 7-inch 800 by 480 panel is one): sign.css gives up detail there, the chip says only the status (the booking's
   // title is in the Today list beside it), and a room name takes the smaller type as soon as it would take two lines, so that nothing runs off the screen.
   const shortSign = window.matchMedia("(max-height: 560px)");
+  // A landscape sign narrower than 1000 px names the days of its week by their first three letters ("Wed"): a seventh of its width is less than "Wednesday" asks for.
+  const narrowWeek = window.matchMedia("(orientation: landscape) and (max-width: 999px)");
   const PHOTO_TIMEOUT_MS = 20 * 1000;   // a photograph not decoded by then counts as failed: a connection gone half open neither answers nor fails
 
   // The backgrounds are photographs the room serves, static/backgrounds/<key>.jpg; "plain" has none. The sign shows the one the
@@ -357,9 +359,12 @@
     const head = make("div", "day-head");
     const date = make("time", "day-date", fmtDay(day.date));
     date.dateTime = day.date;
-    head.append(make("h3", "day-name", day.label), date);
+    const name = make("h3", "day-name", narrowWeek.matches ? day.label.slice(0, 3) : day.label);
+    if (name.textContent !== day.label) name.setAttribute("aria-label", day.label);   // the whole name for a screen reader
+    head.append(name, date);
     li.append(head);
     if (!events.length) {
+      li.classList.add("empty");   // an upright sign gives it a row of its own height (sign.css)
       li.append(make("p", "none", "Nothing booked"));
       return li;
     }
@@ -377,7 +382,7 @@
     const days = model.week;
     setText(el("week-note"), days ? "" : model.weekFailed ? "The week could not be loaded." : "Loading the week.");
     const drawn = (days || []).map((day, n) => ({ day, events: n === 0 ? day.events.filter((ev) => endMs(ev) > now) : day.events }));
-    const key = JSON.stringify([drawn, current ? current.id : null]);
+    const key = JSON.stringify([drawn, current ? current.id : null, narrowWeek.matches]);
     if (key === weekKey) return;
     weekKey = key;
     el("week-days").replaceChildren(...drawn.map(({ day, events }, n) => dayElement(day, events, n === 0, current)));
@@ -497,6 +502,7 @@
 
   window.addEventListener("resize", fitRoomName);
   if (shortSign.addEventListener) shortSign.addEventListener("change", render);   // the chip's words and the name's type follow the sign across 560 px
+  if (narrowWeek.addEventListener) narrowWeek.addEventListener("change", drawView);   // and the days' names across 1000 px, and when it is turned
   if (document.fonts && document.fonts.addEventListener) document.fonts.addEventListener("loadingdone", () => { fontsArrived += 1; fitRoomName(); });
   el("this-week").addEventListener("click", openWeek);
   el("week-back").addEventListener("click", closeWeek);

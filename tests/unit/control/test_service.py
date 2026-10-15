@@ -6,6 +6,7 @@ and record what the control service asked them to do.
 """
 
 import asyncio
+import copy
 import json
 import socket
 from datetime import datetime, timedelta, timezone
@@ -16,16 +17,36 @@ from aiohttp import ClientError
 from aiohttp.test_utils import TestClient, TestServer
 
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
-from croom.core.config import Config
+from croom.core.config import DEFAULT_REACTIONS, Config
 from croom.core.service import Service
-from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, detect_platform
+from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, controls_from, detect_platform
 from croom.control.service import ControlService
+
+# The three people of a stub meeting (spec 2026-10-13, section 3): the room itself, the host, and a participant whose hand is raised.
+STUB_PEOPLE = [
+    {"id": 16777216, "name": "Room 1", "muted": False, "video": True, "hand": False, "host": False, "me": True},
+    {"id": 16777217, "name": "Ann Lee", "muted": False, "video": True, "hand": False, "host": True, "me": False},
+    {"id": 16777218, "name": "Raj Patel", "muted": True, "video": False, "hand": True, "host": False, "me": False},
+]
+
+
+def full_controls(role="participant"):
+    """The control model of a Zoom meeting whose client has every button on the screen, as a participant (or a co-host, or the host) has it:
+    what the provider makes of a full reading of the meeting, with Zoom's names for the reactions."""
+    return controls_from({
+        "me": {"muted": False}, "role": role,
+        "buttons": {"camera": {"on": True}, "raise_hand": {"on": False}, "reactions": {}, "captions": {"on": False},
+                    "layout": {"value": "speaker"}, "hide_self": {"on": False}},
+        "participants": copy.deepcopy(STUB_PEOPLE), "recording": False,
+    }, DEFAULT_REACTIONS)
 
 
 class StubMeeting:
-    """Behaves like MeetingService for the parts the control service uses."""
+    """Behaves like MeetingService for the parts the control service uses. A meeting it joins has the full control model of a Zoom
+    participant (`role` makes it a co-host or the host) with three people in it; controls=False leaves it with no model at all, as a
+    platform that has none yet would."""
 
-    def __init__(self, platforms=("zoom", "google_meet")):
+    def __init__(self, platforms=("zoom", "google_meet"), role="participant", controls=True):
         self._platforms = list(platforms)
         self.state = MeetingState.IDLE
         self.current_meeting = None
@@ -38,8 +59,9 @@ class StubMeeting:
         self.fail_before_joining = None
         self.fail_next_join = False
         # What the table draws from (spec 2026-10-13, section 3): what the meeting is given at join, and what control() was asked.
-        self.controls = {}
-        self.people = {"count": 0, "list": []}
+        self.role = role
+        self.controls = full_controls(role) if controls else {}
+        self.people = {"count": len(STUB_PEOPLE), "list": copy.deepcopy(STUB_PEOPLE)} if controls else {"count": 0, "list": []}
         self.chat = {"unread": 0, "messages": []}
         self.notice = ""
         self.dialog = None
@@ -84,7 +106,8 @@ class StubMeeting:
         self.current_meeting = MeetingInfo(
             platform=detect_platform(url) or "unknown", meeting_id="123456789",
             meeting_url=url, is_muted=self.muted, is_camera_on=self.camera_on,
-            controls=self.controls, people=self.people, chat=self.chat, notice=self.notice, dialog=self.dialog,
+            controls=copy.deepcopy(self.controls), people=copy.deepcopy(self.people), chat=copy.deepcopy(self.chat),
+            notice=self.notice, dialog=copy.deepcopy(self.dialog),
         )
         self.set_state(MeetingState.CONNECTED)
         return self.current_meeting
@@ -100,6 +123,8 @@ class StubMeeting:
         self.muted = not self.muted
         if self.current_meeting:
             self.current_meeting.is_muted = self.muted
+            if "mute" in self.current_meeting.controls:
+                self.current_meeting.controls["mute"]["on"] = not self.muted     # the model says the microphone is live, as the provider reads it
         return self.muted
 
     async def toggle_camera(self):
@@ -108,6 +133,8 @@ class StubMeeting:
         self.camera_on = not self.camera_on
         if self.current_meeting:
             self.current_meeting.is_camera_on = self.camera_on
+            if "camera" in self.current_meeting.controls:
+                self.current_meeting.controls["camera"]["on"] = self.camera_on
         return self.camera_on
 
     async def control(self, name, value=None):
@@ -116,7 +143,17 @@ class StubMeeting:
             raise self.fail_control
         if self.on_control is not None:
             self.on_control(name, value)
+        else:
+            self._flip(name, value)
         return self.current_meeting.controls
+
+    def _flip(self, name, value):
+        """What the provider would read back from Zoom after the obvious controls, so that a page can see the change."""
+        model = self.current_meeting.controls
+        if name in ("captions", "raise_hand", "hide_self") and "on" in model.get(name, {}):
+            model[name]["on"] = not model[name]["on"]
+        elif name == "layout" and "layout" in model:
+            model["layout"]["value"] = value
 
     async def diagnostics(self):
         if getattr(self, "fail_diagnostics", None) is not None:
@@ -351,9 +388,9 @@ async def wait_until(predicate, timeout=2.0):
     raise AssertionError("condition not met in time")
 
 
-async def joined_meeting(client_factory):
-    """A control service whose stub meeting has been joined: its client, and the stub."""
-    meeting = StubMeeting()
+async def joined_meeting(client_factory, **stub):
+    """A control service whose stub meeting has been joined: its client, and the stub (made with the arguments given)."""
+    meeting = StubMeeting(**stub)
     client = await client_factory(make_service(meeting=meeting))
     await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
     await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
@@ -750,6 +787,9 @@ class TestMeetingControls:
     async def test_a_dialog_that_is_not_waiting_is_null_in_the_status(self, client_factory):
         client, meeting = await joined_meeting(client_factory)
         meeting.current_meeting.dialog = {}
+        data = (await (await client.get("/api/status")).json())["meeting"]
+        assert data["dialog"] is None and data["controls"] == full_controls() and data["participants"] == {"count": 3, "list": STUB_PEOPLE}   # the rest is the meeting's own
+        client, meeting = await joined_meeting(client_factory, controls=False)               # a meeting with no model has none to show
         data = (await (await client.get("/api/status")).json())["meeting"]
         assert data["dialog"] is None and data["controls"] == {} and data["participants"] == {"count": 0, "list": []}
 

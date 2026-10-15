@@ -124,7 +124,14 @@
   <section class="view" data-view="meeting">
     <p id="meeting-detail" class="detail"></p>
     <p id="meeting-message" class="message" role="status"></p>
+    <p id="meeting-notice" class="notice"></p>
+    <section id="meeting-dialog" class="dialog-card" hidden>
+      <p id="dialog-title" class="kicker"></p>
+      <p id="dialog-text" class="detail"></p>
+      <div id="dialog-actions" class="actions"></div>
+    </section>
     <div id="meeting-actions" class="actions meeting-actions"></div>
+    <div id="meeting-secondary" class="actions meeting-secondary"></div>
     <section class="sound-section">
       <p class="kicker">Sound</p>
       <p id="sound-note" class="note"></p>
@@ -152,6 +159,28 @@
       <p class="kicker">Upcoming meetings</p>
       <ul id="upcoming-list" class="events"></ul>
       <p id="upcoming-empty" class="note" hidden>No more meetings today</p>
+    </section>
+  </section>
+
+  <!-- The meeting screen's sub-screens (spec 2026-10-13, section 6.1). Each has its way back; what each shows is filled in apart. -->
+  <section class="view" data-view="participants">
+    <button type="button" id="back-from-participants" class="button quiet back">Back</button>
+    <section class="sub-box">
+      <p class="kicker">Participants</p>
+    </section>
+  </section>
+
+  <section class="view" data-view="chat">
+    <button type="button" id="back-from-chat" class="button quiet back">Back</button>
+    <section class="sub-box">
+      <p class="kicker">Chat</p>
+    </section>
+  </section>
+
+  <section class="view" data-view="host">
+    <button type="button" id="back-from-host" class="button quiet back">Back</button>
+    <section class="sub-box">
+      <p class="kicker">Host</p>
     </section>
   </section>
 </main>

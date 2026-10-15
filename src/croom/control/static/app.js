@@ -8,14 +8,15 @@
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
   // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera view
   // belongs to whichever mode showed it, so its Back returns there.
-  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting" };
+  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
   const el = (id) => document.getElementById(id);
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
-  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "" };
+  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "",
+                  reactionsUntil: 0, pending: new Set() };   // when the reaction row closes (a time, 0 for closed); the controls, by name, whose requests are out
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
@@ -107,7 +108,7 @@
   let lastEventsKey = null;
   let lastPickerKey = null;
   let lastUpcomingKey = null;
-  const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
+  const deviceEpoch = { audio: 0, camera: 0, meeting: 0 };   // counts each device's answers, and the meeting's, so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
@@ -272,7 +273,7 @@
     submitForm(el("link-form"));
   }
 
-  const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+  const post = (path, body, options) => api(path, Object.assign({ method: "POST", body: JSON.stringify(body || {}) }, options));
   const withPasscode = (body, passcode) => (passcode ? Object.assign(body, { passcode: passcode }) : body);
   const joinLink = (url, passcode) => act(() => post("/api/meeting/join", withPasscode({ url: url }, passcode)).then(() => joinAccepted(url)));
   const joinEvent = (id) => { forgetJoin(); return act(() => post("/api/meeting/join", { event_id: id }).then(() => { model.lastEvent = id; })); };
@@ -342,11 +343,149 @@
     return "";
   }
 
+  // ===== The meeting screen, drawn from the control model (spec 2026-10-13, sections 3 and 6.1) =====
+  // The agent describes what the table may do now (status.meeting.controls) and this draws exactly that: a control that is not
+  // available is not drawn, and a button says what the platform has, never the last thing that was pressed. A status with no model
+  // (a platform that has none yet) keeps the three buttons the screen began with. The icon shows the state and the label the action,
+  // as on Mute and Camera. Every row is drawn with setActions and a key, so a button is not rebuilt under a finger.
+
+  const REACTIONS_OPEN_MS = 10 * 1000;     // how long the reaction row stays in the secondary row's place
+  const CONTROL_TIMEOUT_MS = 35 * 1000;    // the agent gives a control up to 30 s (Zoom's calls take seconds each, one at a time); the page waits a little longer
+  const NO_ANSWER = "The room's screen did not answer in time; try again in a moment";
+
+  // Zoom 6.5.0's reaction picker has no emoji (and the kiosk may have no colour-emoji font): the choices are Zoom's own names
+  // (controls.reactions.choices), sent back as they came, and the table shows each in friendly words with a Lucide symbol. A name
+  // that is not here is shown as itself, with the smile.
+  const REACTIONS = {
+    "Thumbs Up": { label: "Thumbs up", icon: "thumbs-up" },
+    "Clap": { label: "Clap", icon: "hand" },
+    "Heart": { label: "Heart", icon: "heart" },
+    "Joy": { label: "Laugh", icon: "laugh" },
+    "Open Mouth": { label: "Wow", icon: "smile" },
+    "Tada": { label: "Celebrate", icon: "party-popper" },
+  };
+  const plainName = (name) => String(name).toLowerCase().replace(/[^a-z0-9]+/g, "");   // "Thumbs Up", "thumbs_up" and "THUMBSUP" are one name, as the agent compares them
+  function reactionLook(name) {
+    const zoom = Object.keys(REACTIONS).find((known) => plainName(known) === plainName(name));
+    return zoom ? REACTIONS[zoom] : { label: String(name), icon: "smile" };
+  }
+  const reactionChoices = (c) => (c.reactions && c.reactions.available && Array.isArray(c.reactions.choices) ? c.reactions.choices : []);
+  const reactionsOpen = () => Date.now() < model.reactionsUntil;
+  function openReactions() { model.reactionsUntil = Date.now() + REACTIONS_OPEN_MS; render(); }
+  function closeReactions() { model.reactionsUntil = 0; render(); }
+  function pickReaction(name) { closeReactions(); control("reactions", name); }
+
+  // What the three routes (control, dialog, chat/seen) answer with: the meeting block as it is after the request, the one the poll carries.
+  // It goes into the model at once, with an epoch, so that a poll already on its way cannot put an older block back over it.
+  function takeMeeting(answer) {
+    if (answer && answer.meeting && model.status) { model.status.meeting = answer.meeting; deviceEpoch.meeting += 1; }
+  }
+
+  // A control from the table. It can take up to 30 s inside the agent, so it does not hold the whole page in model.busy as the quick
+  // actions do: the button that was pressed is inert until its answer, every other button works, and the request gives up at 35 s.
+  // A refusal comes in words, for #meeting-message.
+  async function control(name, value) {
+    if (model.pending.has(name)) return;     // one request per tap: the button is inert already, and this is the guard behind it
+    model.pending.add(name);
+    model.error = "";
+    render();
+    const cutoff = new AbortController();
+    const timer = setTimeout(() => cutoff.abort(), CONTROL_TIMEOUT_MS);
+    try {
+      takeMeeting(await post("/api/meeting/control", { name: name, value: value }, { signal: cutoff.signal }));
+    } catch (e) {
+      model.error = e.name === "AbortError" ? NO_ANSWER : e.message;
+    } finally {
+      clearTimeout(timer);
+      model.pending.delete(name);
+    }
+    render();
+  }
+  // One control's button: inert while that control's request is out.
+  const controlSpec = (name, label, icon, className, value) =>
+    ({ label: label, icon: icon, className: className, disabled: model.pending.has(name), onClick: () => control(name, value) });
+
+  // The primary row: Mute, Camera, Raise hand, Reactions, Leave. Mute and Camera keep their own routes and their state in the block;
+  // the rest are the model's, and are drawn when available.
+  function meetingPrimary(m) {
+    const c = m.controls || {};
+    const specs = [
+      { label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
+      { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
+    ];
+    if (c.raise_hand && c.raise_hand.available) specs.push(controlSpec("raise_hand", c.raise_hand.on ? "Lower hand" : "Raise hand", "hand", ""));
+    if (reactionChoices(c).length) specs.push({ label: "Reactions", icon: "smile", className: "", disabled: model.pending.has("reactions"), onClick: openReactions });
+    specs.push(leaveSpec());
+    return specs;
+  }
+
+  // The secondary row: Captions, View, Self view, Participants (with the count), Chat (with the unread count), Host (for a host or
+  // co-host). Without a model there is nothing to draw it from, so none of it is drawn.
+  function meetingSecondary(m) {
+    const c = m.controls || {};
+    if (!Object.keys(c).length) return [];
+    const has = (name) => Boolean(c[name] && c[name].available);
+    const specs = [];
+    if (has("captions")) specs.push(controlSpec("captions", c.captions.on ? "Captions off" : "Captions on", "captions", "quiet"));
+    if (has("layout")) {
+      const gallery = c.layout.value === "gallery";
+      specs.push(controlSpec("layout", gallery ? "Speaker view" : "Gallery view", "layout", "quiet", gallery ? "speaker" : "gallery"));
+    }
+    if (has("hide_self")) specs.push(controlSpec("hide_self", c.hide_self.on ? "Show self view" : "Hide self view", "user", "quiet"));
+    if (m.participants && m.participants.count) specs.push({ label: "Participants (" + m.participants.count + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
+    if (m.chat) specs.push({ label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
+    if (c.host && c.host.role && c.host.role !== "participant") specs.push({ label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
+    return specs;
+  }
+
+  // The reaction row: a div in the secondary row's place while it is open (the row is not in the page when it is closed), one button per
+  // choice, and Cancel.
+  const secondaryKey = { key: null };
+  const reactionKey = { key: null };
+  function renderReactionRow(choices) {
+    let row = el("reaction-row");
+    if (!choices) {
+      if (row) row.remove();
+      reactionKey.key = null;
+      return;
+    }
+    if (!row) {
+      row = document.createElement("div");
+      row.id = "reaction-row";
+      row.className = "actions meeting-secondary";
+      row.setAttribute("role", "group");
+      row.setAttribute("aria-label", "Reactions");
+      el("meeting-secondary").before(row);
+      reactionKey.key = null;
+    }
+    const specs = choices.map((name) => {
+      const look = reactionLook(name);
+      return { label: look.label, icon: look.icon, className: "quiet", target: name, onClick: () => pickReaction(name) };
+    });
+    specs.push({ label: "Cancel", icon: "x-circle", className: "quiet", onClick: closeReactions });
+    setActions(specs, "reaction-row", reactionKey);
+  }
+
+  // Everything of the meeting screen but the primary row, from the same status: the notice line under the title, the dialog's card, the
+  // secondary row, and the reaction row in its place while it is open. Only a connected meeting has any of it; m is null offline.
+  function renderMeetingScreen(m) {
+    const live = Boolean(m) && m.state === "connected";
+    el("meeting-notice").textContent = live ? m.notice || "" : "";
+    el("meeting-dialog").hidden = !(live && m.dialog);
+    const choices = live ? reactionChoices(m.controls || {}) : [];
+    const picking = choices.length > 0 && reactionsOpen();
+    setActions(live ? meetingSecondary(m) : [], "meeting-secondary", secondaryKey);
+    el("meeting-secondary").hidden = picking;
+    renderReactionRow(picking ? choices : null);
+  }
+  // ===== end of the meeting screen =====
+
   // A meeting began or ended: land on the new mode's main screen. What the last action said (a refusal on one mode's
   // screen is not news on the other's) and a Leave still waiting for its second tap belong to the mode that is over.
   function landOnMode() {
     model.error = "";
     model.confirmLeave = false;
+    model.reactionsUntil = 0;
     clearTimeout(confirmTimer);
     if (mode() === "meeting") { linkInput.value = ""; showPasscodeField(false); }   // the idle screen's boxes were for the call that has begun
     applyView(MAIN_SCREEN[mode()], true);
@@ -442,6 +581,7 @@
       el("detail").textContent = "Check that Crystal Meet is running on the room's device, then this page will reconnect on its own.";
       setActions([], "actions", idleActionsKey);
       setActions([], "meeting-actions", meetingActionsKey);
+      renderMeetingScreen(null);
       document.querySelector(".screen-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;
@@ -494,11 +634,7 @@
       el("kicker").textContent = "In a meeting";
       el("headline").textContent = "In a meeting";
       el("detail").textContent = meetingDetail(m);
-      specs = [
-        { label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
-        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
-        leaveSpec(),
-      ];
+      specs = meetingPrimary(m);
     } else if (m.state === "error") {
       body.dataset.state = "error";
       el("kicker").textContent = "Couldn't join";
@@ -516,6 +652,7 @@
       setActions(specs, "actions", idleActionsKey);
       setActions([], "meeting-actions", meetingActionsKey);
     }
+    renderMeetingScreen(mode() === "meeting" ? m : null);
 
     renderEvents(cal);
     renderKeyClick(s);
@@ -618,6 +755,7 @@
       el("detail").textContent = meetingDetail(model.status.meeting);
       if (model.status.meeting.joined_at) el("meeting-elapsed").textContent = elapsedSince(model.status.meeting.joined_at);
     }
+    if (model.reactionsUntil && !reactionsOpen()) closeReactions();   // the row's ten seconds are over
   }
 
   el("link-form").addEventListener("submit", (e) => {
@@ -645,6 +783,7 @@
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
+  for (const name of ["participants", "chat", "host"]) el("back-from-" + name).addEventListener("click", () => setView("meeting"));
   el("key-click-on").addEventListener("click", () => setKeyClick(true));
   el("key-click-off").addEventListener("click", () => setKeyClick(false));
 

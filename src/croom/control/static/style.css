@@ -60,7 +60,10 @@ body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
 body[data-view="meeting"] .view[data-view="meeting"],
-body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
+body[data-view="upcoming"] .view[data-view="upcoming"],
+body[data-view="participants"] .view[data-view="participants"],
+body[data-view="chat"] .view[data-view="chat"],
+body[data-view="host"] .view[data-view="host"] { display: grid; }
 .view[data-view="idle"] {
   grid-template-columns: 3fr 2fr;
   grid-template-rows: auto auto 1fr;
@@ -73,16 +76,34 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 .link { grid-area: link; }
 .schedule { grid-area: schedule; display: flex; flex-direction: column; }
 .upcoming-box { display: flex; flex-direction: column; width: 100%; }
+.sub-box { width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
-.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="upcoming"] { grid-template-rows: auto 1fr; justify-items: start; }
-.view[data-view="meeting"] { grid-template-rows: auto auto auto auto 1fr; }   /* the line, the refusal when there is one, the buttons, Sound, the menu */
-#meeting-detail { margin: 0; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines */
+.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="upcoming"],
+.view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"] { grid-template-rows: auto 1fr; justify-items: start; }
+#meeting-detail { margin: 0; max-width: 90ch; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines; a long title keeps to one line at 1280 */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
 .menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
+/* The secondary row, and the reaction row that takes its place: smaller buttons, so that six and the TV's seventh sit in one row, and no
+   room when there is nothing in the row or the reaction row has it. */
+.meeting-secondary .button { min-height: 52px; padding: 0 18px; }
+.meeting-secondary:empty, .meeting-secondary[hidden] { display: none; }
+/* The notice line under the title: what the meeting says of itself (recorded, transcribed), in the detail's style. */
+.notice { margin: -8px 0 0; color: var(--periwinkle-300); max-width: 60ch; overflow-wrap: anywhere; }   /* pulled up under the line it belongs to */
+.notice:empty { display: none; }
+/* A dialog Zoom left waiting, as a card above the buttons (its buttons and its words come with its behaviour). */
+.dialog-card { padding: 14px 18px; border-radius: var(--radius); background: var(--warn-fill); color: var(--ink-900); }
+.dialog-card .detail { color: inherit; }
+/* The kiosk's meeting screen is fixed at 1280 by 800 and must hold everything at once: the title, the notice, a dialog's card, both rows
+   of buttons, Sound and the menu. It has no row template, so that the rows are the ones showing (a template for the most that can show
+   would keep an empty track's gap for each that does not). The rows are close, a row's own top margin is the grid's gap already, and
+   the two menu buttons are as tall as the buttons above them. */
+.view[data-view="meeting"] { row-gap: clamp(10px, 1.75vh, 16px); }
+.actions.meeting-actions, .actions.meeting-secondary { margin-top: 0; }
+.view[data-view="meeting"] .button.menu-item { min-height: 72px; font-size: 1.2rem; }
 #meeting-message { min-height: auto; }   /* a grid item: .message's explicit minimum would let its row shrink under a long refusal */
 .meeting-state { margin: 0; font-weight: 600; }
 .meeting-elapsed { margin: 0; color: var(--periwinkle-300); font-variant-numeric: tabular-nums; }
@@ -290,11 +311,14 @@ body.keyboard-open .schedule { display: none; }
   overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
 }
 
-/* Sound and Camera panels (spec 2026-10-08). */
+/* Sound and Camera panels (spec 2026-10-08). The Sound strip is the speaker's name over one line: the slider, then the buttons. */
 .device { margin: 0 0 10px; color: var(--periwinkle-300); overflow-wrap: anywhere; }
 .sound-section .note, .camera-section .note { overflow-wrap: anywhere; }   /* a refusal can quote a long file path */
-.sound input[type="range"] { width: 100%; max-width: 520px; height: 44px; accent-color: var(--blue-600); }
-.sound-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 8px; }
+.sound { display: flex; flex-wrap: wrap; align-items: center; column-gap: 28px; }
+.sound[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
+.sound .device { flex: 1 1 100%; margin-bottom: 4px; }
+.sound input[type="range"] { flex: 1 1 260px; width: auto; max-width: 520px; height: 44px; accent-color: var(--blue-600); }
+.sound-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .level { min-width: 3ch; text-align: center; font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .camera-grid { display: grid; grid-template-columns: auto 1fr; gap: 40px; align-items: start; margin-top: 14px; }
 .camera-left { display: flex; gap: 24px; align-items: center; }

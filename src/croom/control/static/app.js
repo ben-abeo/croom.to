@@ -15,8 +15,10 @@
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
+  // reactionsUntil: when the reaction row closes (a time, 0 for closed). ignoreUntil, dialogIgnoreUntil: until when the secondary row's buttons and the
+  // dialog card's ignore a tap. pending: the requests of the meeting screen that are out, by name (a control's, or "dialog").
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "",
-                  reactionsUntil: 0, ignoreUntil: 0, pending: new Set() };   // when the reaction row closes (a time, 0 for closed); the controls, by name, whose requests are out
+                  reactionsUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
@@ -384,7 +386,7 @@
   // replaced, under a finger.
 
   const REACTIONS_OPEN_MS = 10 * 1000;     // how long the reaction row stays in the secondary row's place
-  const UNCOVERED_TAP_MS = 500;            // the secondary row's buttons, uncovered by a reaction row that closed, ignore a tap this long: the second tap of a double tap
+  const UNCOVERED_TAP_MS = 500;            // buttons that have just come up under a finger ignore a tap this long: the secondary row's, uncovered by a reaction row that closed, and the dialog card's; the second tap of a double tap
   const CONTROL_TIMEOUT_MS = 35 * 1000;    // the agent gives a control up to 30 s (Zoom's calls take seconds each, one at a time); the page waits a little longer
   const NO_ANSWER = "The room's screen did not answer in time; try again in a moment";
 
@@ -416,26 +418,28 @@
     if (answer && answer.meeting && model.status) { model.status.meeting = answer.meeting; deviceEpoch.meeting += 1; }
   }
 
-  // A control from the table. It can take up to 30 s inside the agent, so it does not hold the whole page in model.busy as the quick
-  // actions do: the button that was pressed is inert until its answer, every other button works, and the request gives up at 35 s.
-  // A refusal comes in words, for #meeting-message.
-  async function control(name, value) {
-    if (model.pending.has(name)) return;     // one request per tap: the button is inert already, and this is the guard behind it
-    model.pending.add(name);
+  // A request of the meeting screen: a control from the table, or the answer to a dialog. It can take up to 30 s inside the agent, so it does
+  // not hold the whole page in model.busy as the quick actions do: the button that was pressed is inert until its answer (pending, by
+  // key), every other button works, and the request gives up at 35 s. A refusal comes in words, for #meeting-message (or the dialog
+  // card's own line while a card shows).
+  async function request(key, path, body) {
+    if (model.pending.has(key)) return;     // one request per tap: the button is inert already, and this is the guard behind it
+    model.pending.add(key);
     model.error = "";
     render();
     const cutoff = new AbortController();
     const timer = setTimeout(() => cutoff.abort(), CONTROL_TIMEOUT_MS);
     try {
-      takeMeeting(await post("/api/meeting/control", { name: name, value: value }, { signal: cutoff.signal }));
+      takeMeeting(await post(path, body, { signal: cutoff.signal }));
     } catch (e) {
       model.error = e.name === "AbortError" ? NO_ANSWER : e.message;
     } finally {
       clearTimeout(timer);
-      model.pending.delete(name);
+      model.pending.delete(key);
     }
     render();
   }
+  const control = (name, value) => request(name, "/api/meeting/control", { name: name, value: value });
   // One control's button: inert while that control's request is out.
   const controlSpec = (name, label, icon, className, value) =>
     ({ id: name, label: label, icon: icon, className: className, disabled: model.pending.has(name), onClick: () => control(name, value) });
@@ -504,12 +508,51 @@
     setActions(specs, "reaction-row", reactionKey);
   }
 
+  // The dialog card (spec 2026-10-13, section 5). A dialog Zoom drew that the agent did not answer by its policy waits for a tap on the
+  // table: the card shows its title, its text and one button for each of the client's, in the client's order. Zoom 6.5.0 lists the cancel
+  // first and the affirmative last ("Leave Meeting", "Got it"), so the last button is the primary one (the spec said the first, for an
+  // order it had guessed). The card's buttons carry no icon, the one exception to an icon on every button: the words are the client's own,
+  // and the sprite has no symbol for a label that is not known. Each button's id holds the dialog's number and its label, so that a card
+  // whose text changes under a finger keeps its buttons, and a dialog that takes another's place does not give a finger that is down on the
+  // old one a button of the new.
+  const dialogKey = { key: null };
+  let shownDialog = "";   // the dialog the card showed at the last render, by its number and its labels ("" for none)
+  const answerDialog = (id, label) => request("dialog", "/api/meeting/dialog", { id: id, button: label });
+  const dialogTitle = (d) => (String(d.title || "").trim() ? String(d.title) : "Zoom asks");   // only a title that is empty gets the fallback
+
+  function renderDialog(d) {
+    const labels = d && Array.isArray(d.buttons) ? d.buttons : [];
+    const shown = d ? JSON.stringify([d.id, labels]) : "";
+    if (shown !== shownDialog) {
+      // A card that comes up, or whose buttons change, is under a finger that was meant for what it covers (its buttons land where the
+      // primary row was, and Zoom's consent dialog has "Leave Meeting" first) or for the dialog before it: its buttons ignore a tap for half a
+      // second, as the ones a closing reaction row uncovers do. A card that goes, or gives way to another dialog, takes with it a refusal it
+      // was showing: that was said about the dialog it had.
+      if (shown) model.dialogIgnoreUntil = Date.now() + UNCOVERED_TAP_MS;
+      if (shownDialog) model.error = "";
+      shownDialog = shown;
+    }
+    el("meeting-dialog").hidden = !d;
+    el("dialog-title").textContent = d ? dialogTitle(d) : "";
+    const text = d ? String(d.text || "") : "";
+    el("dialog-text").textContent = text;
+    el("dialog-text").title = text;   // the whole of it, for when the card cuts it short (read by nobody on a kiosk, and harmless)
+    // While a card shows, a refusal is said in the card (almost always the dialog's own) and not under the title as well: the two would stack.
+    el("dialog-message").textContent = d ? model.error : "";
+    el("meeting-message").textContent = d ? "" : model.error;
+    setActions(labels.map((label, i) => ({
+      id: d.id + ":" + label, label: label, className: i === labels.length - 1 ? "primary" : "quiet", disabled: model.pending.has("dialog"),
+      target: String(d.id),   // in the key too: the buttons of another dialog are other buttons, though their words are the same
+      onClick: () => { if (Date.now() >= model.dialogIgnoreUntil) answerDialog(d.id, label); },
+    })), "dialog-actions", dialogKey);
+  }
+
   // Everything of the meeting screen but the primary row, from the same status: the notice line under the title, the dialog's card, the
   // secondary row, and the reaction row in its place while it is open. Only a connected meeting has any of it; m is null offline.
   function renderMeetingScreen(m) {
     const live = Boolean(m) && m.state === "connected";
     el("meeting-notice").textContent = live ? m.notice || "" : "";
-    el("meeting-dialog").hidden = !(live && m.dialog);
+    renderDialog(live ? m.dialog : null);
     const choices = live ? reactionChoices(m.controls || {}) : [];
     const picking = choices.length > 0 && reactionsOpen();
     if (shownReactionRow && !picking) model.ignoreUntil = Date.now() + UNCOVERED_TAP_MS;
@@ -610,8 +653,7 @@
   function render() {
     const body = document.body;
     if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
-    el("message").textContent = model.error;
-    el("meeting-message").textContent = model.error;   // the meeting screen's own line for a refusal or an error
+    el("message").textContent = model.error;   // the idle card's line; the meeting screen's own is written with its dialog card (renderDialog)
 
     if (model.offline || !model.status) {
       body.dataset.state = "offline";

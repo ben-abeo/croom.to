@@ -154,6 +154,8 @@ class StubMeeting:
             model[name]["on"] = not model[name]["on"]
         elif name == "layout" and "layout" in model:
             model["layout"]["value"] = value
+        elif name == "dialog" and self.current_meeting.dialog and self.current_meeting.dialog.get("id") == (value or {}).get("id"):
+            self.current_meeting.dialog = None      # the answered dialog is off the screen (a provider shows the next one waiting, if there is one)
 
     async def diagnostics(self):
         if getattr(self, "fail_diagnostics", None) is not None:

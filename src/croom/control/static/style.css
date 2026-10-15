@@ -94,9 +94,26 @@ body[data-view="host"] .view[data-view="host"] { display: grid; }
 /* The notice line under the title: what the meeting says of itself (recorded, transcribed), in the detail's style. */
 .notice { margin: -8px 0 0; color: var(--periwinkle-300); max-width: 60ch; overflow-wrap: anywhere; }   /* pulled up under the line it belongs to */
 .notice:empty { display: none; }
-/* A dialog Zoom left waiting, as a card above the buttons (its buttons and its words come with its behaviour). */
-.dialog-card { padding: 14px 18px; border-radius: var(--radius); background: var(--warn-fill); color: var(--ink-900); }
-.dialog-card .detail { color: inherit; }
+/* A dialog Zoom left waiting, as a card above the buttons: one row, so that it costs the fixed screen 84 px with a line of text and 126 with
+   three. The client's words are on the left (the title, the text cut to three lines, and a refusal's words when there is one) and its buttons
+   on the right; on a phone the buttons drop under the words. The card is cream, as the error card is, so its title, text and buttons have
+   their own colours here: the meeting screen's white buttons and periwinkle labels cannot be read on it. */
+.dialog-card { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px 24px; padding: 14px 18px; border-radius: var(--radius); background: var(--warn-fill); color: var(--ink-900); }
+.dialog-card[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
+.dialog-words { flex: 1 1 320px; min-width: 0; }
+/* The title is the client's, in its own words and capitals (not the small uppercase label a kicker is elsewhere), two lines at the most. */
+.dialog-card .kicker { margin: 0 0 4px; font-size: 1.05em; letter-spacing: 0; text-transform: none; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.dialog-card .detail { margin: 0; max-width: 90ch; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+/* More specific than the meeting screen's own rule for white labels (body[data-state="meeting"] .kicker, .detail, below), which a plain card rule would lose to. */
+body[data-state="meeting"] .dialog-card .kicker { color: var(--blue-700); }
+body[data-state="meeting"] .dialog-card .detail { color: inherit; }
+.dialog-card .message { margin: 6px 0 0; max-width: none; color: #A3260F; }
+.dialog-card .actions { flex: 0 1 auto; justify-content: flex-end; margin-top: 0; }
+.dialog-card .button.primary { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
+.dialog-card .button.primary:hover { background: var(--blue-700); }
+.dialog-card .button.quiet { background: transparent; border-color: var(--blue-700); color: var(--navy-800); }
+.dialog-card .button.quiet:hover { background: rgba(0, 62, 188, 0.08); }
+@media (min-height: 1000px) { .dialog-card .detail { -webkit-line-clamp: 4; } }   /* a taller screen has the room for a fourth line */
 /* The kiosk's meeting screen is fixed at 1280 by 800 and must hold everything at once: the title, the notice, a dialog's card, both rows
    of buttons, Sound and the menu. It has no row template, so that the rows are the ones showing (a template for the most that can show
    would keep an empty track's gap for each that does not). The rows are close, a row's own top margin is the grid's gap already, and
@@ -375,8 +392,9 @@ body.keyboard-open .schedule { display: none; }
    screen has its roomy sizes back: the rows apart, the Sound strip stacked, the menu buttons at their full height. The room's own
    table is not that screen: it is 1920 by 1200, and the kiosk launches Chromium at 1.5x (installer/install-kiosk.sh), so the page
    lays out at 1280 by 800 there and has the compact sizes. The height is 1100 and not 1000 because between 1000 and 1080 px the roomy
-   stack leaves no room for a dialog's card, which the compact one has; the width keeps a portrait tablet (768 by 1024, 820 by 1180)
-   on the compact sizes, which fit it, where the roomy ones scroll it. */
+   stack leaves no room for a dialog's card, which the compact one has (the host's busiest screen with a filled card scrolls by 60 px
+   at 1280 by 1000 with the roomy sizes, and has 165 px to spare with the compact ones); the width keeps a portrait tablet (768 by
+   1024, 820 by 1180) on the compact sizes, which fit it, where the roomy ones scroll it. */
 @media (min-height: 1100px) and (min-width: 1100px) {
   .view[data-view="meeting"] { row-gap: clamp(16px, 2.5vh, 24px); }
   .actions.meeting-actions { margin-top: 22px; }

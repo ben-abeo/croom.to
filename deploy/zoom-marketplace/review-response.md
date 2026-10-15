@@ -87,7 +87,7 @@ The room joined at [TO CONFIRM: date, time and time zone].
 - [ ] **Links & Support** (Production › App Listing): enter the three addresses above and the Support URL https://www.crystalpm.com/support/. The old /contact address redirects there.
 - [ ] **App gallery** (App Information): upload `gallery-2-room-page.png`, `gallery-3-in-meeting.png`, `gallery-4-tv.png` and `gallery-5-door-sign.png` after `gallery.png`, with the captions in `listing.md`.
 - [ ] **Room devices get the no-store fix**: once this branch is merged into main, update each room device in the order below. The device's join page then sends the signature, passcode and ZAK with `Cache-Control: no-store`, which keeps Security answer 3 true.
-  - `sudo apt-get install -y python3-dev gcc` first: the touchpad's mouse library (`evdev`) is compiled when pip installs it, and the update stops without them.
+  - `sudo apt-get install -y python3-dev gcc libc6-dev` first: the touchpad's mouse library (`evdev`) is compiled when pip installs it, and the update stops without them (`gcc` only recommends `libc6-dev`, which has the C headers the build reads).
   - `sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git`
   - `cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'`: the installer's virtual-mouse step on its own (the udev rule for `/dev/uinput`, the `uinput` module at boot, the desktop user in the `input` group).
   - `sudo systemctl restart croom`: a new group only reaches a service that starts afresh.

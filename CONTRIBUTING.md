@@ -39,6 +39,9 @@ By participating in this project, you agree to abide by our Code of Conduct:
 Before you begin, ensure you have:
 
 - **Python 3.11+** installed
+- **Build tools on Linux**: `sudo apt-get install -y python3-dev gcc libc6-dev` (`pip install -e ".[dev]"` compiles `evdev`, which makes the room Pi's
+  virtual mouse and has no wheel: it needs Python's headers, a compiler and the C library's headers, which `gcc` only recommends. It is not
+  installed on macOS or Windows)
 - **Node.js 18+** (for dashboard development)
 - **Git** for version control
 - A **GitHub account**

@@ -490,10 +490,11 @@ def test_guide_troubleshoots_the_tv_not_found_not_waking_not_accepted_and_the_mo
         "A TV that is fully off, with Quick Start+ off, can only be woken by Wake-on-LAN: Mobile TV On must be on and the MAC address must be the TV's own",
         "With Quick Start+ on, a TV that answers is told to turn on over its connection, so Mobile TV On and a wrong but well-formed MAC address do not matter",
         f"A join waits up to {WAKE_WAIT} seconds for the TV, with the page showing Joining, and then goes ahead without it",
+        'The table says "The TV no longer accepts this table" or, on the remote\'s top line, "The TV is asking to pair again", or the TV keeps showing a request to allow a device',
         "Tap Forget TV (on the remote it asks for a second tap), then Pair, and accept the new request on the TV with its own remote",
         "it stops waiting when the request is answered, when the TV goes away, or on Forget TV",
         'the table says the mouse "is not allowed to use /dev/uinput" or "needs /dev/uinput, and it is not there"',
-        "which needs python3-dev and gcc on the device before the software is installed",
+        "which needs python3-dev, gcc and libc6-dev on the device before the software is installed",
         'KERNEL=="uinput", GROUP="input", MODE="0660"',
         "/etc/udev/rules.d/99-croom-uinput.rules",
         "the service's user in the input group, and the uinput module loaded",
@@ -510,7 +511,7 @@ def test_guide_updates_every_room_device_in_the_order_the_virtual_mouse_needs():
     its own, then the restart."""
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     recipe = visible_text(html.split("<h2>Updating a room device</h2>", 1)[1].split("</section>", 1)[0])
-    steps = ("sudo apt-get install -y python3-dev gcc",
+    steps = ("sudo apt-get install -y python3-dev gcc libc6-dev",
              "sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git",
              "cd ~/croom.to && git pull",
              "sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
@@ -523,6 +524,7 @@ def test_guide_updates_every_room_device_in_the_order_the_virtual_mouse_needs():
         "and is compiled on the device",
         "The first and third steps are needed once and do no harm when repeated",
         "Without them the update stops with an error while it builds the mouse library",
+        "the compiler's package only recommends libc6-dev, which has the C headers the build reads",
         "That is the installer's virtual-mouse step on its own",
         "a udev rule hands /dev/uinput to the input group, the uinput module is set to load at every boot, and your user joins the input group",
         "a new group only reaches a service that starts afresh",
@@ -538,13 +540,14 @@ def test_the_marketplace_checklist_updates_a_room_device_in_the_same_order():
     (one nested bullet each), and keeps its own reason: the no-store header."""
     checklist = (REPO / "deploy" / "zoom-marketplace" / "review-response.md").read_text(encoding="utf-8")
     item = checklist.split("- [ ] **Room devices get the no-store fix**", 1)[1].split("\n- [ ] ", 1)[0]
-    steps = ("  - `sudo apt-get install -y python3-dev gcc` first",
+    steps = ("  - `sudo apt-get install -y python3-dev gcc libc6-dev` first",
              "  - `sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git`",
              "  - `cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'`",
              "  - `sudo systemctl restart croom`")
     positions = [item.index(step) for step in steps]
     assert positions == sorted(positions), item
     for needle in ("the touchpad's mouse library (`evdev`) is compiled when pip installs it, and the update stops without them",
+                   "`gcc` only recommends `libc6-dev`, which has the C headers the build reads",
                    "the installer's virtual-mouse step on its own (the udev rule for `/dev/uinput`, the `uinput` module at boot, the desktop user in the `input` group)",
                    "a new group only reaches a service that starts afresh",
                    "`Cache-Control: no-store`"):      # (the item's own reason stays)

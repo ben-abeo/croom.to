@@ -115,13 +115,15 @@ install_dependencies() {
     fi
     log "Using browser package: $CHROMIUM_PKG"
 
-    # Core dependencies (python3-dev and gcc: evdev, which makes the room Pi's virtual mouse, has no wheel: pip compiles it)
+    # Core dependencies (python3-dev, gcc and libc6-dev: evdev, which makes the room Pi's virtual mouse, has no wheel: pip compiles it, and
+    # its build reads the kernel's headers, which libc6-dev brings and gcc only recommends)
     apt-get install -y \
         python3 \
         python3-pip \
         python3-venv \
         python3-dev \
         gcc \
+        libc6-dev \
         "$CHROMIUM_PKG" \
         pulseaudio \
         libpulse0 \
@@ -613,7 +615,7 @@ run_installer() {
                 echo "Environment:"
                 echo "  CROOM_REPO      pip source to install (default: this fork on GitHub)"
                 echo ""
-                echo "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev and gcc, which the install adds):"
+                echo "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev, gcc and libc6-dev, which the install adds):"
                 echo "  a udev rule that gives /dev/uinput to the input group, the uinput module at boot, and the desktop user in the input group."
                 echo "  To redo only that step on a device that is already installed: sudo bash -c 'source installer/install.sh && install_virtual_mouse'"
                 echo ""

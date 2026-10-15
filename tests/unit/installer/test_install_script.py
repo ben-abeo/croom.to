@@ -346,9 +346,10 @@ def test_the_installer_sets_the_virtual_mouse_up_with_the_rest():
 
 
 def test_the_installer_adds_what_building_evdev_needs():
-    """evdev has no wheel: pip compiles its C extension, which needs Python's headers and a compiler."""
+    """evdev has no wheel: pip compiles its C extension, which needs Python's headers, a compiler and the kernel's linux/input.h, which comes
+    with libc6-dev and which gcc only recommends (a device that installs no recommends has the compiler and not the header)."""
     body = SCRIPT.read_text().split("install_dependencies() {", 1)[1].split("\n}", 1)[0]
-    assert "python3-dev" in body.split() and "gcc" in body.split()
+    assert "python3-dev" in body.split() and "gcc" in body.split() and "libc6-dev" in body.split()
 
 
 def test_help_names_the_virtual_mouse_step_and_the_checks_including_the_tvs():
@@ -357,7 +358,7 @@ def test_help_names_the_virtual_mouse_step_and_the_checks_including_the_tvs():
     result = run_bash(f"bash {SCRIPT} --help")
     assert result.returncode == 0
     for needle in (
-        "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev and gcc, which the install adds):",
+        "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev, gcc and libc6-dev, which the install adds):",
         "a udev rule that gives /dev/uinput to the input group, the uinput module at boot, and the desktop user in the input group",
         "To redo only that step on a device that is already installed: sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
         "Checks to run afterwards, as the desktop user the service runs as:",

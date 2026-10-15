@@ -201,6 +201,10 @@ def test_readme_names_the_tv_check_the_routes_the_pointer_socket_the_wake_up_and
         "/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml",
         "`/api/tv/control`", "`/api/tv/pair`", "`/api/tv/forget`", "`/api/tv/discover`",
         "one WebSocket, `/ws/pointer`",
+        # the status block names `prompting`: a TV that shows its pairing prompt for the key the table keeps, said on the page's status line
+        "(`configured`, `paired`, `refused`, `prompting`, `on`, `reachable`, `name`, `volume`, `muted`, `input`, `inputs`, `app`, `channel`, `keep_on`, `held_off`, `host` and `pi_input`)",
+        "`prompting` is true while the TV shows its pairing prompt for the key the table keeps (the agent has waited at it longer than a TV that does not answer takes: "
+        "the TV has forgotten the table), and the page's status line then says to **Forget TV**, then **Pair**",
         f"(a Turn on waits up to {TURN_ON} seconds for the TV)",
         # the open page: the pointer takes no sign-in and refuses a page from another site
         "anyone on the network who can open the page can drive the TV and the Pi's mouse",
@@ -215,7 +219,7 @@ def test_readme_names_the_tv_check_the_routes_the_pointer_socket_the_wake_up_and
         "a virtual device on `/dev/uinput` (`evdev`)",
         "so its own pointer should appear on the TV from then on; the first use in a room confirms it",
         "the installer's udev rule gives `/dev/uinput` to the `input` group, loads the `uinput` module at boot and puts the desktop user in that group",
-        "`python3-dev` and `gcc` must be on the device before the agent is installed or updated",
+        "`python3-dev`, `gcc` and `libc6-dev` must be on the device before the agent is installed or updated",
         # the limitation: nothing here has met a real C6 or a real Pi yet
         "verified against a fake TV and a fake virtual mouse, not yet on an LG C6",
     ):
@@ -227,13 +231,15 @@ def test_readme_names_the_tv_check_the_routes_the_pointer_socket_the_wake_up_and
 def test_readme_says_how_to_update_a_room_device_for_the_virtual_mouse():
     """The update recipe, in its order: the build tools, the new software, the installer's virtual-mouse step on its own, the restart."""
     text = README.read_text(encoding="utf-8")
-    steps = ("sudo apt-get install -y python3-dev gcc",
+    steps = ("sudo apt-get install -y python3-dev gcc libc6-dev",
              "sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git",
              "cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
              "sudo systemctl restart croom`; the room guide's section Updating a room device walks through it")
     assert "To update a room device that is already installed, type these on it in this order:" in text
     positions = [text.index(step) for step in steps]
     assert positions == sorted(positions)
+    # why the third package: the compiler's own package only recommends the C library's headers that evdev's build reads
+    assert "(the room Pi's virtual mouse needs `evdev`, which pip compiles: it reads the kernel's headers, which `libc6-dev` brings and `gcc` only recommends)" in text
 
 
 def test_readme_says_the_python_floor_the_package_asks_for():

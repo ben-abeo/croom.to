@@ -45,10 +45,13 @@ def test_the_contributor_prerequisites_and_the_debian_control_file_ask_for_the_p
     contributing = (repo / "CONTRIBUTING.md").read_text(encoding="utf-8")
     assert "- **Python 3.11+** installed" in contributing
     assert "Python 3.10" not in contributing
+    # pip install -e ".[dev]" compiles evdev on Linux: the prerequisites name what that takes (it is not a dependency elsewhere)
+    assert "- **Build tools on Linux**: `sudo apt-get install -y python3-dev gcc libc6-dev`" in contributing
+    assert "`pip install -e \".[dev]\"` compiles `evdev`" in contributing
     control = (repo / "packaging" / "debian" / "control").read_text(encoding="utf-8")
     depends = control.split("\nDepends:", 1)[1].split("\nRecommends:", 1)[0]
     entries = [entry.strip() for entry in depends.replace("\n", " ").split(",")]
-    for needed in ("python3 (>= 3.11)", "python3-dev", "gcc"):
+    for needed in ("python3 (>= 3.11)", "python3-dev", "gcc", "libc6-dev"):
         assert needed in entries, needed
     assert "python3 (>= 3.10)" not in control
 
@@ -60,4 +63,4 @@ def test_the_generated_packages_ask_for_the_python_pyproject_does_and_no_build_t
     from croom.installer.packaging import COMMON_DEPENDS
     assert "python3 (>= 3.11)" in COMMON_DEPENDS
     assert [entry for entry in COMMON_DEPENDS if entry.startswith("python3 (")] == ["python3 (>= 3.11)"]
-    assert "python3-dev" not in COMMON_DEPENDS and "gcc" not in COMMON_DEPENDS
+    assert not {"python3-dev", "gcc", "libc6-dev"} & set(COMMON_DEPENDS)

@@ -97,12 +97,16 @@
   // Idle mode returns to the idle screen on its own: the kiosk never reloads and nobody presses Back, so a room left on
   // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns, except
   // the TV view opened from one (the remote is a quick look in a call): it goes back to the meeting screen after two minutes.
+  // The full-screen touchpad (touchpad.js) holds the wait while it is up: a person moving the TV's cursor touches the surface, not
+  // the page, and the surface has a wait of its own; the page's begins again when it goes away.
   const IDLE_RETURN_MS = 10 * 60 * 1000;
   const TV_RETURN_MS = 2 * 60 * 1000;
   let idleReturnTimer = null;
+  let idleReturnHeld = false;
   function armIdleReturn() {
     clearTimeout(idleReturnTimer);
     idleReturnTimer = null;
+    if (idleReturnHeld) return;
     if (mode() === "idle" && view() !== "idle") idleReturnTimer = setTimeout(() => setView("idle", true), IDLE_RETURN_MS);
     else if (mode() === "meeting" && view() === "tv") idleReturnTimer = setTimeout(() => setView("meeting", true), TV_RETURN_MS);
   }
@@ -662,6 +666,7 @@
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING, submitForm: submitForm,
     view: view, setView: setView, mode: mode, cameraMode: () => cameraMode, kiosk: kiosk,
     onViewChange: (fn) => viewHooks.push(fn),
+    holdIdleReturn: (held) => { idleReturnHeld = Boolean(held); armIdleReturn(); },
     // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
     // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.
     onRender: (fn) => { renderHooks.push(fn); if (model.status && !model.offline) fn(model.status); },

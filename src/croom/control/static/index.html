@@ -195,9 +195,9 @@
         <button type="button" id="tv-inputs-close" class="button quiet" data-icon="exit">Close</button>
       </div>
 
-      <div class="tv-middle">
+      <div id="tv-middle" class="tv-middle">
         <div class="tv-left">
-          <div class="tv-dpad" role="group" aria-label="Arrows and OK">
+          <div id="tv-dpad" class="tv-dpad" role="group" aria-label="Arrows and OK" data-mode="keys">
             <svg class="tv-disc" viewBox="-150 -150 300 300" focusable="false">
               <path class="tv-sector" data-tv="key:UP" role="button" tabindex="0" aria-label="Up" d="M -104.65 -104.65 A 148 148 0 0 1 104.65 -104.65 L 43.84 -43.84 A 62 62 0 0 0 -43.84 -43.84 Z"/>
               <path class="tv-sector" data-tv="key:RIGHT" role="button" tabindex="0" aria-label="Right" d="M 104.65 -104.65 A 148 148 0 0 1 104.65 104.65 L 43.84 43.84 A 62 62 0 0 0 43.84 -43.84 Z"/>
@@ -255,7 +255,10 @@
         </div>
       </div>
 
-      <div id="tv-modes" class="tv-modes"></div>   <!-- the pointer modes' row (spec 5.2): its height is kept so that the remote does not move when they come -->
+      <div id="tv-trackpad" class="tv-trackpad" role="group" aria-label="Trackpad" data-target="tv" hidden>   <!-- the disc's place while a pointer mode is on (spec 5.2) -->
+        <p id="tv-trackpad-lead" class="tv-lead"></p>
+        <p id="tv-trackpad-how" class="tv-how"></p>
+      </div>
     </div>
 
     <section id="tv-not-set-up" class="tv-card" hidden>
@@ -296,12 +299,31 @@
         <button type="button" id="tv-refused-cancel" class="button quiet" data-icon="x-circle" hidden>Cancel</button>
       </div>
     </section>
+
+    <div id="tv-modes" class="tv-modes" role="group" aria-label="Pointer modes">   <!-- under the cards too, with Full-screen touchpad alone (remote.js) -->
+      <button type="button" id="tv-pointer" class="button quiet" aria-pressed="false" data-icon="pointer">Pointer</button>
+      <button type="button" id="tv-pi-mouse" class="button quiet" aria-pressed="false" data-icon="monitor">Room Pi mouse</button>
+      <button type="button" id="tv-fullscreen" class="button quiet" data-icon="touchpad">Full-screen touchpad</button>
+    </div>
   </section>
 </main>
+<div id="touchpad" class="touchpad" role="dialog" aria-modal="true" aria-label="Full-screen touchpad" hidden>
+  <div class="touchpad-strip">
+    <p class="touchpad-name"><span id="touchpad-title" class="touchpad-title"></span><small id="touchpad-sub" class="touchpad-sub"></small></p>
+    <p id="touchpad-link" class="touchpad-link" role="status" hidden>Reconnecting&hellip;</p>
+    <div id="touchpad-target" class="touchpad-switch" role="group" aria-label="Target">
+      <button type="button" id="touchpad-tv" class="button" aria-pressed="false" data-icon="tv">TV</button>
+      <button type="button" id="touchpad-pi" class="button" aria-pressed="true" data-icon="monitor">Room Pi</button>
+    </div>
+    <button type="button" id="touchpad-done" class="button" data-icon="check">Done</button>
+  </div>
+  <div id="touchpad-surface" class="touchpad-surface"><p id="touchpad-how" class="touchpad-how"></p></div>
+</div>
 <div id="keyboard" class="keyboard" role="group" aria-label="On-screen keyboard" hidden></div>
 <script src="/static/app.js"></script>
 <script src="/static/devices.js"></script>
 <script src="/static/keyboard.js"></script>
+<script src="/static/touchpad.js"></script>
 <script src="/static/remote.js"></script>
 </body>
 </html>

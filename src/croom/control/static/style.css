@@ -27,6 +27,9 @@
   --ink-900: #1C2024;
   --warn-fill: #FFF8E1;
   --warn-bar: #E8A013;
+  --tray: #0B1220;                           /* the keyboard's tray: the d-pad's sectors, the trackpad, the touchpad's surface */
+  --line: rgba(189, 206, 255, 0.30);
+  --line-soft: rgba(189, 206, 255, 0.16);
   --radius: 12px;
   --radius-sm: 8px;
   --gutter: clamp(16px, 2.5vw, 32px);
@@ -320,12 +323,9 @@ body.keyboard-open .schedule { display: none; }
    colour or a fill says so here with enough weight to win over body[data-state] above (a meeting outlines every button in the page,
    filled ones too), so the remote looks the same in both modes. */
 .view[data-view="tv"] {
-  --tray: #0B1220;                           /* the keyboard's tray: the d-pad's sectors */
-  --line: rgba(189, 206, 255, 0.30);
-  --line-soft: rgba(189, 206, 255, 0.16);
   --tv-on: #1FA971;
   grid-template-columns: minmax(0, 1fr);       /* the widest row may not stretch the view past the screen */
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr) auto;   /* the head; the remote, or the card that comes before it; the pointer modes */
   gap: 16px;
 }
 .view[data-view="tv"] .button.quiet { border-color: var(--periwinkle-300); color: #fff; }
@@ -351,12 +351,11 @@ body.keyboard-open .schedule { display: none; }
 .button.tv-forget-head { flex: 0 0 136px; min-height: 40px; padding: 0 12px; font-size: 0.95rem; text-align: center; }   /* the width of "Forget TV" with its picture; "Tap again to forget the TV" wraps onto two lines in it */
 .button.tv-forget-head.danger { padding: 0 8px; line-height: 1.15; }
 
-/* The remote: the top keys, the d-pad with the numbers, and the row the pointer modes will have. A press is never a selection or a callout. */
-.tv-remote { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 16px; min-height: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+/* The remote: the top keys, then the d-pad with the numbers, or the trackpad in their place. A press is never a selection or a callout. */
+.tv-remote { grid-row: 2; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 16px; min-height: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 .tv-remote[hidden] { display: none; }
 .tv-keys, .tv-inputs { grid-row: 1; }   /* placed, not left to auto-placement: the one that is hidden must not move the middle into the row that stretches */
-.tv-middle { grid-row: 2; }
-.tv-modes { grid-row: 3; min-height: 56px; }
+.tv-middle, .tv-trackpad { grid-row: 2; }
 .tv-keys { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 12px; }   /* one row at 1280 by 800; narrower, the groups wrap */
 .tv-keys[hidden], .tv-inputs[hidden] { display: none; }
 .tv-spacer { flex: 1 1 auto; }
@@ -383,8 +382,9 @@ body.keyboard-open .schedule { display: none; }
 
 /* The middle: the d-pad on the left, the numbers on the right; the columns start and end together. */
 .tv-middle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-height: 0; }
+.tv-middle[hidden] { display: none; }
 .tv-left, .tv-right { display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 18px; min-height: 0; padding: 4px 0; }
-.tv-dpad { position: relative; flex: 0 1 300px; aspect-ratio: 1; min-height: 180px; touch-action: manipulation; }   /* 300 px at 1280 by 800; a shorter column makes it smaller, and the nav row stays under it instead of running into the row below */
+.tv-dpad { position: relative; flex: 0 1 300px; aspect-ratio: 1; min-height: 150px; touch-action: manipulation; }   /* 300 px at 1280 by 800; a shorter column makes it smaller, down to 150 px, and the nav row stays under it instead of running into the row below */
 .tv-disc { display: block; width: 100%; height: 100%; overflow: visible; }
 .tv-sector { fill: var(--tray); stroke: var(--line); stroke-width: 2; cursor: pointer; outline: none; }
 .tv-sector:active { fill: var(--navy-800); }   /* the sector lights while it is pressed */
@@ -408,7 +408,7 @@ body.keyboard-open .schedule { display: none; }
 .tv-nav { display: flex; gap: 10px; }
 .tv-nav .button { padding: 0 clamp(14px, calc(5.8vw - 43px), 26px); }   /* 543 px of row at 26 px of padding; the column is 480 px at 1024 wide and 559 at 1190 */
 
-.tv-numbers { display: grid; grid-template-columns: repeat(3, 84px); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 10px; flex: 0 1 254px; min-height: 190px; }
+.tv-numbers { display: grid; grid-template-columns: repeat(3, 84px); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 10px; flex: 0 1 254px; min-height: 150px; }   /* the four rows share what the column has, down to 150 px */
 .view[data-view="tv"] .tv-numbers .button { min-height: 0; padding: 0; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
 .view[data-view="tv"] .tv-numbers .tv-go { font-size: 1.05rem; }
 .tv-play { display: flex; align-items: center; justify-content: center; gap: 34px; width: 100%; }   /* the whole column, so that the keys are 57 and 52 px wide when it has room, and fewer when it has not */
@@ -421,8 +421,22 @@ body.keyboard-open .schedule { display: none; }
 .tv-colour.yellow i { background: #E8C547; }
 .tv-colour.blue i { background: #4C7BF0; }
 
+/* The pointer modes (spec 5.2): the row under the remote, or under a card with Full-screen touchpad alone. The one that is on is filled blue
+   (the .filled of Power, remote.js toggles it). Pointer and Room Pi mouse turn the disc's place into a trackpad over the whole middle, as the
+   mockup's tv-pointer.png has it; the keys above and this row stay where they are. A finger on it is raised and answers within the frame. */
+.tv-modes { grid-row: 3; display: flex; flex-wrap: wrap; gap: 12px; min-height: 56px; }
+.tv-trackpad {
+  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; min-height: 0; padding: 0 24px; text-align: center;
+  border-radius: 28px; background: var(--tray); border: 2px solid var(--line);
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;   /* the browser scrolls, selects and calls out nothing on it */
+}
+.tv-trackpad[hidden] { display: none; }
+.tv-trackpad.touching { background: var(--navy-800); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6); }   /* a darker fill and a 1 px inset, as every key has */
+.tv-lead { margin: 0; font-size: 1.15rem; color: #fff; }
+.tv-how { margin: 0; color: var(--periwinkle-300); font-size: 0.95rem; }
+
 /* The cards: in the remote's place when there is no TV to use. A long list of TVs scrolls inside its card, not the page. */
-.tv-card { align-self: start; width: 100%; max-width: 820px; max-height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: var(--radius); background: var(--surface-800); padding: 30px 32px; }
+.tv-card { grid-row: 2; align-self: start; width: 100%; max-width: 820px; max-height: 100%; min-height: 0; display: flex; flex-direction: column; border-radius: var(--radius); background: var(--surface-800); padding: 30px 32px; }
 .tv-card[hidden] { display: none; }
 .tv-card h2 { margin: 0 0 10px; font-size: 1.45rem; font-weight: 600; }
 .tv-card p { margin: 0 0 16px; color: #E6ECFF; }
@@ -454,7 +468,38 @@ body.keyboard-open .schedule { display: none; }
   .tv-nav, .tv-play { flex-wrap: wrap; justify-content: center; }
   .tv-play { gap: 12px 24px; }
   .tv-modes { min-height: 0; }
+  .tv-trackpad { min-height: 240px; }   /* the page scrolls here, so the pad is a pad and not a line of words */
   .tv-card { padding: 22px 20px; }
+}
+
+/* The full-screen touchpad (spec 5.3): over the whole page, header included, with a thin strip that names the target, the switch between the two
+   targets and Done, and a surface with nothing on it to tap by mistake. It sits above the keyboard. A fill that is stated here wins over the meeting
+   state's outline of every button, so the surface looks the same in a call. */
+.touchpad { position: fixed; inset: 0; z-index: 70; display: flex; flex-direction: column; background: var(--tray); color: #fff; }
+.touchpad[hidden] { display: none; }
+.touchpad-strip { flex: 0 0 auto; display: flex; align-items: center; gap: 18px; padding: 12px var(--gutter); background: var(--surface-900); border-bottom: 1px solid var(--line-soft); }
+.touchpad-name { margin: 0; flex: 1 1 auto; min-width: 0; }
+.touchpad-title { display: block; font-size: 1.05rem; font-weight: 600; overflow-wrap: anywhere; }
+.touchpad-sub { display: block; margin-top: 2px; font-size: 0.85rem; font-weight: 400; color: var(--periwinkle-300); overflow-wrap: anywhere; }
+.touchpad-link { margin: 0; flex: 0 0 auto; display: flex; align-items: center; gap: 8px; font-size: 0.95rem; color: #FFD7D5; }   /* the connection mark: the socket is down, and the page is trying again */
+.touchpad-link::before { content: ""; width: 9px; height: 9px; border-radius: 50%; background: var(--warn-bar); }
+.touchpad-link[hidden] { display: none; }
+.touchpad-switch { flex: 0 0 auto; display: inline-flex; border: 2px solid var(--periwinkle-300); border-radius: var(--radius); overflow: hidden; }
+.touchpad .touchpad-switch .button { min-height: 52px; border: 0; border-radius: 0; background: transparent; color: #fff; }
+.touchpad .touchpad-switch .button[aria-pressed="true"] { background: var(--blue-600); }
+.touchpad #touchpad-done { flex: 0 0 auto; min-height: 56px; background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
+.touchpad #touchpad-done:hover { background: var(--blue-700); border-color: var(--blue-700); }
+.touchpad-surface {
+  flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; background: var(--tray);
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+}
+.touchpad-surface.touching { background: var(--navy-800); }
+.touchpad-how { margin: 0; padding: 0 24px; color: rgba(189, 206, 255, 0.45); text-align: center; line-height: 1.9; white-space: pre-line; pointer-events: none; }
+@media (max-width: 1023px) {
+  .touchpad-strip { flex-wrap: wrap; gap: 10px; }
+  .touchpad-name { flex: 1 1 100%; }   /* the title on a line of its own, the switch and Done under it */
+  .touchpad .touchpad-switch .button { padding: 0 14px; }
+  .touchpad #touchpad-done { padding: 0 20px; }
 }
 
 /* Viewport layouts (spec 2026-10-12, section 3). Last in the file, so they override the rules above. */
@@ -472,6 +517,15 @@ body.keyboard-open .schedule { display: none; }
   /* A title can run to a hundred characters: three lines of headline at most, so the link box stays on the screen.
      The full title is in the Today list, and in the detail line when the booking is the next one. */
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+}
+@media (min-width: 1024px) and (min-height: 700px) and (max-height: 760px) {
+  /* The fixed screen at its lowest (1024 by 700, 1280 by 720): the middle of the TV view gives way, so that nothing reaches into the row of pointer
+     modes under it, with a row of inputs open or a refusal of several lines in the head. The rows and the modes take 48 px of height and the
+     columns lose their gap and padding; the d-pad and the number pad then have the height that is left, to their floors above. */
+  .tv-left, .tv-right { gap: 10px; padding: 0; }
+  .tv-modes { min-height: 48px; }
+  .tv-modes .button, .tv-nav .button, .tv-transport .button.tv-key, .view[data-view="tv"] .button.tv-colour { min-height: 48px; }
+  .tv-numbers { gap: 8px; }
 }
 @media (max-width: 1023px) {
   /* A phone: one column. */

@@ -1,5 +1,6 @@
-// The TV view's remote on the table (spec 2026-10-13 TV remote and touchpad, section 5): the page's own part for the LG TV. app.js draws the
-// rest of the page and shares it through window.croomPage (as devices.js does): the model, the requests, the buttons, the render and view hooks.
+// The TV view's remote on the table (spec 2026-10-13 TV remote and touchpad, section 5): the page's own part for the LG TV, with the modes that
+// turn its d-pad into a trackpad. app.js draws the rest of the page and shares it through window.croomPage (as devices.js does): the model, the
+// requests, the buttons, the render and view hooks. touchpad.js reads the fingers for the trackpad and for the full-screen surface.
 (function () {
   "use strict";
   const P = window.croomPage;
@@ -16,6 +17,7 @@
   const keepFocus = P.keepFocus;
   const view = P.view;
   const CONFIRM_MS = P.CONFIRM_MS;
+  const T = window.croomTouchpad;
 
   // ===========================================================================================================================
   // The TV view: the remote on the table (spec 2026-10-13 TV remote and touchpad, section 5). The agent's status carries the TV's
@@ -170,6 +172,7 @@
   // A key of the remote: its data-tv is "name:value", or the name alone. Power's tap and Input's are the table's own business.
   function tvKey(node) {
     if (node.matches("button") ? node.disabled : node.getAttribute("aria-disabled") === "true") return;
+    if (node.closest("#tv-dpad") && el("tv-dpad").dataset.mode === "pointer") return;   // the disc is the trackpad: its sectors and OK take no press
     const spec = node.dataset.tv;
     const cut = spec.indexOf(":");
     const name = cut < 0 ? spec : spec.slice(0, cut);
@@ -273,8 +276,77 @@
     render();
   }
 
+  // --- the pointer modes (spec section 5.2) ---
+  // Pointer and Room Pi mouse turn the disc's place, the whole middle of the remote, into a trackpad for the TV's cursor or the room Pi's
+  // mouse (touchpad.js reads the fingers and carries them over /ws/pointer). A second tap on the mode that is on brings the d-pad back, and a
+  // tap on the other moves the trackpad to its target; the keys above and the modes below stay where they are. Full-screen touchpad hands the
+  // whole screen to the pointer, on the target of the mode that is on, else the room Pi. The page leaving the view puts both away.
+  const pointer = { target: null };   // "tv", "pi", or null while the middle is the d-pad
+  const trackpad = T.reader(el("tv-trackpad"), () => pointer.target);
+  const TRACKPAD_WORDS = {
+    tv: ["Move one finger to move the TV's cursor", "Tap to click \u00B7 Two fingers to scroll \u00B7 Press and hold, then move, to drag"],
+    pi: ["Move one finger to move the mouse on the room's screen",
+         "Tap to click \u00B7 Two-finger tap to right-click \u00B7 Two fingers to scroll \u00B7 Press and hold, then move, to drag"],
+  };
+  const TRACKPAD_LOST = "Reconnecting\u2026";   // in the how-line while the socket is lost: a finger moves nothing until it is back
+  let pointerWordsTimer = null;
+
+  function stopPointer() {
+    trackpad.cancel();   // a drag that is held goes up first
+    pointer.target = null;
+    T.link.want("disc", false);
+  }
+  function setPointer(target) {
+    trackpad.cancel();   // a drag ends on the target it began on
+    pointer.target = pointer.target === target ? null : target;
+    T.link.want("disc", pointer.target !== null);
+    render();
+  }
+  function openTouchpad() {
+    const t = tvBlock();
+    T.surface.show({ target: pointer.target || "pi", tv: { usable: tvCardOf(t) === "", name: t.name || "" }, opener: el("tv-fullscreen") });
+  }
+
+  // What the agent says it cannot do (the TV is not answering, the room Pi's mouse is not allowed) goes where a refused control's words go. A move
+  // that cannot be taken comes back for each frame, so the same words in a burst are drawn once, and they go five quiet seconds after the last.
+  T.link.onError((words) => {
+    if (!pointer.target || T.surface.isOpen()) return;   // (the surface shows what it is told in its own strip)
+    clearTimeout(pointerWordsTimer);
+    pointerWordsTimer = setTimeout(() => { if (tvView.words === words) { tvView.words = ""; render(); } }, T.WORDS_MS);
+    if (tvView.words === words) return;
+    tvView.words = words;
+    render();
+  });
+  T.link.watch(() => { if (pointer.target) render(); });   // the trackpad's how-line says when the socket is lost
+
+  // The modes row: under the cards (no TV to point at) it is Full-screen touchpad alone, for the room Pi's mouse.
+  function renderTvPointer(card, t) {
+    const target = pointer.target;
+    el("tv-dpad").dataset.mode = target ? "pointer" : "keys";
+    el("tv-middle").hidden = Boolean(target);
+    el("tv-trackpad").hidden = !target;
+    for (const [id, who] of [["tv-pointer", "tv"], ["tv-pi-mouse", "pi"]]) {
+      const b = el(id), on = target === who;
+      b.hidden = card !== "";
+      b.setAttribute("aria-pressed", String(on));
+      b.classList.toggle("filled", on);
+      b.classList.toggle("quiet", !on);
+    }
+    if (target) {
+      const [lead, how] = TRACKPAD_WORDS[target];
+      const line = T.link.state() === "down" ? TRACKPAD_LOST : how;
+      el("tv-trackpad").dataset.target = target;
+      if (el("tv-trackpad-lead").textContent !== lead) el("tv-trackpad-lead").textContent = lead;
+      if (el("tv-trackpad-how").textContent !== line) el("tv-trackpad-how").textContent = line;
+    }
+    T.surface.sync({ usable: card === "", name: t.name || "" });
+  }
+
   // The view is left: nothing of it waits for the next person. (A pairing or a Turn on that is with the agent goes on, and its state stays.)
   function tvLeft() {
+    stopPointer();
+    T.surface.hide();
+    clearTimeout(pointerWordsTimer);
     tvVisit += 1;
     tvDisarm();
     tvDisarmForget();
@@ -309,6 +381,7 @@
       if (where) parts.push(["text", where]);
       if (t.channel) parts.push(["text", "Channel " + t.channel]);
     } else turnOn = true;
+    if (card === "" && pointer.target === "tv") parts.push(["text", "Pointer on"]);
     const key = JSON.stringify([parts, turnOn]);
     if (key !== tvView.factsKey) {
       tvView.factsKey = key;
@@ -489,7 +562,9 @@
     el("tv-not-set-up").hidden = card !== "not-set-up";
     el("tv-pairing").hidden = card !== "pairing";
     el("tv-refused").hidden = card !== "refused";
+    if (card !== "" && pointer.target) stopPointer();   // the cards come before there is a TV to point at
     renderTvStatus(t, card);
+    renderTvPointer(card, t);
     renderTvForget(card);
     if (card === "") {
       renderTvKeys(t, live);
@@ -518,6 +593,9 @@
   el("tv-forget").addEventListener("click", () => tvForget(el("tv-forget")));
   keepFocus(el("tv-forget-head"));
   el("tv-forget-head").addEventListener("click", tvForgetTap);
+  el("tv-pointer").addEventListener("click", () => setPointer("tv"));
+  el("tv-pi-mouse").addEventListener("click", () => setPointer("pi"));
+  el("tv-fullscreen").addEventListener("click", openTouchpad);
   P.onViewChange((name) => {
     if (name === "tv") refreshStatus();   // the TV as it is now, not as of the last poll
     else tvLeft();

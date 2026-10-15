@@ -7,6 +7,8 @@ when Playwright or its browser is not installed.
 """
 
 import asyncio
+import json
+import math
 import socket
 import tempfile
 import threading
@@ -22,7 +24,7 @@ from croom.meeting.providers.base import MeetingState
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASKED
 from croom.tv.errors import TvError
 from tests.unit.control.test_service import (
-    BOARDROOM, StubCalendar, StubDevices, StubMeeting, StubSearch, StubTv, event, skip_if_day_ends_within,
+    BOARDROOM, StubCalendar, StubDevices, StubMeeting, StubMouse, StubSearch, StubTv, event, skip_if_day_ends_within,
 )
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -32,7 +34,7 @@ class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
-                 tv=None, discover=None):
+                 tv=None, discover=None, mouse=None):
         self.events = list(calendar_events)
         self.room_name = room_name
         self.room_location = room_location
@@ -41,6 +43,7 @@ class PageServer:
         self.devices = devices if devices is not None else StubDevices()
         self.tv = tv                                                       # the room's TV service: none is a room with no TV set up
         self.discover = discover if discover is not None else StubSearch()   # Find TVs never puts a search on this network: a test that wants TVs found gives it some
+        self.mouse = mouse                                                 # the room Pi's virtual mouse: none is the real one, which the conftest keeps from being made
         self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
         self.meeting = None
         self.port = None
@@ -62,7 +65,7 @@ class PageServer:
             config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
                     "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")},
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
-            devices=self.devices, tv=self.tv, discover=self.discover,
+            devices=self.devices, tv=self.tv, discover=self.discover, mouse=self.mouse,
         )
         await service.start()
         self.port = service.bound_port
@@ -80,9 +83,14 @@ class PageServer:
         assert self._ready.wait(5), "page server did not start"
         return self
 
+    def stop(self):
+        """The agent goes away: its pointer sockets are closed, and nothing listens on its port any more."""
+        if self._thread.is_alive():
+            self._loop.call_soon_threadsafe(self._stop.set)
+            self._thread.join(5)
+
     def __exit__(self, *exc):
-        self._loop.call_soon_threadsafe(self._stop.set)
-        self._thread.join(5)
+        self.stop()
         self._settings_dir.cleanup()
 
 
@@ -599,7 +607,7 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-tv", "#icon-volume", "#icon-volume-x"])   # the last two are Key click on and off
         settled(page)
         page.click("#open-tv-options")
-        assert shown_icons(page) == bar + ["#icon-back", "#icon-locate"]     # this room has no TV: the card that says so, with Find TVs
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-locate", "#icon-touchpad"]     # this room has no TV: the card that says so, with Find TVs, and the touchpad for the room Pi's mouse
         settled(page)
         page.click("#back-from-tv")
         page.click("#open-camera-setup")
@@ -5425,27 +5433,30 @@ def test_every_icon_in_the_tv_view_draws_at_the_size_of_its_text_and_costs_no_he
         assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-power", "#icon-monitor", "#icon-home", "#icon-menu",
                                      "#icon-volume", "#icon-up", "#icon-down",
                                      "#icon-return", "#icon-exit", "#icon-info", "#icon-list",
-                                     "#icon-rewind", "#icon-play", "#icon-pause", "#icon-stop", "#icon-fast-forward"]
+                                     "#icon-rewind", "#icon-play", "#icon-pause", "#icon-stop", "#icon-fast-forward",
+                                     "#icon-pointer", "#icon-monitor", "#icon-touchpad"]
         page.click("#tv-input")
         assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-check", "#icon-exit",
                                      "#icon-return", "#icon-exit", "#icon-info", "#icon-list",
-                                     "#icon-rewind", "#icon-play", "#icon-pause", "#icon-stop", "#icon-fast-forward"]
+                                     "#icon-rewind", "#icon-play", "#icon-pause", "#icon-stop", "#icon-fast-forward",
+                                     "#icon-pointer", "#icon-monitor", "#icon-touchpad"]
         page.close()
     with PageServer(tv=RemoteTv(paired=False), discover=StubSearch([BOARDROOM])) as server:
         page = tv_page(browser, server)
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-tv", "#icon-locate"]
+        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-tv", "#icon-locate", "#icon-touchpad"]    # (the touchpad alone: no TV to point at)
         page.close()
     with PageServer(tv=RemoteTv(refused=True)) as server:
         page = tv_page(browser, server)
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-tv"]
+        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-tv", "#icon-touchpad"]
         page.close()
     with PageServer(tv=RemoteTv(on=False, reachable=False, volume=None)) as server:
         page = tv_page(browser, server)
         assert shown_icons(page)[:5] == ["#icon-settings", "#icon-back", "#icon-power", "#icon-x-circle", "#icon-power"]   # Turn on, Forget TV, and Power
+        assert shown_icons(page)[-3:] == ["#icon-pointer", "#icon-monitor", "#icon-touchpad"]                              # (Pointer works on a TV that is off: what it cannot take comes back in words)
         page.close()
     with PageServer() as server:
         page = tv_page(browser, server)
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-locate"]
+        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-locate", "#icon-touchpad"]
         page.close()
 
 
@@ -5489,7 +5500,7 @@ def test_the_remotes_buttons_are_not_replaced_while_the_status_polls_or_the_stat
     with PageServer(tv=tv) as server:
         page = tv_page(browser, server)
         page.click("#tv-input")
-        page.evaluate("""() => { window.kept = [...document.querySelectorAll('#tv-remote button, #tv-remote [data-tv], #tv-input-list button, #tv-turn-on')]; }""")
+        page.evaluate("""() => { window.kept = [...document.querySelectorAll('#tv-remote button, #tv-remote [data-tv], #tv-input-list button, #tv-turn-on, #tv-modes button, #tv-trackpad, #touchpad button')]; }""")
         tv.shown.update(muted=True, volume=33, input="HDMI_2", app="com.webos.app.hdmi2")   # (somebody used the TV's own remote, too)
         refresh_now(page)
         page.wait_for_function("document.getElementById('tv-level').textContent === '33'", timeout=5000)
@@ -5638,21 +5649,23 @@ def test_a_pairing_from_the_refused_card_that_is_accepted_shows_the_remote(brows
 
 
 LAYOUT_PROBE = """() => { const d = document.documentElement, vis = (e) => e.getClientRects().length;
-  const keys = [...document.querySelectorAll('#tv-remote [data-tv], #tv-inputs button, .tv-head button')].filter(vis)
+  const keys = [...document.querySelectorAll('#tv-remote [data-tv], #tv-inputs button, .tv-head button, #tv-modes button')].filter(vis)
     .map(e => ({ id: e.dataset.tv || e.id || e.textContent.trim().slice(0, 12), el: e, r: e.getBoundingClientRect() }));
-  const outside = keys.filter(k => k.r.left < -0.5 || k.r.right > d.clientWidth + 0.5).map(k => k.id);
+  const outside = keys.filter(k => k.r.left < -0.5 || k.r.right > d.clientWidth + 0.5 || k.r.top < -0.5 || k.r.bottom > innerHeight + 0.5).map(k => k.id);
   const overlapping = [];
   for (let i = 0; i < keys.length; i++) for (let j = i + 1; j < keys.length; j++) { const a = keys[i].r, b = keys[j].r;
     const w = Math.min(a.right, b.right) - Math.max(a.left, b.left), h = Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top);
     if (w > 1 && h > 1 && !(keys[i].el.closest('.tv-dpad') && keys[j].el.closest('.tv-dpad'))) overlapping.push([keys[i].id, keys[j].id]); }
   const modes = document.getElementById('tv-modes').getBoundingClientRect().top;
+  const above = [...keys.filter(k => !k.el.closest('#tv-modes')).map(k => k.r),     // the keys, and what they sit in: the columns, the trackpad, the card
+    ...['.tv-left', '.tv-right', '#tv-trackpad', '.tv-card'].map(s => document.querySelector(s + ':not([hidden])')).filter(e => e && vis(e)).map(e => e.getBoundingClientRect())];
   const rows = ['.tv-nav', '.tv-play', '.tv-numbers'].map(s => { const e = document.querySelector(s).getBoundingClientRect(), c = document.querySelector(s).closest('.tv-left, .tv-right').getBoundingClientRect();
     return [s, e.width <= c.width + 0.5]; });
-  return { outside, overlapping, belowTheKeys: Math.max(...keys.map(k => k.r.bottom)) - modes, rowsInTheirColumns: rows.filter(([s, ok]) => !ok).map(([s]) => s) }; }"""
+  return { outside, overlapping, belowTheKeys: Math.max(...above.map(r => r.bottom)) - modes, rowsInTheirColumns: rows.filter(([s, ok]) => !ok).map(([s]) => s) }; }"""
 
 
 def assert_the_remote_is_laid_out(page, where):
-    """Every key on the screen, none on another, nothing into the row the pointer modes will have, each row inside its column, and no scrolling."""
+    """Every key on the screen (the pointer modes' too), none on another, nothing above the modes row reaching into it, each row inside its column, and no scrolling."""
     found = page.evaluate(LAYOUT_PROBE)
     assert found["outside"] == [], (where, "off the screen")
     assert found["overlapping"] == [], (where, "overlapping")
@@ -5665,7 +5678,7 @@ def assert_the_remote_is_laid_out(page, where):
 def test_the_remote_with_stop_fits_from_1024_to_1920_wide_with_every_key_on_the_screen(browser, width, height):
     """The nav row (Back, Exit, Info, Guide) and the playback row (five keys and the four colours) are wider than the half of the screen they
     are in at 1024 wide; they give way, and the d-pad and the number pad give way in height, so that nothing is off the screen, on another key,
-    or in the row the pointer modes will have. The widest state is checked too: the sound off ("Unmute"), Power and Forget TV asking to confirm."""
+    or in the row of the pointer modes. The widest state is checked too: the sound off ("Unmute"), Power and Forget TV asking to confirm."""
     for label, tv, reach in (
             ("the remote", RemoteTv(), lambda page: None),
             ("the widest labels", RemoteTv(muted=True), lambda page: (page.click("#tv-power"), page.click("#tv-forget-head"))),
@@ -5908,3 +5921,1198 @@ def test_the_remote_works_through_the_real_tv_service_and_the_library_gets_its_c
             page.close()
     finally:
         FakeTvClient.instances.clear()
+
+
+SURFACE_PROBE = """() => { const vis = (e) => e.getClientRects().length, W = document.documentElement.clientWidth;
+  const things = [...document.querySelectorAll('#touchpad button, #touchpad-title, #touchpad-sub, #touchpad-link')].filter(vis).map(e => ({ id: e.id, r: e.getBoundingClientRect() }));
+  const off = things.filter(t => t.r.left < -0.5 || t.r.right > W + 0.5 || t.r.top < -0.5 || t.r.bottom > innerHeight + 0.5).map(t => t.id);
+  const overlapping = [];
+  for (let i = 0; i < things.length; i++) for (let j = i + 1; j < things.length; j++) { const a = things[i].r, b = things[j].r;
+    if (Math.min(a.right, b.right) - Math.max(a.left, b.left) > 1 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 1) overlapping.push([things[i].id, things[j].id]); }
+  return { off, overlapping, stripHeight: document.querySelector('.touchpad-strip').getBoundingClientRect().height,
+           padHeight: document.getElementById('touchpad-surface').getBoundingClientRect().height }; }"""
+
+
+# --- the pointer modes and the full-screen touchpad (spec 2026-10-13 TV remote and touchpad, sections 3 to 5) ---
+
+# The pad's numbers, as the plan gives them (touchpad.js has them as constants, each with a line on why): the tests are written in them, so a
+# change of a number is a change of a test. (The distance of a tap, 8 px, the wheel's notch, 30 px, and the surface's ten minutes are in the tests as they are.)
+GAIN, ACCEL_PX, TAP_MS, HOLD_MS = 1.6, 40, 180, 350
+FRAME_MS = 16                       # one animation frame on the page's stopped clock
+PAD, SURFACE = "#tv-trackpad", "#touchpad-surface"
+TOUCH = """([selector, kind, id, x, y]) => document.querySelector(selector).dispatchEvent(new PointerEvent(kind === 'lostcapture' ? 'lostpointercapture' : 'pointer' + kind, {
+    pointerId: id, pointerType: 'touch', isPrimary: id === 1, clientX: x, clientY: y, bubbles: true, cancelable: true,
+    button: kind === 'move' ? -1 : 0, buttons: kind === 'up' || kind === 'cancel' || kind === 'lostcapture' ? 0 : 1 }))"""
+
+
+def touch_event(page, selector, kind, x, y, finger=1):
+    """A synthetic finger on `selector`: `kind` is down, move, up, cancel or lostcapture, and `finger` is the pointer's id (two fingers are two ids)."""
+    page.evaluate(TOUCH, [selector, kind, finger, x, y])
+
+
+def frame(page, count=1):
+    """The page's animation frames, one at a time: on the stopped clock a frame is only drawn when the test runs its clock for one."""
+    for _ in range(count):
+        page.clock.run_for(FRAME_MS)
+
+
+def scaled(dx, dy=0):
+    """What one frame's travel (dx, dy) becomes: the gain, and the acceleration that follows the speed of the frame."""
+    k = GAIN * (1 + min(math.hypot(dx, dy), ACCEL_PX) / ACCEL_PX)
+    return dx * k, dy * k
+
+
+def drag_path(page, selector, steps, start=(100, 100), finger=1):
+    """A finger goes down at `start` and moves by each (dx, dy) of `steps`, one animation frame for each. It is left down; returns where it is."""
+    x, y = start
+    touch_event(page, selector, "down", x, y, finger)
+    for dx, dy in steps:
+        x, y = x + dx, y + dy
+        touch_event(page, selector, "move", x, y, finger)
+        frame(page)
+    return x, y
+
+
+class PointerLog:
+    """The agent's end of /ws/pointer, for a page that is not to reach the real one: it takes every socket the page opens, and notes the sockets
+    and the frames the page sends, in order. The page's messages come through the test browser's driver, so `got()` lets them arrive."""
+
+    def __init__(self, page):
+        self.page, self.sockets, self.frames, self.closed = page, [], [], []
+        page.route_web_socket("**/ws/pointer", self._accept)
+
+    def _accept(self, ws):
+        self.sockets.append(ws)
+        ws.on_message(lambda text: self.frames.append(json.loads(text)))
+        ws.on_close(lambda code, reason: self.closed.append(ws))              # (the sockets that the page closed)
+
+    def got(self):
+        self.page.wait_for_timeout(80)
+        return list(self.frames)
+
+    def say(self, words):
+        self.sockets[-1].send(json.dumps({"error": words}))
+
+    def drop(self):
+        self.sockets[-1].close(code=1011, reason="the agent stopped")
+
+
+def the_socket(page, state="up"):
+    """Waits for the pointer socket to be as the page's client says (it is a small public handle: window.croomTouchpad)."""
+    page.wait_for_function(f"window.croomTouchpad.link.state() === '{state}'", timeout=5000)
+
+
+def pad_page(browser, server, mode=None, width=1280, height=800):
+    """The TV view on a stopped clock, with a PointerLog in the agent's place; `mode` is the id of a button of the modes row to tap, and the socket is
+    up when this returns."""
+    page = page_on_a_stopped_clock(browser, server, width, height)
+    log = PointerLog(page)
+    open_tv_screen(page)
+    if mode:
+        page.click(mode)
+        the_socket(page)
+    return page, log
+
+
+def view_of(page):
+    return page.evaluate("document.body.dataset.view")
+
+
+def test_the_modes_row_turns_the_disc_into_a_trackpad_for_each_target_and_back(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        modes = page.locator("#tv-modes button")
+        assert modes.evaluate_all("bs => bs.map(b => b.id)") == ["tv-pointer", "tv-pi-mouse", "tv-fullscreen"]
+        assert modes.all_inner_texts() == ["Pointer", "Room Pi mouse", "Full-screen touchpad"]
+        assert modes.evaluate_all("bs => bs.map(b => b.querySelector('svg use').getAttribute('href'))") == ["#icon-pointer", "#icon-monitor", "#icon-touchpad"]
+        assert modes.evaluate_all("bs => bs.every(b => !('tv' in b.dataset))")                  # not keys of the remote: they send no control
+        disc = page.locator("#tv-dpad")
+        assert disc.get_attribute("data-mode") == "keys" and page.locator("#tv-middle").is_visible() and page.locator("#tv-trackpad").is_hidden()
+
+        def filled(selector):
+            return page.locator(selector).evaluate("b => getComputedStyle(b).backgroundColor")
+
+        page.mouse.move(0, 0)                                                                    # (a hovered key is another colour)
+        assert filled("#tv-pointer") == "rgba(0, 0, 0, 0)"                                       # off: outlined
+
+        page.click("#tv-pointer")                                                                # the disc becomes the TV's trackpad
+        page.mouse.move(0, 0)
+        assert disc.get_attribute("data-mode") == "pointer" and page.locator("#tv-trackpad").get_attribute("data-target") == "tv"
+        assert page.locator("#tv-trackpad").is_visible() and page.locator("#tv-middle").is_hidden()
+        assert [page.locator(s).get_attribute("aria-pressed") for s in ("#tv-pointer", "#tv-pi-mouse")] == ["true", "false"]
+        assert filled("#tv-pointer") == "rgb(27, 82, 229)" and filled("#tv-pi-mouse") == "rgba(0, 0, 0, 0)"    # blue when on
+        assert page.locator("#tv-trackpad-lead").inner_text() == "Move one finger to move the TV's cursor"
+        assert page.locator("#tv-trackpad-how").inner_text() == "Tap to click · Two fingers to scroll · Press and hold, then move, to drag"
+        assert status_line(page) == "Boardroom TV · On · HDMI 1 (Crystal Meet) · Pointer on"
+
+        page.click("#tv-pi-mouse")                                                               # a tap on the other moves the trackpad to its target
+        assert disc.get_attribute("data-mode") == "pointer" and page.locator("#tv-trackpad").get_attribute("data-target") == "pi"
+        assert [page.locator(s).get_attribute("aria-pressed") for s in ("#tv-pointer", "#tv-pi-mouse")] == ["false", "true"]
+        assert page.locator("#tv-trackpad-lead").inner_text() == "Move one finger to move the mouse on the room's screen"
+        assert "Two-finger tap to right-click" in page.locator("#tv-trackpad-how").inner_text()
+        assert status_line(page) == "Boardroom TV · On · HDMI 1 (Crystal Meet)"         # nothing for the room Pi: the trackpad's own words say which it moves
+
+        page.click("#tv-pi-mouse")                                                               # a second tap on the one that is on brings the d-pad back
+        assert disc.get_attribute("data-mode") == "keys" and page.locator("#tv-middle").is_visible() and page.locator("#tv-trackpad").is_hidden()
+        assert [page.locator(s).get_attribute("aria-pressed") for s in ("#tv-pointer", "#tv-pi-mouse")] == ["false", "false"]
+        page.click("#tv-pointer")
+        page.click("#tv-pointer")
+        assert disc.get_attribute("data-mode") == "keys" and status_line(page) == "Boardroom TV · On · HDMI 1 (Crystal Meet)"
+        assert errors == []
+        page.close()
+
+
+def test_the_trackpad_takes_the_middle_and_the_keys_above_and_the_modes_below_stay_put(browser):
+    """The disc grows into the whole middle of the remote (the mockup's tv-pointer.png), and nothing else on the screen moves for it."""
+    with PageServer(tv=RemoteTv()) as server:
+        page = tv_page(browser, server)
+
+        def where():
+            return page.evaluate("[...document.querySelectorAll('.tv-head button, #tv-keys button, #tv-modes button')].map(k => { const r = k.getBoundingClientRect(); return [k.id || k.dataset.tv, r.left, r.top, r.width, r.height]; })")
+
+        resting = where()
+        middle = page.locator("#tv-middle").bounding_box()
+        page.click("#tv-pointer")
+        pad = page.locator("#tv-trackpad").bounding_box()
+        assert all(abs(pad[k] - middle[k]) <= 1 for k in ("x", "y", "width", "height")), (pad, middle)   # the trackpad is where the middle was
+        assert where() == resting
+        page.close()
+
+
+def test_the_dpads_sectors_and_ok_take_no_press_in_pointer_mode(browser):
+    tv = RemoteTv()
+    with PageServer(tv=tv) as server:
+        page = tv_page(browser, server)
+        page.dispatch_event('.tv-dpad [data-tv="key:UP"]', "click")                              # (as a press does: it reaches the TV while the d-pad is the d-pad)
+        assert tv_calls(page, server, 1) == [("control", "key", "UP")]
+        page.click("#tv-pointer")
+        for selector in ('.tv-dpad [data-tv="key:UP"]', '.tv-dpad [data-tv="key:LEFT"]', ".tv-ok"):
+            page.dispatch_event(selector, "click")
+            page.dispatch_event(selector, "keydown", {"key": "Enter"})
+            page.dispatch_event(selector, "keydown", {"key": " "})
+        page.wait_for_timeout(200)
+        assert tv.calls == [("control", "key", "UP")]
+        page.close()
+
+
+@pytest.mark.parametrize("tv", [lambda: RemoteTv(paired=False), lambda: None, lambda: RemoteTv(refused=True)], ids=["not paired", "no TV set up", "no longer accepted"])
+def test_the_modes_row_under_a_card_has_only_the_full_screen_touchpad_and_it_moves_the_room_pi(browser, tv):
+    with PageServer(tv=tv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        assert page.locator("#tv-remote").is_hidden()
+        assert [b.is_visible() for b in page.locator("#tv-modes button").all()] == [False, False, True]
+        assert page.locator("#tv-fullscreen").inner_text() == "Full-screen touchpad"
+        page.click("#tv-fullscreen")
+        assert page.locator("#touchpad").is_visible()
+        assert page.locator("#touchpad-tv").is_disabled() and page.locator("#touchpad-pi").get_attribute("aria-pressed") == "true"   # the room Pi, and no TV to switch to
+        assert page.locator("#touchpad-title").inner_text() == "Moving the mouse on the room's screen"
+        assert page.locator("#touchpad-sub").inner_text() == "Pair the TV to move its cursor"
+        page.click("#touchpad-tv", force=True)                                                   # (a disabled half does nothing)
+        assert page.locator("#touchpad-title").inner_text() == "Moving the mouse on the room's screen"
+        page.click("#touchpad-done")
+        assert page.locator("#touchpad").is_hidden() and view_of(page) == "tv"
+        page.close()
+
+
+def test_a_pointer_mode_goes_off_when_the_tv_stops_being_one_the_table_can_move(browser):
+    tv = RemoteTv()
+    with PageServer(tv=tv) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-pointer")
+        tv.paired = False                                                                        # (forgotten from another page)
+        refresh_now(page)
+        page.wait_for_selector("#tv-pairing", state="visible", timeout=5000)
+        assert page.locator("#tv-pointer").is_hidden() and page.locator("#tv-fullscreen").is_visible()
+        tv.paired = True
+        refresh_now(page)
+        page.wait_for_selector("#tv-remote", state="visible", timeout=5000)
+        assert page.locator("#tv-dpad").get_attribute("data-mode") == "keys" and page.locator("#tv-pointer").get_attribute("aria-pressed") == "false"
+        page.close()
+
+
+def test_a_finger_path_on_the_disc_sends_moves_and_a_tap_clicks(browser):
+    """A finger drawn across the trackpad, a frame at a time, and a tap, as the agent's stub is sent them. The path is twelve frames of (5, 2): what
+    it sends adds up to what the gain and the acceleration make of it, in whole numbers, one message for each frame at most; the tap is one
+    message and nothing else."""
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        x, y = drag_path(page, PAD, [(5, 2)] * 12)
+        touch_event(page, PAD, "up", x, y)
+        moves = log.got()
+        assert moves and all(m["target"] == "tv" and m["type"] == "move" for m in moves), moves
+        assert all(type(m["dx"]) is int and type(m["dy"]) is int for m in moves)                   # whole numbers, which is what the agent takes
+        assert len(moves) == 11                                                                    # one for each frame but the first, whose travel was held (see below)
+        want_x, want_y = (12 * v for v in scaled(5, 2))
+        assert abs(sum(m["dx"] for m in moves) - want_x) <= 1 and abs(sum(m["dy"] for m in moves) - want_y) <= 1
+        touch_event(page, PAD, "down", 300, 300)
+        page.clock.run_for(50)
+        touch_event(page, PAD, "up", 300, 300)
+        assert log.got()[len(moves):] == [{"target": "tv", "type": "tap"}]
+        page.close()
+
+
+def test_several_moves_in_one_frame_are_one_message_and_the_speed_is_the_frames(browser):
+    """A touch panel reports faster than the screen draws: what comes between two frames is added up, and the acceleration follows the speed of that
+    travel, not of each report (four reports of 2 px are 8 px of travel in the frame: 1.6 x 1.2 of it, and not 1.6 x 1.05)."""
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        touch_event(page, PAD, "down", 100, 100)
+        for x in (102, 104, 106, 108):
+            touch_event(page, PAD, "move", x, 100)
+        assert log.got() == []                                                                     # (nothing goes before the frame)
+        frame(page)
+        touch_event(page, PAD, "up", 108, 100)
+        assert log.got() == [{"target": "tv", "type": "move", "dx": int(scaled(8)[0]), "dy": 0}]    # 15 (15.36), in one message
+        page.close()
+
+
+def test_the_travel_of_a_touch_is_held_until_it_has_gone_eight_pixels_or_lasted_a_tap(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        touch_event(page, PAD, "down", 100, 100)
+        touch_event(page, PAD, "move", 105, 100)
+        frame(page)
+        assert log.got() == []                                                                     # 5 px, 16 ms: it could still be a tap
+        touch_event(page, PAD, "move", 110, 100)
+        frame(page)
+        assert log.got() == [{"target": "tv", "type": "move", "dx": 18, "dy": 0}]                   # 10 px: both frames' travel, as if it had gone out as it came (9.1 and 9.1)
+        touch_event(page, PAD, "up", 110, 100)
+        touch_event(page, PAD, "down", 200, 200)                                                         # and one that stays within 8 px but lasts
+        touch_event(page, PAD, "move", 203, 200)
+        frame(page)
+        assert len(log.got()) == 1
+        page.clock.run_for(TAP_MS)
+        touch_event(page, PAD, "move", 204, 200)
+        frame(page)
+        assert log.got()[1:] == [{"target": "tv", "type": "move", "dx": 6, "dy": 0}]               # 3 px and 1 px: 5.16 and 1.64 of the cursor, held and then sent together
+        touch_event(page, PAD, "up", 204, 200)
+        assert len(log.got()) == 2                                                                 # (it lasted: no tap)
+        page.close()
+
+
+def test_a_slow_path_loses_nothing_to_whole_numbers_and_a_fast_flick_goes_further_than_the_gain_alone(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        x, y = drag_path(page, PAD, [(-1, -1)] * 80)                                               # 1.41 px a frame: 1.66 times as far, and 1 or 2 whole pixels each time
+        touch_event(page, PAD, "up", x, y)
+        slow = log.got()
+        want = 80 * scaled(-1, -1)[0]
+        assert abs(sum(m["dx"] for m in slow) - want) <= 1 and abs(sum(m["dy"] for m in slow) - want) <= 1, (sum(m["dx"] for m in slow), want)
+        assert {m["dx"] for m in slow[1:]} <= {-1, -2} and len(slow) >= 70                          # (the first message has the held frames' travel: 6 of them, 8.5 px, went past 8)
+        x, y = drag_path(page, PAD, [(60, 0)], start=(10, 500))                                    # one frame of 60 px: the acceleration at its top, twice the gain
+        touch_event(page, PAD, "up", x, y)
+        flick = log.got()[len(slow):]
+        assert len(flick) == 1 and flick[0]["dy"] == 0 and 191 <= flick[0]["dx"] <= 192, flick
+        assert flick[0]["dx"] > 60 * GAIN * 1.5
+        page.close()
+
+
+def test_a_quick_short_touch_is_a_tap_and_sends_only_the_tap_however_it_wobbles(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        touch_event(page, PAD, "down", 100, 100)
+        touch_event(page, PAD, "move", 103, 101)                                                         # a fingertip rolls
+        frame(page)
+        touch_event(page, PAD, "move", 100, 99)
+        frame(page, 3)
+        touch_event(page, PAD, "up", 100, 99)
+        assert log.got() == [{"target": "tv", "type": "tap"}]
+        touch_event(page, PAD, "down", 100, 100)                                                         # slower than a tap is no tap
+        page.clock.run_for(TAP_MS + 20)
+        touch_event(page, PAD, "up", 100, 100)
+        touch_event(page, PAD, "down", 100, 100)                                                         # and further than a tap is a move
+        touch_event(page, PAD, "move", 112, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 112, 100)
+        frames = log.got()
+        assert [f["type"] for f in frames] == ["tap", "move"]
+        page.close()
+
+
+def test_a_finger_held_still_and_then_moved_drags_and_a_long_press_that_does_not_move_sends_nothing(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        touch_event(page, PAD, "down", 100, 100)                                                         # held still for 400 ms, then moved: a drag
+        page.clock.run_for(HOLD_MS + 50)
+        assert log.got() == []                                                                     # (nothing is sent for the holding itself)
+        touch_event(page, PAD, "move", 120, 100)
+        frame(page)
+        touch_event(page, PAD, "move", 140, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 140, 100)
+        frames = log.got()
+        assert frames[0] == {"target": "tv", "type": "down"} and frames[-1] == {"target": "tv", "type": "up"}
+        moves = frames[1:-1]
+        assert moves and all(f["type"] == "move" for f in moves)
+        assert abs(sum(m["dx"] for m in moves) - 2 * scaled(20)[0]) <= 1                           # (the 20 px that took it past 8 px are not lost)
+        touch_event(page, PAD, "down", 100, 100)                                                         # a long press that ends where it began: nothing at all
+        page.clock.run_for(HOLD_MS + 250)
+        touch_event(page, PAD, "up", 100, 100)
+        assert log.got() == frames
+        touch_event(page, PAD, "down", 100, 100)                                                         # a finger that moves at once does not drag
+        page.clock.run_for(40)
+        touch_event(page, PAD, "move", 130, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 130, 100)
+        assert [f["type"] for f in log.got()[len(frames):]] == ["move"]
+        page.close()
+
+
+def test_a_drag_that_the_browser_takes_away_lets_go_too(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 130, 100)
+        frame(page)
+        touch_event(page, PAD, "cancel", 130, 100)                                                       # (a palm, a system gesture: no lift will come)
+        frames = log.got()
+        assert [f["type"] for f in frames][0] == "down" and frames[-1]["type"] == "up" and all(f["target"] == "pi" for f in frames)
+        page.close()
+
+
+def test_a_touch_the_browser_lets_go_of_without_a_lift_ends_like_a_cancelled_one(browser):
+    """No up and no cancel came, but the pad lost its hold on the finger: a drag must not be left with the button down on the room Pi."""
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 140, 100)
+        frame(page)
+        touch_event(page, PAD, "lostcapture", 140, 100)
+        assert [f["type"] for f in log.got()] == ["down", "move", "up"]
+        touch_event(page, PAD, "up", 140, 100)                                                       # (the lift that was lost turns up late: nothing more)
+        assert [f["type"] for f in log.got()] == ["down", "move", "up"]
+        touch_event(page, PAD, "down", 300, 300)                                                     # and a tap that ends normally is one, with the lost capture after it
+        page.clock.run_for(50)
+        touch_event(page, PAD, "up", 300, 300)
+        touch_event(page, PAD, "lostcapture", 300, 300)
+        assert [f["type"] for f in log.got()] == ["down", "move", "up", "tap"]
+        page.close()
+
+
+def test_a_drag_under_a_mode_that_is_switched_or_put_away_ends_on_the_target_it_began_on(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 140, 100)
+        frame(page)
+        page.click("#tv-pointer")                                                                    # (a second finger on the other mode)
+        frames = log.got()
+        assert [(f["target"], f["type"]) for f in frames] == [("pi", "down"), ("pi", "move"), ("pi", "up")]
+        touch_event(page, PAD, "move", 180, 100)                                                     # the first finger is still down: it is nobody's now
+        frame(page)
+        touch_event(page, PAD, "up", 180, 100)
+        assert log.got() == frames
+        page.close()
+
+
+def test_a_drag_the_socket_lost_is_forgotten_and_nothing_is_sent_late_for_it(browser):
+    """The agent let the button go when the socket ended, so the page does not send an up for the drag, though the finger is still down when the socket
+    is back: what the finger does from there is an ordinary move."""
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 140, 100)
+        frame(page)
+        assert [f["type"] for f in log.got()] == ["down", "move"]
+        log.drop()
+        the_socket(page, "down")
+        touch_event(page, PAD, "move", 180, 100)                                                     # (dropped, never kept)
+        frame(page)
+        page.clock.run_for(1001)
+        the_socket(page)
+        touch_event(page, PAD, "move", 200, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 200, 100)
+        frames = log.got()
+        assert [f["type"] for f in frames] == ["down", "move", "move"]                               # no up, then or now, and nothing from the time it was away
+        assert frames[2]["dx"] == int(scaled(20)[0])
+        page.close()
+
+
+def test_two_fingers_scroll_and_two_finger_tap_right_clicks_the_pi(browser):
+    """The room Pi's wheel turns a notch for each 30 px of the two fingers' mean travel, the remainder carried, the content following the fingers
+    (up for a finger drawn up); the TV is sent the pixels. A quick touch of both fingers is a right click, for the room Pi only."""
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 300, 1)
+        touch_event(page, PAD, "down", 220, 300, 2)
+        for step in range(1, 5):                                                                   # both fingers drawn up, 20 px a frame: 80 px, 2.67 notches
+            touch_event(page, PAD, "move", 100, 300 - 20 * step, 1)
+            touch_event(page, PAD, "move", 220, 300 - 20 * step, 2)
+            frame(page)
+        touch_event(page, PAD, "up", 100, 220, 1)
+        touch_event(page, PAD, "up", 220, 220, 2)
+        scrolls = log.got()
+        assert scrolls and all(f == {"target": "pi", "type": "scroll", "dx": 0, "dy": f["dy"]} and f["dy"] < 0 for f in scrolls), scrolls
+        assert sum(f["dy"] for f in scrolls) == -2                                                 # (and 0.67 of a notch is carried, not sent)
+        touch_event(page, PAD, "down", 100, 300, 1)                                                      # fingers drawn down, and the other way
+        touch_event(page, PAD, "down", 220, 300, 2)
+        for step in range(1, 5):
+            touch_event(page, PAD, "move", 100, 300 + 20 * step, 1)
+            touch_event(page, PAD, "move", 220, 300 + 20 * step, 2)
+            frame(page)
+        touch_event(page, PAD, "up", 100, 380, 1)
+        touch_event(page, PAD, "up", 220, 380, 2)
+        assert sum(f["dy"] for f in log.got()[len(scrolls):]) == 2
+        before = len(log.got())
+        touch_event(page, PAD, "down", 100, 300, 1)                                                      # a two-finger tap: both down and up again within 180 ms
+        touch_event(page, PAD, "down", 220, 300, 2)
+        page.clock.run_for(60)
+        touch_event(page, PAD, "up", 100, 300, 1)
+        touch_event(page, PAD, "up", 220, 300, 2)
+        assert log.got()[before:] == [{"target": "pi", "type": "right"}]
+        page.close()
+
+
+def test_a_second_finger_landing_during_a_drag_lets_the_button_go_and_the_two_fingers_scroll(browser):
+    """Once a second finger lands the gesture is two-finger until every finger is up: a drag that was going on ends first, so that no scroll runs with
+    the button held, and the up is not sent again at the lifts."""
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 300, 1)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 140, 300, 1)
+        frame(page)
+        touch_event(page, PAD, "down", 260, 300, 2)
+        for step in range(1, 5):
+            touch_event(page, PAD, "move", 140, 300 - 20 * step, 1)
+            touch_event(page, PAD, "move", 260, 300 - 20 * step, 2)
+            frame(page)
+        touch_event(page, PAD, "up", 140, 220, 1)
+        touch_event(page, PAD, "up", 260, 220, 2)
+        frames = log.got()
+        assert [f["type"] for f in frames[:3]] == ["down", "move", "up"]                             # the drag, and the button let go as the second finger lands
+        assert frames[3:] and all(f["type"] == "scroll" and f["dy"] < 0 for f in frames[3:]) and sum(f["dy"] for f in frames[3:]) == -2
+        page.close()
+
+
+def test_two_fingers_on_the_tv_scroll_in_pixels_and_a_two_finger_tap_sends_nothing(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        touch_event(page, PAD, "down", 100, 300, 1)
+        touch_event(page, PAD, "down", 220, 300, 2)
+        for step in range(1, 5):
+            touch_event(page, PAD, "move", 100 + 6 * step, 300 - 20 * step, 1)
+            touch_event(page, PAD, "move", 220 + 6 * step, 300 - 20 * step, 2)
+            frame(page)
+        touch_event(page, PAD, "up", 124, 220, 1)
+        touch_event(page, PAD, "up", 244, 220, 2)
+        scrolls = log.got()
+        assert scrolls and all(f["target"] == "tv" and f["type"] == "scroll" and type(f["dx"]) is int and type(f["dy"]) is int for f in scrolls)
+        assert (sum(f["dx"] for f in scrolls), sum(f["dy"] for f in scrolls)) == (24, -80)         # the pixels, with the signs of the fingers' own travel
+        touch_event(page, PAD, "down", 100, 300, 1)
+        touch_event(page, PAD, "down", 220, 300, 2)
+        touch_event(page, PAD, "move", 103, 302, 1)                                                # (the fingertips roll a little)
+        touch_event(page, PAD, "move", 222, 301, 2)
+        frame(page)
+        page.clock.run_for(40)
+        touch_event(page, PAD, "up", 103, 302, 1)
+        touch_event(page, PAD, "up", 222, 301, 2)
+        assert log.got() == scrolls                                                                # (the TV's cursor has no right button, and the rolling scrolled nothing)
+        page.close()
+
+
+def test_a_slow_two_finger_touch_is_no_tap_and_a_third_finger_and_the_last_finger_of_two_do_nothing(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 300, 1)
+        touch_event(page, PAD, "down", 220, 300, 2)
+        page.clock.run_for(TAP_MS + 20)                                                            # slower than a tap
+        touch_event(page, PAD, "up", 100, 300, 1)
+        touch_event(page, PAD, "up", 220, 300, 2)
+        assert log.got() == []
+        touch_event(page, PAD, "down", 100, 300, 1)                                                      # a third finger is ignored, wherever it goes
+        touch_event(page, PAD, "down", 220, 300, 2)
+        touch_event(page, PAD, "down", 340, 300, 3)
+        for step in range(1, 5):
+            touch_event(page, PAD, "move", 100, 300 - 20 * step, 1)
+            touch_event(page, PAD, "move", 220, 300 - 20 * step, 2)
+            touch_event(page, PAD, "move", 340 + 60 * step, 300 + 60 * step, 3)                      # (last, so that it would be the one the frame found)
+            frame(page)
+        touch_event(page, PAD, "up", 340, 300, 3)
+        scrolled = log.got()
+        assert sum(f["dy"] for f in scrolled) == -2 and all(f["type"] == "scroll" for f in scrolled)
+        touch_event(page, PAD, "up", 100, 220, 1)                                                        # the last finger of two lifting is not a tap, and its travel is not a move
+        touch_event(page, PAD, "down", 400, 300, 4)                                                      # and a finger that lands after one of the two has lifted joins nothing
+        for step in range(1, 5):
+            touch_event(page, PAD, "move", 400, 300 - 20 * step, 4)
+            touch_event(page, PAD, "move", 220, 220 - 20 * step, 2)
+            frame(page)
+        touch_event(page, PAD, "up", 400, 220, 4)
+        touch_event(page, PAD, "up", 220, 140, 2)
+        assert log.got() == scrolled
+        page.close()
+
+
+def test_the_full_screen_touchpad_opens_on_the_target_of_the_mode_that_is_on_else_the_room_pi(browser):
+    for mode, target, title, small in (
+            (None, "pi", "Moving the mouse on the room's screen", "The room Pi behind the TV"),
+            ("#tv-pointer", "tv", "Moving the TV's cursor", "Boardroom TV"),
+            ("#tv-pi-mouse", "pi", "Moving the mouse on the room's screen", "The room Pi behind the TV")):
+        with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+            page = tv_page(browser, server)
+            if mode:
+                page.click(mode)
+            page.click("#tv-fullscreen")
+            assert page.locator("#touchpad").is_visible()
+            assert page.locator("#touchpad-title").inner_text() == title and page.locator("#touchpad-sub").inner_text() == small
+            assert [page.locator(s).get_attribute("aria-pressed") for s in ("#touchpad-tv", "#touchpad-pi")] == [str(target == "tv").lower(), str(target == "pi").lower()]
+            assert page.locator("#touchpad-tv").inner_text() == "TV" and page.locator("#touchpad-pi").inner_text() == "Room Pi" and page.locator("#touchpad-done").inner_text() == "Done"
+            assert [page.locator(f"#touchpad-{k} svg use").get_attribute("href") for k in ("tv", "pi", "done")] == ["#icon-tv", "#icon-monitor", "#icon-check"]
+            page.close()
+
+
+def test_the_surface_covers_the_whole_page_and_the_switch_moves_it_between_the_targets(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-pointer")
+        page.click("#tv-fullscreen")
+        box = page.locator("#touchpad").bounding_box()
+        assert (box["x"], box["y"], box["width"], box["height"]) == (0, 0, 1280, 800)                # the header too
+        assert page.evaluate("document.elementFromPoint(1200, 50).closest('#touchpad') !== null")    # where Options is, and nothing of the page is under a finger
+        assert page.locator("#touchpad-surface").evaluate("s => s.getBoundingClientRect().bottom") == 800
+        page.click("#touchpad-pi")
+        assert page.locator("#touchpad-title").inner_text() == "Moving the mouse on the room's screen"
+        assert page.locator("#touchpad-pi").get_attribute("aria-pressed") == "true" and page.locator("#touchpad-tv").get_attribute("aria-pressed") == "false"
+        page.click("#touchpad-tv")
+        assert page.locator("#touchpad-title").inner_text() == "Moving the TV's cursor"
+        page.click("#touchpad-pi")
+        page.click("#touchpad-done")                                                                 # Done: the TV view, with the mode that was on
+        assert page.locator("#touchpad").is_hidden() and view_of(page) == "tv"
+        assert page.locator("#tv-dpad").get_attribute("data-mode") == "pointer" and page.locator("#tv-trackpad").get_attribute("data-target") == "tv"
+        assert page.locator("#tv-pointer").get_attribute("aria-pressed") == "true"                   # (the surface's own switch is its own)
+        page.close()
+
+
+def test_a_tv_that_is_forgotten_under_the_surface_hands_the_surface_to_the_room_pi_and_ends_a_drag_on_the_tv(browser):
+    tv = RemoteTv()
+    with PageServer(tv=tv, mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        page.click("#tv-fullscreen")
+        assert page.locator("#touchpad-title").inner_text() == "Moving the TV's cursor" and page.locator("#touchpad-tv").is_enabled()
+        touch_event(page, SURFACE, "down", 400, 400)                                                 # a finger on the surface, holding for a drag
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, SURFACE, "move", 440, 400)
+        frame(page)
+        tv.paired = False                                                                            # (forgotten from another page)
+        page.clock.run_for(2500)                                                                     # (the page's poll sees it)
+        page.wait_for_function("document.getElementById('touchpad-title').textContent === \"Moving the mouse on the room's screen\"", timeout=5000)
+        assert page.locator("#touchpad-tv").is_disabled() and page.locator("#touchpad-pi").get_attribute("aria-pressed") == "true"
+        assert page.locator("#touchpad-sub").inner_text() == "Pair the TV to move its cursor"
+        assert page.locator("#touchpad").is_visible()                                                # (the surface stays: it is what the person is using)
+        assert [(f["target"], f["type"]) for f in log.got()] == [("tv", "down"), ("tv", "move"), ("tv", "up")]   # the drag ended on the TV it began on
+        page.close()
+
+
+def test_the_surface_takes_the_focus_for_done_and_gives_it_back_to_the_button_that_opened_it(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-fullscreen")
+        assert page.evaluate("document.activeElement.id") == "touchpad-done"
+        assert page.locator("#touchpad").get_attribute("role") == "dialog" and page.locator("#touchpad").get_attribute("aria-modal") == "true"
+        page.click("#touchpad-done")
+        assert page.evaluate("document.activeElement.id") == "tv-fullscreen"
+        page.close()
+
+
+def test_a_drag_on_the_surface_ends_on_the_target_it_began_on_when_the_switch_is_tapped(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        page.click("#tv-fullscreen")
+        touch_event(page, SURFACE, "down", 400, 400)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, SURFACE, "move", 440, 400)
+        frame(page)
+        page.click("#touchpad-pi")                                                                   # (a second finger on the switch)
+        frames = log.got()
+        assert [(f["target"], f["type"]) for f in frames] == [("tv", "down"), ("tv", "move"), ("tv", "up")]
+        touch_event(page, SURFACE, "move", 480, 400)                                                 # the first finger is still down: it is nobody's now
+        frame(page)
+        touch_event(page, SURFACE, "up", 480, 400)
+        assert log.got() == frames
+        page.close()
+
+
+def test_the_touchpad_returns_to_the_screen_that_opened_it(browser):
+    """Done puts the surface away and the page is on the TV view it was opened from, with the mode that was on; Back from there goes where the TV view
+    came from: the meeting screen for a call, Options for a room that is not in one."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)                                                                             # in a call
+        page.click("#open-tv-meeting")
+        page.click("#tv-fullscreen")
+        assert page.locator("#touchpad").is_visible() and view_of(page) == "tv"
+        page.click("#touchpad-done")
+        assert page.locator("#touchpad").is_hidden() and view_of(page) == "tv" and page.locator("#tv-remote").is_visible()
+        page.click("#back-from-tv")
+        assert view_of(page) == "meeting"
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)
+        page.clock.run_for(2500)                                                                     # (the page's poll sees the call has ended)
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        page.click("#open-options")                                                                  # and in a room that is not
+        page.click("#open-tv-options")
+        page.click("#tv-pi-mouse")
+        page.click("#tv-fullscreen")
+        page.click("#touchpad-done")
+        assert page.locator("#touchpad").is_hidden() and view_of(page) == "tv"
+        assert page.locator("#tv-dpad").get_attribute("data-mode") == "pointer"
+        page.click("#back-from-tv")
+        assert view_of(page) == "options"
+        page.close()
+
+
+def test_the_touchpad_puts_itself_away_after_ten_idle_minutes_and_the_pages_own_return_waits_meanwhile(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_tv_screen(page)
+        page.click("#tv-fullscreen")
+        page.clock.fast_forward(9 * 60_000)
+        touch_event(page, SURFACE, "down", 400, 400)                                                       # a touch at nine minutes keeps it another ten
+        touch_event(page, SURFACE, "up", 400, 400)
+        page.clock.fast_forward(90_000)
+        assert page.locator("#touchpad").is_visible()                                                # (ten and a half minutes in: the page's own return, ten from the tap, was waiting)
+        page.clock.fast_forward(8 * 60_000)
+        assert page.locator("#touchpad").is_visible()
+        page.clock.fast_forward(90_000)
+        assert page.locator("#touchpad").is_hidden() and view_of(page) == "tv"                       # ten minutes with no touch: the TV view it was opened from
+        page.clock.fast_forward(9 * 60_000)
+        assert view_of(page) == "tv"                                                                 # and the page's own wait begins again: ten minutes from now
+        page.clock.fast_forward(90_000)
+        assert view_of(page) == "idle"
+        page.close()
+
+
+def test_a_meetings_tv_view_waits_two_minutes_from_the_surface_going_away_and_not_while_it_is_up(browser):
+    """In a meeting the TV view returns to the meeting screen after two idle minutes; the tap that opened the surface starts that wait, and the surface
+    must stop it: nobody touching the screen for two and a half minutes is what a person pointing at the TV looks like to the page."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.click("#open-tv-meeting")
+        page.click("#tv-fullscreen")
+        page.clock.fast_forward(150_000)
+        assert page.locator("#touchpad").is_visible() and view_of(page) == "tv"
+        page.click("#touchpad-done")
+        page.clock.fast_forward(100_000)
+        assert view_of(page) == "tv"                                                                 # the two minutes begin when the surface goes away
+        page.clock.fast_forward(30_000)
+        assert view_of(page) == "meeting"
+        page.close()
+
+
+@pytest.mark.parametrize("cause", ["Back", "the idle return", "the meeting ending", "the mode the TV view came from ending"])
+def test_leaving_the_tv_view_in_the_middle_of_a_drag_lets_go_closes_the_socket_and_turns_the_mode_off(browser, cause):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        log = PointerLog(page)
+        if cause == "the meeting ending":
+            join_by_id(page)
+            page.click("#open-tv-meeting")
+        else:
+            open_tv_screen(page)
+        page.click("#tv-pi-mouse")
+        the_socket(page)
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 140, 100)
+        frame(page)
+        assert [f["type"] for f in log.got()] == ["down", "move"]                                    # a drag is going, with the button down on the room Pi
+        if cause == "Back":
+            page.click("#back-from-tv")
+        elif cause == "the idle return":
+            page.clock.fast_forward(10 * 60_000 + 1000)
+        elif cause == "the meeting ending":
+            page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)
+            page.clock.run_for(2500)                                                                 # (the page's poll sees the call has ended)
+        else:
+            page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)
+            page.clock.run_for(2500)                                                                 # (and here, that one has begun)
+        page.wait_for_function("document.body.dataset.view !== 'tv'", timeout=8000)
+        frames = log.got()
+        assert frames[-1] == {"target": "pi", "type": "up"}                                          # let go before the socket went
+        assert len(log.closed) == 1 and log.closed[0] is log.sockets[0]
+        the_socket(page, "closed")
+        page.close()
+
+
+def test_leaving_the_tv_view_puts_the_surface_away_and_turns_the_mode_off(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        log = PointerLog(page)
+        join_by_id(page)
+        page.click("#open-tv-meeting")
+        page.click("#tv-pointer")
+        page.click("#tv-fullscreen")
+        the_socket(page)
+        touch_event(page, SURFACE, "down", 400, 400)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, SURFACE, "move", 440, 400)
+        frame(page)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)    # the call ends under the surface
+        page.clock.run_for(2500)
+        page.wait_for_function("document.body.dataset.view === 'idle'", timeout=8000)
+        assert page.locator("#touchpad").is_hidden()
+        assert [f["type"] for f in log.got()] == ["down", "move", "up"] and log.got()[-1]["target"] == "tv"
+        the_socket(page, "closed")
+        page.click("#open-options")
+        page.click("#open-tv-options")
+        assert page.locator("#tv-dpad").get_attribute("data-mode") == "keys" and page.locator("#tv-pointer").get_attribute("aria-pressed") == "false"
+        page.close()
+
+
+def test_one_socket_is_open_while_a_pointer_mode_is_on_or_the_surface_is_up_and_closed_when_neither_is(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        log = PointerLog(page)
+        open_tv_screen(page)
+        page.wait_for_timeout(100)
+        assert log.sockets == []                                                                     # the remote alone opens none
+        page.click("#tv-pointer")
+        the_socket(page)
+        assert len(log.sockets) == 1 and log.sockets[0].url == f"ws://127.0.0.1:{server.port}/ws/pointer"   # (ws for a page that is not on https, on the page's own host)
+        page.click("#tv-fullscreen")
+        page.click("#touchpad-done")
+        page.wait_for_timeout(100)
+        assert len(log.sockets) == 1 and log.closed == []                                            # the same one, through the surface, and still there for the mode
+        page.click("#tv-pi-mouse")
+        page.wait_for_timeout(100)
+        assert len(log.sockets) == 1 and log.closed == []                                            # (the other target, the same socket)
+        page.click("#tv-pi-mouse")                                                                   # no mode, no surface
+        the_socket(page, "closed")
+        page.wait_for_timeout(100)
+        assert log.closed == [log.sockets[0]]
+        page.click("#tv-fullscreen")                                                                 # the surface alone
+        the_socket(page)
+        assert len(log.sockets) == 2
+        page.click("#touchpad-done")
+        the_socket(page, "closed")
+        page.wait_for_timeout(100)
+        assert log.closed == log.sockets
+        page.close()
+
+
+def test_the_touchpad_shows_a_mark_when_the_socket_drops(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        log = PointerLog(page)
+        open_tv_screen(page)
+        page.click("#tv-fullscreen")
+        the_socket(page)
+        mark = page.locator("#touchpad-link")
+        assert mark.is_hidden()                                                                      # nothing to say while the socket is there
+        log.drop()
+        the_socket(page, "down")
+        assert mark.is_visible() and mark.inner_text() == "Reconnecting…"
+        assert page.locator("#touchpad-title").is_visible() and page.locator("#touchpad-done").is_visible()   # the strip keeps its place
+        page.clock.run_for(900)
+        page.wait_for_timeout(100)
+        assert len(log.sockets) == 1 and mark.is_visible()                                           # it tries again after a second
+        page.clock.run_for(200)
+        the_socket(page)
+        assert len(log.sockets) == 2 and mark.is_hidden()
+        log.drop()                                                                                   # lost again, once it was back: the wait begins again at a second
+        the_socket(page, "down")
+        page.clock.run_for(1001)
+        the_socket(page)
+        assert len(log.sockets) == 3 and mark.is_hidden()
+        page.close()
+
+
+def test_the_trackpad_says_reconnecting_in_its_how_line_while_the_socket_is_down(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        how = page.locator("#tv-trackpad-how")
+        resting = how.inner_text()
+        log.drop()
+        the_socket(page, "down")
+        assert how.inner_text() == "Reconnecting…"
+        page.clock.run_for(1001)
+        the_socket(page)
+        assert how.inner_text() == resting
+        page.close()
+
+
+def until(page, done, timeout=5.0):
+    """Waits, as the page's agent would take its time, for what the server's stubs are to have been told."""
+    waited = 0.0
+    while not done() and waited < timeout:
+        page.wait_for_timeout(25)
+        waited += 0.025
+    assert done(), "the server was not told in time"
+
+
+def test_the_socket_comes_back_after_one_second_two_and_then_every_five_and_nothing_done_meanwhile_is_sent_late(browser):
+    """The agent goes away (its socket closes, and nothing listens on its port: every try fails) and comes back on the same port."""
+    port = free_port()
+    attempts = []
+    with PageServer(tv=RemoteTv(), mouse=StubMouse(), port=port) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        page.on("websocket", lambda ws: attempts.append(ws))
+        open_tv_screen(page)
+        page.click("#tv-pi-mouse")
+        the_socket(page)
+        assert len(attempts) == 1
+    the_socket(page, "down")
+
+    def after(ms):
+        page.clock.run_for(ms)
+        page.wait_for_timeout(100)
+        for _ in range(200):                                                                         # a try that was made has failed, and the page has set its next wait, before the clock moves again
+            if all(ws.is_closed() for ws in attempts):
+                break
+            page.wait_for_timeout(25)
+        return len(attempts)
+
+    assert (after(999), after(2)) == (1, 2)                                                          # a second after the loss
+    assert (after(1998), after(2)) == (2, 3)                                                         # two after that
+    assert (after(4998), after(2)) == (3, 4)                                                         # then five
+    assert (after(4998), after(2)) == (4, 5)                                                         # and five again
+    assert {ws.url for ws in attempts} == {f"ws://127.0.0.1:{port}/ws/pointer"}
+    touch_event(page, PAD, "down", 100, 100)                                                               # a tap while the agent is away: dropped, never kept
+    page.clock.run_for(50)
+    touch_event(page, PAD, "up", 100, 100)
+    mouse = StubMouse()
+    with PageServer(tv=RemoteTv(), mouse=mouse, port=port):
+        page.clock.run_for(5001)
+        the_socket(page)
+        until(page, lambda: mouse.opened >= 1)
+        page.wait_for_timeout(300)
+        assert mouse.calls == []                                                                     # (it would have clicked now)
+        touch_event(page, PAD, "down", 100, 100)                                                           # and it works again
+        page.clock.run_for(50)
+        touch_event(page, PAD, "up", 100, 100)
+        until(page, lambda: mouse.calls == [("click", "left")])
+        assert page.locator("#tv-words").is_hidden()
+    page.close()
+
+
+def test_an_error_frame_shows_its_words_in_the_status_line_once_and_they_clear(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        said = "The TV is not answering at 10.0.0.41"
+        log.say(said)
+        page.wait_for_function(f"document.getElementById('tv-words').textContent === {said!r}", timeout=5000)
+        assert page.locator("#tv-words").is_visible()
+        page.evaluate("""() => { window.writes = 0; const watch = new MutationObserver((records) => { window.writes += records.length; });
+            for (const id of ['tv-words', 'tv-remote', 'tv-modes']) watch.observe(document.getElementById(id), { childList: true, characterData: true, subtree: true, attributes: true }); }""")
+        for _ in range(20):                                                                          # every move the TV cannot take comes back as the same words
+            log.say(said)
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.writes") == 0                                                   # drawn once
+        page.clock.run_for(4900)
+        assert page.locator("#tv-words").inner_text() == said                                       # (the words came again: it is five seconds from the last of them)
+        page.clock.run_for(200)
+        assert page.locator("#tv-words").is_hidden()                                                 # five quiet seconds
+        log.say("<b>It is text</b>")                                                                 # whatever it says is text, never markup
+        page.wait_for_function("document.getElementById('tv-words').textContent === '<b>It is text</b>'", timeout=5000)
+        assert page.locator("#tv-words b").count() == 0
+        page.click('[data-tv="volume_up"]')                                                          # and a tap on a key clears them, as it does a refusal's
+        assert page.locator("#tv-words").is_hidden()
+        log.say(said)
+        page.wait_for_selector("#tv-words:not([hidden])", timeout=5000)
+        page.click("#back-from-tv")                                                                  # leaving the view clears them for the next person
+        page.click("#open-tv-options")
+        assert page.locator("#tv-words").is_hidden()
+        page.close()
+
+
+def test_an_error_frame_shows_in_the_strips_small_line_and_goes_after_five_quiet_seconds(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server)
+        page.click("#tv-fullscreen")
+        the_socket(page)
+        small = page.locator("#touchpad-sub")
+        said = "The room Pi's mouse needs /dev/uinput, and it is not there"
+        log.say(said)
+        page.wait_for_function(f"document.getElementById('touchpad-sub').textContent === {said!r}", timeout=5000)
+        page.evaluate("""() => { window.writes = 0; new MutationObserver((records) => { window.writes += records.length; }).observe(
+            document.getElementById('touchpad'), { childList: true, characterData: true, subtree: true, attributes: true }); }""")
+        for _ in range(20):
+            log.say(said)
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.writes") == 0
+        page.clock.run_for(4900)
+        assert small.inner_text() == said
+        page.clock.run_for(200)
+        assert small.inner_text() == "The room Pi behind the TV"
+        page.close()
+
+
+def test_the_pointer_socket_is_wss_on_a_page_served_over_https(browser):
+    """A page over https may not open a plain ws socket, so the socket takes the protocol of the page (the other tests of it see ws, from plain http).
+    The agent here speaks http: a route fetches the page for an https address from it, and a PointerLog stands in for the socket."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        agent = f"http://127.0.0.1:{server.port}"
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.route("https://room.test/**", lambda route: route.fulfill(response=route.fetch(url=route.request.url.replace("https://room.test", agent))))
+        log = PointerLog(page)
+        page.goto("https://room.test/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        open_tv_screen(page)
+        page.click("#tv-pointer")
+        the_socket(page)
+        assert [s.url for s in log.sockets] == ["wss://room.test/ws/pointer"]
+        page.close()
+
+
+def test_what_the_agent_says_while_the_surface_is_up_goes_to_the_surface_and_not_to_the_remote_beneath_it(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        page.click("#tv-fullscreen")
+        said = "The TV is not answering at 10.0.0.41"
+        log.say(said)
+        page.wait_for_function(f"document.getElementById('touchpad-sub').textContent === {said!r}", timeout=5000)
+        page.click("#touchpad-done")
+        assert page.locator("#tv-words").is_hidden()                                                 # nothing is left under the status line for the person back on the remote
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1024, 700), (1280, 720)])
+def test_the_remote_keeps_its_number_keys_and_its_disc_big_enough_to_press_on_the_lowest_screens(browser, width, height):
+    with PageServer(tv=RemoteTv()) as server:
+        page = tv_page(browser, server, width, height)
+        laid_out(page)
+        heights = [key.bounding_box()["height"] for key in page.locator(".tv-numbers button").all()]
+        assert min(heights) >= 42, (width, height, min(heights))
+        assert page.locator(".tv-dpad").bounding_box()["height"] >= 190
+        page.close()
+
+
+def test_the_trackpad_and_the_surface_answer_a_touch_within_the_frame_and_leave_it_to_the_page(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+
+        def look(selector):
+            return page.locator(selector).evaluate("n => [n.classList.contains('touching'), getComputedStyle(n).backgroundColor]")
+
+        for selector, resting in ((PAD, "rgb(11, 18, 32)"), (SURFACE, "rgb(11, 18, 32)")):
+            if selector == PAD:
+                page.click("#tv-pointer")
+            else:
+                page.click("#tv-fullscreen")
+            assert look(selector) == [False, resting]                                                # the tray
+            touch_event(page, selector, "down", 100, 300)                                                  # (no frame has run: the page answers in the event itself)
+            assert look(selector) == [True, "rgb(22, 36, 79)"]                                       # navy, the page's pressed colour
+            touch_event(page, selector, "down", 200, 300, 2)
+            touch_event(page, selector, "up", 100, 300)
+            assert look(selector)[0] is True                                                         # (a finger is still down)
+            touch_event(page, selector, "up", 200, 300, 2)
+            assert look(selector) == [False, resting]
+            style = page.locator(selector).evaluate("n => { const s = getComputedStyle(n); return [s.touchAction, s.userSelect]; }")
+            assert style == ["none", "none"], selector                                               # the browser scrolls and selects nothing on it
+            assert page.evaluate("""(s) => { const e = new MouseEvent('contextmenu', { bubbles: true, cancelable: true });
+                document.querySelector(s).dispatchEvent(e); return e.defaultPrevented; }""", selector), selector     # and a long press opens no menu
+        page.close()
+
+
+def two_fingers(page, selector, steps, start=((100, 300), (220, 300))):
+    """Two fingers down, then both moved by each (dx, dy) of `steps`, a frame for each, and both lifted."""
+    (x1, y1), (x2, y2) = start
+    touch_event(page, selector, "down", x1, y1, 1)
+    touch_event(page, selector, "down", x2, y2, 2)
+    for dx, dy in steps:
+        x1, y1, x2, y2 = x1 + dx, y1 + dy, x2 + dx, y2 + dy
+        touch_event(page, selector, "move", x1, y1, 1)
+        touch_event(page, selector, "move", x2, y2, 2)
+        frame(page)
+    touch_event(page, selector, "up", x1, y1, 1)
+    touch_event(page, selector, "up", x2, y2, 2)
+
+
+def test_the_pages_frames_are_the_ones_the_server_takes_for_the_tvs_cursor(browser):
+    """Through the real /ws/pointer route of the control service to the TV's cursor (the stub client of the service's own tests): what the page
+    sends is what the agent reads, and it answers with no error."""
+    tv = RemoteTv()
+    with PageServer(tv=tv, mouse=StubMouse()) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_tv_screen(page)
+        page.click("#tv-pointer")
+        the_socket(page)
+        x, y = drag_path(page, PAD, [(5, 2)] * 12)                                                   # a path
+        touch_event(page, PAD, "up", x, y)
+        touch_event(page, PAD, "down", 300, 300)                                                           # a tap
+        page.clock.run_for(50)
+        touch_event(page, PAD, "up", 300, 300)
+        two_fingers(page, PAD, [(0, -20)] * 4)                                                       # a scroll
+        until(page, lambda: ("click",) in tv.cursor.calls and any(c[0] == "scroll" for c in tv.cursor.calls))
+        calls = tv.cursor.calls
+        moves = [c for c in calls if c[0] == "move"]
+        assert all(c[3] == 0 for c in moves)                                                         # (no button is down)
+        assert abs(sum(c[1] for c in moves) - 12 * scaled(5, 2)[0]) <= 1 and abs(sum(c[2] for c in moves) - 12 * scaled(5, 2)[1]) <= 1
+        assert [c for c in calls if c[0] != "move"] == [("click",), ("scroll", 0, -20), ("scroll", 0, -20), ("scroll", 0, -20), ("scroll", 0, -20)]
+        assert calls.index(("click",)) > max(i for i, c in enumerate(calls) if c[0] == "move")       # the order is the finger's
+        touch_event(page, PAD, "down", 100, 100)                                                           # a drag: down, its moves with the button down, and up
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 130, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 130, 100)
+        until(page, lambda: calls[-1] == ("move", 0, 0, 0))
+        dragged = calls[calls.index(("scroll", 0, -20)) + 4:]
+        assert dragged[-1] == ("move", 0, 0, 0) and all(c[0] == "move" and c[3] == 1 for c in dragged[:-1]) and dragged[:-1]
+        assert page.locator("#tv-words").is_hidden()
+        page.close()
+
+
+def test_the_pages_frames_are_the_ones_the_server_takes_for_the_room_pis_mouse(browser):
+    mouse = StubMouse()
+    with PageServer(tv=RemoteTv(), mouse=mouse) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_tv_screen(page)
+        page.click("#tv-pi-mouse")
+        the_socket(page)
+        until(page, lambda: mouse.opened >= 1)                                                       # the mouse is made as the socket opens
+        x, y = drag_path(page, PAD, [(-5, 3)] * 12)
+        touch_event(page, PAD, "up", x, y)
+        touch_event(page, PAD, "down", 300, 300)
+        page.clock.run_for(50)
+        touch_event(page, PAD, "up", 300, 300)
+        touch_event(page, PAD, "down", 100, 300, 1)                                                        # a two-finger tap: the right button
+        touch_event(page, PAD, "down", 220, 300, 2)
+        page.clock.run_for(50)
+        touch_event(page, PAD, "up", 100, 300, 1)
+        touch_event(page, PAD, "up", 220, 300, 2)
+        two_fingers(page, PAD, [(0, -20)] * 4)                                                       # a scroll, in the wheel's notches
+        touch_event(page, PAD, "down", 100, 100)                                                           # and a drag
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 130, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 130, 100)
+        until(page, lambda: mouse.calls and mouse.calls[-1] == ("release", "left"))
+        calls = mouse.calls
+        assert [c for c in calls if c[0] != "move"] == [("click", "left"), ("click", "right"), ("scroll", -1), ("scroll", -1), ("press", "left"), ("release", "left")]
+        path = [c for c in calls[:calls.index(("click", "left"))] if c[0] == "move"]
+        assert abs(sum(c[1] for c in path) - 12 * scaled(-5, 3)[0]) <= 1 and abs(sum(c[2] for c in path) - 12 * scaled(-5, 3)[1]) <= 1
+        assert calls.index(("press", "left")) < max(i for i, c in enumerate(calls) if c[0] == "move") < calls.index(("release", "left"))   # the drag's moves are between
+        assert page.locator("#tv-words").is_hidden()
+        page.close()
+
+
+def test_what_the_server_refuses_comes_back_to_the_page_in_words(browser):
+    tv = RemoteTv()
+    tv.fail_pointer = TvError("The TV is not answering at 10.0.0.41")
+    with PageServer(tv=tv, mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-pointer")
+        the_socket(page)
+        touch_event(page, PAD, "down", 100, 100)                                                           # (the page's own clock: the frames come as they do)
+        touch_event(page, PAD, "move", 140, 100)
+        page.wait_for_function("document.getElementById('tv-words').textContent === 'The TV is not answering at 10.0.0.41'", timeout=5000)
+        touch_event(page, PAD, "up", 140, 100)
+        assert page.locator("#tv-words").is_visible()
+        page.close()
+
+
+def test_the_page_never_asks_the_tvs_cursor_for_a_right_click(browser):
+    """The TV's cursor has no right button: the server would refuse it in words, and the page has no reason to ask."""
+    tv = RemoteTv()
+    with PageServer(tv=tv, mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-pointer")
+        for finger, x in ((1, 100), (2, 220)):
+            touch_event(page, PAD, "down", x, 300, finger)
+        for finger, x in ((1, 100), (2, 220)):
+            touch_event(page, PAD, "up", x, 300, finger)
+        page.wait_for_timeout(400)
+        assert tv.cursor.calls == [] and page.locator("#tv-words").is_hidden()
+        page.close()
+
+
+def test_the_modes_row_and_the_surface_wear_the_same_colours_in_a_meeting_as_outside_one(browser):
+    """The meeting state outlines every button in the page, filled ones included: the modes' fills, and the surface's, must win over that."""
+    colours = []
+    for meeting in (False, True):
+        with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+            page = open_page(browser, server)
+            if meeting:
+                join_by_id(page)
+                page.click("#open-tv-meeting")
+            else:
+                open_tv_screen(page)
+            page.click("#tv-pointer")
+            page.click("#tv-fullscreen")
+            page.mouse.move(0, 0)                                                                    # (a hovered button is another colour)
+            colours.append(page.evaluate("""() => ['#tv-pointer', '#tv-pi-mouse', '#tv-fullscreen', '#touchpad-done', '#touchpad-tv', '#touchpad-pi'].map(s => {
+                const c = getComputedStyle(document.querySelector(s)); return [c.backgroundColor, c.borderTopColor, c.color]; })"""))
+            page.close()
+    assert colours[0] == colours[1]                                                                  # the same in a call as out of one
+    blue, clear, periwinkle = "rgb(27, 82, 229)", "rgba(0, 0, 0, 0)", "rgb(189, 206, 255)"
+    assert [c[0] for c in colours[0]] == [blue, clear, clear, blue, blue, clear]                     # Pointer is on, the other two are not; Done and the target that is on are blue
+    assert [colours[0][i][1] for i in (1, 2)] == [periwinkle, periwinkle] and colours[0][3][1] == blue    # the two that are off are outlined; Done is filled to its edge
+    assert all(c[2] == "rgb(255, 255, 255)" for c in colours[0])
+
+
+def laid_out(page):
+    """The page's font and icons are in, so that what is measured is the layout it keeps (a font that comes late changes how the words wrap)."""
+    page.evaluate("document.fonts.ready.then(() => window.croomPage.iconsReady)")
+    page.wait_for_timeout(100)
+
+
+ALL_INPUTS = [{"id": f"HDMI_{n}", "label": f"HDMI {n}"} for n in range(1, 5)] + [{"id": "AV_1", "label": "AV 1"}, {"id": "COMP_1", "label": "Component"},
+                                                                                      {"id": "LIVE_TV", "label": "Live TV"}, {"id": "SCART", "label": "Scart"}]
+MODE_STATES = {
+    "the remote": (lambda: RemoteTv(), lambda page: None),
+    "the row of inputs open with eight inputs": (lambda: RemoteTv(inputs=ALL_INPUTS), lambda page: page.click("#tv-input")),
+    "a two-line refusal": (lambda: failing(RemoteTv(), REFUSAL), lambda page: page.click('[data-tv="key:HOME"]')),
+    "a refusal that wraps onto more lines": (lambda: failing(RemoteTv(), REFUSAL + ", " + REFUSAL), lambda page: page.click('[data-tv="key:HOME"]')),
+    "the TV pointer on": (lambda: RemoteTv(), lambda page: page.click("#tv-pointer")),
+    "the room Pi mouse on": (lambda: RemoteTv(), lambda page: page.click("#tv-pi-mouse")),
+    "a card with its full-screen touchpad": (lambda: RemoteTv(paired=False), lambda page: None),
+    "the surface": (lambda: RemoteTv(), lambda page: page.click("#tv-fullscreen")),
+}
+LAYOUT_SIZES = [(1024, 700), (1024, 768), (1280, 720), (1280, 800), (1920, 1200)]
+
+
+@pytest.mark.parametrize("width, height", LAYOUT_SIZES)
+@pytest.mark.parametrize("state", list(MODE_STATES))
+def test_the_modes_row_is_clear_of_everything_above_it_and_wholly_on_the_screen_at_every_size(browser, state, width, height):
+    make, reach = MODE_STATES[state]
+    with PageServer(tv=make(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server, width, height)
+        reach(page)
+        if "refusal" in state:
+            page.wait_for_selector("#tv-words:not([hidden])", timeout=5000)
+        laid_out(page)
+        if state == "the surface":
+            found = page.evaluate(SURFACE_PROBE)
+            assert found["off"] == [], (state, width, height, "off the screen")
+            assert found["overlapping"] == [] and found["stripHeight"] <= 100 and found["padHeight"] >= height - 100, (state, width, height, found)
+            assert fits(page), (state, width, height, "the page under the surface scrolls")
+        else:
+            assert_the_remote_is_laid_out(page, f"{state} at {width} by {height}")
+        page.close()
+
+
+def test_the_longest_words_the_agent_sends_leave_the_modes_row_most_of_its_gap_at_the_lowest_screen(browser):
+    """A refusal runs to about 300 characters (the room Pi's mouse that could not be made), which is four lines at 1024 wide: the d-pad and the number pad
+    give way for it with room to spare, so that a line more, in the Pi's own Chromium, does not reach the row under them."""
+    with PageServer(tv=failing(RemoteTv(), REFUSAL + ", " + REFUSAL)) as server:
+        page = tv_page(browser, server, 1024, 700)
+        page.click('[data-tv="key:HOME"]')
+        page.wait_for_selector("#tv-words:not([hidden])", timeout=5000)
+        laid_out(page)
+        assert page.evaluate(LAYOUT_PROBE)["belowTheKeys"] <= -8
+        page.close()
+
+
+@pytest.mark.parametrize("state", ["the remote", "the TV pointer on", "a card with its full-screen touchpad", "the surface"])
+def test_the_modes_row_and_the_surface_stack_on_a_phone_without_scrolling_sideways(browser, state):
+    make, reach = MODE_STATES[state]
+    with PageServer(tv=make(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server, 390, 844)
+        reach(page)
+        laid_out(page)
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), state
+        for button in page.locator("#tv-modes button:visible, #touchpad button:visible").all():
+            box = button.bounding_box()
+            assert box["x"] >= 0 and box["x"] + box["width"] <= 390, button.inner_text()
+        if state == "the TV pointer on":
+            assert page.locator("#tv-trackpad").bounding_box()["height"] >= 200                      # a pad to put a finger on, and not a line of words
+        if state == "the surface":
+            assert page.locator("#touchpad-title").bounding_box()["width"] >= 300                    # the title has a line of its own, the switch and Done under it
+        page.close()

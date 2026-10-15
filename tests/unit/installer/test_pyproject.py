@@ -51,3 +51,13 @@ def test_the_contributor_prerequisites_and_the_debian_control_file_ask_for_the_p
     for needed in ("python3 (>= 3.11)", "python3-dev", "gcc"):
         assert needed in entries, needed
     assert "python3 (>= 3.10)" not in control
+
+
+def test_the_generated_packages_ask_for_the_python_pyproject_does_and_no_build_tools():
+    """croom.installer.packaging builds the .deb's Depends for the packages it generates: its common list asks for 3.11, as the control file
+    and requires-python do. It compiles nothing, so it asks for no compiler or headers (the control file, which installs the agent
+    on a device where evdev is built, has them)."""
+    from croom.installer.packaging import COMMON_DEPENDS
+    assert "python3 (>= 3.11)" in COMMON_DEPENDS
+    assert [entry for entry in COMMON_DEPENDS if entry.startswith("python3 (")] == ["python3 (>= 3.11)"]
+    assert "python3-dev" not in COMMON_DEPENDS and "gcc" not in COMMON_DEPENDS

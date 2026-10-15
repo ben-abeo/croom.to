@@ -3560,7 +3560,8 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         assert shown_icons(page) == bar + ["#icon-keyboard", "#icon-video"]  # and the keyboard button and Join beside the link box
         settled(page)
         page.click("#open-options")
-        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-tv", "#icon-volume", "#icon-volume-x"])   # the last two are Key click on and off
+        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-door", "#icon-tv", "#icon-volume", "#icon-volume-x"])   # the four menu items, then Key click on and off
+        assert page.locator(".view[data-view=options] .menu-item svg.icon").count() == 4      # each of the four has its icon: Camera framing, Screensaver, Door sign, TV
         settled(page)
         page.click("#open-tv-options")
         assert shown_icons(page) == bar + ["#icon-back", "#icon-locate", "#icon-touchpad"]     # this room has no TV: the card that says so, with Find TVs, and the touchpad for the room Pi's mouse

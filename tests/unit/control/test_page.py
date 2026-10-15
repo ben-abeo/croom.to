@@ -4838,7 +4838,9 @@ def test_the_reaction_row_goes_by_itself_after_ten_seconds_and_ends_with_the_mee
         page.clock.run_for(2000)
         page.wait_for_function("!document.querySelector('#reaction-row')", timeout=5000)
         assert page.locator("#meeting-secondary").is_visible() and polls                 # the polls were on their way all the while
-        page.unroute("**/api/status")                                                    # the held polls go on their way
+        for route in polls:                                                              # the held polls go on their way: unrouting alone leaves their route handlers waiting,
+            route.continue_()                                                            # and a route left waiting is garbage that fails a later test (-W error)
+        page.unroute("**/api/status")
         open_reactions(page)                                                             # an open row does not outlive its meeting
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers=JSON)
         poll_until(page, "document.body.dataset.view === 'idle'")
@@ -4917,6 +4919,7 @@ def test_a_control_the_room_never_answers_is_given_up_after_35_seconds(browser):
         page.clock.fast_forward(2000)
         page.wait_for_function("document.getElementById('meeting-message').textContent.includes('did not answer')", timeout=5000)
         assert hand.is_enabled() and hand.inner_text() == "Raise hand" and len(held) == 1   # given up on: the tap may be made again, and was one request
+        held[0].abort()                                                                     # the held route is let go: a route left waiting is garbage that fails a later test
         page.close()
 
 
@@ -5808,6 +5811,21 @@ def test_a_refusal_in_the_card_still_fits_the_kiosk_beside_a_one_line_text(brows
         refusal = page.locator("#dialog-message").bounding_box()
         assert refusal["height"] > 40, "the refusal is not the two lines this test is for"
         assert fits(page), "the meeting screen scrolls with a refusal of two lines in the card"
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (390, 844)])
+def test_a_label_with_no_break_in_it_wraps_inside_the_card_and_does_not_push_it_off_the_screen(browser, width, height):
+    """The client's words are not cut, so a label that is one long word (150 characters) is wrapped by its button: it may not make the card,
+    or the page, wider than the screen."""
+    label = "Unbroken" + "x" * 142
+    assert len(label) == 150
+    with PageServer() as server:
+        page = a_meeting_with_a_dialog(browser, server, dict(ZOOMS_DIALOG, buttons=["Leave Meeting", label]), width, height)
+        shown = page.evaluate("""() => { const card = document.getElementById('meeting-dialog').getBoundingClientRect(), d = document.documentElement, m = document.querySelector('main');
+            return { cardRight: Math.round(card.right), screen: d.clientWidth, sideways: d.scrollWidth > d.clientWidth || m.scrollWidth > m.clientWidth }; }""")
+        assert shown["cardRight"] <= shown["screen"] and not shown["sideways"], shown
+        assert texts(page, "#dialog-actions") == ["Leave Meeting", label]                    # and every character of it is there
         page.close()
 
 

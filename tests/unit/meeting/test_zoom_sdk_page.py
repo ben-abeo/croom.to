@@ -3061,15 +3061,15 @@ async def test_diagnostics_list_the_dialogs_open_and_every_dialog_met_and_how_ea
         passing = await show(run, "Transcription", "This meeting is being transcribed.", ["OK"])
         await show(run, "Unmute?", "The host would like you to unmute.", ["Stay muted", "Unmute"])
         first, second, third = await reported(run, "dialog", 3)
-        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({first['id']}, ' GOT-it ')") is True      # pressed, and the client took it
-        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{passing}')")                                       # went by itself
+        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({third['id']}, ' UN-mute ')") is True     # the last of the three is the one pressed, and the client took it
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{passing}')")                                       # the middle one went by itself
         await reported(run, "dialog-closed", 2)
         data = await run.page.evaluate("window.crystalMeet.diagnostics()")
-        assert data["dialogs"] == [third]                                                           # the one still waiting, as it was reported
+        assert data["dialogs"] == [first]                                                           # the first is still waiting, as it was reported
         seen = data["dialogs_seen"]
         assert [{k: d[k] for k in ("id", "title", "text", "buttons")} for d in seen] == [first, second, third]
         assert [d["title"] for d in seen] == ["Recording consent", "Transcription", "Unmute?"] and seen[0]["buttons"] == ["Leave Meeting", "Got it"]
-        assert [(d["pressed"], d["closed"]) for d in seen] == [("Got it", True), (None, True), (None, False)]    # answered; went by itself; waiting
+        assert [(d["pressed"], d["closed"]) for d in seen] == [(None, False), (None, True), ("Unmute", True)]    # waiting; went by itself; answered
         assert [d["label"] for d in seen] == ["Recording consent", "Transcription", "Unmute?"]                      # the aria-label of each one's root
         for d in seen:                                                                              # first seen now, as an ISO date
             assert abs((datetime.now(timezone.utc) - datetime.fromisoformat(d["at"].replace("Z", "+00:00"))).total_seconds()) < 60, d["at"]

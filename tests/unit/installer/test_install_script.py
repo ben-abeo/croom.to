@@ -340,3 +340,41 @@ def test_the_installer_adds_what_building_evdev_needs():
     """evdev has no wheel: pip compiles its C extension, which needs Python's headers and a compiler."""
     body = SCRIPT.read_text().split("install_dependencies() {", 1)[1].split("\n}", 1)[0]
     assert "python3-dev" in body.split() and "gcc" in body.split()
+
+
+def test_help_names_the_virtual_mouse_step_and_the_checks_including_the_tvs():
+    """The help says what the install sets up for the touchpad's virtual mouse and how to redo that step on its own, and lists the checks
+    with the other two where `croom --check-tv` is, as the desktop user the service runs as (the TV's key is private to it)."""
+    result = run_bash(f"bash {SCRIPT} --help")
+    assert result.returncode == 0
+    for needle in (
+        "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev and gcc, which the install adds):",
+        "a udev rule that gives /dev/uinput to the input group, the uinput module at boot, and the desktop user in the input group",
+        "To redo only that step on a device that is already installed: sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
+        "Checks to run afterwards, as the desktop user the service runs as:",
+        "/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml",
+        "/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml",
+        "/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml",
+    ):
+        assert needle in result.stdout, needle
+
+
+def test_the_virtual_mouse_step_can_be_run_on_its_own_from_an_installed_device(tmp_path):
+    """What the help and the guides tell a person to type: source the script (it runs nothing when sourced) and call the step. The rule
+    and the module land where the folders say, the user joins the group, the module is loaded now: here with stand-ins for the commands
+    that need root, so that nothing on this machine changes."""
+    bin_dir, rules, modules, calls = tmp_path / "bin", tmp_path / "rules.d", tmp_path / "modules-load.d", tmp_path / "calls.log"
+    bin_dir.mkdir()
+    for command in ("usermod", "udevadm", "modprobe"):
+        stand_in = bin_dir / command
+        stand_in.write_text(f'#!/bin/sh\necho "{command} $@" >> "{calls}"\n')
+        stand_in.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "SUDO_USER": "pi", "UDEV_RULES_DIR": str(rules), "MODULES_LOAD_DIR": str(modules)}
+    result = run_bash(f"source {SCRIPT} && install_virtual_mouse", env=env)
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == ["usermod -aG input pi", "udevadm control --reload-rules", "modprobe uinput",
+                                              "udevadm trigger --subsystem-match=misc --sysname-match=uinput"]
+    (rule_file,) = rules.iterdir()
+    assert 'KERNEL=="uinput", GROUP="input", MODE="0660"' in rule_file.read_text().splitlines()
+    (module_file,) = modules.iterdir()
+    assert module_file.read_text().split() == ["uinput"]

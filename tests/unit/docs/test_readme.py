@@ -126,3 +126,91 @@ def test_readme_says_where_a_zoom_meetings_passcode_comes_from():
     assert "Zoom links need their passcode in the link" not in text
     # the Meet half of the bullet stays
     assert "A failed Meet join logs what Meet showed" in text
+
+
+def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
+    """The room page row says where the remote is opened from, what is on it, and the three touchpad modes with how each one ends; the
+    features table's row links this spec and plan and names the shell check."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        # the remote's place: the idle screen's Options, the meeting screen's own button; it belongs to the screen that opened it
+        "the **TV** remote and the keyboard's **Key click**",
+        "**Camera** for presets and nudges, **Upcoming meetings**, **TV**)",
+        "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV** on the meeting screen",
+        "**Back** returns to the screen that opened it",
+        # what is on it, and what a TV that is not paired shows in its place
+        "**Power** (a second tap turns the TV off)",
+        "the room Pi's input marked Crystal Meet",
+        "shows **Find TVs** and **Pair** in its place",
+        # the three touchpad modes, and the touchpad's way back
+        "**Pointer** turns the d-pad into a trackpad for the TV's cursor",
+        "**Room Pi mouse** moves the mouse of the Pi behind the TV",
+        "**Full-screen touchpad** gives the whole table screen to either",
+        "returns to the TV screen on **Done** or after ten idle minutes",
+        "a two-finger tap right-clicks the Pi",
+        # the features table: this spec and this plan, and the check that came with them
+        "a full-screen touchpad and `croom --check-tv` | [spec](docs/superpowers/specs/2026-10-13-tv-remote-and-touchpad-design.md) "
+        "| [plan](docs/superpowers/plans/2026-10-13-tv-remote-and-touchpad.md) |",
+    ):
+        assert needle in text, needle
+    assert "Options ›" not in text      # the README says "**Options**, then **TV**", not the arrow
+
+
+def test_readme_has_the_tv_row_in_the_config_table_and_says_what_each_key_does():
+    """The `tv` keys, one clause each: the quoting that an all-digit MAC address needs, when pi_input is acted on, and what keep_on keeps
+    and a manual Off holds (in memory only)."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "| `tv` | `enabled`, `host`, `mac`, `pi_input`, `keep_on` |",
+        "**Mobile TV On** and **LG Connect Apps** switched on",
+        "a `mac` of digits only, such as `001122334455` or `10:20:30:40:50:59`, is a number to YAML and must be quoted",
+        "`pi_input` is the TV input the room Pi is on (the default, `HDMI_1`, is a guess)",
+        "before every join it also switches the TV to `pi_input`, live TV and apps included, and leaves a TV whose state is not known alone",
+        "`keep_on` (default `true`) wakes the TV when the agent starts, before every join and after an unexpected off",
+        "a manual **Off** from the table holds until a manual **On** or the next join",
+        "`held_off` lives in memory only, so a restart forgets it",
+        "key the TV hands out at pairing is kept in `tv-client-key` under the data directory, mode 600, never in the config",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_names_the_tv_check_the_routes_the_pointer_socket_and_the_virtual_mouse():
+    """The commands list has the shell check, as the agent's user; the decisions name the routes the remote calls, the one socket the
+    touchpad's events travel on, and what the room Pi's virtual mouse needs on the device."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml",
+        "`/api/tv/control`", "`/api/tv/pair`", "`/api/tv/forget`", "`/api/tv/discover`",
+        "one WebSocket, `/ws/pointer`",
+        # the open page: the pointer takes no sign-in and refuses a page from another site
+        "anyone on the network who can open the page can drive the TV and the Pi's mouse",
+        "a page from another site is refused the pointer",
+        # the virtual mouse: where it is made, what lets the agent use it, and what building it needs
+        "a virtual device on `/dev/uinput` (`evdev`)",
+        "the installer's udev rule gives `/dev/uinput` to the `input` group, loads the `uinput` module at boot and puts the desktop user in that group",
+        "`python3-dev` and `gcc` must be on the device before the agent is installed or updated",
+        # the limitation: nothing here has met a real C6 or a real Pi yet
+        "verified against a fake TV and a fake virtual mouse, not yet on an LG C6",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_says_how_to_update_a_room_device_for_the_virtual_mouse():
+    """The update recipe, in its order: the build tools, the new software, the installer's virtual-mouse step on its own, the restart."""
+    text = README.read_text(encoding="utf-8")
+    steps = ("sudo apt-get install -y python3-dev gcc",
+             "sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git",
+             "cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
+             "sudo systemctl restart croom`; the room guide's The TV section walks through it")
+    assert "To update a room device that is already installed, type these on it in this order:" in text
+    positions = [text.index(step) for step in steps]
+    assert positions == sorted(positions)
+
+
+def test_readme_says_the_python_floor_the_package_asks_for():
+    """requires-python is 3.11 (the TV service uses asyncio.timeout): the upstream badge said 3.10."""
+    text = README.read_text(encoding="utf-8")
+    for needle in ("python-3.11+-blue.svg", "[![Python 3.11+]"):
+        assert needle in text, needle
+    for stale in ("Python 3.10", "python-3.10"):
+        assert stale not in text, stale

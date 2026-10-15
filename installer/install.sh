@@ -610,6 +610,15 @@ run_installer() {
                 echo ""
                 echo "Environment:"
                 echo "  CROOM_REPO      pip source to install (default: this fork on GitHub)"
+                echo ""
+                echo "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev and gcc, which the install adds):"
+                echo "  a udev rule that gives /dev/uinput to the input group, the uinput module at boot, and the desktop user in the input group."
+                echo "  To redo only that step on a device that is already installed: sudo bash -c 'source installer/install.sh && install_virtual_mouse'"
+                echo ""
+                echo "Checks to run afterwards, as the desktop user the service runs as:"
+                echo "  $INSTALL_DIR/venv/bin/croom --check-calendar -c $CONFIG_DIR/config.yaml   the room's Google Calendar"
+                echo "  $INSTALL_DIR/venv/bin/croom --check-zoom -c $CONFIG_DIR/config.yaml       the Zoom credentials"
+                echo "  $INSTALL_DIR/venv/bin/croom --check-tv -c $CONFIG_DIR/config.yaml         the room's LG TV (with none set up, the LG TVs on the network)"
                 exit 0
                 ;;
             *)

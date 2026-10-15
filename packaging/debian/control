@@ -15,9 +15,11 @@ Package: croom
 Architecture: any
 Depends: ${python3:Depends},
          ${misc:Depends},
-         python3 (>= 3.10),
+         python3 (>= 3.11),
+         python3-dev,
          python3-pip,
          python3-venv,
+         gcc,
          chromium-browser,
          pulseaudio,
          v4l-utils,

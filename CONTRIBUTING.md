@@ -38,7 +38,7 @@ By participating in this project, you agree to abide by our Code of Conduct:
 
 Before you begin, ensure you have:
 
-- **Python 3.10+** installed
+- **Python 3.11+** installed
 - **Node.js 18+** (for dashboard development)
 - **Git** for version control
 - A **GitHub account**

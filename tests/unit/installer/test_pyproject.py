@@ -36,3 +36,18 @@ def test_mypy_does_not_ask_for_evdevs_stubs():
     """evdev is imported where the room Pi's virtual mouse is made (a room without a touchpad runs without it, and so does a machine
     that only runs the checks): mypy is told not to mind that it is not there."""
     assert {"module": "evdev", "ignore_missing_imports": True} in pyproject()["tool"]["mypy"]["overrides"]
+
+
+def test_the_contributor_prerequisites_and_the_debian_control_file_ask_for_the_python_pyproject_does():
+    """CONTRIBUTING's prerequisite and the .deb's Depends say 3.11, as requires-python does (the README's badge is pinned beside the README
+    tests), and the Depends has what compiling evdev takes: it has no wheel, so pip builds its C extension on the device."""
+    repo = PYPROJECT.parent
+    contributing = (repo / "CONTRIBUTING.md").read_text(encoding="utf-8")
+    assert "- **Python 3.11+** installed" in contributing
+    assert "Python 3.10" not in contributing
+    control = (repo / "packaging" / "debian" / "control").read_text(encoding="utf-8")
+    depends = control.split("\nDepends:", 1)[1].split("\nRecommends:", 1)[0]
+    entries = [entry.strip() for entry in depends.replace("\n", " ").split(",")]
+    for needed in ("python3 (>= 3.11)", "python3-dev", "gcc"):
+        assert needed in entries, needed
+    assert "python3 (>= 3.10)" not in control

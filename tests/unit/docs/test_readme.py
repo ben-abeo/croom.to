@@ -5,6 +5,8 @@ guides, and links every design spec and implementation plan.
 
 from pathlib import Path
 
+from tests.unit.docs.documented_numbers import IDLE_RETURN_MIN, TAP_PX, TOUCHPAD_IDLE_MIN, TURN_ON, TV_RETURN_MIN, reconnect_words, words
+
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "README.md"
 
@@ -129,8 +131,9 @@ def test_readme_says_where_a_zoom_meetings_passcode_comes_from():
 
 
 def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
-    """The room page row says where the remote is opened from, what is on it, and the three touchpad modes with how each one ends; the
-    features table's row links this spec and plan and names the shell check."""
+    """The room page row says where the remote is opened from, what is on it, what its place shows when there is no TV to control, the
+    three touchpad modes with how each one ends, and what a person meets on the pad; the features table's row links this spec and plan
+    and names the shell check. The waits are the page's own constants."""
     text = README.read_text(encoding="utf-8")
     for needle in (
         # the remote's place: the idle screen's Options, the meeting screen's own button; it belongs to the screen that opened it
@@ -138,31 +141,46 @@ def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
         "**Camera** for presets and nudges, **Upcoming meetings**, **TV**)",
         "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV** on the meeting screen",
         "**Back** returns to the screen that opened it",
-        # what is on it, and what a TV that is not paired shows in its place
+        f"left alone it returns by itself after {words(IDLE_RETURN_MIN)} minutes ({words(TV_RETURN_MIN)} on the meeting screen)",
+        # what is on it
         "**Power** (a second tap turns the TV off)",
         "the room Pi's input marked Crystal Meet",
-        "shows **Find TVs** and **Pair** in its place",
+        # what its place shows when there is no TV to control: three cards, and the touchpad stays under each of them
+        "a room with no TV set up shows **Find TVs** and how to set one up",
+        "a TV not yet paired shows **Pair** (and **Find TVs**)",
+        "a TV that no longer accepts the table shows **Forget TV** and **Pair**",
+        "under any of those cards **Full-screen touchpad** stays, so a room with no TV still has the room Pi's mouse",
         # the three touchpad modes, and the touchpad's way back
         "**Pointer** turns the d-pad into a trackpad for the TV's cursor",
         "**Room Pi mouse** moves the mouse of the Pi behind the TV",
+        "(a virtual mouse that the Pi's desktop takes like a USB mouse, so its pointer should appear on the TV; the first use in a room confirms it)",
         "**Full-screen touchpad** gives the whole table screen to either",
-        "returns to the TV screen on **Done** or after ten idle minutes",
+        f"returns to the TV screen on **Done** or after {words(TOUCHPAD_IDLE_MIN)} idle minutes",
         "a two-finger tap right-clicks the Pi",
+        # what a person meets on the pad: the armed hold and the lost link
+        f"A blue border on the pad means a hold is armed: after a short rest the next move drags, a touch that moves sooner is a move for good, "
+        f"and after a rest a nudge under {TAP_PX} pixels does nothing",
+        f"the pad says **Reconnecting…** and the page tries again {reconnect_words()}",
         # the features table: this spec and this plan, and the check that came with them
         "a full-screen touchpad and `croom --check-tv` | [spec](docs/superpowers/specs/2026-10-13-tv-remote-and-touchpad-design.md) "
         "| [plan](docs/superpowers/plans/2026-10-13-tv-remote-and-touchpad.md) |",
     ):
         assert needle in text, needle
     assert "Options ›" not in text      # the README says "**Options**, then **TV**", not the arrow
+    # the no-TV card has Find TVs and no Pair, and the Pi's pointer is not yet seen on a device
+    assert "shows **Find TVs** and **Pair** in its place" not in text
+    assert "its cursor then shows on the TV" not in text
 
 
 def test_readme_has_the_tv_row_in_the_config_table_and_says_what_each_key_does():
-    """The `tv` keys, one clause each: the quoting that an all-digit MAC address needs, when pi_input is acted on, and what keep_on keeps
-    and a manual Off holds (in memory only)."""
+    """The `tv` keys, one clause each: that the MAC address is needed with Quick Start+ too and the quoting an all-digit one needs, when
+    pi_input is acted on, and what keep_on keeps and a manual Off holds (in memory only); the room files ship the block switched off."""
     text = README.read_text(encoding="utf-8")
     for needle in (
         "| `tv` | `enabled`, `host`, `mac`, `pi_input`, `keep_on` |",
-        "**Mobile TV On** and **LG Connect Apps** switched on",
+        "the room files in `deploy/rooms/` carry the block with `enabled: false`",
+        "**LG Connect Apps** switched on in its settings, and **Mobile TV On** too unless Quick Start+ is on",
+        "`mac` is the TV's MAC address, which every Turn on needs (the wake-up message goes out first, so a missing or malformed one stops it even with Quick Start+)",
         "a `mac` of digits only, such as `001122334455` or `10:20:30:40:50:59`, is a number to YAML and must be quoted",
         "`pi_input` is the TV input the room Pi is on (the default, `HDMI_1`, is a guess)",
         "before every join it also switches the TV to `pi_input`, live TV and apps included, and leaves a TV whose state is not known alone",
@@ -174,25 +192,36 @@ def test_readme_has_the_tv_row_in_the_config_table_and_says_what_each_key_does()
         assert needle in text, needle
 
 
-def test_readme_names_the_tv_check_the_routes_the_pointer_socket_and_the_virtual_mouse():
+def test_readme_names_the_tv_check_the_routes_the_pointer_socket_the_wake_up_and_the_virtual_mouse():
     """The commands list has the shell check, as the agent's user; the decisions name the routes the remote calls, the one socket the
-    touchpad's events travel on, and what the room Pi's virtual mouse needs on the device."""
+    touchpad's events travel on, the wake-up message that goes out first whatever the TV keeps, and what the room Pi's virtual mouse
+    needs on the device. A Turn on's longest wait is the service's own sum."""
     text = README.read_text(encoding="utf-8")
     for needle in (
         "/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml",
         "`/api/tv/control`", "`/api/tv/pair`", "`/api/tv/forget`", "`/api/tv/discover`",
         "one WebSocket, `/ws/pointer`",
+        f"(a Turn on waits up to {TURN_ON} seconds for the TV)",
         # the open page: the pointer takes no sign-in and refuses a page from another site
         "anyone on the network who can open the page can drive the TV and the Pi's mouse",
         "a page from another site is refused the pointer",
+        # the wake-up: sent first in every case, so the MAC address is needed with Quick Start+ too; Mobile TV On only for a TV that is fully off
+        "To turn a TV on the agent sends a Wake-on-LAN message first, whatever the TV keeps",
+        "a limited broadcast from the default-route interface: the Pi and the TV must share that network",
+        "so a missing or malformed `mac` stops a Turn on, a join's wake and the re-wake alike",
+        "a TV that is fully off is woken by that message alone, which needs Mobile TV On, and a TV that keeps its socket in standby (Quick Start+) "
+        "is then told to turn on over it, so it needs no Mobile TV On",
         # the virtual mouse: where it is made, what lets the agent use it, and what building it needs
         "a virtual device on `/dev/uinput` (`evdev`)",
+        "so its own pointer should appear on the TV from then on; the first use in a room confirms it",
         "the installer's udev rule gives `/dev/uinput` to the `input` group, loads the `uinput` module at boot and puts the desktop user in that group",
         "`python3-dev` and `gcc` must be on the device before the agent is installed or updated",
         # the limitation: nothing here has met a real C6 or a real Pi yet
         "verified against a fake TV and a fake virtual mouse, not yet on an LG C6",
     ):
         assert needle in text, needle
+    assert "the Pi's own pointer shows on the TV" not in text
+    assert "sudo -u croom" not in text          # (there is no croom user: the service runs as the desktop user who ran the installer)
 
 
 def test_readme_says_how_to_update_a_room_device_for_the_virtual_mouse():
@@ -201,7 +230,7 @@ def test_readme_says_how_to_update_a_room_device_for_the_virtual_mouse():
     steps = ("sudo apt-get install -y python3-dev gcc",
              "sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git",
              "cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
-             "sudo systemctl restart croom`; the room guide's The TV section walks through it")
+             "sudo systemctl restart croom`; the room guide's section Updating a room device walks through it")
     assert "To update a room device that is already installed, type these on it in this order:" in text
     positions = [text.index(step) for step in steps]
     assert positions == sorted(positions)
@@ -214,3 +243,21 @@ def test_readme_says_the_python_floor_the_package_asks_for():
         assert needle in text, needle
     for stale in ("Python 3.10", "python-3.10"):
         assert stale not in text, stale
+
+
+def test_the_rooms_readme_says_the_tv_block_is_there_and_off_and_names_all_three_checks():
+    """deploy/rooms/README.md: the room files are still complete configs with three values to replace and an optional location, and now
+    carry a tv: block that is switched off until the room's LG TV is set up; the checks it names include the TV's."""
+    readme = " ".join((REPO / "deploy" / "rooms" / "README.md").read_text(encoding="utf-8").split())   # the file is wrapped at 80 columns
+    for needle in (
+        "is a complete agent config with three values to replace",
+        "an optional location",
+        "`tv`: the room's LG TV, switched off (`enabled: false`) until it is set up",
+        "the room guide's section The TV says how to switch it on",
+        "`/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml`",
+        "`/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml`",
+        "the TV (once it is set up) with `/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml`",
+        "each run as the desktop user the service runs as (the TV's key is private to that user)",
+    ):
+        assert needle in readme, needle
+    assert "four things" not in readme

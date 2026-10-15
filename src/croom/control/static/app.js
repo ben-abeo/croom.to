@@ -18,9 +18,10 @@
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
   // reactionsUntil: when the reaction row closes (a time, 0 for closed). ignoreUntil, dialogIgnoreUntil: until when the secondary row's buttons and the
   // dialog card's ignore a tap. pending: the requests of the meeting screen that are out, by name (a control's, or "dialog"). confirmEnd, confirmRemove:
-  // End meeting for everyone, and Remove on the row of the person with that key, have been asked about and wait for their second tap.
-  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, confirmEnd: false, confirmRemove: null, screensaver: null,
-                  lastLink: "", lastEvent: "", reactionsUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
+  // End meeting for everyone, and Remove on the row of the person with that key, have been asked about and wait for their second tap. errorOn: the
+  // view the refusal in `error` was met on (a sub-screen says the refusals of its own controls, and not the meeting screen's).
+  const model = { status: null, events: [], offline: false, busy: false, error: "", errorOn: "", confirmLeave: false, confirmEnd: false, confirmRemove: null,
+                  screensaver: null, lastLink: "", lastEvent: "", reactionsUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
@@ -193,6 +194,7 @@
 
   async function act(request) {
     if (model.busy) return;
+    const on = view();
     model.busy = true;
     model.error = "";
     render();
@@ -200,6 +202,7 @@
       await request();
     } catch (e) {
       model.error = e.message;
+      model.errorOn = on;
     }
     model.busy = false;
     await refreshStatus();
@@ -444,6 +447,7 @@
   // card's own line while a card shows).
   async function request(key, path, body) {
     if (model.pending.has(key)) return;     // one request per tap: the button is inert already, and this is the guard behind it
+    const on = view();                      // the screen the tap was made on: a refusal that comes later belongs to it
     model.pending.add(key);
     model.error = "";
     render();
@@ -453,6 +457,7 @@
       takeMeeting(await post(path, body, { signal: cutoff.signal }));
     } catch (e) {
       model.error = e.name === "AbortError" ? NO_ANSWER : e.message;
+      model.errorOn = on;
     } finally {
       clearTimeout(timer);
       model.pending.delete(key);
@@ -667,7 +672,7 @@
   function leftView(was) {
     if (was === "host") forgetEnd();
     if (was === "participants") forgetRemove();
-    if (was === "host" || was === "participants") model.error = "";
+    if ((was === "host" || was === "participants") && model.errorOn === was) model.error = "";
   }
 
   // --- Participants: the room's people, and for a host or co-host the buttons that act on them, and the waiting room.
@@ -833,9 +838,10 @@
     renderChat(m);
     setActions(m ? hostSpecs(m) : [], "host-actions", hostKey);
     keepChatSeen(m);
-    // A refusal is said on the screen it happened on (the meeting screen's own line is not in sight from here).
-    el("participants-message").textContent = view() === "participants" ? model.error : "";
-    el("host-message").textContent = view() === "host" ? model.error : "";
+    // A refusal is said on the screen it was met on (the meeting screen's own line is not in sight from here), and a screen says its own and not another's:
+    // not the one the meeting screen's Raise hand drew before the person came, nor the one it draws after they have.
+    el("participants-message").textContent = view() === "participants" && model.errorOn === "participants" ? model.error : "";
+    el("host-message").textContent = view() === "host" && model.errorOn === "host" ? model.error : "";
   }
   // ===== end of the Participants, Chat and Host screens =====
 
@@ -942,6 +948,7 @@
       setActions([], "actions", idleActionsKey);
       setActions([], "meeting-actions", meetingActionsKey);
       renderMeetingScreen(null);
+      renderSubScreens(null);   // the lists and their buttons go as the meeting screen's rows do: nothing is known of who is in the meeting, and a Remove could only fail
       document.querySelector(".screen-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;

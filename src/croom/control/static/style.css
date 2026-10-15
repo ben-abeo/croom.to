@@ -137,7 +137,7 @@ body[data-state="meeting"] .participant .button.primary { background: var(--blue
 .chat { gap: 10px; }
 .chat-message .chat-from { margin: 0; color: var(--periwinkle-300); font-size: 0.9em; }
 .chat-message .chat-text { margin: 2px 0 0; overflow-wrap: anywhere; }
-.list-box .message { margin-top: 12px; }
+.list-box .message { margin-top: 12px; flex: 0 0 auto; min-height: auto; }   /* a refusal of several lines keeps its height, and the list above it gives way */
 .host-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 28px; }
 .meeting-state { margin: 0; font-weight: 600; }
 .meeting-elapsed { margin: 0; color: var(--periwinkle-300); font-variant-numeric: tabular-nums; }
@@ -390,7 +390,13 @@ body.keyboard-open .schedule { display: none; }
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 }
 @media (min-width: 1024px) {
-  #participant-list .row-actions:not(:empty) { min-width: 17rem; justify-content: flex-end; }   /* Mute and Remove side by side: a person with no Mute leaves its room empty, and the marks end in one column */
+  /* Mute and Remove side by side: a person with no Mute leaves its room empty, and the marks end in one column. The room's own row has no buttons and
+     leaves all of it empty, in a list that has buttons. Remove keeps the width of its second-tap words, so that nothing in the row moves under a finger
+     when it asks (a tap aimed at Mute, a moment after a mis-tap on Remove, would otherwise land on the ask). */
+  #participant-list .row-actions:not(:empty) { min-width: 24rem; justify-content: flex-end; }
+  #participant-list:has(.row-actions:not(:empty)) .row-actions:empty { min-width: 24rem; }   /* (a rule of its own: an engine without :has() drops the rule it is in, and the one above is not to go with it) */
+  #participant-list .row-actions .button:last-child { min-width: 16rem; }
+  .host-actions .button.danger { min-width: 23rem; }   /* End keeps the width of its longer words: the shorter ones would fit on the line above at 1280 by 800, and the button would jump from under the finger */
 }
 @media (max-width: 1023px) {
   /* A phone: one column. */

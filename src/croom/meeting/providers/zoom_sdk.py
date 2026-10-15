@@ -462,8 +462,10 @@ class ZoomSdkProvider(MeetingProvider):
             known = dict(self._reading, me=dict(self._me_of(self._reading), muted=self._muted))
             info.controls = controls_from(known, self.reactions)
             people = self._reading.get("participants") or []
+            waiting = [p for p in people if p.get("waiting")]     # in the waiting room: not in the meeting yet, and listed apart (controls.host.waiting_room)
+            listed = [p for p in people if not p.get("waiting")]
             count = self._reading.get("count")
-            info.people = {"count": count if isinstance(count, int) else len(people), "list": people[:PEOPLE_LISTED]}
+            info.people = {"count": count - len(waiting) if isinstance(count, int) else len(listed), "list": listed[:PEOPLE_LISTED]}
             info.recording = bool(self._reading.get("recording"))
             info.locked = bool(self._reading.get("locked"))
 

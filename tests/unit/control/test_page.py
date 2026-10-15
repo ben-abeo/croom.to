@@ -6759,3 +6759,17 @@ def test_each_button_that_asks_for_a_second_tap_has_its_own_five_seconds(browser
         assert page.locator("#meeting-actions .button.danger").inner_text().strip() == "Leave"
         assert server.meeting.controls_called == [] and server.meeting.leaves == 0
         page.close()
+
+
+# --- fix round 1: the model's truth ---
+
+def test_a_person_whose_video_is_not_known_is_not_marked_video_off(browser):
+    """The bridge says null for a camera Zoom did not speak of; only an explicit false is Video off."""
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 2)
+        people[3]["video"] = None
+        people[4]["video"] = False
+        set_people(server, people)
+        poll_until(page, "document.querySelectorAll('#participant-list .mark-video-off').length === 2")    # Raj (the stub's) and Tom
+        assert page.locator("#participant-list .participant:has-text('Priya') .mark-video-off").count() == 0
+        page.close()

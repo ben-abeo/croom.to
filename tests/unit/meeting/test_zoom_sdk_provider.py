@@ -1662,6 +1662,25 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         people = provider.current_meeting.people
         assert people["count"] == 60 and len(people["list"]) == 50 and people["list"][0]["name"] == "Person 0"
 
+    def test_people_in_the_waiting_room_are_not_counted_or_listed_among_those_in_the_meeting(self):
+        """Zoom's attendee list holds the people in the waiting room too (waiting: true); the table lists them apart (controls.host.waiting_room), so the
+        count and the list are of those who are in the meeting."""
+        provider = in_a_meeting(None)
+        people = [{"id": 1, "name": "Room", "me": True, "waiting": False}, {"id": 2, "name": "Ann", "waiting": False}, {"id": 3, "name": "Guest", "waiting": True}]
+        provider._take_state(dict(READING, participants=people, count=3, buttons={}))
+        shown = provider.current_meeting.people
+        assert shown["count"] == 2 and [p["name"] for p in shown["list"]] == ["Room", "Ann"]
+
+    def test_the_cap_is_on_those_in_the_meeting_and_the_count_is_whole(self):
+        provider = in_a_meeting(None)
+        crowd = [{"id": 100 + i, "name": f"Person {i}", "me": False, "waiting": i < 5} for i in range(60)]     # five of the sixty are waiting
+        provider._take_state(dict(READING, participants=crowd, count=60, buttons={}))
+        people = provider.current_meeting.people
+        assert people["count"] == 55 and len(people["list"]) == 50 and people["list"][0]["name"] == "Person 5"
+        provider._take_state(dict(READING, participants=crowd[3:8], count=120, buttons={}))     # a count of the reading's own (Zoom may list fewer than it counts): less the waiting
+        people = provider.current_meeting.people
+        assert people["count"] == 118 and [p["name"] for p in people["list"]] == ["Person 5", "Person 6", "Person 7"]
+
     def test_a_reading_of_the_current_user_alone_changes_only_what_it_says(self):
         provider = in_a_meeting(None)
         info = provider.current_meeting

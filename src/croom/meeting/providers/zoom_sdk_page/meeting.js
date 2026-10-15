@@ -73,6 +73,7 @@
   // ---- State as Zoom has it: the current user's record and the client's own buttons ----
   const pick = (obj, names) => { for (const n of names) { if (obj && obj[n] !== undefined && obj[n] !== null) return obj[n]; } return undefined; };
   const known = (value) => value !== undefined && value !== null && value !== "";
+  const knownOrNull = (value) => (known(value) ? !!value : null);   // what Zoom does not say is unknown, not off
   const handUp = (user) => !!pick(user, ["raiseHand", "bRaiseHand", "isHandRaised", "bHandRaised"]);
   // The room's id and name from Zoom's record, once Zoom lists the room (before that the record has neither).
   function takeUser(user) {
@@ -261,7 +262,7 @@
     };
     const participants = list.map((a) => ({
       id: pick(a, ["userId"]), name: String(pick(a, ["userName", "displayName", "name"]) || ""),
-      muted: !!pick(a, ["muted", "bMuted"]), video: !!pick(a, ["video", "bVideoOn", "videoOn"]),
+      muted: !!pick(a, ["muted", "bMuted"]), video: knownOrNull(pick(a, ["video", "bVideoOn", "videoOn"])),
       hand: !!pick(a, ["raiseHand", "bRaiseHand", "bHandRaised"]), host: !!pick(a, ["isHost", "bHost"]),
       waiting: !!pick(a, ["isHold", "waiting", "bHold", "isInWaitingRoom"]), me: pick(a, ["userId"]) === me.userId,
     }));

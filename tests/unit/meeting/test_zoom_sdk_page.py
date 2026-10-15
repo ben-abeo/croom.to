@@ -537,6 +537,19 @@ async def test_an_older_builds_field_names_are_still_read():
         assert m["participants"] == [{"id": 5, "name": "Old", "muted": False, "video": True, "hand": True, "host": False, "waiting": True, "me": False}]
 
 
+async def test_an_attendee_whose_camera_zoom_does_not_speak_of_is_unknown_and_not_off():
+    """Only a camera Zoom says is off is off: a record with no field for it says nothing, and the table must not mark that person "Video off"."""
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            window.ZoomMtg.getAttendeeslist = (o) => o.success({ result: { attendeesList: [
+                { userId: 5, userName: "Says on", video: true }, { userId: 6, userName: "Says off", video: false }, { userId: 7, userName: "Says nothing" },
+                { userId: 8, userName: "Older name", bVideoOn: false }, { userId: 9, userName: "Blank", video: "" }] } });
+        }""")
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert [p["video"] for p in m["participants"]] == [True, False, None, False, None]
+
+
 async def test_a_record_without_mute_or_video_keeps_the_last_known_mute_and_leaves_the_camera_unknown():
     async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.noToolbar = true;") as run:
         await run.wait_for("connected")

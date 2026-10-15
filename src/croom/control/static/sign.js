@@ -146,8 +146,9 @@
   // The room's name takes the smaller type (.room.long) when it is longer than LONG_NAME characters, and also when it would take more than NAME_LINES
   // lines at the large size: "Sales Conference Room" is three lines of it on a 1280 px sign, and on a short sign three lines push the chip, and the
   // scoreboard strip, off the bottom. How many lines it takes is measured, with the smaller type taken off for a moment, in the layout it has now, so
-  // it is measured again when the name, the sign's size or the view changes (the week sets the name in a size of its own on a short sign) and when a
-  // font arrives (the first measure may have been in the fallback font). A poll that changes none of these measures nothing and writes nothing.
+  // it is measured again when the name, the sign's size or the view changes (the week sets the name in a size of its own on a short sign), when a font
+  // arrives (the first measure may have been in the fallback font) and when the words of the status or the bookings beside it change (a longer chip is
+  // a taller status). A poll that changes none of these measures nothing and writes nothing.
   let nameFit = null;      // what the name was last fitted to
   let fontsArrived = 0;    // how many times a font has finished loading, which is part of what it was fitted to
 
@@ -155,27 +156,40 @@
     const room = el("room-name");
     const name = room.textContent;
     const data = document.body.dataset;
-    const fitted = [name, window.innerWidth, window.innerHeight, data.view, "strip" in data, fontsArrived].join("|");   // the height decides shortSign too
+    const fitted = [name, window.innerWidth, window.innerHeight, data.view, "strip" in data, fontsArrived,   // the height decides shortSign too
+      el("chip-text").textContent, el("detail").textContent, el("room-location").textContent, el("today").hidden, el("events").textContent].join("|");
     if (fitted === nameFit) return;
     nameFit = fitted;
-    room.style.removeProperty("font-size");   // the sizes the stylesheet gives, afresh: a sign that has grown past 560 px is let go of its steps
+    room.style.removeProperty("font-size");   // the sizes the stylesheet gives, afresh: a sign that has grown is let go of its steps
     let long = name.length > LONG_NAME;
     if (!long) {
       room.classList.remove("long");
       long = linesOf(room) > (shortSign.matches ? SHORT_NAME_LINES : NAME_LINES);
     }
     room.classList.toggle("long", long);
-    if (shortSign.matches) stepNameDown(room);
+    if (shortSign.matches) stepNameDown(room, () => linesOf(room) > NAME_LINES);   // a short sign: down to two lines, whatever the room left
+    stepNameDown(room, statusRunsOff);                                              // any sign: and on down while its status runs off the screen
   }
 
   const linesOf = (node) => Math.round(node.getBoundingClientRect().height / parseFloat(getComputedStyle(node).lineHeight));
 
-  // A name that takes more than NAME_LINES lines even in the smaller type ("Executive Conference Room North Wing" on an 800 px sign) goes on down, NAME_STEP_REM
-  // at a time, each size on the 0.1 rem grid, until it takes NAME_LINES or has reached NAME_FLOOR_REM. Whole, as ever, and the status under it keeps its room.
-  function stepNameDown(room) {
+  // Whether the sign is taller than its screen because of the status, which is the name's to cure: the Today list beside the status, when it is
+  // the taller of the two, is not (and with no list beside it, in the week or without a calendar, the status is the whole of the row). The status
+  // column is stretched to the row, so its words end where the chip and the detail line under it do.
+  function statusRunsOff() {
+    const sign = document.querySelector(".sign");
+    if (sign.scrollHeight <= sign.clientHeight) return false;
+    const today = el("today");
+    return today.hidden || document.querySelector(".status > div").getBoundingClientRect().bottom >= today.getBoundingClientRect().bottom - 0.5;
+  }
+
+  // A name that is still too big (on a short sign: one that takes more than NAME_LINES lines even in the smaller type, "Executive Conference Room North Wing" on an
+  // 800 px sign; on any sign: one with a status that runs off the screen) goes on down, NAME_STEP_REM at a time, each size on the 0.1 rem grid, until it is not
+  // or has reached NAME_FLOOR_REM. Whole, as ever, and the status under it keeps its room.
+  function stepNameDown(room, tooBig) {
     const rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
     let size = parseFloat(getComputedStyle(room).fontSize) / rem;
-    while (size > NAME_FLOOR_REM && linesOf(room) > NAME_LINES) {
+    while (size > NAME_FLOOR_REM && tooBig()) {
       size = Math.max(NAME_FLOOR_REM, Math.round((size - NAME_STEP_REM) * 10) / 10);
       room.style.fontSize = size + "rem";
     }
@@ -199,6 +213,7 @@
     if (!model.status && !model.offline) return; // still loading: wait for the first status result
     if (model.offline) {
       setStatus("offline", "Sign not connected", "Check that Crystal Meet is running on the room's device.");
+      fitRoomName();   // its two lines of detail are a taller status than the one before
       return;
     }
     const s = model.status;

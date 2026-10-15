@@ -119,6 +119,9 @@ body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-s
 #chip-text { min-width: 0; overflow-wrap: anywhere; }
 .detail { margin: 14px 0 0; max-width: 30ch; color: var(--periwinkle-300); font-size: 1.2rem; overflow-wrap: anywhere; }
 .detail:empty { display: none; }
+/* What comes from outside the sign (a booking's title in the chip and in the detail line, the room's location) is two lines and an ellipsis at
+   most, so that no title or location, however long, grows the status column past the sign; the whole of each is in the page. */
+.location, #chip-text, .detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 
 .today { align-self: start; min-width: 0; }
 .today-head, .week-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 10px; }

@@ -6252,6 +6252,33 @@ def test_chat_and_participants_are_offered_only_when_the_platform_has_them(brows
         page.close()
 
 
+def test_a_meet_call_draws_what_the_meet_provider_reports_and_nothing_else(browser):
+    """End to end through the real ControlService, with a stub meeting that reports the model the Meet provider builds (spec 2026-10-13,
+    section 4.5): the buttons Meet's page has (microphone, camera, raise hand, captions), a count of people with no roster, no chat and no
+    reactions. The primary row has no Reactions; the secondary row has Captions and nothing else: no View or Self view (Meet has no such
+    controls here), no Participants (nothing to list), no Chat (nothing is read) and no Host."""
+    from croom.meeting.providers.google_meet import meet_controls
+    with PageServer() as server:
+        server.meeting.controls = meet_controls({"camera": {"on": True}, "raise_hand": {"on": False}, "captions": {"on": False}}, muted=False)
+        server.meeting.people = {"count": 3, "list": []}
+        page = open_page(browser, server)
+        page.fill("#link-input", "https://meet.google.com/abc-defg-hij")
+        page.click("#link-form button[type=submit]")
+        page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        assert server.meeting.current_meeting.platform == "google_meet"
+        assert texts(page, "#meeting-actions") == ["Mute", "Turn camera off", "Raise hand", "Leave"]
+        assert texts(page, "#meeting-secondary") == ["Captions on"]
+        page.locator("#meeting-secondary .button", has_text="Captions on").click()
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Captions off')", timeout=5000)
+        page.locator("#meeting-actions .button", has_text="Raise hand").click()
+        page.wait_for_function("document.getElementById('meeting-actions').textContent.includes('Lower hand')", timeout=5000)
+        assert server.meeting.controls_called == [("captions", None), ("raise_hand", None)]       # through the same control route as Zoom's
+        assert texts(page, "#meeting-secondary") == ["Captions off"]
+        assert fits(page)
+        page.close()
+
+
 @pytest.mark.parametrize("opener, view", [("#meeting-secondary .button:has-text('Participants')", "participants"), ("#meeting-secondary .button:has-text('Chat')", "chat"),
                                           ("#meeting-secondary .button:has-text('Host')", "host"), ("#open-camera-live", "camera"), ("#open-upcoming", "upcoming")])
 def test_a_dialog_that_comes_up_brings_the_page_back_to_the_meeting_screen_once(browser, opener, view):

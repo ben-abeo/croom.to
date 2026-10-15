@@ -4727,6 +4727,15 @@ def wait_for_held(page, held, count=1):
     raise AssertionError(f"{len(held)} of {count} requests came")
 
 
+def wait_for_calls(page, server, count):
+    """Real time, whatever the page's clock: until the stub meeting has been asked for this many controls."""
+    for _ in range(100):
+        if len(server.meeting.controls_called) >= count:
+            return
+        page.wait_for_timeout(50)
+    raise AssertionError(f"the meeting was asked for {server.meeting.controls_called}, not {count} controls")
+
+
 def poll_until(page, condition):
     """Poll the status, answered and drawn, until the condition holds in the page: its timers are stopped, so nothing else polls. (A
     wait_for_function whose expression returns a promise is over at once: a promise is truthy.)"""
@@ -4894,6 +4903,71 @@ def test_a_reaction_in_flight_keeps_the_reactions_button_inert_and_the_row_close
         held[0].fulfill(json={"meeting": page.evaluate("window.croomPage.model.status.meeting")})
         page.wait_for_function("!document.querySelector('#meeting-actions .button:disabled')", timeout=5000)
         assert reactions.is_enabled()
+        page.close()
+
+
+@pytest.mark.parametrize("which, then", [(0, ("captions", None)), (3, ("hide_self", None)), (6, None)])   # Thumbs up over Captions, Laugh over Hide self view, Cancel over Host
+def test_a_tap_on_what_a_closing_reaction_row_uncovers_is_ignored_for_half_a_second(browser, which, then):
+    """The row closes at the pick and the secondary row is back under the finger: the second tap of a double tap (a thumb that lands twice,
+    150 ms apart) is not meant for the button that is there now, nor is one a little slower. The clock is stopped: the half second is the
+    test's to spend."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        open_reactions(page)
+        box = page.locator("#reaction-row .button").nth(which).bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
+        page.mouse.click(x, y)                                                       # the pick (or Cancel): the row closes, and a secondary button is under this spot
+        page.wait_for_function("!document.querySelector('#reaction-row')", timeout=5000)
+        if then:
+            wait_for_calls(page, server, 1)                                          # the pick's own request
+        asked = list(server.meeting.controls_called)
+        page.clock.run_for(150)
+        page.mouse.click(x, y)                                                       # 150 ms after the pick: the second tap of a double tap
+        page.clock.run_for(300)
+        page.mouse.click(x, y)                                                       # 450 ms: a slow one
+        page.wait_for_timeout(300)                                                   # (real time) long enough for a request to have gone out
+        assert server.meeting.controls_called == asked and page.evaluate("document.body.dataset.view") == "meeting"
+        page.clock.run_for(200)
+        page.mouse.click(x, y)                                                       # 650 ms: a tap meant for the button works
+        if then:
+            wait_for_calls(page, server, len(asked) + 1)
+            assert server.meeting.controls_called[-1] == then
+        else:
+            page.wait_for_function("document.body.dataset.view === 'host'", timeout=5000)
+        page.close()
+
+
+@pytest.mark.parametrize("how", ["its ten seconds are over", "its choices are gone"])
+def test_a_row_that_goes_by_itself_uncovers_buttons_that_ignore_a_tap_for_half_a_second_too(browser, how):
+    """Not only a pick: a thumb aiming at a reaction as the row lapses, or as a poll takes its choices away, meets the secondary row too."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        open_reactions(page)
+        box = page.locator("#reaction-row .button").first.bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] / 2           # Thumbs up: over Captions when the row is gone
+        if how == "its ten seconds are over":
+            page.clock.run_for(9000)
+            for _ in range(40):                                                    # to the tick that closes it
+                if not page.locator("#reaction-row").count():
+                    break
+                page.clock.run_for(100)
+        else:
+            server.meeting.current_meeting.controls["reactions"] = {"available": False, "choices": ["Clap"]}
+            poll_until(page, "!document.querySelector('#reaction-row')")
+        assert page.locator("#reaction-row").count() == 0 and page.locator("#meeting-secondary").is_visible()
+        left = page.evaluate("window.croomPage.model.ignoreUntil - Date.now()")      # how much of the half second the buttons have still to ignore
+        assert 0 < left <= 500
+        page.mouse.click(x, y)
+        page.wait_for_timeout(300)
+        assert server.meeting.controls_called == []
+        page.clock.run_for(left + 50)
+        page.mouse.click(x, y)                                                       # after it, a tap on Captions is a tap on Captions
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("captions", None)]
         page.close()
 
 

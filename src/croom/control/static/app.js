@@ -16,7 +16,7 @@
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "",
-                  reactionsUntil: 0, pending: new Set() };   // when the reaction row closes (a time, 0 for closed); the controls, by name, whose requests are out
+                  reactionsUntil: 0, ignoreUntil: 0, pending: new Set() };   // when the reaction row closes (a time, 0 for closed); the controls, by name, whose requests are out
   const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
@@ -350,6 +350,7 @@
   // as on Mute and Camera. Every row is drawn with setActions and a key, so a button is not rebuilt under a finger.
 
   const REACTIONS_OPEN_MS = 10 * 1000;     // how long the reaction row stays in the secondary row's place
+  const UNCOVERED_TAP_MS = 500;            // the secondary row's buttons, uncovered by a reaction row that closed, ignore a tap this long: the second tap of a double tap
   const CONTROL_TIMEOUT_MS = 35 * 1000;    // the agent gives a control up to 30 s (Zoom's calls take seconds each, one at a time); the page waits a little longer
   const NO_ANSWER = "The room's screen did not answer in time; try again in a moment";
 
@@ -435,12 +436,15 @@
     if (m.participants && m.participants.count) specs.push({ label: "Participants (" + m.participants.count + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
     if (m.chat) specs.push({ label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
     if (c.host && c.host.role && c.host.role !== "participant") specs.push({ label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
-    return specs;
+    // A reaction row that closes uncovers these buttons under the finger that picked: the second tap of a double tap (or a tap at the
+    // moment the row lapses) is not meant for them.
+    return specs.map((spec) => Object.assign({}, spec, { onClick: () => { if (Date.now() >= model.ignoreUntil) spec.onClick(); } }));
   }
 
   // The reaction row: a div in the secondary row's place while it is open (the row is not in the page when it is closed), one button per
   // choice, and Cancel.
   const secondaryKey = { key: null };
+  let shownReactionRow = false;
   const reactionKey = { key: null };
   function renderReactionRow(choices) {
     let row = el("reaction-row");
@@ -474,6 +478,8 @@
     el("meeting-dialog").hidden = !(live && m.dialog);
     const choices = live ? reactionChoices(m.controls || {}) : [];
     const picking = choices.length > 0 && reactionsOpen();
+    if (shownReactionRow && !picking) model.ignoreUntil = Date.now() + UNCOVERED_TAP_MS;
+    shownReactionRow = picking;
     setActions(live ? meetingSecondary(m) : [], "meeting-secondary", secondaryKey);
     el("meeting-secondary").hidden = picking;
     renderReactionRow(picking ? choices : null);

@@ -1,4 +1,5 @@
-"""Fixtures of the control page's browser tests."""
+"""Fixtures of the control tests, all of them automatic: evdev is kept out of every test (no real mouse is made on the machine they run on),
+and the browser tests leave no page open for the tests after them."""
 
 import sys
 

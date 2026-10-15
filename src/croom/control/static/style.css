@@ -85,7 +85,8 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
-.menu { display: grid; grid-template-columns: repeat(3, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* Camera, Screensaver and TV; Camera, Upcoming meetings and TV */
+.menu { display: grid; grid-template-columns: repeat(3, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's three: Camera, Upcoming meetings and TV */
+.view[data-view="options"] .menu { grid-template-columns: repeat(2, minmax(260px, 420px)); }   /* Options has four (Camera framing, Screensaver, Door sign and TV): two by two, not three and one alone; the same height */
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
 #meeting-message { min-height: auto; }   /* a grid item: .message's explicit minimum would let its row shrink under a long refusal */
@@ -531,11 +532,14 @@ body.keyboard-open .schedule { display: none; }
   .tv-modes { min-height: 48px; }
   .tv-modes .button, .tv-nav .button, .tv-transport .button.tv-key, .view[data-view="tv"] .button.tv-colour { min-height: 48px; }
   .tv-numbers { gap: 8px; }
+  /* The cards' hint under a list of TVs repeats the guide and took the room of a row and a half: the list is what the person came for, and it
+     scrolls in its card, so while one is shown the hint goes (it is back with no list: it is the card's instruction). */
+  .tv-card:has(.tv-found:not([hidden])) .tv-hint { display: none; }
 }
 @media (max-width: 1023px) {
   /* A phone: one column. */
   .view[data-view="idle"] { grid-template-columns: 1fr; grid-template-rows: auto; grid-template-areas: "now" "link" "schedule"; }
-  .menu { grid-template-columns: 1fr; }
+  .menu, .view[data-view="options"] .menu { grid-template-columns: 1fr; }
   .camera-grid { grid-template-columns: 1fr; gap: 24px; }   /* the pad, then the presets: two columns need about 800 px */
   .camera-left { flex-wrap: wrap; }
   /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, so its width is not left to what a

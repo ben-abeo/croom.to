@@ -4887,9 +4887,10 @@ def test_the_keyboard_group_goes_while_the_room_cannot_be_reached_and_comes_back
         page.close()
 
 
-@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
-def test_the_options_screen_with_its_keyboard_group_fits_the_kiosk_and_a_portrait_screen(browser, width, height):
-    """The kiosk's 1280 by 800 and a portrait tablet's 800 by 1280 keep fits() on the Options screen with the group on it."""
+@pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1200), (800, 1280)])
+def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_kiosk_and_the_screens_either_side(browser, width, height):
+    """The kiosk's 1280 by 800, the biggest screen's 1920 by 1200 and a portrait tablet's 800 by 1280 keep fits() on the Options screen with
+    its four items (Camera framing, Screensaver, Door sign and TV) and the Key click group on it, the group right under the items."""
     with PageServer() as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
@@ -4897,15 +4898,47 @@ def test_the_options_screen_with_its_keyboard_group_fits_the_kiosk_and_a_portrai
         page.click("#open-options")
         group = page.locator(".keyboard-section")
         buttons_end = "Math.max(...Array.from(document.querySelectorAll('.view[data-view=options] .menu-item')).map(b => b.getBoundingClientRect().bottom))"
+        assert page.locator(".view[data-view=options] .menu-item").count() == 4
         assert group.is_visible() and fits(page), "the options screen scrolls"
         box = group.bounding_box()
         assert 0 <= box["y"] - page.evaluate(buttons_end) <= 60 and box["y"] + box["height"] <= height   # right under the menu's buttons, on the screen
-        # The door sign's branch gives this menu a third entry: with it the group is still under the buttons and on the screen, and nothing scrolls.
-        page.evaluate("""() => { const entry = document.createElement('button'); entry.className = 'button quiet menu-item'; entry.textContent = 'Door sign';
-            document.querySelector('.view[data-view=options] .menu').append(entry); }""")
-        box = group.bounding_box()
-        assert 0 <= box["y"] - page.evaluate(buttons_end) <= 60 and box["y"] + box["height"] <= height
-        assert fits(page), "the options screen scrolls with a third entry"
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1024, 700), (1920, 1200)])
+def test_the_four_items_of_the_options_screen_sit_two_by_two(browser, width, height):
+    """Three in a row left the TV alone on a second row. Two by two reads as a set, and takes the same height."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.click("#open-options")
+        boxes = page.locator(".view[data-view=options] .menu-item").evaluate_all(
+            "bs => bs.map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; })")
+        (x0, y0, w0, h0), (x1, y1, w1, h1), (x2, y2, w2, h2), (x3, y3, w3, h3) = boxes
+        assert y0 == y1 and y2 == y3 and y2 > y0 and x0 == x2 and x1 == x3 and x1 > x0, boxes      # two rows of two
+        assert w0 == w1 == w2 == w3 and h0 == h1 == h2 == h3 == 160, boxes                         # the same size, as before
+        assert y3 + h3 - y0 == 2 * 160 + 24, boxes                                                 # and the height three and one took
+        page.close()
+
+
+def test_the_menu_of_the_meeting_screen_keeps_its_three_in_a_row(browser):
+    with PageServer(tv=RemoteTv()) as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        tops = page.locator(".view[data-view=meeting] .menu-item").evaluate_all("bs => bs.map(b => Math.round(b.getBoundingClientRect().top))")
+        assert len(tops) == 3 and len(set(tops)) == 1, tops
+        page.close()
+
+
+def test_the_four_items_of_the_options_screen_stack_in_one_column_below_1024_wide(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 800, "height": 1280})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.click("#open-options")
+        boxes = page.locator(".view[data-view=options] .menu-item").evaluate_all("bs => bs.map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; })")
+        assert len({x for x, _ in boxes}) == 1 and [y for _, y in boxes] == sorted(y for _, y in boxes) and len({y for _, y in boxes}) == 4, boxes
         page.close()
 
 
@@ -7813,11 +7846,47 @@ def test_power_off_needs_a_second_tap(browser):
         page.wait_for_timeout(200)
         assert power.inner_text().strip() == "Power" and tv.calls == []
         power.click()
-        page.wait_for_timeout(100)
+        page.clock.run_for(600)                                                  # (a person's second tap: after more than half a second)
         power.click()                                                            # the second tap, within five seconds
         assert tv_calls(page, server, 1) == [("control", "power", "off")]
         page.wait_for_function("document.getElementById('tv-turn-on') && !document.getElementById('tv-turn-on').hidden", timeout=5000)
         assert power.inner_text().strip() == "Power"                             # the TV is off now: the button is just Power, and waits for a tap
+        page.close()
+
+
+def test_a_bounced_double_tap_on_power_does_not_turn_the_tv_off(browser):
+    """A touch screen can report one tap twice a moment apart: the first arms Power, and the second would be taken for the confirmation.
+    After arming, Power ignores a tap for half a second (CONFIRM_GUARD_MS); a person's own second tap comes after that, within the five seconds."""
+    tv = RemoteTv()
+    with PageServer(tv=tv) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_tv_screen(page)
+        power = page.locator("#tv-power")
+        power.click()                                                            # armed
+        page.clock.run_for(150)
+        power.click()                                                            # the bounce, 150 ms after the first tap
+        page.wait_for_timeout(200)
+        assert power.inner_text().strip() == "Tap again to turn off" and tv.calls == []          # still armed, and nothing was asked of the TV
+        page.clock.run_for(349)                                                  # 499 ms after the first tap: the guard has a millisecond to go
+        power.click()
+        page.wait_for_timeout(200)
+        assert power.inner_text().strip() == "Tap again to turn off" and tv.calls == []
+        page.clock.run_for(201)                                                  # 700 ms after the first tap: a person's own second tap
+        power.click()
+        assert tv_calls(page, server, 1) == [("control", "power", "off")]        # confirms
+        page.close()
+
+
+def test_a_second_tap_after_the_guard_still_has_the_five_seconds_of_the_first(browser):
+    tv = RemoteTv()
+    with PageServer(tv=tv) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_tv_screen(page)
+        power = page.locator("#tv-power")
+        power.click()
+        page.clock.run_for(4_900)
+        power.click()                                                            # nearly five seconds on: it still confirms
+        assert tv_calls(page, server, 1) == [("control", "power", "off")]
         page.close()
 
 
@@ -7839,6 +7908,50 @@ def test_a_tv_that_is_off_shows_turn_on_and_one_tap_on_power_turns_it_on(browser
         assert all(k.is_enabled() for k in page.locator("#tv-remote [data-tv]").all())
         page.mouse.move(0, 0)                                                    # (off the key: a hovered one is tinted)
         assert page.locator("#tv-power").evaluate("b => getComputedStyle(b).backgroundColor") == "rgba(0, 0, 0, 0)"   # outlined again
+        page.close()
+
+
+ASKING = "The TV is asking to pair again \u2014 Forget TV, then Pair"
+
+
+def test_a_tv_that_is_asking_to_pair_again_says_so_in_place_of_turn_on_and_follows_the_status(browser):
+    """A TV that has forgotten this table shows its pairing prompt (the status says `prompting`): the table's line says what to do about it,
+    where an off TV says Turn on, and Forget TV is on the head row as it always is. Turning it on would not help, and the line goes when
+    the TV stops asking (a Turn on that is with the agent still says Turning on)."""
+    tv = RemoteTv(on=False, reachable=False, volume=None, prompting=True)
+    with PageServer(tv=tv) as server:
+        page = tv_page(browser, server)
+        assert status_line(page) == "Boardroom TV \u00b7 " + ASKING
+        assert page.locator("#tv-turn-on").is_hidden()
+        forget = page.locator("#tv-forget-head")
+        assert forget.is_visible() and forget.is_enabled()
+        assert page.locator("#tv-remote").is_visible() and page.locator("#tv-words").is_hidden()      # it is still the remote, and nothing was refused
+        assert fits(page)
+        tv.shown.update(prompting=False)                                         # the person accepted it with the TV's own remote, or it went away
+        refresh_now(page)
+        page.wait_for_function("document.getElementById('tv-status').textContent.includes('Turn on')", timeout=5000)
+        assert status_line(page) == "Boardroom TV \u00b7 Turn on" and page.locator("#tv-turn-on").is_visible()
+        page.close()
+
+
+def test_a_tv_that_is_on_says_what_it_shows_even_when_the_status_says_it_is_asking(browser):
+    """Asking is for a TV that is not connected: one that is on and answering says where it is, as it always did."""
+    with PageServer(tv=RemoteTv(prompting=True)) as server:
+        page = tv_page(browser, server)
+        assert status_line(page) == "Boardroom TV \u00b7 On \u00b7 HDMI 1 (Crystal Meet)"
+        page.close()
+
+
+def test_a_tv_that_is_asking_to_pair_again_and_is_turned_on_says_turning_on_meanwhile(browser):
+    tv = RemoteTv(on=False, reachable=False, volume=None, prompting=True)
+    tv.gate = asyncio.Event()
+    with PageServer(tv=tv) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-power")                                                  # Power is there, as it is for any TV that is not on
+        tv_calls(page, server, 1)
+        page.wait_for_function("document.getElementById('tv-status').textContent.includes('Turning on')", timeout=5000)
+        assert status_line(page) == "Boardroom TV \u00b7 Turning on\u2026"
+        server.release(tv.gate)
         page.close()
 
 
@@ -8376,6 +8489,31 @@ def test_the_pairing_card_keeps_a_long_list_of_tvs_inside_itself_and_in_view(bro
         page.close()
 
 
+LIST_ROWS = """card => { const list = document.querySelector(card + ' .tv-found-list'), li = list.querySelector('li');
+    return list.clientHeight / li.getBoundingClientRect().height; }"""
+
+
+@pytest.mark.parametrize("card", ["#tv-pairing", "#tv-not-set-up"])
+@pytest.mark.parametrize("width, height", [(1024, 700), (1280, 720), (1280, 760), (1024, 768), (1280, 800)])
+def test_the_list_of_tvs_a_search_found_has_two_rows_at_least_at_every_size_of_the_kiosk(browser, card, width, height):
+    """At 1024 by 700 and 1280 by 720 the card's hint under the list took the room of a row and a half, and the list was one row high (it
+    scrolls in its card). The hint repeats the guide: at the screens that are short it goes while a list is shown, and the list has the rows."""
+    many = [{"host": f"10.0.0.{n}", "name": f"Lobby TV {n}", "location": ""} for n in range(41, 49)]
+    with PageServer(tv=RemoteTv(paired=False) if card == "#tv-pairing" else None, discover=StubSearch(many)) as server:
+        page = tv_page(browser, server, width, height)
+        laid_out(page)
+        hint = page.locator(f"{card} .tv-hint")
+        assert hint.is_visible()                                                     # (with no list on the card it is the card's instruction)
+        page.click(f"{card} .tv-find")
+        page.wait_for_selector(f"{card} .tv-found li", timeout=5000)
+        laid_out(page)
+        rows = page.evaluate(LIST_ROWS, card)
+        assert rows >= 2, (card, width, height, rows)
+        assert hint.is_hidden() == (height <= 760), (card, width, height)             # gone on the short screens only
+        assert fits(page) and page.locator("#tv-modes").is_visible()
+        page.close()
+
+
 @pytest.mark.parametrize("state", ["the remote", "the remote with its inputs open", "the pairing card with a list of TVs", "the card of a TV that refuses the table"])
 def test_the_tv_view_stacks_on_a_phone_without_scrolling_sideways(browser, state):
     make, reach = FIT_STATES[state]
@@ -8510,12 +8648,33 @@ def test_forget_tv_on_the_remote_needs_a_second_tap_like_power_off(browser):
         page.wait_for_timeout(200)
         assert forget.inner_text().strip() == "Forget TV" and tv.calls == []
         forget.click()
-        page.wait_for_timeout(100)
+        page.clock.run_for(600)                                                      # (a person's second tap: after more than half a second)
         forget.click()                                                               # the second tap, within five seconds
         assert tv_calls(page, server, 1) == [("forget",)]
         assert [(m, r, body) for m, r, _, body in seen] == [("POST", "tv/forget", "{}")]
         page.wait_for_selector("#tv-pairing", state="visible", timeout=5000)         # forgotten: the pairing card, and no Forget TV on it
         assert forget.is_hidden() and status_line(page) == "TV at 10.0.0.41 \u00b7 Not paired yet"
+        page.close()
+
+
+def test_a_bounced_double_tap_on_forget_tv_does_not_forget_the_tv(browser):
+    """The same rule as Power's: the head's Forget TV ignores a tap for half a second after it is armed, so that a touch that is reported
+    twice does not forget the pairing (which costs the table its TV until the TV's own remote has accepted a new one)."""
+    tv = RemoteTv()
+    with PageServer(tv=tv) as server:
+        page = page_on_a_stopped_clock(browser, server)
+        open_tv_screen(page)
+        seen = tv_requests(page)
+        forget = page.locator("#tv-forget-head")
+        forget.click()                                                               # armed
+        page.clock.run_for(150)
+        forget.click()                                                               # the bounce, 150 ms after the first tap
+        page.wait_for_timeout(200)
+        assert forget.inner_text().replace("\n", " ").strip() == "Tap again to forget the TV" and tv.calls == [] and seen == []
+        page.clock.run_for(550)                                                      # 700 ms after the first tap
+        forget.click()
+        assert tv_calls(page, server, 1) == [("forget",)]                            # the person's second tap confirms
+        assert [(m, r, body) for m, r, _, body in seen] == [("POST", "tv/forget", "{}")]
         page.close()
 
 
@@ -8552,6 +8711,7 @@ def test_a_forget_the_agent_refuses_says_why_and_flashes_the_key(browser):
     with PageServer(tv=tv) as server:
         page = tv_page(browser, server)
         page.click("#tv-forget-head")
+        page.wait_for_timeout(600)                                                   # (a person's second tap: after more than half a second)
         page.click("#tv-forget-head")
         page.wait_for_selector("#tv-words:not([hidden])", timeout=5000)
         assert page.locator("#tv-words").inner_text().startswith("The TV could not be forgotten")
@@ -10031,6 +10191,7 @@ MODE_STATES = {
     "a refusal that wraps onto more lines": (lambda: failing(RemoteTv(), REFUSAL + ", " + REFUSAL), lambda page: page.click('[data-tv="key:HOME"]')),
     "the TV pointer on": (lambda: RemoteTv(), lambda page: page.click("#tv-pointer")),
     "the room Pi mouse on": (lambda: RemoteTv(), lambda page: page.click("#tv-pi-mouse")),
+    "a TV that is asking to pair again": (lambda: RemoteTv(on=False, reachable=False, volume=None, prompting=True), lambda page: None),
     "a card with its full-screen touchpad": (lambda: RemoteTv(paired=False), lambda page: None),
     "the surface": (lambda: RemoteTv(), lambda page: page.click("#tv-fullscreen")),
 }

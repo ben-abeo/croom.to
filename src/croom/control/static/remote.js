@@ -31,11 +31,13 @@
   const TV_INPUTS_MS = 10000;     // the row of inputs puts itself away when nobody picks
   const TV_FLASH_MS = 900;        // a key the TV refused is amber this long
   const TV_PI = "Crystal Meet";   // what the table calls the input the room Pi is on
+  const CONFIRM_GUARD_MS = 500;   // a button that has just asked for a second tap (Power, Forget TV) ignores a tap this long: a touch that a screen reports twice, a moment apart (about 150 ms), would otherwise be both the question and the answer, and a person's own second tap comes after more than half a second
   // The apps the status line names in words; any other is "an app": the TV's id for it is not a word for a person.
   const TV_APPS = { "com.webos.app.livetv": "Live TV", "com.webos.app.home": "Home screen", "com.webos.app.settings": "Settings",
     netflix: "Netflix", "youtube.leanback.v4": "YouTube", amazon: "Prime Video" };
   const TV_PAIR_WAIT = "Accept the request on the TV with its own remote. The table waits a minute for it.";
   const TV_REFUSED_TEXT = el("tv-refused-text").textContent;   // the card's own words, put back when a pairing from it is over
+  const TV_ASKING = "The TV is asking to pair again \u2014 Forget TV, then Pair";   // the status line of a TV that shows its pairing prompt for the key this table keeps (status.tv.prompting)
   const TV_FOUND_NONE = "No TVs answered. Check that the TV is on, and on the same network as this table.";
 
   const tvView = {
@@ -43,8 +45,10 @@
     turningOn: false,    // a Turn on is with the TV (up to 23 s): the remote waits for it
     armed: false,        // Power has had its first tap and waits for the second
     armTimer: null,
+    armedAt: 0,          // ... and when it had it (Date.now())
     forgetArmed: false,  // the head's Forget TV has had its first tap and waits for the second
     forgetTimer: null,
+    forgetArmedAt: 0,
     inputsOpen: false,   // the row of inputs is where the top keys are
     inputsTimer: null,
     inputsKey: null,
@@ -140,16 +144,19 @@
     clearTimeout(tvView.armTimer);
   }
 
-  // A TV that is on is turned off by two taps on Power, the second within five seconds, as Leave is; a TV that is not on is turned on by one.
+  // A TV that is on is turned off by two taps on Power, the second after half a second (CONFIRM_GUARD_MS) and within five seconds, as Leave is
+  // (without the half second); a TV that is not on is turned on by one.
   function tvPower() {
     if (!tvBlock().on) { tvTurnOn(); return; }
     if (!tvView.armed) {
       tvView.armed = true;
+      tvView.armedAt = Date.now();
       clearTimeout(tvView.armTimer);
       tvView.armTimer = setTimeout(() => { tvView.armed = false; render(); }, CONFIRM_MS);
       render();
       return;
     }
+    if (Date.now() - tvView.armedAt < CONFIRM_GUARD_MS) return;   // the first touch again, not the second tap
     tvDisarm();
     tvControl("power", "off", el("tv-power"));
   }
@@ -244,17 +251,19 @@
     clearTimeout(tvView.forgetTimer);
   }
 
-  // The head's Forget TV asks for a second tap, within five seconds, as Power does to turn the TV off: forgetting costs the table its TV
-  // until the TV's own remote has accepted a new pairing.
+  // The head's Forget TV asks for a second tap, after half a second and within five seconds, as Power does to turn the TV off: forgetting
+  // costs the table its TV until the TV's own remote has accepted a new pairing.
   function tvForgetTap() {
     if (el("tv-forget-head").disabled) return;
     if (!tvView.forgetArmed) {
       tvView.forgetArmed = true;
+      tvView.forgetArmedAt = Date.now();
       clearTimeout(tvView.forgetTimer);
       tvView.forgetTimer = setTimeout(() => { tvView.forgetArmed = false; render(); }, CONFIRM_MS);
       render();
       return;
     }
+    if (Date.now() - tvView.forgetArmedAt < CONFIRM_GUARD_MS) return;   // the first touch again, not the second tap
     tvDisarmForget();
     tvForget(el("tv-forget-head"));
   }
@@ -374,7 +383,8 @@
     return where;
   }
 
-  // The status line: "Boardroom TV \u00B7 On \u00B7 HDMI 1 (Crystal Meet)". A TV that is not on has Turn on in place of its state.
+  // The status line: "Boardroom TV \u00B7 On \u00B7 HDMI 1 (Crystal Meet)". A TV that is not on has Turn on in place of its state, unless it is
+  // asking this table to pair again: it has forgotten the table, and the line says what to do about it (Forget TV is on the head row).
   function renderTvStatus(t, card) {
     const parts = [["name", t.name || (card === "pairing" && t.host ? "TV at " + t.host : "TV")]];
     let turnOn = false;
@@ -387,7 +397,8 @@
       const where = tvWhere(t);
       if (where) parts.push(["text", where]);
       if (t.channel) parts.push(["text", "Channel " + t.channel]);
-    } else turnOn = true;
+    } else if (t.prompting) parts.push(["text", TV_ASKING]);
+    else turnOn = true;
     if (card === "" && pointer.target === "tv") parts.push(["text", "Pointer on"]);
     const key = JSON.stringify([parts, turnOn]);
     if (key !== tvView.factsKey) {

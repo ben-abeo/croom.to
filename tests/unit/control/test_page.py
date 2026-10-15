@@ -4596,11 +4596,19 @@ def test_the_meeting_screen_with_everything_still_fits_and_hides_the_unavailable
         page.close()
 
 
-@pytest.mark.parametrize("width, height, menu, tall", [(1280, 800, 72, False), (1920, 1200, 160, True)])
-def test_a_tall_table_has_the_roomy_sizes_of_the_meeting_screen_and_the_kiosk_keeps_the_compact_ones(browser, width, height, menu, tall):
-    """The kiosk lays out at 1280 by 800 and the room's table at 1920 by 1200: the compact fit of the meeting screen (a tight stack, the
-    Sound strip on two lines, 72 px menu buttons) is what 800 px needs. At 1200 px it left more than half the screen empty, so there the
-    screen has its roomy sizes: the rows apart, the Sound strip stacked, the menu buttons at their full height. fits() holds at both."""
+@pytest.mark.parametrize("width, height, roomy", [
+    (1280, 800, False),      # the room's table: the 1920 by 1200 panel lays out at 1280 by 800, the kiosk launches Chromium at 1.5x (installer/install-kiosk.sh)
+    (1280, 1000, False),     # tall enough for the roomy stack to fit the host's screen, with nothing left for a dialog's card: the compact one has
+    (1920, 1080, False),
+    (768, 1024, False),      # a portrait tablet: the roomy sizes scroll it
+    (820, 1180, False),      # a taller one, as tall as the roomy sizes ask: the width keeps it compact
+    (1920, 1200, True),      # an unscaled tall wide browser
+])
+def test_the_roomy_sizes_of_the_meeting_screen_are_for_wide_tall_screens_only_and_the_rest_keep_the_compact_ones(browser, width, height, roomy):
+    """The compact fit of the meeting screen (a tight stack, the Sound strip on two lines, 72 px menu buttons) is what 800 px needs, and
+    what a dialog's card needs up to 1100 px (between 1000 and 1080 px tall the roomy stack leaves the card no room). From 1100 by
+    1100 px up the screen has its roomy sizes: the rows apart, the Sound strip stacked, the menu buttons at their full height. A
+    portrait tablet (768 by 1024 is tall and narrow) keeps the compact ones, which fit it, where the roomy ones scroll. fits() holds."""
     with PageServer(role="host") as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
@@ -4612,7 +4620,10 @@ def test_a_tall_table_has_the_roomy_sizes_of_the_meeting_screen_and_the_kiosk_ke
             stacked: document.getElementById('volume-slider').getBoundingClientRect().bottom <= document.getElementById('quieter').getBoundingClientRect().top,
             gap: parseFloat(getComputedStyle(document.querySelector('.view[data-view=meeting]')).rowGap),
             above: parseFloat(getComputedStyle(document.getElementById('meeting-actions')).marginTop) })""")
-        assert sizes == {"menu": menu, "stacked": tall, "gap": 24 if tall else 14, "above": 22 if tall else 0}, sizes
+        expected = {"menu": 160 if roomy else 72, "stacked": roomy, "gap": 24 if roomy else min(16, round(height * 0.0175)), "above": 22 if roomy else 0}
+        if width < 1024:
+            expected.pop("stacked")                                          # a phone's or a tablet's Sound strip wraps whatever the sizes
+        assert {name: sizes[name] for name in expected} == expected, sizes
         assert fits(page)
         page.close()
 
@@ -5092,6 +5103,29 @@ def test_a_button_whose_own_words_change_is_the_same_button_and_runs_what_it_say
         page.locator("#meeting-secondary .button", has_text="Speaker view").click()
         page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Gallery view')", timeout=5000)
         assert server.meeting.controls_called == [("layout", "gallery"), ("layout", "speaker")]
+        page.close()
+
+
+def test_a_lift_on_a_button_whose_words_changed_since_the_press_does_not_run_the_new_words(browser):
+    """A thumb comes down on Mute as the host mutes the room: the poll turns the button into Unmute under it, and the lift must not turn the
+    room's microphone live. The button is kept (its own words changed), but what the lift runs is what it said when the finger went down; a
+    press made on the new words does what they say."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        box = page.locator("#meeting-actions .button", has_text="Mute").bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()
+        server.meeting.muted = True                                                  # the host muted the room: the agent's state ...
+        server.meeting.current_meeting.is_muted = True                               # ... and what the status carries
+        poll_until(page, "document.querySelector('#meeting-actions .button').textContent.includes('Unmute')")
+        page.mouse.up()
+        page.wait_for_timeout(700)                                                   # long enough for a request to have gone out and been answered
+        assert server.meeting.muted is True, "the lift unmuted a room the host had just muted"
+        page.locator("#meeting-actions .button", has_text="Unmute").click()
+        page.wait_for_function("document.querySelector('#meeting-actions .button').textContent.trim() === 'Mute'", timeout=5000)
+        assert server.meeting.muted is False
         page.close()
 
 

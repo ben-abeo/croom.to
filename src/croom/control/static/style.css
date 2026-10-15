@@ -370,10 +370,14 @@ body.keyboard-open .schedule { display: none; }
   .top:has(.next-warning:not([hidden])) .next-warning { flex: 1 1 100%; }
 }
 
-/* A tall table: the room's own is 1920 by 1200. The meeting screen's compact fit (the tight stack, the Sound strip on two lines, the
-   72 px menu buttons: what 800 px needs, above) left more than half of a 1200 px screen empty, so from 1000 px up the screen has its
-   roomy sizes back: the rows apart, the Sound strip stacked, the menu buttons at their full height. */
-@media (min-height: 1000px) {
+/* A wide, tall screen with no scaling (a 1920 by 1200 browser): the meeting screen's compact fit (the tight stack, the Sound strip on
+   two lines, the 72 px menu buttons: what 800 px needs, above) would leave more than half of it empty, so from 1100 by 1100 px up the
+   screen has its roomy sizes back: the rows apart, the Sound strip stacked, the menu buttons at their full height. The room's own
+   table is not that screen: it is 1920 by 1200, and the kiosk launches Chromium at 1.5x (installer/install-kiosk.sh), so the page
+   lays out at 1280 by 800 there and has the compact sizes. The height is 1100 and not 1000 because between 1000 and 1080 px the roomy
+   stack leaves no room for a dialog's card, which the compact one has; the width keeps a portrait tablet (768 by 1024, 820 by 1180)
+   on the compact sizes, which fit it, where the roomy ones scroll it. */
+@media (min-height: 1100px) and (min-width: 1100px) {
   .view[data-view="meeting"] { row-gap: clamp(16px, 2.5vh, 24px); }
   .actions.meeting-actions { margin-top: 22px; }
   .view[data-view="meeting"] .button.menu-item { min-height: 160px; font-size: 1.4rem; }

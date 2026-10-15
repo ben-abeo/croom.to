@@ -315,7 +315,8 @@
     // buttons in the same order as the row on the screen is patched where it stands: another button's words changed (a
     // chat message came in), and a finger that is down on this one must still find it at the lift, or the browser drops the
     // tap. A row whose set or order of buttons changes is built again. A tap goes to the spec the row is drawn from now
-    // (keyHolder.specs), not to the one its button was drawn with, so a button that is kept runs what it says now.
+    // (keyHolder.specs), not to the one its button was drawn with, so a button that is kept runs what it says now, unless its
+    // words changed after the finger went down (below).
     const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null, s.icon || null]));
     keyHolder.specs = specs;
     if (key === keyHolder.key) return;
@@ -327,7 +328,20 @@
       return;
     }
     keyHolder.ids = ids;
-    container.replaceChildren(...specs.map((s, i) => button(s.label, s.className, (e) => { const now = keyHolder.specs[i]; if (now) now.onClick(e); }, s.disabled, s.icon)));
+    container.replaceChildren(...specs.map((s, i) => {
+      // The lift runs what the button says now, but only if it says what it did when the finger went down: a host muting the room as a
+      // thumb comes down on Mute turns the button into Unmute, and the lift must not unmute the room. (A click with no press before it, a
+      // key on a keyboard, has no words to compare.)
+      let pressed;
+      const b = button(s.label, s.className, (e) => {
+        const now = keyHolder.specs[i], was = pressed;
+        pressed = undefined;
+        if (now && (was === undefined || was === now.label)) now.onClick(e);
+      }, s.disabled, s.icon);
+      b.addEventListener("pointerdown", () => { const now = keyHolder.specs[i]; pressed = now ? now.label : undefined; });
+      b.addEventListener("pointercancel", () => { pressed = undefined; });
+      return b;
+    }));
   }
   const idleActionsKey = { key: null };
   const meetingActionsKey = { key: null };

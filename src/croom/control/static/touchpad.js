@@ -12,7 +12,8 @@
   const ACCEL_PX = 40;                       // the travel in one frame at which the acceleration tops out, at twice the gain: a flick crosses the screen, a slow drag is exact
   const TAP_MS = 180;                        // a touch shorter than this that stayed within TAP_PX is a click
   const TAP_PX = 8;                          // how far a fingertip may roll and still be still
-  const HOLD_MS = 350;                       // a finger that stayed still this long, and then moves, drags
+  const SLOP_PX = 3;                         // how far it may wander and still not have moved at all: the noise of a resting finger and of the screen under it
+  const HOLD_MS = 350;                       // a finger that rested this long before it first moved, and then goes, drags
   const PI_NOTCH_PX = 30;                    // two fingers' travel that turns the room Pi's wheel one notch
   const TOUCHPAD_IDLE_MS = 10 * 60 * 1000;   // the surface puts itself away after this long with no touch on it
   const RECONNECT_MS = [1000, 2000, 5000];   // the socket's waits before it tries again: after the first loss, after the second, then every five seconds
@@ -83,12 +84,15 @@
 
   // --- the touch reader ---
   // The fingers on one surface. `node` is where they go down; target() says whom a message is for, "tv" or "pi", each time one is sent.
-  // A gesture runs from the first finger down to the last finger up. One finger moves the cursor; a short quick touch is a click; a finger that
-  // stayed still for HOLD_MS before it moved drags, with the button down until it lifts. A second finger makes it a two-finger gesture, which
-  // stays one until every finger is up: the fingers scroll, and a short quick touch of both is a right click (the room Pi's; the TV's cursor
-  // has no right button). A third finger is ignored. The travel is gathered for each animation frame and sent as one message of whole numbers;
-  // what the whole numbers leave behind is carried into the next, so a slow drag loses nothing. The travel of a touch is held back until the
-  // touch has said what it is, by going TAP_PX or by lasting TAP_MS: a click sends only the click, and a still finger moves nothing.
+  // A gesture runs from the first finger down to the last finger up. One finger moves the cursor; a short quick touch is a click; a press and
+  // hold drags, with the button down until it lifts. What a touch is is decided once, when its finger first really moves (past SLOP_PX): before
+  // HOLD_MS it is a mover for good, however slowly it goes on, and never drags; from HOLD_MS on it is a press and hold, however gently it starts.
+  // A finger that never passes the slop is a click, if it was quick, and nothing otherwise. A second finger makes it a two-finger gesture,
+  // which stays one until every finger is up: the fingers scroll, and a short quick touch of both is a right click (the room Pi's; the TV's
+  // cursor has no right button). A third finger is ignored. The travel is gathered for each animation frame and sent as one message of whole
+  // numbers; what the whole numbers leave behind is carried into the next, so a slow drag loses nothing. The travel of a touch is held back
+  // until it has said what it is: a mover's by going TAP_PX or by lasting TAP_MS, a press and hold's by going TAP_PX, when the button goes down
+  // and the held travel after it. A click sends only the click, and a still finger moves nothing.
   function reader(node, target) {
     const fingers = new Map();   // pointerId -> { x0, y0: where it landed, x, y: where it is, lx, ly: where the last frame left it }
     let g = null;                // the gesture: { at: when it began, two, far: how far a finger has been from where it landed, released, dragging, carry }
@@ -102,7 +106,7 @@
       return [x, y];
     };
     const released = (t) => {    // the touch has said what it is, so its travel goes
-      if (!g.released && (g.far >= TAP_PX || t - g.at >= TAP_MS)) g.released = true;
+      if (!g.released && (g.far >= TAP_PX || (g.resting === false && t - g.at >= TAP_MS))) g.released = true;
       return g.released;
     };
 
@@ -154,10 +158,11 @@
         g.at = t;
         g.far = 0;
         g.released = false;
+        g.resting = null;
         g.carry.x = g.carry.y = 0;
         for (const f of fingers.values()) { f.x0 = f.lx = f.x; f.y0 = f.ly = f.y; }
       } else {
-        g = { at: t, two: false, far: 0, released: false, dragging: false, carry: { x: 0, y: 0 } };
+        g = { at: t, two: false, far: 0, released: false, dragging: false, resting: null, carry: { x: 0, y: 0 } };
       }
       fingers.set(e.pointerId, { x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY });
       node.classList.add("touching");
@@ -170,8 +175,10 @@
       f.y = e.clientY;
       const away = Math.hypot(f.x - f.x0, f.y - f.y0);
       if (away > g.far) {
-        // The first time a finger that has stayed still for HOLD_MS goes TAP_PX, it is a drag: the button goes down before the moves.
-        if (!g.two && g.far < TAP_PX && away >= TAP_PX && performance.now() - g.at >= HOLD_MS && send("down")) g.dragging = true;
+        // What the touch is is decided once, when the finger first really moves: one that rested HOLD_MS before that is a press and hold, and
+        // goes TAP_PX before it drags (the button goes down, then its travel); one that moved sooner is a mover and never a drag.
+        if (g.resting === null && away >= SLOP_PX) g.resting = !g.two && performance.now() - g.at >= HOLD_MS;
+        if (g.resting && g.far < TAP_PX && away >= TAP_PX && send("down")) g.dragging = true;
         g.far = away;
       }
       if (!frame) frame = requestAnimationFrame(flush);

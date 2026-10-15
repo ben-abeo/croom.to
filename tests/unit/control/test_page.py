@@ -9,6 +9,7 @@ when Playwright or its browser is not installed.
 import asyncio
 import json
 import math
+import random
 import socket
 import tempfile
 import threading
@@ -7115,4 +7116,139 @@ def test_the_modes_row_and_the_surface_stack_on_a_phone_without_scrolling_sidewa
             assert page.locator("#tv-trackpad").bounding_box()["height"] >= 200                      # a pad to put a finger on, and not a line of words
         if state == "the surface":
             assert page.locator("#touchpad-title").bounding_box()["width"] >= 300                    # the title has a line of its own, the switch and Done under it
+        page.close()
+
+
+# --- fix round 1: what a touch is, decided once (a tap, a move or a hold) ---
+
+class RealTouch:
+    """Real touches through the browser's own input pipeline (CDP Input.dispatchTouchEvent): real pointer events of type touch, with the capture and the
+    timestamps a panel gives them. The page needs a touch screen (`has_touch`). The protocol lists every finger that is down with each call."""
+
+    def __init__(self, page):
+        self.cdp, self.down = page.context.new_cdp_session(page), {}
+
+    def _send(self, kind):
+        self.cdp.send("Input.dispatchTouchEvent", {"type": kind, "touchPoints": [{"x": x, "y": y, "id": i} for i, (x, y) in sorted(self.down.items())]})
+
+    def start(self, x, y, finger=1):
+        self.down[finger] = (x, y)
+        self._send("touchStart")
+
+    def move(self, x, y, finger=1):
+        self.down[finger] = (x, y)
+        self._send("touchMove")
+
+    def end(self, finger=1):
+        self.down.pop(finger, None)
+        self._send("touchEnd")
+
+
+def real_pad_page(browser, server, mode, width=1280, height=800):
+    """The TV view on the page's own clock, on a touch screen, with a PointerLog for the agent and `mode` on. Returns the page, the log and the middle of
+    the trackpad."""
+    page = browser.new_page(viewport={"width": width, "height": height}, has_touch=True)
+    log = PointerLog(page)
+    page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    open_tv_screen(page)
+    page.click(mode)
+    the_socket(page)
+    box = page.locator(PAD).bounding_box()
+    return page, log, (box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+
+
+def test_a_press_and_hold_that_starts_gently_still_sends_down_before_its_moves(browser):
+    """Real touches. A finger rests for half a second and then goes, gently, 2 px at a frame: it is a press and hold, because it rested before it first
+    moved, however gently it moves after; what it sends is `down` first, and its moves from there."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log, (x, y) = real_pad_page(browser, server, "#tv-pi-mouse")
+        finger = RealTouch(page)
+        finger.start(x, y)
+        page.wait_for_timeout(HOLD_MS + 150)
+        for _ in range(15):
+            x += 2
+            finger.move(x, y)
+            page.wait_for_timeout(16)
+        finger.end()
+        types = [f["type"] for f in log.got()]
+        assert types[:1] == ["down"] and types[-1:] == ["up"] and set(types[1:-1]) == {"move"} and len(types) > 4, types
+        page.close()
+
+
+def test_a_slow_move_from_the_landing_moves_the_cursor_and_never_presses_the_button(browser):
+    """Real touches. A finger that creeps from the moment it lands (1 px every 40 ms) is a move from its first real travel, for good: slowly,
+    carefully placing the cursor is not a drag, and must not end in a click."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log, (x, y) = real_pad_page(browser, server, "#tv-pi-mouse")
+        finger = RealTouch(page)
+        finger.start(x, y)
+        for _ in range(25):
+            page.wait_for_timeout(40)
+            x += 1
+            finger.move(x, y)
+        finger.end()
+        types = [f["type"] for f in log.got()]
+        assert len(types) >= 8 and set(types) == {"move"}, types
+        page.close()
+
+
+def test_a_resting_finger_that_rolls_a_little_sends_nothing(browser):
+    """Real touches. A finger that rests for most of a second and rolls by up to 2 px as it does moves nothing and clicks nothing."""
+    rolls = random.Random(3)
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log, (x, y) = real_pad_page(browser, server, "#tv-pointer")
+        finger = RealTouch(page)
+        finger.start(x, y)
+        for _ in range(24):
+            page.wait_for_timeout(30)
+            finger.move(x + rolls.choice((-2, 0, 2)), y + rolls.choice((-2, 0, 2)))
+        finger.end()
+        assert log.got() == []
+        page.close()
+
+
+def test_a_touch_that_has_moved_is_a_mover_for_good_and_a_rest_after_it_makes_no_drag(browser):
+    """The kind of a touch is decided once, at its first real travel: this one moved after 100 ms, so it is a mover, and going on after a long rest
+    does not turn it into a press and hold."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(100)
+        touch_event(page, PAD, "move", 104, 100)
+        frame(page)
+        page.clock.run_for(500)
+        touch_event(page, PAD, "move", 110, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 110, 100)
+        assert [f["type"] for f in log.got()] == ["move"]
+        page.close()
+
+
+def test_a_hold_that_starts_gently_holds_its_travel_to_eight_pixels_and_then_sends_down_and_the_travel(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 100, 100)
+        page.clock.run_for(HOLD_MS + 50)
+        touch_event(page, PAD, "move", 104, 100)                                                   # the first real travel, after a rest: a press and hold
+        frame(page)
+        assert log.got() == []                                                                     # (4 px of the 8: nothing goes, not even as a move)
+        touch_event(page, PAD, "move", 108, 100)
+        frame(page)
+        touch_event(page, PAD, "up", 108, 100)
+        assert log.got() == [{"target": "pi", "type": "down"}, {"target": "pi", "type": "move", "dx": 14, "dy": 0}, {"target": "pi", "type": "up"}]   # 2 x 7.04
+        page.close()
+
+
+def test_a_finger_that_rolls_a_little_while_it_rests_sends_nothing_however_long_it_rests(browser):
+    rolls = random.Random(5)
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        touch_event(page, PAD, "down", 100, 100)
+        for _ in range(40):                                                                        # more than a second of it
+            page.clock.run_for(30)
+            touch_event(page, PAD, "move", 100 + rolls.choice((-2, 0, 2)), 100 + rolls.choice((-2, 0, 2)))
+        page.clock.run_for(30)
+        touch_event(page, PAD, "up", 100, 100)
+        assert log.got() == []
         page.close()

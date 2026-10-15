@@ -118,6 +118,25 @@ def browser():
         instance.close()
 
 
+LEFT_OPEN = []     # the contexts the next test's look at the browser must find closed
+
+
+def test_a_sign_page_a_test_leaves_open_is_closed_when_that_test_ends(browser):
+    """No page outlives its test (the whole-branch review): the browser is one for the whole module and every `new_page()` makes a context of its own,
+    so a test that fails before its `page.close()` would leave a page polling a server that has gone, and its route handler, to every test after it.
+    This one opens a page, hangs a route handler on it and leaves it open on purpose; the test after it looks."""
+    page = browser.new_page()
+    page.route("**/*", lambda route: route.abort())
+    LEFT_OPEN.append(page.context)
+    assert page.context in browser.contexts
+
+
+def test_the_next_sign_test_finds_the_browser_with_no_page_open(browser):
+    if not LEFT_OPEN:
+        pytest.skip("the test before it leaves a page open, and this one looks for it")
+    assert LEFT_OPEN[0] not in browser.contexts and browser.contexts == []
+
+
 def open_page(browser, server):
     page = browser.new_page(viewport={"width": 1280, "height": 800})
     page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")

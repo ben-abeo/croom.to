@@ -141,8 +141,9 @@ def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps()
     text = README.read_text(encoding="utf-8")
     for needle in (
         "a first row of Mute, Turn camera off, Raise hand, **Reactions** and Leave",
-        "a second row of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat** and, only while the room is host or co-host, **Host**",
-        "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more",
+        "a second row of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat**, **Host** (only while the room is host or co-host) and **TV**, "
+        "then the room's volume, **Camera** for presets and nudges and **Upcoming meetings**",
+        "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more (Leave, **TV** and the rest of the screen are as ever)",
         "a Zoom dialog that waits for a tap shows as a card above the controls with Zoom's own buttons",
         "**Participants**, **Chat** (read only) and **Host** are screens of their own, each with **Back**, and each returns to the meeting screen after two idle minutes",
         "Leave, Remove and End meeting for everyone ask for a second tap",
@@ -150,6 +151,7 @@ def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps()
     ):
         assert needle in text, needle
     assert "(Mute, Turn camera off, Leave, the room's volume" not in text
+    assert "**Upcoming meetings** and **TV**" not in text and "**Upcoming meetings**, **TV**" not in text      # the TV is in the second row, not beside Camera
 
 
 def test_readme_names_the_dialog_policys_and_the_reactions_defaults_as_the_code_has_them():
@@ -268,10 +270,10 @@ def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
     and names the shell check. The waits are the page's own constants."""
     text = README.read_text(encoding="utf-8")
     for needle in (
-        # the remote's place: the idle screen's Options, the meeting screen's own button; it belongs to the screen that opened it
+        # the remote's place: the idle screen's Options, the last button of the meeting screen's second row; it belongs to the screen that opened it
         "the **TV** remote and the keyboard's **Key click**",
-        "**Camera** for presets and nudges, **Upcoming meetings** and **TV**.",
-        "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV** on the meeting screen",
+        "**Chat**, **Host** (only while the room is host or co-host) and **TV**, then the room's volume",
+        "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV**, the last button of the second row, on the meeting screen",
         "**Back** returns to the screen that opened it",
         f"left alone it returns by itself after {words(IDLE_RETURN_MIN)} minutes ({words(TV_RETURN_MIN)} on the meeting screen)",
         # what is on it

@@ -89,12 +89,11 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
-.menu { display: grid; grid-template-columns: repeat(3, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's three: Camera, Upcoming meetings and TV */
-.view[data-view="options"] .menu { grid-template-columns: repeat(2, minmax(260px, 420px)); }   /* Options has four (Camera framing, Screensaver, Door sign and TV): two by two, not three and one alone; the same height */
+.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' four (Camera framing, Screensaver, Door sign and TV) sit two by two, the same height */
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
-/* The secondary row, and the reaction row that takes its place: smaller buttons, so that six and the TV's seventh sit in one row, and no
-   room when there is nothing in the row or the reaction row has it. */
+/* The secondary row, and the reaction row that takes its place: smaller buttons, so that the seven (Captions, the view, Hide self view,
+   Participants, Chat, Host and the TV's) sit in one row, and no room when there is nothing in the row or the reaction row has it. */
 .meeting-secondary .button { min-height: 52px; padding: 0 18px; }
 .meeting-secondary:empty, .meeting-secondary[hidden] { display: none; }
 /* The notice line under the title: what the meeting says of itself (recorded, transcribed), in the detail's style. */
@@ -610,7 +609,7 @@ body.keyboard-open .schedule { display: none; }
   .participant .name { flex-basis: 100%; }
   .participant .marks { flex: 1 1 auto; justify-content: flex-start; }
   .view[data-view="idle"] { grid-template-columns: 1fr; grid-template-rows: auto; grid-template-areas: "now" "link" "schedule"; }
-  .menu, .view[data-view="options"] .menu { grid-template-columns: 1fr; }
+  .menu { grid-template-columns: 1fr; }
   .camera-grid { grid-template-columns: 1fr; gap: 24px; }   /* the pad, then the presets: two columns need about 800 px */
   .camera-left { flex-wrap: wrap; }
   /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, so its width is not left to what a

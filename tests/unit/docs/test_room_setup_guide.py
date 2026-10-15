@@ -317,7 +317,8 @@ def test_guide_describes_the_meeting_screen_its_rows_sub_screens_dialog_card_and
     assert html.index("First run and the screens") < html.index(">The meeting screen</h2>") < html.index("<h2>Troubleshooting</h2>")
     for needle in (
         "While a call lasts the page shows the meeting screen on its own, and draws only what the call's platform offers the room right now",
-        "A Google Meet call offers Mute, Turn camera off, Raise hand, Captions and Leave, and no more",
+        "A Google Meet call offers Mute, Turn camera off, Raise hand, Captions and Leave, and no more (besides TV, which every call has)",
+        "The remote and touchpad of the room's TV, always the last button of the row: the section The TV, below, sets it up",
         "Thumbs up", "Clap", "Heart", "Laugh", "Wow", "Celebrate",
         "Participants (7)", "Chat (2)", "Waiting room", "Admit", "No messages yet",
         "Mute all", "Ask all to unmute", "Start recording", "Lock meeting", "End meeting for everyone",
@@ -338,7 +339,7 @@ def test_guide_draws_the_meeting_screens_icons_from_the_rooms_own_sprite():
     symbol = lambda source, name: re.search(rf'<symbol id="icon-{re.escape(name)}"[^>]*>(.*?)</symbol>', source, re.S)
     used = sorted(set(re.findall(r'<use href="#icon-([a-z-]+)"', html)))
     assert {"mic", "mic-off", "video", "video-off", "hand", "smile", "phone-off", "captions", "layout", "user", "users", "message", "lock", "unlock", "record",
-            "door", "x-circle", "thumbs-up", "heart", "laugh", "party-popper"} <= set(used), used
+            "door", "x-circle", "thumbs-up", "heart", "laugh", "party-popper", "tv"} <= set(used), used
     for name in used:
         ours, theirs = symbol(html, name), symbol(page, name)
         assert ours and theirs, name
@@ -350,7 +351,7 @@ def test_guide_step_four_lists_the_meeting_screens_rows_as_built_and_mute_only_f
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
     for needle in (
-        "During a call the page shows the meeting screen on its own: a first row of Mute, Turn camera off, Raise hand, Reactions and Leave, a second row of Captions, the view, Hide self view, Participants, Chat and, for a host, Host (the section after this step shows them all), then the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next",
+        "During a call the page shows the meeting screen on its own: a first row of Mute, Turn camera off, Raise hand, Reactions and Leave, a second row of Captions, the view, Hide self view, Participants, Chat, Host (for a host) and TV (the section after this step shows them all), then the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next",
         "A host or co-host also gets Mute (only for someone not already muted) and Remove on each other person (Tap again to remove)",
     ):
         assert needle in text, needle
@@ -458,7 +459,7 @@ def test_guide_describes_the_remote_on_the_table_and_the_touchpad_modes_and_how_
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     text = visible_text(html)
     for needle in (
-        "Open the remote. Tap Options, then TV. During a meeting tap TV on the meeting screen, beside Camera and Upcoming meetings",
+        "Open the remote. Tap Options, then TV. During a meeting tap TV, the last button of the second row",
         f"the remote returns by itself after {words(IDLE_RETURN_MIN)} minutes with no touch, or {words(TV_RETURN_MIN)} minutes during a meeting",
         "The top line names the TV and says what it shows, for example Boardroom TV · On · HDMI 1 (Crystal Meet)",
         "so it can differ from the name Find TVs listed for the same TV",

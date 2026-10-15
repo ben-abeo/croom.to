@@ -116,7 +116,7 @@ def test_zoom_guide_says_what_the_tables_controls_do_and_the_limits_zoom_sets():
     for needle in (
         "Mute or Unmute, Turn camera off or Turn camera on, Raise hand or Lower hand, Reactions and Leave",
         "Reactions replaces the second row for ten seconds with Thumbs up, Clap, Heart, Laugh, Wow and Celebrate, and Cancel",
-        "Captions on or Captions off, Gallery view or Speaker view, Hide self view or Show self view, Participants (7), Chat (2) with the number of messages not yet read, and Host, drawn only while Zoom says the room is host or co-host",
+        "Captions on or Captions off, Gallery view or Speaker view, Hide self view or Show self view, Participants (7), Chat (2) with the number of messages not yet read, Host, drawn only while Zoom says the room is host or co-host, and TV, the room's own button for its TV's remote, which is always the last",
         "Mute (not shown for someone already muted) and Remove",
         "people in the waiting room are listed apart under Waiting room, each with Admit",
         "The last 20 messages other people sent",

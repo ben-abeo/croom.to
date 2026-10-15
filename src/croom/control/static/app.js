@@ -499,7 +499,8 @@
   }
 
   // The secondary row: Captions, View, Self view, Participants (with the count), Chat (with the unread count), Host (for a host or
-  // co-host). Without a model there is nothing to draw it from, so none of it is drawn.
+  // co-host), and the TV's remote, the table's own button and the last of them. Without a model there is nothing to draw it from, so none
+  // of it is drawn.
   function meetingSecondary(m) {
     const c = m.controls || {};
     if (!Object.keys(c).length) return [];
@@ -517,6 +518,9 @@
     if (people.length) specs.push({ id: "participants", label: "Participants (" + (m.participants.count || people.length) + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
     if (m.chat && !(c.chat && c.chat.available === false)) specs.push({ id: "chat", label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
     if (c.host && c.host.role && c.host.role !== "participant") specs.push({ id: "host", label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
+    // The TV is the room's, not the platform's: it is drawn with the row, after Host, whatever the TV's state (a room with no TV set up, or a TV not
+    // yet paired, finds its cards in the view that this opens).
+    specs.push({ id: "tv", label: "TV", icon: "tv", className: "quiet", onClick: () => setView("tv") });
     // A reaction row that closes uncovers these buttons under the finger that picked: the second tap of a double tap (or a tap at the
     // moment the row lapses) is not meant for them.
     return specs.map((spec) => Object.assign({}, spec, { onClick: () => { if (Date.now() >= model.ignoreUntil) spec.onClick(); } }));
@@ -1195,7 +1199,6 @@
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
   for (const name of ["participants", "chat", "host"]) el("back-from-" + name).addEventListener("click", () => setView("meeting"));
   el("open-tv-options").addEventListener("click", () => setView("tv"));
-  el("open-tv-meeting").addEventListener("click", () => setView("tv"));
   el("back-from-tv").addEventListener("click", () => setView(tvMode === "meeting" ? "meeting" : "options"));
   el("key-click-on").addEventListener("click", () => setKeyClick(true));
   el("key-click-off").addEventListener("click", () => setKeyClick(false));

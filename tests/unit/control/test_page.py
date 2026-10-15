@@ -5730,6 +5730,31 @@ def test_a_finger_down_on_an_input_is_not_lost_when_the_tv_changes_the_input_und
         page.close()
 
 
+def test_a_finger_down_on_the_check_of_the_input_that_was_current_is_not_lost_when_the_input_changes(browser):
+    """The check is the picture of the input the TV shows, and it comes off that input's button when the TV changes input. A finger that went
+    down on the picture must still find something to lift on, or the browser drops the tap: the row's pictures take no press of their own, so
+    the button does."""
+    tv = RemoteTv(inputs=[{"id": f"HDMI_{n}", "label": f"HDMI {n}"} for n in (1, 2, 3)])               # (it shows HDMI 1)
+    with PageServer(tv=tv) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-input")
+        seen = tv_requests(page)
+        check = page.locator("#tv-input-list button:has-text('HDMI 1') svg")
+        assert check.count() == 1
+        box = check.bounding_box()
+        page.mouse.move(box["x"] + box["width"] / 2, box["y"] + box["height"] / 2)
+        page.mouse.down()                                                            # the finger is on the check
+        tv.shown.update(input="HDMI_3", app="com.webos.app.hdmi3")                   # and the TV changes input under it
+        refresh_now(page)
+        page.wait_for_function("document.querySelectorAll('#tv-input-list button')[2].querySelector('svg')", timeout=5000)
+        assert page.locator("#tv-input-list button:has-text('HDMI 1') svg").count() == 0   # the check has gone from the button that was pressed
+        page.mouse.up()
+        assert tv_calls(page, server, 1) == [("control", "input", "HDMI_1")]         # the tap was not lost
+        page.wait_for_timeout(200)
+        assert [(m, r, body) for m, r, _, body in seen] == [("POST", "tv/control", '{"name":"input","value":"HDMI_1"}')]
+        page.close()
+
+
 def test_the_row_of_inputs_is_drawn_again_when_the_tv_lists_another_input(browser):
     tv = RemoteTv(inputs=[{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}])
     with PageServer(tv=tv) as server:

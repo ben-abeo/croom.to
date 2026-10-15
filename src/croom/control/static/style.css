@@ -379,6 +379,7 @@ body.keyboard-open .schedule { display: none; }
 .tv-input-list { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; min-width: 0; }
 .tv-inputs .button.pi { font-weight: 600; }
 .tv-inputs .tv-sub { color: var(--periwinkle-300); font-weight: 400; }
+.tv-input-list .button svg { pointer-events: none; }   /* the pick takes the press, not its check: the check comes off a pick when the TV changes input, and a finger that went down on it would have nothing left to lift on */
 
 /* The middle: the d-pad on the left, the numbers on the right; the columns start and end together. */
 .tv-middle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-height: 0; }

@@ -246,7 +246,7 @@
       pi: "One finger moves \u00B7 Tap to click \u00B7 Two-finger tap to right-click\nTwo fingers scroll \u00B7 Press and hold, then move, to drag",
     };
     let target = "pi";
-    let tv = { usable: false, name: "" };   // the TV's name, and whether there is a TV to move at all
+    let tv = { usable: false, name: "", configured: false };   // the TV's name, whether there is a TV to move, and whether the room has one set up at all
     let opener = null;
     let idle = null;
     let said = "";                          // what the agent last said it could not do, until it has been quiet for WORDS_MS
@@ -255,7 +255,8 @@
 
     function draw() {
       title.textContent = target === "tv" ? "Moving the TV's cursor" : "Moving the mouse on the room's screen";
-      const line = said || (target === "tv" ? tv.name || "The TV" : tv.usable ? "The room Pi behind the TV" : "Pair the TV to move its cursor");
+      const line = said || (target === "tv" ? tv.name || "The TV" : tv.usable ? "The room Pi behind the TV"
+        : tv.configured ? "Pair the TV to move its cursor" : "No TV is set up for this room");
       if (small.textContent !== line) small.textContent = line;
       how.textContent = HOW[target];
       for (const key of Object.keys(halves)) halves[key].setAttribute("aria-pressed", String(key === target));
@@ -273,12 +274,19 @@
       said = "";
       draw();
     }
+    // What the surface covers takes no focus while it is up, so that no key can leave it for a button that is out of sight.
+    function coverPage(on) {
+      for (const node of document.querySelectorAll("header.top, main.screen")) {
+        if (on) node.setAttribute("inert", ""); else node.removeAttribute("inert");
+      }
+    }
     function show(options) {
       tv = options.tv;
       target = options.target;   // (remote.js asks for the TV only while there is one to move: the pointer mode goes off under the cards)
       opener = options.opener || null;
       said = "";
       root.hidden = false;
+      coverPage(true);
       P.holdIdleReturn(true);
       link.want("surface", true);
       touched();
@@ -294,6 +302,7 @@
       said = "";
       link.want("surface", false);
       P.holdIdleReturn(false);
+      coverPage(false);                                                  // (before the focus goes back: a node that is inert takes none)
       if (opener && opener.isConnected) opener.focus({ preventScroll: true });
       opener = null;
     }

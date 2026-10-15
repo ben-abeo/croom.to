@@ -302,9 +302,11 @@
     T.link.want("disc", pointer.target !== null);
     render();
   }
+  // What the surface needs to know of the TV: its name, whether it can be moved, and whether the room has one set up (the words differ).
+  const surfaceTv = (t, card) => ({ usable: card === "", name: t.name || "", configured: Boolean(t.configured) });
   function openTouchpad() {
     const t = tvBlock();
-    T.surface.show({ target: pointer.target || "pi", tv: { usable: tvCardOf(t) === "", name: t.name || "" }, opener: el("tv-fullscreen") });
+    T.surface.show({ target: pointer.target || "pi", tv: surfaceTv(t, tvCardOf(t)), opener: el("tv-fullscreen") });
   }
 
   // What the agent says it cannot do (the TV is not answering, the room Pi's mouse is not allowed) goes where a refused control's words go. A move
@@ -333,7 +335,7 @@
       b.classList.toggle("quiet", !on);
     }
     drawTrackpadWords();
-    T.surface.sync({ usable: card === "", name: t.name || "" });
+    T.surface.sync(surfaceTv(t, card));
   }
 
   // What the trackpad says: whom it moves and how, or that the socket is lost.

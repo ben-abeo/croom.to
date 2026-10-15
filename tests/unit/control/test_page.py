@@ -10,6 +10,7 @@ import asyncio
 import json
 import math
 import random
+import re
 import socket
 import tempfile
 import threading
@@ -6103,8 +6104,9 @@ def test_the_dpads_sectors_and_ok_take_no_press_in_pointer_mode(browser):
         page.close()
 
 
-@pytest.mark.parametrize("tv", [lambda: RemoteTv(paired=False), lambda: None, lambda: RemoteTv(refused=True)], ids=["not paired", "no TV set up", "no longer accepted"])
-def test_the_modes_row_under_a_card_has_only_the_full_screen_touchpad_and_it_moves_the_room_pi(browser, tv):
+@pytest.mark.parametrize("tv, said", [(lambda: RemoteTv(paired=False), "Pair the TV to move its cursor"), (lambda: None, "No TV is set up for this room"),
+                                      (lambda: RemoteTv(refused=True), "Pair the TV to move its cursor")], ids=["not paired", "no TV set up", "no longer accepted"])
+def test_the_modes_row_under_a_card_has_only_the_full_screen_touchpad_and_it_moves_the_room_pi(browser, tv, said):
     with PageServer(tv=tv(), mouse=StubMouse()) as server:
         page = tv_page(browser, server)
         assert page.locator("#tv-remote").is_hidden()
@@ -6114,7 +6116,7 @@ def test_the_modes_row_under_a_card_has_only_the_full_screen_touchpad_and_it_mov
         assert page.locator("#touchpad").is_visible()
         assert page.locator("#touchpad-tv").is_disabled() and page.locator("#touchpad-pi").get_attribute("aria-pressed") == "true"   # the room Pi, and no TV to switch to
         assert page.locator("#touchpad-title").inner_text() == "Moving the mouse on the room's screen"
-        assert page.locator("#touchpad-sub").inner_text() == "Pair the TV to move its cursor"
+        assert page.locator("#touchpad-sub").inner_text() == said                                # (what is to be done, for a TV that is there; that there is none, for a room with none)
         page.click("#touchpad-tv", force=True)                                                   # (a disabled half does nothing)
         assert page.locator("#touchpad-title").inner_text() == "Moving the mouse on the room's screen"
         page.click("#touchpad-done")
@@ -7405,4 +7407,57 @@ def test_the_reconnecting_words_follow_the_socket_at_once_even_while_the_pages_o
         the_socket(page)
         page.wait_for_timeout(100)
         assert (words.inner_text() != "Reconnecting\u2026") if disc else words.is_hidden()
+        page.close()
+
+
+# --- fix round 1: the words, the colours and the focus of the surface ---
+
+def contrast(foreground, background):
+    """The WCAG contrast ratio of a text colour (rgba, over `background`) on a background colour (rgb), both as the browser writes them."""
+    def lum(rgb):
+        lin = [(c / 255 / 12.92) if c / 255 <= 0.03928 else ((c / 255 + 0.055) / 1.055) ** 2.4 for c in rgb]
+        return 0.2126 * lin[0] + 0.7152 * lin[1] + 0.0722 * lin[2]
+
+    *ink, alpha = [float(v) for v in re.findall(r"[\d.]+", foreground)] + ([1.0] if foreground.startswith("rgb(") else [])
+    ground = [float(v) for v in re.findall(r"[\d.]+", background)][:3]
+    shown = [a * alpha + b * (1 - alpha) for a, b in zip(ink[:3], ground)]
+    light, dark = sorted((lum(shown), lum(ground)), reverse=True)
+    return (light + 0.05) / (dark + 0.05)
+
+
+def test_the_surfaces_hint_reads_at_four_and_a_half_to_one_or_better_resting_and_pressed(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        page.click("#tv-fullscreen")
+        colours = lambda: page.evaluate("""() => [getComputedStyle(document.getElementById('touchpad-how')).color,
+            getComputedStyle(document.getElementById('touchpad-surface')).backgroundColor]""")
+        resting = colours()
+        assert contrast(*resting) >= 4.5, resting
+        touch_event(page, SURFACE, "down", 600, 500)                                                 # a finger on the surface lights it: the words must still read
+        pressed = colours()
+        assert pressed[1] != resting[1] and contrast(*pressed) >= 4.5, pressed
+        touch_event(page, SURFACE, "up", 600, 500)
+        page.close()
+
+
+def test_the_page_is_inert_under_the_surface_so_that_focus_cannot_leave_it_and_takes_focus_again_when_it_goes(browser):
+    """While the surface is up, a key can only land on its own controls (or on nothing, past the last of them: the test browser has no address bar to go
+    to); never on a button of the page under it, out of sight."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page = tv_page(browser, server)
+        under = "[...document.querySelectorAll('header.top, main.screen')].map(n => n.hasAttribute('inert'))"
+        assert page.evaluate(under) == [False, False]
+        page.click("#tv-fullscreen")
+        assert page.evaluate(under) == [True, True]
+        seen = set()
+        for _ in range(8):                                                                           # round the surface's own controls, and round again
+            page.keyboard.press("Tab")
+            seen.add(page.evaluate("document.activeElement.id || document.activeElement.tagName"))
+            assert page.evaluate("document.activeElement.closest('header.top, main.screen') === null"), seen
+        assert {"touchpad-tv", "touchpad-pi", "touchpad-done"} <= seen, seen                          # (its own controls are still reached)
+        page.click("#touchpad-done")
+        assert page.evaluate(under) == [False, False]
+        assert page.evaluate("document.activeElement.id") == "tv-fullscreen"                         # the button that opened it, as before
+        page.keyboard.press("Shift+Tab")
+        assert page.evaluate("document.activeElement.id") == "tv-pi-mouse"                           # and the page's buttons take focus again
         page.close()

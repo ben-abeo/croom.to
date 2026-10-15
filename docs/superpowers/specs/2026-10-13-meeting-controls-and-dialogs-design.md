@@ -131,7 +131,7 @@ The client draws modal dialogs over the meeting: transcription and AI Companion 
 
 A dialog that disappears on its own (the host withdrew it, the meeting ended) clears from the status with `dialog-closed`. A banner with no buttons is never a dialog; recording and transcription banners feed `notice`. After any dialog closes, the state is re-read (the host's mute shows at once).
 
-On the table, a waiting dialog is a card above the controls: the title, the text, and one button per label, in the client's order, the first one primary. The notice line sits under the meeting title, in the detail style, for the rest of the call.
+On the table, a waiting dialog is a card above the controls: the title, the text, and one button per label, in the client's order, the last one primary (Zoom 6.5.0 draws its dialogs cancel-first, `["Leave Meeting", "Got it"]`, so the affirmative button is the last). The notice line sits under the meeting title, in the detail style, for the rest of the call.
 
 ## 6. The room page
 

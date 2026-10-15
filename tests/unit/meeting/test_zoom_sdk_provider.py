@@ -14,6 +14,7 @@ import pytest
 playwright = pytest.importorskip("playwright.async_api")
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config  # noqa: E402
+from croom.core.logs import DIALOGS_LOGGER  # noqa: E402
 from croom.meeting.providers.base import (  # noqa: E402
     DialogPolicy,
     MeetingControlError,
@@ -1840,7 +1841,7 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         assert not [r for r in caplog.records if r.levelno >= logging.WARNING], [r.getMessage() for r in caplog.records]
 
     async def test_every_dialog_is_a_line_in_the_journal_with_its_words_and_buttons(self, caplog):
-        caplog.set_level(logging.INFO, logger="croom.meeting.providers.zoom_sdk")
+        caplog.set_level(logging.INFO, logger=DIALOGS_LOGGER)
         provider = in_a_meeting(FakePage())
         provider._on_dialog({"id": 8, "title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]})
         provider._on_dialog({"id": 9, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
@@ -1848,6 +1849,39 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         lines = [r.getMessage() for r in caplog.records if r.levelno == logging.INFO and "Zoom dialog" in r.getMessage()]
         assert len(lines) == 2 and "Recording consent" in lines[0] and "Leave Meeting" in lines[0] and "Got it" in lines[0]
         assert "This meeting is being transcribed." in lines[1] and "'OK'" in lines[1]
+
+    async def test_each_dialogs_three_lines_come_from_the_dialogs_logger_in_the_words_the_guide_quotes(self, caplog):
+        """What Zoom drew, and what was done with it: pressed for the room ("Acknowledged ...") or left for the table ("The dialog waits on the table"). They are
+        the one thing a stock install's journal must hold of a meeting, so they come from a logger of their own that the agent keeps at INFO."""
+        caplog.set_level(logging.INFO)
+        provider = in_a_meeting(FakePage())
+        provider._on_dialog({"id": 8, "title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]})
+        provider._on_dialog({"id": 9, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
+        await settle_background(provider)
+        ours = [(r.name, r.levelno, r.getMessage()) for r in caplog.records if r.name == DIALOGS_LOGGER]
+        assert ours == [
+            (DIALOGS_LOGGER, logging.INFO, "Zoom dialog: 'Recording consent' 'This meeting is being recorded.' buttons ['Leave Meeting', 'Got it']"),
+            (DIALOGS_LOGGER, logging.INFO, "The dialog waits on the table"),
+            (DIALOGS_LOGGER, logging.INFO, "Zoom dialog: '' 'This meeting is being transcribed.' buttons ['OK']"),
+            (DIALOGS_LOGGER, logging.INFO, "Acknowledged Zoom's dialog with 'OK'"),
+        ]
+        assert not [r for r in caplog.records if r.name == "croom.meeting.providers.zoom_sdk" and r.levelno == logging.INFO and "dialog" in r.getMessage()]
+
+    async def test_on_a_stock_install_a_dialog_reaches_the_journal_though_the_agent_logs_warnings_only(self, agent_logging):
+        """The unit starts the agent with no -v. The provider's own INFO lines are not written then; the dialogs' are."""
+        reached = agent_logging()
+        provider = in_a_meeting(FakePage())
+        provider._on_dialog({"id": 8, "title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]})
+        provider._on_dialog({"id": 9, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
+        await settle_background(provider)
+        logging.getLogger("croom.meeting.providers.zoom_sdk").info("Left the Zoom meeting")        # an INFO line of the provider's own
+        said = [r.getMessage() for r in reached]
+        assert said == [
+            "Zoom dialog: 'Recording consent' 'This meeting is being recorded.' buttons ['Leave Meeting', 'Got it']",
+            "The dialog waits on the table",
+            "Zoom dialog: '' 'This meeting is being transcribed.' buttons ['OK']",
+            "Acknowledged Zoom's dialog with 'OK'",
+        ]
 
     async def test_an_event_the_provider_cannot_read_is_dropped_and_the_watcher_goes_on(self):
         provider = in_a_meeting(FakePage())

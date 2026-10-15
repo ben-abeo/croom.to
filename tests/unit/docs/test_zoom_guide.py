@@ -253,3 +253,25 @@ def test_zoom_guide_describes_the_diagnostics_route_and_what_the_journal_says():
         "A step the provider took on its own failed:",
     ):
         assert needle in text, needle
+
+
+def test_zoom_guide_says_which_lines_a_stock_installs_journal_holds_and_how_to_turn_the_rest_on():
+    """The installed unit starts the agent with no -v, which logs warnings and errors only. The dialogs' lines are the exception (they come from a logger the
+    agent keeps at INFO), and a refusal Zoom gave to a tap is an INFO line that needs -v, which the guide says how to turn on for a while."""
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    for needle in (
+        "A stock install's agent writes warnings and errors to the journal and nothing else, with one exception: every dialog.",
+        "shows a line for every dialog, whether or not the agent runs with -v",
+        "The dialogs of the call that is going on are also in dialogs_seen, with or without the journal.",
+        "Zoom's own refusal of a tap, in Zoom's words. This is an INFO line, and the journal holds INFO lines only while the agent runs with -v; the same words are on the table.",
+        "To see them for a while, add -v after croom.core.agent on the ExecStart line of /etc/systemd/system/croom.service, so that it reads ExecStart=/opt/croom/venv/bin/python -m croom.core.agent -v -c /etc/croom/config.yaml; then run sudo systemctl daemon-reload and sudo systemctl restart croom, and take the -v out the same way afterwards",
+    ):
+        assert needle in text, needle
+    assert "Zoom's refusals are plain INFO lines" not in text                                      # which a stock install's journal does not hold
+    # what the sentences rest on: the unit has no -v, the refusal is an INFO line, the dialogs' lines have a logger of their own
+    install = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
+    assert "ExecStart=$INSTALL_DIR/venv/bin/python -m croom.core.agent -c $CONFIG_DIR/config.yaml" in install
+    service = (REPO / "src" / "croom" / "control" / "service.py").read_text(encoding="utf-8")
+    assert 'logger.info(f"The {what} control was not carried out: {words}")' in service
+    zoom = (REPO / "src" / "croom" / "meeting" / "providers" / "zoom_sdk.py").read_text(encoding="utf-8")
+    assert zoom.count("dialog_log.info(") == 3 and "logger.info(\"The dialog waits" not in zoom

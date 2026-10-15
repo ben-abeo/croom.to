@@ -162,6 +162,7 @@ def test_readme_names_the_dialog_policys_and_the_reactions_defaults_as_the_code_
     for needle in (
         "| `meeting.dialogs` | `acknowledge`, `ask_everything` |",
         "`ask_everything: true` (default `false`) makes every dialog wait for a tap",
+        "Every dialog Zoom draws is written to the journal (`journalctl -u croom`) with its title, words and buttons and what was done with it, whether or not the agent runs with `-v`, so a new one can be judged and added to the list",
         "| `meeting.controls` | `reactions` |",
         "(shown on the table as Thumbs up, Clap, Heart, Laugh, Wow and Celebrate); `reactions: []` offers none, and the **Reactions** button is not drawn",
     ):

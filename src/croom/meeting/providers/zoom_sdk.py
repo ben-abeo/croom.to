@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Set
 from urllib.parse import parse_qs, urlparse
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config
+from croom.core.logs import DIALOGS_LOGGER
 from croom.meeting.providers.base import (
     DialogPolicy,
     MeetingControlError,
@@ -33,6 +34,9 @@ from croom.meeting.zoom_auth import (
 )
 
 logger = logging.getLogger(__name__)
+# The three lines each dialog gets (what Zoom drew, and whether it was pressed for the room or left for the table) come from a logger of their own,
+# which the agent keeps at INFO whatever -v says: a stock install logs warnings only, and a new dialog is judged from the journal (core/logs.py).
+dialog_log = logging.getLogger(DIALOGS_LOGGER)
 
 # What Zoom's error carries when the passcode is the problem: its own words, or its wrong-passcode code (3004).
 PASSCODE_REFUSAL = re.compile(r"pass(?:word|code)|\bcode 3004\b", re.IGNORECASE)
@@ -615,7 +619,7 @@ class ZoomSdkProvider(MeetingProvider):
         dialog_id = self._dialog_id(dialog)
         if info is None or dialog_id is None or dialog_id in self._on_screen or dialog_id in self._answered:
             return
-        logger.info(f"Zoom dialog: {dialog.get('title')!r} {dialog.get('text')!r} buttons {dialog.get('buttons')}")
+        dialog_log.info(f"Zoom dialog: {dialog.get('title')!r} {dialog.get('text')!r} buttons {dialog.get('buttons')}")
         self._on_screen.add(dialog_id)
         words = self._dialog_words(dialog_id, dialog)
         if self.dialog_policy.decide(dialog) == "acknowledge":
@@ -628,7 +632,7 @@ class ZoomSdkProvider(MeetingProvider):
             return
         self._dialogs.append(words)
         info.dialog = dict(self._dialogs[0])
-        logger.info("The dialog waits on the table")
+        dialog_log.info("The dialog waits on the table")
 
     @staticmethod
     def _dialog_words(dialog_id: int, dialog: Dict[str, Any]) -> Dict[str, Any]:
@@ -664,7 +668,7 @@ class ZoomSdkProvider(MeetingProvider):
             except MeetingControlError as e:
                 failure = e
             else:
-                logger.info(f"Acknowledged Zoom's dialog with {label!r}")
+                dialog_log.info(f"Acknowledged Zoom's dialog with {label!r}")
                 self._notices.pop(dialog_id, None)
                 return
         self._put_on_the_table(dialog_id, label, failure)

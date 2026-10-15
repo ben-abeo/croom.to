@@ -11,6 +11,7 @@ import sys
 from typing import Optional, Dict, Any
 
 from croom.core.config import Config, load_config
+from croom.core.logs import setup_logging
 from croom.core.service import ServiceManager, Service
 from croom.platform.detector import PlatformDetector, PlatformInfo
 from croom.platform.capabilities import CapabilityDetector, Capabilities
@@ -370,11 +371,7 @@ def main() -> None:
     args = parser.parse_args()
 
     # Setup logging
-    log_level = logging.DEBUG if args.debug else (logging.INFO if args.verbose else logging.WARNING)
-    logging.basicConfig(
-        level=log_level,
-        format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
+    setup_logging(args.verbose, args.debug)
 
     if args.check_calendar:
         from croom.calendar.check import check_calendar

@@ -11,7 +11,7 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config
@@ -46,6 +46,18 @@ PASSCODE_ASKED = "Zoom needs the meeting passcode"
 PAGE_REFUSAL = re.compile(r"^(?:Page\.evaluate: )?Error: (?P<words>.+)$")
 # How the page begins its words when Zoom drops a mute made again inside the second it keeps for one (meeting.js, ignored()).
 MUTE_IGNORED = "Zoom ignored mute"
+# How the page words a refusal of one of Zoom's own calls, which it names by the SDK's method: "Zoom ignored muteAll (...)", "Zoom did not confirm lockMeeting in
+# time", "Zoom refused endMeeting (code 3003)". The table gives the host's controls the words of their own buttons instead (ZoomSdkProvider.control).
+CALL_REFUSAL = re.compile(r"^(?P<says>Zoom (?:ignored|refused|did not confirm|did not answer)) (?P<call>\w+)")
+# Each host control that has a button of its own, with the Zoom method the bridge calls for it and the words of the button. Record and lock say what a tap
+# does (Start or Stop recording, Lock or Unlock meeting), so their words come from the state (ZoomSdkProvider._call_words).
+HOST_CALLS = {
+    "host.mute_all": ("muteAll", "Mute all"),
+    "host.ask_unmute": ("muteAll", "Ask all to unmute"),
+    "host.admit": ("putOnHold", "Admit"),
+    "host.remove": ("expel", "Remove"),
+    "host.end": ("endMeeting", "End meeting for everyone"),
+}
 # What the page says of a dialog it was asked to press that is no longer there (meeting.js, answerNow()).
 DIALOG_GONE = "no longer on the screen"
 # How Playwright says the page was navigated away from while a call into it was in flight: Zoom sends the page to its leaveUrl when a
@@ -747,9 +759,28 @@ class ZoomSdkProvider(MeetingProvider):
     # Controls from the table (spec 2026-10-13, section 3)
     # ------------------------------------------------------------------
 
+    def _call_words(self, name: str) -> Optional[Tuple[str, str]]:
+        """The Zoom method a host control makes (what the bridge names in a refusal) and the words of the table's button for it, as the button says them
+        now; None for a control that has no button of its own."""
+        info = self._current_meeting
+        if name == "host.record":
+            return "record", "Stop recording" if info is not None and info.recording else "Start recording"
+        if name == "host.lock":
+            return "lockMeeting", "Unlock meeting" if info is not None and info.locked else "Lock meeting"
+        return HOST_CALLS.get(name)
+
+    def _in_the_tables_words(self, name: str, words: str) -> str:
+        """A refusal the bridge worded with the name of Zoom's method ("Zoom ignored muteAll (...)"), worded with the control's button instead
+        ("Zoom ignored Mute all (...)"). Zoom's own words, and any refusal that does not name this control's call, are left as they are."""
+        named, said = self._call_words(name), CALL_REFUSAL.match(words)
+        if named is None or said is None or said.group("call") != named[0]:
+            return words
+        return f"{said.group('says')} {named[1]}{words[said.end():]}"
+
     async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
-        """A control from the table, carried out through the page's bridge (see MeetingProvider.control). A refusal is a
-        MeetingControlError in the bridge's words, unchanged. The answer is the control model as it is afterwards."""
+        """A control from the table, carried out through the page's bridge (see MeetingProvider.control). A refusal is a MeetingControlError in the
+        bridge's words, in which a host call is named by its button and not by the SDK's method (_in_the_tables_words). The answer is the control
+        model as it is afterwards."""
         self._require_meeting()
         info = self._current_meeting
         if name == "chat.seen":
@@ -768,8 +799,11 @@ class ZoomSdkProvider(MeetingProvider):
             await self.toggle_camera()
             await self._read_state_from_zoom()   # the model says the camera as Zoom has it now
         else:
-            self._take_state(await self._page_call(CONTROL, [name, value], f"Could not carry out {re.sub(r'[^A-Za-z0-9]+', ' ', name).strip() or 'the control'}",
-                                                   timeout=self.CONTROL_TIMEOUT_S))
+            try:
+                self._take_state(await self._page_call(CONTROL, [name, value], f"Could not carry out {re.sub(r'[^A-Za-z0-9]+', ' ', name).strip() or 'the control'}",
+                                                       timeout=self.CONTROL_TIMEOUT_S))
+            except MeetingControlError as e:
+                raise MeetingControlError(self._in_the_tables_words(name, str(e))) from e
         return info.controls
 
     async def _end_meeting_for_everyone(self) -> Dict[str, Any]:
@@ -781,7 +815,7 @@ class ZoomSdkProvider(MeetingProvider):
             await self._page_call(CONTROL, ["host.end", None], "Could not end the meeting", timeout=self.CONTROL_TIMEOUT_S)
         except MeetingControlError as e:
             if CONTEXT_DESTROYED not in str(e) and self._state == MeetingState.CONNECTED:
-                raise
+                raise MeetingControlError(self._in_the_tables_words("host.end", str(e))) from e
         if watcher is not None and not watcher.done():
             await asyncio.wait({watcher}, timeout=self.LEFT_WAIT_S)
         return {}

@@ -1355,6 +1355,57 @@ class TestControlsAndDialogs:
         finally:
             await shutdown(provider)
 
+    @pytest.mark.parametrize("control, words, then", [
+        ("host.mute_all", "Zoom ignored muteAll (it takes one a few seconds after the last); try again in a moment",
+         "Zoom ignored Mute all (it takes one a few seconds after the last); try again in a moment"),
+        ("host.ask_unmute", "Zoom ignored muteAll (it takes one a few seconds after the last); try again in a moment",
+         "Zoom ignored Ask all to unmute (it takes one a few seconds after the last); try again in a moment"),
+        ("host.admit", "Zoom did not answer putOnHold in time", "Zoom did not answer Admit in time"),
+        ("host.remove", "Zoom did not confirm expel in time", "Zoom did not confirm Remove in time"),
+        ("host.end", "Zoom refused endMeeting (code 3003)", "Zoom refused End meeting for everyone (code 3003)"),
+        ("host.record", "Zoom ignored record (it takes one a few seconds after the last); try again in a moment",
+         "Zoom ignored Start recording (it takes one a few seconds after the last); try again in a moment"),
+        ("host.lock", "Zoom refused lockMeeting", "Zoom refused Lock meeting"),
+        # what is not the bridge's naming of this control's call stays as it is: Zoom's own words, the table's own, and the room's mute
+        ("host.mute_all", "Current user is neither host nor cohost (code 1)", "Current user is neither host nor cohost (code 1)"),
+        ("host.mute_all", "Zoom ignored lockMeeting (it takes one a few seconds after the last); try again in a moment",
+         "Zoom ignored lockMeeting (it takes one a few seconds after the last); try again in a moment"),
+        ("host.mute_one", "Zoom ignored mute (it takes one a few seconds after the last); try again in a moment",
+         "Zoom ignored mute (it takes one a few seconds after the last); try again in a moment"),
+        ("raise_hand", "Zoom did not switch the hand", "Zoom did not switch the hand"),
+        ("host.mute_all", "Zoom refused muteAllAndMore", "Zoom refused muteAllAndMore"),
+    ])
+    def test_a_refusal_that_names_zooms_own_call_names_the_tables_button_instead(self, control, words, then):
+        provider = in_a_meeting(None)
+        assert provider._in_the_tables_words(control, words) == then
+
+    def test_a_record_or_a_lock_refusal_names_what_the_button_says_now(self):
+        provider = in_a_meeting(None)
+        provider.current_meeting.recording = provider.current_meeting.locked = True
+        assert provider._in_the_tables_words("host.record", "Zoom did not answer record in time") == "Zoom did not answer Stop recording in time"
+        assert provider._in_the_tables_words("host.lock", "Zoom refused lockMeeting (code 3000)") == "Zoom refused Unlock meeting (code 3000)"
+
+    async def test_the_host_screens_refusals_reach_the_table_in_its_own_words(self):
+        """Through the bridge and Zoom's gate: a host call made again inside the five seconds Zoom keeps for it is dropped, and the table's line names the
+        button that was tapped (Mute all, then Ask all to unmute, which is the same SDK call), not muteAll."""
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';")
+        try:
+            await provider.join_meeting(LINK)
+            await provider.control("host.mute_all")
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("host.mute_all")
+            assert str(failure.value) == "Zoom ignored Mute all (it takes one a few seconds after the last); try again in a moment"
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("host.ask_unmute")
+            assert str(failure.value) == "Zoom ignored Ask all to unmute (it takes one a few seconds after the last); try again in a moment"
+            await provider.control("host.lock")
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.control("host.lock")
+            assert str(failure.value) == "Zoom ignored Unlock meeting (it takes one a few seconds after the last); try again in a moment"
+            assert provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
     async def test_a_host_carries_out_the_host_controls_and_the_model_follows(self):
         provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.role = 'host';")
         try:
@@ -1758,7 +1809,7 @@ class TestControlsAndDialogs:
             assert info.controls["host"]["end"]["available"] is False                    # the host's alone: and Zoom refuses a co-host
             with pytest.raises(MeetingControlError) as failure:
                 await provider.control("host.end")
-            assert str(failure.value) == "Zoom refused endMeeting (code 3003)" and provider.state == MeetingState.CONNECTED
+            assert str(failure.value) == "Zoom refused End meeting for everyone (code 3003)" and provider.state == MeetingState.CONNECTED
         finally:
             await shutdown(provider)
 
@@ -2265,7 +2316,7 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         try:
             with pytest.raises(MeetingControlError) as failure:
                 await provider.control("host.end")
-            assert str(failure.value) == "Zoom refused endMeeting (code 3003)" and provider.state == MeetingState.CONNECTED
+            assert str(failure.value) == "Zoom refused End meeting for everyone (code 3003)" and provider.state == MeetingState.CONNECTED
         finally:
             provider._watcher.cancel()
             await asyncio.gather(provider._watcher, return_exceptions=True)

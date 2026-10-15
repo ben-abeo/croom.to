@@ -13,6 +13,8 @@ import pytest
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
 from croom.meeting.providers.base import DialogPolicy
+from croom.meeting.providers.zoom_sdk import ZoomSdkProvider
+from croom.meeting.zoom_auth import ZoomCredentials
 
 REPO = Path(__file__).resolve().parents[3]
 GUIDES = REPO / "docs" / "guides"
@@ -126,7 +128,7 @@ def test_zoom_guide_says_what_the_tables_controls_do_and_the_limits_zoom_sets():
         "each returns to the meeting screen by itself after two idle minutes (a tap restarts the wait)",
         "Leave becomes Tap again to leave, Remove becomes Tap again to remove and End meeting for everyone becomes Tap again to end: the second tap must come within five seconds, and a tap in the half second after the first does not count",
         "Zoom takes one mute a second, and one mute all, ask to unmute, remove, record or lock about every five seconds",
-        "Zoom ignored muteAll (it takes one a few seconds after the last); try again in a moment",
+        "Zoom ignored Mute all (it takes one a few seconds after the last); try again in a moment, naming the button that was tapped (Mute all, Ask all to unmute, Lock meeting, Remove and so on), not Zoom's own name for the call",
         "Zoom's captions button is not on the screen yet; try again in a moment",
         "Zoom did not switch captions",
     ):
@@ -232,13 +234,24 @@ def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_wh
         "Zoom answers a participant's own rename with an error (neither host nor co-host) and then with success",
         "Then double-tap a reaction on the touchscreen: the row closes at the pick, and the second tap must land on nothing",
         "Double-tap Leave quickly first: the second tap counts only half a second after the first, within five seconds, so a double tap confirms nothing; the same holds for Remove (on the Participants screen) and End meeting for everyone (on the Host screen)",
-        "Zoom did not confirm muteAll in time",
-        "Zoom did not answer muteAll in time",
+        "Zoom did not confirm Mute all in time",
+        "Zoom did not answer Mute all in time",
         "What to send back",
         "the diagnostics JSON from each point and the journal lines",
         "the acknowledge list and the stop phrases are refined from what comes back",
     ):
         assert needle in text, needle
+
+
+def test_the_refusal_words_the_zoom_guide_quotes_are_the_ones_the_provider_gives():
+    """"Zoom ignored Mute all ...", not the SDK's own name for the call: the guide quotes what the table shows, and the provider words a refusal so."""
+    text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
+    provider = ZoomSdkProvider(ZoomCredentials("sdkClient123", "sdkSecret456"))
+    for raw in ("Zoom ignored muteAll (it takes one a few seconds after the last); try again in a moment", "Zoom did not confirm muteAll in time", "Zoom did not answer muteAll in time"):
+        quoted = provider._in_the_tables_words("host.mute_all", raw)
+        assert quoted != raw and quoted in text, quoted
+        assert raw not in text, raw
+    assert "muteAll" not in text and "lockMeeting" not in text and "putOnHold" not in text and "expel" not in text       # no API name of Zoom's is quoted as what the table says
 
 
 def test_zoom_guide_describes_the_diagnostics_route_and_what_the_journal_says():
@@ -272,7 +285,7 @@ def test_zoom_guide_says_which_lines_a_stock_installs_journal_holds_and_how_to_t
         "shows a line for every dialog, whether or not the agent runs with -v",
         "The dialogs of the call that is going on are also in dialogs_seen, with or without the journal.",
         "Zoom's own refusal of a tap, in Zoom's words. This is an INFO line, and the journal holds INFO lines only while the agent runs with -v; the same words are on the table.",
-        "To see them for a while, add -v after croom.core.agent on the ExecStart line of /etc/systemd/system/croom.service, so that it reads ExecStart=/opt/croom/venv/bin/python -m croom.core.agent -v -c /etc/croom/config.yaml; then run sudo systemctl daemon-reload and sudo systemctl restart croom, and take the -v out the same way afterwards",
+        "To see them for a while, between meetings (the restart ends a call in progress), add -v after croom.core.agent on the ExecStart line of /etc/systemd/system/croom.service, so that it reads ExecStart=/opt/croom/venv/bin/python -m croom.core.agent -v -c /etc/croom/config.yaml; then run sudo systemctl daemon-reload and sudo systemctl restart croom, and take the -v out the same way afterwards, again between meetings",
     ):
         assert needle in text, needle
     assert "Zoom's refusals are plain INFO lines" not in text                                      # which a stock install's journal does not hold

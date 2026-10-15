@@ -115,6 +115,7 @@ def test_zoom_guide_says_what_the_tables_controls_do_and_the_limits_zoom_sets():
     text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
     for needle in (
         "Mute or Unmute, Turn camera off or Turn camera on, Raise hand or Lower hand, Reactions and Leave",
+        "A tap asks for the state its button names and does not flip what Zoom has by then: a tap on Mute made a moment after the host muted the room leaves it muted, and one on Turn camera off made after the camera went off at the TV leaves it off",
         "Reactions replaces the second row for ten seconds with Thumbs up, Clap, Heart, Laugh, Wow and Celebrate, and Cancel",
         "Captions on or Captions off, Gallery view or Speaker view, Hide self view or Show self view, Participants (7), Chat (2) with the number of messages not yet read, Host, drawn only while Zoom says the room is host or co-host, and TV, the room's own button for its TV's remote, which is always the last",
         "Mute (not shown for someone already muted) and Remove",

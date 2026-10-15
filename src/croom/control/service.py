@@ -1220,23 +1220,41 @@ class ControlService(Service):
             self._title = ""
             self._joined_at = None
 
+    async def _state_asked_for(self, request: web.Request, field: str) -> Any:
+        """The state a mute or camera request asks for: True or False when the body says it (`{"muted": true}`, `{"on": false}`), None when it says
+        nothing of it (no body, `{}`: the toggle these two routes have always been), or the 400 for a body that is not an object or whose field is
+        not true or false. The table sends the state its button names, so that a tap made a moment after the host muted the room, or after the
+        camera went off at the TV, ends as the person asked and not the other way round."""
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response(f"Send a JSON object with {field} true or false, or nothing to switch it", 400)
+        if field not in data:
+            return None
+        if not isinstance(data[field], bool):
+            return self._error_response(f"{field} must be true or false, not {data[field]!r}", 400)
+        return data[field]
+
     async def _handle_mute(self, request: web.Request) -> web.Response:
         rejection = self._require_json(request)
         if rejection is not None:
             return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
+        wanted = await self._state_asked_for(request, "muted")
+        if isinstance(wanted, web.Response):
+            return wanted
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
         try:
-            muted = await self._meeting.toggle_mute()
+            # A state asked for is set (a microphone that already is so is left alone); none asked for is the toggle.
+            muted = await (self._meeting.toggle_mute() if wanted is None else self._meeting.set_mute(wanted))
         except MeetingControlError as e:
             logger.info(f"The microphone was not changed: {first_line(e)}")
             return self._error_response(first_line(e), 409)
         except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
             logger.warning(f"Could not change the microphone: {first_line(e)}", exc_info=True)
             return self._error_response(f"Could not change the microphone: {first_line(e)}", 409)
-        return web.json_response({"muted": bool(muted)})
+        return web.json_response({"muted": bool(muted), "meeting": self._meeting_block()})   # the block as the control routes answer: the table draws it at once
 
     async def _handle_camera(self, request: web.Request) -> web.Response:
         rejection = self._require_json(request)
@@ -1244,17 +1262,20 @@ class ControlService(Service):
             return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
+        wanted = await self._state_asked_for(request, "on")
+        if isinstance(wanted, web.Response):
+            return wanted
         if self._meeting_state() != "connected":
             return self._error_response("Not in a meeting", 409)
         try:
-            camera_on = await self._meeting.toggle_camera()
+            camera_on = await (self._meeting.toggle_camera() if wanted is None else self._meeting.set_camera(wanted))
         except MeetingControlError as e:
             logger.info(f"The camera was not switched: {first_line(e)}")
             return self._error_response(first_line(e), 409)
         except Exception as e:  # noqa: BLE001 - a fault in the browser answers with its words, never a 500
             logger.warning(f"Could not switch the camera: {first_line(e)}", exc_info=True)
             return self._error_response(f"Could not switch the camera: {first_line(e)}", 409)
-        return web.json_response({"camera_on": bool(camera_on)})
+        return web.json_response({"camera_on": bool(camera_on), "meeting": self._meeting_block()})
 
     async def _run_control(self, name: str, value: Any) -> web.Response:
         """Carry out a control from the table (or "dialog", an answer to a dialog Zoom drew, or "chat.seen") in the meeting, and answer with the

@@ -264,6 +264,23 @@ def test_readme_lists_the_meeting_routes_and_says_who_can_read_the_status():
         assert needle in text, needle
 
 
+def test_readme_says_mute_and_camera_send_the_state_their_button_names_and_the_routes_take_it():
+    """A tap decided by what the room is when it arrives flips what the host just did (the whole-branch review): the buttons send the state they name,
+    the routes set it, and a body that names none still toggles."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "Mute and Camera keep their own routes and send the state their button names, `POST /api/meeting/mute` with `{\"muted\": true}` and `POST /api/meeting/camera` with `{\"on\": false}`: "
+        "the agent sets that state (a microphone or camera that is as asked is left alone)",
+        "a body that names no state still toggles, as the routes always did, and both answer with the meeting block as well as the state",
+    ):
+        assert needle in text, needle
+    # what the sentences rest on: the routes read those two fields, and the page sends them
+    source = SERVICE.read_text(encoding="utf-8")
+    page = (REPO / "src" / "croom" / "control" / "static" / "app.js").read_text(encoding="utf-8")
+    assert '_state_asked_for(request, "muted")' in source and '_state_asked_for(request, "on")' in source
+    assert 'request("mute", "/api/meeting/mute", { muted: muted })' in page and 'request("camera", "/api/meeting/camera", { on: on })' in page
+
+
 def test_readme_credits_lucide_and_ties_the_credit_to_the_sprite():
     """The sprite says which Lucide it was built from; the README's credit line says the same version and the licence."""
     text = README.read_text(encoding="utf-8")

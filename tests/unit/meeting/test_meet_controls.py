@@ -368,6 +368,91 @@ async def test_the_mute_control_goes_through_toggle_mute(meet_page):
     assert await keys(provider) == ["Control+d"]
 
 
+# ---- A state asked for is set: pressed only when the label says otherwise (the whole-branch review's race) ----
+
+
+async def test_a_state_asked_for_is_pressed_for_only_when_the_label_says_otherwise(meet_page):
+    """The table asks for muted or for the camera on, not for a flip: a button whose label says so already is left alone, and the answer is the state."""
+    provider, info = await meet_page(replica())                         # the microphone is live, the camera off
+    assert await provider.set_mute(True) is True and info.is_muted is True and await keys(provider) == ["Control+d"]
+    assert await provider.set_mute(True) is True and info.is_muted is True and await keys(provider) == ["Control+d"]       # muted already: no press, no refusal
+    assert await provider.set_mute(False) is False and info.is_muted is False and await keys(provider) == ["Control+d", "Control+d"]
+    assert await provider.set_mute(False) is False and await keys(provider) == ["Control+d", "Control+d"]
+    assert await provider.set_camera(False) is False and info.is_camera_on is False and await keys(provider) == ["Control+d", "Control+d"]    # off already
+    assert await provider.set_camera(True) is True and info.is_camera_on is True and await keys(provider) == ["Control+d", "Control+d", "Control+e"]
+    assert await provider.set_camera(True) is True and await keys(provider) == ["Control+d", "Control+d", "Control+e"]
+    assert await provider.set_camera(False) is False and info.controls["camera"]["on"] is False and (await keys(provider))[-1] == "Control+e"
+
+
+@pytest.mark.parametrize("setter, wanted, part, page_says, pressed", [
+    ("set_mute", True, "microphone", "Turn on microphone (ctrl + d)", []),                   # the host muted the room, which the provider has not seen: muted already
+    ("set_mute", False, "microphone", "Turn on microphone (ctrl + d)", ["Control+d"]),       # and an Unmute is pressed, though the provider last had the room live
+    ("set_camera", True, "camera", "Turn off camera (ctrl + e)", []),                        # the camera was turned on at the TV, which the provider has not seen
+    ("set_camera", False, "camera", "Turn off camera (ctrl + e)", ["Control+e"]),
+])
+async def test_a_state_asked_for_is_judged_by_the_label_now_and_not_by_what_the_provider_last_knew(meet_page, setter, wanted, part, page_says, pressed):
+    """The page changed the button under the provider, which has not looked since (it read the join: the microphone live, the camera off): the
+    press is decided by what the label says now, in whichever direction that differs from what the provider had."""
+    provider, info = await meet_page(replica())
+    await set_label(provider, part, page_says)
+    assert await getattr(provider, setter)(wanted) is wanted
+    assert await keys(provider) == pressed
+    assert (info.is_muted if setter == "set_mute" else info.is_camera_on) is wanted
+
+
+async def test_a_state_asked_for_after_the_host_muted_the_room_leaves_it_muted_where_the_toggle_unmuted_it(meet_page):
+    provider, info = await meet_page(replica())
+    await set_label(provider, "microphone", "Turn on microphone (ctrl + d)")                  # the host muted the room: the table's Mute is a poll behind
+    assert await provider.set_mute(True) is True and info.is_muted is True and info.controls["mute"] == {"available": True, "on": False}
+    assert await keys(provider) == []
+    await set_label(provider, "microphone", "Turn on microphone (ctrl + d)")
+    assert await provider.toggle_mute() is False and await keys(provider) == ["Control+d"]     # the toggle, sent blind, flips what is there
+
+
+async def test_the_label_is_read_under_the_press_lock_so_a_set_waiting_behind_a_press_sees_its_result(meet_page):
+    """A set that read its label before it had the lock would press a second time over a press that was already carrying it out (the room
+    muted, then unmuted again). It reads under the lock: the one press before it has done the work, and the set presses nothing."""
+    provider, info = await meet_page(replica())
+    page = provider._page
+    real = page.keyboard.press
+
+    async def slow_press(key, **options):
+        await asyncio.sleep(0.15)                                                              # long enough for the set to be waiting for the lock
+        return await real(key, **options)
+
+    page.keyboard.press = slow_press
+    assert await asyncio.gather(provider.toggle_mute(), provider.set_mute(True)) == [True, True]
+    assert await keys(provider) == ["Control+d"] and info.is_muted is True
+    assert await asyncio.gather(provider.set_camera(True), provider.set_camera(True), provider.set_camera(True)) == [True, True, True]
+    assert (await keys(provider)).count("Control+e") == 1 and info.is_camera_on is True
+
+
+async def test_a_state_asked_for_that_meet_does_not_take_is_a_refusal_but_one_already_so_is_not(meet_page):
+    provider, info = await meet_page(replica())
+    provider.PRESS_WAIT_S = 0.3
+    await provider._page.evaluate("window.__ignore = ['d', 'e']")                              # Meet takes neither shortcut just now
+    with pytest.raises(MeetingControlError, match="^Meet did not change the microphone; try again$"):
+        await provider.set_mute(True)
+    with pytest.raises(MeetingControlError, match="^Meet did not change the camera; try again$"):
+        await provider.set_camera(True)
+    assert await provider.set_mute(False) is False and await provider.set_camera(False) is False       # as asked already: nothing to press, nothing refused
+    assert info.is_muted is False and info.is_camera_on is False
+
+
+async def test_a_state_asked_for_of_a_button_the_page_does_not_show_is_refused_before_anything_is_pressed(meet_page):
+    provider, info = await meet_page(replica(BUTTONS.replace("Turn on camera", "Camera")))
+    with pytest.raises(MeetingControlError, match="^Meet shows no camera button right now$"):
+        await provider.set_camera(True)
+    with pytest.raises(MeetingControlError, match="^Meet shows no camera button right now$"):
+        await provider.set_camera(False)
+    assert await keys(provider) == []
+
+
+async def test_a_state_asked_for_with_no_call_is_what_the_providers_always_answered():
+    provider = GoogleMeetProvider(FakeDisplay())
+    assert await provider.set_mute(False) is True and await provider.set_camera(True) is False
+
+
 # ---- The bare c key belongs to the page, not to a text field ----
 
 

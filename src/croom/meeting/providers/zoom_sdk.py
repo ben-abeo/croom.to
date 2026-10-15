@@ -51,9 +51,11 @@ DIALOG_GONE = "no longer on the screen"
 # How Playwright says the page was navigated away from while a call into it was in flight: Zoom sends the page to its leaveUrl when a
 # meeting ends.
 CONTEXT_DESTROYED = "Execution context was destroyed"
-# The calls into the page's bridge (meeting.js): the whole reading of the meeting (the first version of the bridge only had readState), a
-# control by name, and a button of a dialog by its label.
+# The calls into the page's bridge (meeting.js): the whole reading of the meeting (the first version of the bridge only had readState), the
+# room's own mute set to a state (Zoom's call takes the state, so a call that finds it so changes nothing), a control by name, and a button
+# of a dialog by its label.
 READ_MEETING = "() => (window.crystalMeet.readMeeting || window.crystalMeet.readState)()"
+MUTE_CALL = "(muted) => window.crystalMeet.mute(muted)"
 CONTROL = "([name, value]) => window.crystalMeet.control(name, value)"
 ANSWER_DIALOG = "([id, label]) => window.crystalMeet.answerDialog(id, label)"
 # The control that has the page open the View menu, read it and close it, picking nothing (meeting.js, readViewMenu()).
@@ -481,7 +483,7 @@ class ZoomSdkProvider(MeetingProvider):
         stop it on entry. What Zoom has afterwards is what counts."""
         if not mic_on and zoom.get("muted") is not True:
             try:
-                await self._page_call("(muted) => window.crystalMeet.mute(muted)", True, "Could not mute the microphone")
+                await self._page_call(MUTE_CALL, True, "Could not mute the microphone")
             except MeetingControlError as e:
                 if str(e).startswith(MUTE_IGNORED):
                     # The page's own mic-off default has just muted the room, and Zoom's record can lag that mute, so this look found
@@ -554,18 +556,43 @@ class ZoomSdkProvider(MeetingProvider):
             raise RuntimeError("Not in a meeting")
 
     async def toggle_mute(self) -> bool:
+        """Flip the microphone as Zoom has it now (the host may have muted the room since the last look). The table does not use this: its
+        button names the state a tap asks for, and set_mute sets it."""
         self._require_meeting()
-        await self._read_state_from_zoom()   # the host may have muted the room since the last look
-        muted = await self._page_call("(muted) => window.crystalMeet.mute(muted)", not self._muted, "Could not change the microphone")
-        self._muted = bool(muted)
-        await self._read_state_from_zoom()   # what Zoom has now, not what was asked
+        await self._read_state_from_zoom()
+        return await self.set_mute(not self._muted)
+
+    async def set_mute(self, muted: bool) -> bool:
+        """Set the microphone to the state asked for (True is muted), whatever Zoom has now or the provider last knew: Zoom's own call is told the
+        state, not to flip it, so a request made against a state that has changed since the table drew its button (the host muted the room a
+        moment before a tap on Mute) ends as the person asked and not the other way round. A call that finds the microphone as asked changes
+        nothing. Zoom drops a mute made again inside the second it keeps for one: when the room is as asked all the same (a second tap, or another
+        device's, in that second) that is the state and not a refusal. The answer is what Zoom has afterwards."""
+        self._require_meeting()
+        muted = bool(muted)
+        try:
+            self._muted = bool(await self._page_call(MUTE_CALL, muted, "Could not change the microphone"))
+        except MeetingControlError as e:
+            if not str(e).startswith(MUTE_IGNORED):
+                raise
+            if (await self._read_state_from_zoom()).get("muted") is not muted:
+                raise                            # Zoom has not said, or says the room is not as asked: the refusal stands
+        else:
+            await self._read_state_from_zoom()   # what Zoom has now, not what was asked
         self._publish_state()
         return self._muted
 
     async def toggle_camera(self) -> bool:
+        """Flip the camera as Zoom has it now; the table asks for a state instead (set_camera)."""
         self._require_meeting()
         await self._read_state_from_zoom()
-        self._camera_on = await self._set_video(not self._camera_on)   # what the button says once Zoom has switched
+        return await self.set_camera(not self._camera_on)
+
+    async def set_camera(self, on: bool) -> bool:
+        """Set the camera to the state asked for (True is on): the client's video button is pressed only when it does not say so already (a camera
+        turned off at the TV a moment before a tap on Turn camera off is left off), and the answer is what the button says once Zoom has switched."""
+        self._require_meeting()
+        self._camera_on = await self._set_video(bool(on))
         self._publish_state()
         return self._camera_on
 

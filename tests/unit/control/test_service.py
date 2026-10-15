@@ -69,6 +69,7 @@ class StubMeeting:
         self.leaves = 0
         self.muted = False
         self.camera_on = True
+        self.presses = []         # "mute" and "camera", each time the stub changes the microphone or the camera: a set that finds it as asked presses nothing
         self.callbacks = []
         self.fail_with = None
         self.fail_before_joining = None
@@ -146,24 +147,48 @@ class StubMeeting:
         self.current_meeting = None
         self.set_state(MeetingState.IDLE)
 
-    async def toggle_mute(self):
-        if getattr(self, "fail_mute", None) is not None:
-            raise self.fail_mute
-        self.muted = not self.muted
+    def _mute_to(self, muted):
+        """The microphone pressed: what the provider's model says afterwards, as it reads it from the platform."""
+        self.presses.append("mute")
+        self.muted = muted
         if self.current_meeting:
             self.current_meeting.is_muted = self.muted
             if "mute" in self.current_meeting.controls:
                 self.current_meeting.controls["mute"]["on"] = not self.muted     # the model says the microphone is live, as the provider reads it
+
+    def _camera_to(self, on):
+        self.presses.append("camera")
+        self.camera_on = on
+        if self.current_meeting:
+            self.current_meeting.is_camera_on = self.camera_on
+            if "camera" in self.current_meeting.controls:
+                self.current_meeting.controls["camera"]["on"] = self.camera_on
+
+    async def toggle_mute(self):
+        if getattr(self, "fail_mute", None) is not None:
+            raise self.fail_mute
+        self._mute_to(not self.muted)
         return self.muted
 
     async def toggle_camera(self):
         if getattr(self, "fail_camera", None) is not None:
             raise self.fail_camera
-        self.camera_on = not self.camera_on
-        if self.current_meeting:
-            self.current_meeting.is_camera_on = self.camera_on
-            if "camera" in self.current_meeting.controls:
-                self.current_meeting.controls["camera"]["on"] = self.camera_on
+        self._camera_to(not self.camera_on)
+        return self.camera_on
+
+    async def set_mute(self, muted):
+        """The state asked for, whatever the stub has now: a microphone that is as asked is not pressed (the providers' own set)."""
+        if getattr(self, "fail_mute", None) is not None:
+            raise self.fail_mute
+        if self.muted != muted:
+            self._mute_to(muted)
+        return self.muted
+
+    async def set_camera(self, on):
+        if getattr(self, "fail_camera", None) is not None:
+            raise self.fail_camera
+        if self.camera_on != on:
+            self._camera_to(on)
         return self.camera_on
 
     async def control(self, name, value=None):
@@ -1009,12 +1034,98 @@ class TestLeaveMuteCamera:
         client = await client_factory(make_service(meeting=meeting))
         await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
         await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
-        assert await (await client.post("/api/meeting/mute", json={})).json() == {"muted": True}
-        assert await (await client.post("/api/meeting/camera", json={})).json() == {"camera_on": False}
+        muted = await (await client.post("/api/meeting/mute", json={})).json()
+        assert muted["muted"] is True and muted["meeting"]["muted"] is True        # the meeting block as it is afterwards, as the other three routes answer
+        camera = await (await client.post("/api/meeting/camera", json={})).json()
+        assert camera["camera_on"] is False and camera["meeting"]["camera_on"] is False
         data = await (await client.get("/api/status")).json()
         assert data["meeting"]["muted"] is True
         assert data["meeting"]["camera_on"] is False
-        assert await (await client.post("/api/meeting/mute", json={})).json() == {"muted": False}
+        assert (await (await client.post("/api/meeting/mute", json={})).json())["muted"] is False
+
+    async def test_the_answer_of_a_mute_or_a_camera_is_the_state_and_the_block_the_status_carries(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        for path, body in (("mute", {"muted": True}), ("camera", {"on": False}), ("mute", {})):
+            answer = await (await client.post(f"/api/meeting/{path}", json=body)).json()
+            assert set(answer) == {"muted" if path == "mute" else "camera_on", "meeting"}, (path, body)
+            status = await (await client.get("/api/status")).json()
+            assert answer["meeting"] == status["meeting"], (path, body)            # the page takes it into its model as it takes the control routes'
+
+    async def test_a_body_with_no_state_in_it_toggles_whatever_else_it_holds_and_so_does_none(self, client_factory):
+        """Other callers keep working: the mute and the camera route have always toggled, and a body that says nothing of the state asks for that."""
+        client, meeting = await joined_meeting(client_factory)
+        json_only = {"Content-Type": "application/json"}
+        for path, field in (("mute", "muted"), ("camera", "camera_on")):
+            sent = []
+            for kwargs in ({"json": {}}, {"headers": json_only}, {"json": {"unrelated": True}}, {"data": "{}", "headers": json_only}):
+                answer = await (await client.post(f"/api/meeting/{path}", **kwargs)).json()
+                sent.append(answer[field])
+            assert sent == ([True, False, True, False] if path == "mute" else [False, True, False, True]), (path, sent)    # each one flipped what it found
+        assert meeting.presses == ["mute"] * 4 + ["camera"] * 4
+
+    async def test_a_state_asked_for_is_set_and_a_set_that_finds_it_so_answers_it_and_presses_nothing(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        for path, field, body, expected, presses in (
+            ("mute", "muted", {"muted": True}, True, ["mute"]),
+            ("mute", "muted", {"muted": True}, True, ["mute"]),                    # as asked already: 200 with the state, no press, no refusal
+            ("mute", "muted", {"muted": False}, False, ["mute", "mute"]),
+            ("mute", "muted", {"muted": False}, False, ["mute", "mute"]),
+            ("camera", "camera_on", {"on": True}, True, ["mute", "mute"]),         # the camera is on at join
+            ("camera", "camera_on", {"on": False}, False, ["mute", "mute", "camera"]),
+            ("camera", "camera_on", {"on": False}, False, ["mute", "mute", "camera"]),
+            ("camera", "camera_on", {"on": True}, True, ["mute", "mute", "camera", "camera"]),
+        ):
+            resp = await client.post(f"/api/meeting/{path}", json=body)
+            answer = await resp.json()
+            assert resp.status == 200 and answer[field] is expected and answer["meeting"][field] is expected, (path, body)
+            assert meeting.presses == presses, (path, body)
+
+    async def test_a_tap_made_against_a_state_the_table_has_not_caught_up_with_ends_as_the_person_asked(self, client_factory):
+        """The whole-branch review's race, at the route: the host mutes the room, and a tap on the table's stale Mute reaches the agent before the
+        next poll says so. The table asks for what its button names (muted), and the room stays muted; the toggle that used to be sent unmuted it."""
+        client, meeting = await joined_meeting(client_factory)
+        meeting._mute_to(True)                                                      # the host muted the room: what the table has not been told yet
+        meeting.presses.clear()
+        answer = await (await client.post("/api/meeting/mute", json={"muted": True})).json()
+        assert answer["muted"] is True and meeting.muted is True and meeting.presses == []
+        meeting._camera_to(False)                                                   # the camera was turned off at the TV, and the table still says Turn camera off
+        meeting.presses.clear()
+        answer = await (await client.post("/api/meeting/camera", json={"on": False})).json()
+        assert answer["camera_on"] is False and meeting.camera_on is False and meeting.presses == []
+        assert (await (await client.post("/api/meeting/mute", json={})).json())["muted"] is False       # the toggle, sent blind, is what undoes the host's mute
+
+    @pytest.mark.parametrize("path, field", [("mute", "muted"), ("camera", "on")])
+    @pytest.mark.parametrize("value", ["true", "yes", "false", 1, 0, None, [True], {"on": True}])
+    async def test_a_state_that_is_not_true_or_false_is_refused_in_words_and_nothing_is_pressed(self, client_factory, path, field, value):
+        client, meeting = await joined_meeting(client_factory)
+        resp = await client.post(f"/api/meeting/{path}", json={field: value})
+        assert resp.status == 400
+        error = (await resp.json())["error"]
+        assert error.startswith(f"{field} must be true or false") and repr(value) in error, error
+        assert meeting.presses == []
+
+    @pytest.mark.parametrize("path", ["mute", "camera"])
+    @pytest.mark.parametrize("data", ["[true]", "true", "not json", '"muted"'])
+    async def test_a_body_that_is_not_a_json_object_is_a_400_and_nothing_is_pressed(self, client_factory, path, data):
+        client, meeting = await joined_meeting(client_factory)
+        resp = await client.post(f"/api/meeting/{path}", data=data, headers={"Content-Type": "application/json"})
+        assert resp.status == 400 and "JSON object" in (await resp.json())["error"]
+        assert meeting.presses == []
+
+    async def test_a_state_asked_for_outside_a_meeting_is_a_409_as_a_toggle_is(self, client_factory):
+        client = await client_factory(make_service(meeting=StubMeeting()))
+        assert (await client.post("/api/meeting/mute", json={"muted": True})).status == 409
+        assert (await client.post("/api/meeting/camera", json={"on": False})).status == 409
+
+    async def test_a_set_the_platform_cannot_carry_out_answers_in_its_words_as_a_toggle_does(self, client_factory):
+        client, meeting = await joined_meeting(client_factory)
+        meeting.fail_mute = MeetingControlError("Host does not allow participants to unmute (code 3008)")
+        resp = await client.post("/api/meeting/mute", json={"muted": False})
+        assert resp.status == 409 and (await resp.json())["error"] == "Host does not allow participants to unmute (code 3008)"
+        meeting.fail_camera = RuntimeError("Target page, context or browser has been closed")
+        resp = await client.post("/api/meeting/camera", json={"on": True})
+        assert resp.status == 409 and (await resp.json())["error"] == "Could not switch the camera: Target page, context or browser has been closed"
+        assert meeting.presses == []
 
     async def test_a_camera_fault_answers_with_its_words_not_a_500(self, client_factory):
         meeting = StubMeeting()

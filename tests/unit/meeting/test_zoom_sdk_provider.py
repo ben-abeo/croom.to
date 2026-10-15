@@ -200,6 +200,123 @@ class TestControls:
             await shutdown(provider)
 
 
+class TestSetToTheStateAsked:
+    """Mute and the camera set to the state the table asked for (the whole-branch review's race): the table's button can be a poll behind Zoom, and a
+    tap on it must end as the person asked, not flip what Zoom has by the time the tap arrives."""
+
+    @pytest.mark.parametrize("before, wanted", [
+        (True, True),       # the host muted the room; the table's Mute is a poll behind: the room stays muted (the toggle sent unmuted it, live)
+        (False, False),     # the host unmuted the room; a stale Unmute leaves it live
+        (False, True),      # the ordinary Mute
+        (True, False),      # the ordinary Unmute
+    ])
+    async def test_a_mute_asked_for_ends_as_asked_whatever_zoom_had_and_the_provider_last_knew(self, before, wanted):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("(muted) => window.ZoomMtg._setMuted(muted)", before)       # the host changes the room's microphone ...
+            assert await eventually(lambda: info.is_muted is before)
+            await provider._page.evaluate("window.ZoomMtg._later(1000)")                               # (Zoom takes one mute a second)
+            info.is_muted = provider._muted = not before                                              # ... and the provider has not heard of it: its cache is behind
+            assert await provider.set_mute(wanted) is wanted
+            assert info.is_muted is wanted and provider.get_status()["meeting"]["controls"]["mute"]["on"] is (not wanted)
+            assert await provider._page.evaluate("window.ZoomMtg._muted") is wanted
+            assert await mute_calls(provider) == [wanted]                    # Zoom was told the state, never to flip: nothing the opposite went out
+        finally:
+            await shutdown(provider)
+
+    async def test_the_toggle_still_flips_what_zoom_has_now(self):
+        """The bodiless route, the IR remote and the gestures keep the toggle: it reads Zoom first and sends the opposite."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._setMuted(true)")
+            assert await eventually(lambda: info.is_muted is True)
+            info.is_muted = provider._muted = False                                                   # the provider's cache is behind, as above
+            assert await provider.toggle_mute() is False and await mute_calls(provider) == [False]    # Zoom had it muted: the toggle unmutes
+        finally:
+            await shutdown(provider)
+
+    async def test_a_second_identical_mute_inside_the_second_zoom_keeps_is_no_refusal_when_the_room_is_as_asked(self):
+        """Zoom drops a mute made again within a second and calls nothing back; the room is muted all the same, and the table asked for muted:
+        that is the state, not a refusal. The opposite ask, in the same second, is one: the room is not as asked."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            assert await provider.set_mute(True) is True
+            assert await asyncio.wait_for(provider.set_mute(True), timeout=5) is True                  # dropped by Zoom, answered at once by the page
+            assert len(await provider._page.evaluate("window.__dropped")) == 1 and info.is_muted is True
+            with pytest.raises(MeetingControlError) as failure:
+                await asyncio.wait_for(provider.set_mute(False), timeout=5)
+            assert str(failure.value) == "Zoom ignored mute (it takes one a few seconds after the last); try again in a moment"
+            assert info.is_muted is True and provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_mute_zoom_refuses_is_refused_in_its_words_and_the_state_stays(self):
+        provider = await provider_for(api=FakeApi(), stub=STUB_JS + "window.ZoomMtg._behaviour.mutedOnEntry = true;")
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { window.ZoomMtg.mute = (o) => o.error({ errorCode: 3008, errorMessage: 'Host does not allow participants to unmute' }); }")
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.set_mute(False)
+            assert str(failure.value) == "Host does not allow participants to unmute (code 3008)"
+            assert info.is_muted is True and provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+    async def test_a_set_takes_what_zoom_has_afterwards_not_what_was_asked(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { window.ZoomMtg.mute = (o) => o.success(); }")        # Zoom answers, and nothing changes
+            assert await provider.set_mute(True) is False and info.is_muted is False
+        finally:
+            await shutdown(provider)
+
+    @pytest.mark.parametrize("before, wanted, clicks", [
+        (False, False, 0),     # it went off at the TV and the table still says Turn camera off: already as asked, so nothing is pressed (the toggle turned it on)
+        (True, True, 0),       # and the other way about
+        (True, False, 1),
+        (False, True, 1),
+    ])
+    async def test_a_camera_asked_for_ends_as_asked_and_a_camera_that_is_so_already_is_not_pressed(self, before, wanted, clicks):
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            if not before:
+                await provider._page.evaluate("document.getElementById('stub-video').click()")        # someone at the TV turned the camera off
+            pressed = await provider._page.evaluate("window.__videoClicks")
+            info.is_camera_on = provider._camera_on = not before                                       # the provider has not looked since: its cache is behind
+            assert await provider.set_camera(wanted) is wanted
+            assert info.is_camera_on is wanted and provider.get_status()["meeting"]["controls"]["camera"]["on"] is wanted
+            assert await provider._page.evaluate("window.__videoClicks") - pressed == clicks
+            assert await provider._page.get_attribute("#stub-video", "aria-label") == ("stop my video" if wanted else "start my video")
+        finally:
+            await shutdown(provider)
+
+    async def test_a_camera_set_zoom_cannot_carry_out_says_why_and_presses_nothing(self):
+        provider = await provider_for(api=FakeApi(), stub=client(videoUnusable=True))
+        try:
+            info = await provider.join_meeting(LINK, camera_on=True)
+            with pytest.raises(MeetingControlError) as failure:
+                await provider.set_camera(True)
+            assert str(failure.value) == "Zoom cannot use the camera right now"
+            assert info.is_camera_on is False and await provider._page.evaluate("window.__videoClicks") == 0
+        finally:
+            await shutdown(provider)
+
+    async def test_setting_needs_a_meeting_as_toggling_does(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            with pytest.raises(RuntimeError):
+                await provider.set_mute(True)
+            with pytest.raises(RuntimeError):
+                await provider.set_camera(False)
+        finally:
+            await shutdown(provider)
+
+
 class TestAgain:
     async def test_join_leave_join_again(self):
         provider = await provider_for(api=FakeApi())

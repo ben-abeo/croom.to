@@ -318,7 +318,6 @@
   // the call keeps the booking's title. The link the card put back stays in the model for the old card a poll may still show.
   const joinEventAgain = (id, passcode) => act(() => post("/api/meeting/join", withPasscode({ event_id: id }, passcode)).then(() => joinAccepted(model.lastLink, id)));
   const leave = () => { forgetJoin(); return act(() => post("/api/meeting/leave")); };   // Cancel, Dismiss and Leave give the join up
-  const toggle = (kind) => act(() => post("/api/meeting/" + kind));
   // The keyboard's key click is the room's setting (spec 2026-10-13, 3.3): the service keeps it, and every status carries it.
   const setKeyClick = (on) => act(() => post("/api/settings", { key_click: on }));
   const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
@@ -480,6 +479,12 @@
     render();
   }
   const control = (name, value) => request(name, "/api/meeting/control", { name: name, value: value });
+  // Mute and Camera keep their own routes, and send the state the button names: a tap on Mute asks for muted, on Turn camera off for off, whatever the
+  // room is by the time the request arrives (the host may have muted it, or the camera gone off at the TV, since the poll that drew the button), so a
+  // tap made a moment late ends as the person asked and cannot undo what someone else just did. The agent sets that state. They are requests of the
+  // meeting screen like the rest: only the button pressed waits for its answer, and a camera that takes twenty seconds to switch holds nothing else.
+  const setMute = (muted) => request("mute", "/api/meeting/mute", { muted: muted });
+  const setCamera = (on) => request("camera", "/api/meeting/camera", { on: on });
   // One control's button: inert while that control's request is out.
   const controlSpec = (name, label, icon, className, value) =>
     ({ id: name, label: label, icon: icon, className: className, disabled: model.pending.has(name), onClick: () => control(name, value) });
@@ -489,8 +494,8 @@
   function meetingPrimary(m) {
     const c = m.controls || {};
     const specs = [
-      { id: "mute", label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
-      { id: "camera", label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
+      { id: "mute", label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", disabled: model.pending.has("mute"), onClick: () => setMute(!m.muted) },
+      { id: "camera", label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", disabled: model.pending.has("camera"), onClick: () => setCamera(!m.camera_on) },
     ];
     if (c.raise_hand && c.raise_hand.available) specs.push(controlSpec("raise_hand", c.raise_hand.on ? "Lower hand" : "Raise hand", "hand", ""));
     if (reactionChoices(c).length) specs.push({ id: "reactions", label: "Reactions", icon: "smile", className: "", disabled: model.pending.has("reactions"), onClick: openReactions });

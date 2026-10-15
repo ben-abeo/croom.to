@@ -351,6 +351,11 @@ class MeetingProvider(ABC):
         """
         Set camera state.
 
+        This default is for a provider that cannot read its platform's state: it trusts the cached one and toggles when that differs. A provider
+        that can read it overrides this with a set that does not depend on a cache (Zoom's asks the client for the state wanted, Meet's reads the
+        button under its press lock), because the table's Camera button sends the state it names, and a request made against a state that changed
+        since the table drew it must not flip the camera the wrong way.
+
         Args:
             on: True to enable camera
 
@@ -363,7 +368,7 @@ class MeetingProvider(ABC):
 
     async def set_mute(self, muted: bool) -> bool:
         """
-        Set mute state.
+        Set mute state (see set_camera: the same default, and the same override by a provider that can read its platform's microphone).
 
         Args:
             muted: True to mute

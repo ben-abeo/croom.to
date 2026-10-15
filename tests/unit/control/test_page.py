@@ -11124,6 +11124,115 @@ def test_a_control_the_room_never_answers_is_given_up_after_35_seconds(browser):
         page.close()
 
 
+def mute_and_camera_buttons(page):
+    """The first two buttons of the primary row: Mute (or Unmute) and Turn camera off (or on)."""
+    return page.locator("#meeting-actions .button").nth(0), page.locator("#meeting-actions .button").nth(1)
+
+
+def test_mute_and_camera_send_the_state_their_buttons_name_and_the_answer_goes_into_the_model(browser):
+    """The whole-branch review's race: a tap that asks the agent to flip whatever the room is when it arrives undoes what the host just did. The
+    buttons say what a tap does (Mute, Unmute, Turn camera off, Turn camera on), and the request carries that state; the agent sets it. The answer
+    is the meeting block as it is afterwards, taken into the model the moment it comes (so the button changes without waiting for a poll)."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        mute_asked, camera_asked = hold_requests(page, "**/api/meeting/mute"), hold_requests(page, "**/api/meeting/camera")
+        mute, camera = mute_and_camera_buttons(page)
+        assert (mute.inner_text(), camera.inner_text()) == ("Mute", "Turn camera off")
+        for held, button, expected, then in (
+            (mute_asked, mute, {"muted": True}, "Unmute"), (mute_asked, mute, {"muted": False}, "Mute"),
+            (camera_asked, camera, {"on": False}, "Turn camera on"), (camera_asked, camera, {"on": True}, "Turn camera off"),
+        ):
+            asked = len(held)
+            button.click()
+            wait_for_held(page, held, asked + 1)
+            assert held[asked].request.post_data_json == expected
+            block = page.evaluate("window.croomPage.model.status.meeting")
+            field, state = ("muted", expected["muted"]) if "muted" in expected else ("camera_on", expected["on"])
+            block[field] = state
+            block["controls"]["mute" if field == "muted" else "camera"]["on"] = (not state) if field == "muted" else state
+            held[asked].fulfill(json={field: state, "meeting": block})
+            page.wait_for_function("(words) => [...document.querySelectorAll('#meeting-actions .button')].some((b) => b.textContent.trim() === words)", arg=then, timeout=5000)
+            assert page.evaluate(f"window.croomPage.model.status.meeting.{field}") is state          # in the model, not only on the screen
+            assert page.evaluate("window.croomPage.model.busy") is False and page.locator("#meeting-actions .button:disabled").count() == 0
+        page.close()
+
+
+@pytest.mark.parametrize("which", ["mute", "camera"])
+def test_a_tap_on_a_mute_or_camera_button_that_is_a_poll_behind_ends_as_the_button_said(browser, which):
+    """The host muted the room, or the camera went off at the TV, and the page has not been told (its timers are stopped: no poll). A tap on the
+    Mute it still shows asks for muted, and one on Turn camera off for off: the room stays muted and the camera off, where a toggle sent blind
+    unmuted the room and turned the camera on. The answer brings the page up to date, and the next poll agrees."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        meeting = server.meeting
+        buttons = mute_and_camera_buttons(page)
+        button, was, now = ((buttons[0], "Mute", "Unmute") if which == "mute" else (buttons[1], "Turn camera off", "Turn camera on"))
+        if which == "mute":
+            meeting._mute_to(True)
+        else:
+            meeting._camera_to(False)
+        meeting.presses.clear()
+        assert button.inner_text() == was                                                               # a poll behind
+        button.click()
+        shows = f"[...document.querySelectorAll('#meeting-actions .button')].some((b) => b.textContent.trim() === {now!r})"
+        page.wait_for_function(shows, timeout=5000)
+        assert (meeting.muted, meeting.camera_on) == ((True, True) if which == "mute" else (False, False))
+        assert meeting.presses == []                                                                    # nothing was pressed, and nothing flipped back
+        poll_until(page, shows)                                                                         # the next poll agrees with the answer
+        assert button.inner_text() == now
+        page.close()
+
+
+def test_a_double_tap_on_mute_is_one_request_and_only_that_button_waits_for_its_answer(browser):
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        held = hold_requests(page, "**/api/meeting/mute")
+        mute, camera = mute_and_camera_buttons(page)
+        page.evaluate("() => { const b = document.querySelector('#meeting-actions .button'); b.click(); b.click(); }")   # two taps, before the page can draw the button inert
+        wait_for_held(page, held)
+        page.wait_for_timeout(200)
+        assert len(held) == 1 and held[0].request.post_data_json == {"muted": True}
+        assert mute.is_disabled() and camera.is_enabled() and page.evaluate("window.croomPage.model.busy") is False    # the page as a whole is not held
+        assert page.locator("#meeting-actions .button:disabled").count() == 1
+        held[0].continue_()                                                                              # on to the agent
+        page.wait_for_function("document.querySelector('#meeting-actions .button').textContent.trim() === 'Unmute'", timeout=5000)
+        assert mute.is_enabled() and server.meeting.presses == ["mute"]
+        page.close()
+
+
+def test_a_slow_camera_switch_holds_only_its_own_button_and_the_dialogs_card_stays_answerable(browser):
+    """The camera can take twenty seconds to switch in Zoom: it used to hold the whole page in model.busy, and with it every button on every
+    screen, the waiting dialog's card included. It is a request of the meeting screen like the rest: its own button waits, and nothing else."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        held = hold_requests(page, "**/api/meeting/camera")
+        mute, camera = mute_and_camera_buttons(page)
+        camera.click()
+        wait_for_held(page, held)
+        assert held[0].request.post_data_json == {"on": False}
+        assert camera.is_disabled() and mute.is_enabled() and page.evaluate("window.croomPage.model.busy") is False
+        assert page.locator("#meeting-actions .button:disabled").count() == 1 and page.locator("#meeting-secondary .button:disabled").count() == 0
+        put_up(server, ZOOMS_DIALOG)                                                                    # Zoom draws a dialog while the camera is switching
+        poll_until(page, CARD)
+        page.clock.run_for(600)                                                                         # the card's own half second of ignoring a tap
+        assert page.locator("#dialog-actions .button:disabled").count() == 0
+        page.locator("#dialog-actions .button", has_text="Got it").click()
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("dialog", {"id": 7, "button": "Got it"})]
+        page.wait_for_function("document.querySelector('#meeting-dialog').hidden", timeout=5000)
+        assert camera.is_disabled()                                                                      # the camera still waits for its own answer
+        block = page.evaluate("window.croomPage.model.status.meeting")
+        block["camera_on"], block["controls"]["camera"]["on"] = False, False
+        held[0].fulfill(json={"camera_on": False, "meeting": block})
+        page.wait_for_function("document.querySelectorAll('#meeting-actions .button')[1].textContent.trim() === 'Turn camera on'", timeout=5000)
+        assert camera.is_enabled()
+        page.close()
+
+
 def test_a_reaction_in_flight_keeps_the_reactions_button_inert_and_the_row_closed(browser):
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server)

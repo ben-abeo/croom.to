@@ -439,6 +439,25 @@ class GoogleMeetProvider(MeetingProvider):
         await self._read_controls()
         return not live
 
+    async def set_camera(self, on: bool) -> bool:
+        """Set the camera to the state asked for (True is on): the button's label is read under the press lock and Ctrl+E is pressed only when
+        the label does not say so already, so a request made against a state that has changed since the table drew its button (the camera
+        turned off at the TV a moment before a tap on Turn camera off) ends as the person asked. Returns what the label says afterwards."""
+        if not self._page or self._state != MeetingState.CONNECTED:
+            return False
+        now = await self._press("camera", wanted=bool(on))
+        await self._read_controls()
+        return now
+
+    async def set_mute(self, muted: bool) -> bool:
+        """Set the microphone to the state asked for (True is muted), as set_camera does for the camera: the label is read under the lock and
+        Ctrl+D is pressed only when it differs. Returns what the label says afterwards (True = muted)."""
+        if not self._page or self._state != MeetingState.CONNECTED:
+            return True
+        live = await self._press("mute", wanted=not muted)
+        await self._read_controls()
+        return not live
+
     # ------------------------------------------------------------------
     # Controls from the table (spec 2026-10-13, sections 3 and 4.5)
     # ------------------------------------------------------------------
@@ -462,12 +481,13 @@ class GoogleMeetProvider(MeetingProvider):
             raise MeetingControlError("Not available in a Meet call")
         return await self._read_controls()
 
-    async def _press(self, name: str) -> bool:
+    async def _press(self, name: str, wanted: Optional[bool] = None) -> bool:
         """Press a control's shortcut and wait for the change to show in its button's label (for PRESS_WAIT_S at most), one press at a
         time; the answer is the state the label shows then (True is on: the microphone live, the camera on, the hand up, the captions on).
-        A control whose button is not on the page is refused before anything is pressed, and so is the bare C key while something that takes
-        typing has the keyboard (it would be typed into the chat box). A press that changes no label is a refusal in words, never a
-        success."""
+        With `wanted` the control is set to that state instead of flipped: the label is read here, under the lock, and when it says so
+        already nothing is pressed and the answer is that state (a press that was in the way of this one has done the work). A control whose
+        button is not on the page is refused before anything is pressed, and so is the bare C key while something that takes typing has the
+        keyboard (it would be typed into the chat box). A press that changes no label is a refusal in words, never a success."""
         words = self.CONTROL_WORDS[name]
         async with self._pressing:
             try:
@@ -475,6 +495,8 @@ class GoogleMeetProvider(MeetingProvider):
                 before = reading.get(name)
                 if before is None:
                     raise MeetingControlError(f"Meet shows no {words} button right now")
+                if wanted is not None and bool(before["on"]) == wanted:
+                    return wanted
                 if name == "captions" and reading.get("taken"):
                     raise MeetingControlError(KEYBOARD_TAKEN_WORDS)
                 await self._page.keyboard.press(self.SHORTCUTS[name])

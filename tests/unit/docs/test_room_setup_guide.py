@@ -318,6 +318,8 @@ def test_guide_describes_the_meeting_screen_its_rows_sub_screens_dialog_card_and
     for needle in (
         "While a call lasts the page shows the meeting screen on its own, and draws only what the call's platform offers the room right now",
         "A Google Meet call offers Mute, Turn camera off, Raise hand, Captions and Leave, and no more (besides TV, which every call has)",
+        "a host muting the room changes the button within a few seconds, and a tap asks for the state the button names, so a Mute tapped just after the host muted the room leaves it muted",
+        "The same for the camera: a Turn camera off tapped after the camera went off at the TV leaves it off",
         "The remote and touchpad of the room's TV, always the last button of the row: the section The TV, below, sets it up",
         "Thumbs up", "Clap", "Heart", "Laugh", "Wow", "Celebrate",
         "Participants (7)", "Chat (2)", "Waiting room", "Admit", "No messages yet",

@@ -176,7 +176,9 @@ def test_guide_describes_the_week_view():
     for needle in (
         "Tap This week beside today's bookings. The sign shows the next seven days, today first, each with its name, its date and its bookings "
         "(the time, the title and Zoom or Google Meet); a day with nothing booked says Nothing booked.",
-        "The seven days run across the screen, or one under another on a sign standing upright.",
+        "The seven days run across the screen, or one under another on a sign standing upright, where a booking's title is cut after one line.",
+        "On a screen lying down and 700 pixels high or less a booking is its time and one line of title, "
+        "and on one narrower than 1000 pixels the days are named by three letters (Wed).",
         "A booking is listed once, on the day it starts, and an all-day booking shows 12:00 AM.",
         "The sign never scrolls: where a day has more bookings than fit, it shows the first ones and +3 more.",
         "The week is read from the device when you open it, so open it again to see a change.",
@@ -210,24 +212,34 @@ def test_guide_gives_the_short_screen_rules_the_stylesheet_has():
     """The thresholds in the guide are the ones in sign.css, so the one cannot change without the other."""
     text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
     for needle in (
-        "A booking's title is cut after two lines with an ellipsis, in Today as in the week, and after one line in Today on a screen 560 pixels high or less.",
+        "The label under the room's name, the line under it and the room's location are cut with an ellipsis after two lines, "
+        "and so is a booking's title (after one line in Today on a screen 560 pixels high or less).",
         "A room name that would take more than two lines is set in smaller type, as one of more than 24 characters is, so it is never cut; "
         "on a screen 560 pixels high or less, one that would take two lines is too, and one that still takes more than two goes on down 0.1 rem at a time, "
         "to 1.3 rem, until it takes two.",
-        "At 560 pixels high or less the week view leaves out the line under the status label and each day's date, with football scores on or off.",
-        "up to 700 pixels high the week view leaves out the line under the status label and the room's location and makes the room's name smaller, "
-        "and at 560 pixels or less, in Today, the status leaves out the line under its label too.",
+        "On a screen of any height a name also goes down, to 1.3 rem at the most, while the status would run off the bottom.",
+        "At 700 pixels high or less the week leaves out the line under the status label and the room's location and makes the room's name smaller, "
+        "and at 560 pixels or less each day's date too; with football scores on, at 560 pixels high or less, Today's status leaves out the line under its label too.",
     ):
         assert needle in text, needle
+    # the week's rules were for the strip once: "With football scores on, the strip takes some of the height: up to 700 pixels high the week view ..."
+    assert "With football scores on, the strip takes some of the height" not in text
+    assert "At 560 pixels high or less the week view leaves out the line under the status label and each day's date, with football scores on or off." not in text
     assert "the Today list leaves out the line under the label too" not in text       # it is the status in Today that does, not the list
     css = squash((REPO / "src" / "croom" / "control" / "static" / "sign.css").read_text(encoding="utf-8"))      # however the stylesheet is laid out
     for rule in (
-        '@media (max-height: 700px) { body[data-view="week"][data-strip] .detail, body[data-view="week"][data-strip] .location { display: none; }',
+        '@media (max-height: 700px) { body[data-view="week"] .detail, body[data-view="week"] .location { display: none; } body[data-view="week"] .room { font-size: clamp(1.8rem, 3.6vw, 2.6rem); } }',
         '@media (max-height: 560px) { body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }',
         '@media (max-height: 560px) { body[data-strip] .detail { display: none; } .event .title { -webkit-line-clamp: 1; }',
         '.event .title { margin: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }',
+        # the label, the line under it and the location: two lines at most
+        '.location, #chip-text, .detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }',
+        # a landscape sign's booking in the week: the time with one line of title under it, and no platform
+        '@media (orientation: landscape) and (max-height: 700px) { .slots { margin-top: 0.375rem; gap: 0.25rem; } .slot { padding: 0.25rem 0.5rem; } '
+        '.slot .title { -webkit-line-clamp: 1; } .slot .who { display: none; } }',
     ):
         assert squash(rule) in css, rule
+    assert 'body[data-view="week"][data-strip]' not in css                       # the week's rules are by height alone, strip up or down
 
 
 def test_guide_repeats_the_photograph_credits_of_every_background():
@@ -251,19 +263,19 @@ def test_guide_troubleshooting_covers_the_football_strip_the_settings_file_and_t
         "a firewall or web filter that blocks site.api.espn.com on HTTPS",
         "the device tries again after 1, 2 and 5 minutes and then every 10, and the strip comes back by itself when a read works.",
         "While ESPN cannot be reached the strip keeps the last result it read, so a game played since can still show as next.",
-        "The switch is on but the strip never comes",
+        "A choice is lost when the device restarts",
         "are saved in control-settings.json in the device's data folder, /var/lib/croom",
-        "the screen still shows the switch on, a chosen background holds only until the next restart, and the strip never comes.",
+        "the choices still work, but they are lost at the next restart until the folder can be written.",
         "says \"Could not save the room settings\" and why",
         "A name too long even at the smallest size",
-        "On a screen only 480 to 500 pixels high a room name goes down to 1.3 rem and no further.",
-        "At the narrowest of the six sizes measured, 800 by 480, a name of up to 67 characters takes two lines at that size, "
-        "and one of 87 to 147 characters takes three to five lines and still fits, in every status, with the football strip up or down; "
-        "900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500 take no more lines.",
-        "A name of 184 characters, seven lines at 800 by 480, runs past the bottom of the screen by 6 pixels with the strip up and a location of two lines, "
-        "and by 39 when the room is free for the rest of the day.",
+        "A room name goes down to 1.3 rem and no further. Room names over about 150 characters (five lines of the smallest type on a 7-inch 800 by 480 sign) run off the sign; "
+        "use a shorter name.",
     ):
         assert needle in text, needle
+    # the settings card said the strip never came, and the name's card gave pixel counts: the scoreboard follows a switch until the restart, and the limit is one sentence
+    for gone in ("The switch is on but the strip never comes", "a chosen background holds only until the next restart, and the strip never comes",
+                 "On a screen only 480 to 500 pixels high", "runs past the bottom of the screen by 6 pixels", "and by 39 when the room is free"):
+        assert gone not in text, gone
     # the first card said a two-line name and a title in the label were the trouble: the chip now carries no title on a short screen and the name takes the smaller type
     for gone in ("A long name does not fit a very short screen", "shorten the room's name to one line (Boardroom, not Conference Room Twelve)",
                  "A name on two lines with a location under it runs past the bottom of the screen at 1280 by 480 and 1366 by 500",

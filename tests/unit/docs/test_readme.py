@@ -149,16 +149,16 @@ def test_readme_describes_the_redesigned_door_sign():
         "the agent reads each school's schedule from ESPN's public feed (`site.api.espn.com`, no account or key) every ten minutes, so the device needs outbound HTTPS to it.",
         # the routes the sign uses
         "`/api/calendar/week` (the next seven days, today first, each `{date, label, events}` by the device's local day)",
-        "`POST /api/settings` changes `sign_background` and `sign_scores`, and refuses a bad value with words.",
+        "`POST /api/settings` changes `sign_background`, `sign_scores` and `key_click`, and refuses a bad value with words.",
+        "`settings` with `sign_background` and `sign_scores` (and the room page's `key_click`)",
         # what is not known yet
         "The football scores come from a public ESPN feed that ESPN does not document for this use",
-        "On a door screen only 480 to 500 px high a room name goes down to 1.3 rem and no further: at the narrowest of the six sizes measured, 800 by 480 "
-        "(the others are 900 by 500, 1024 by 480, 1024 by 500, 1280 by 480 and 1366 by 500, and take no more lines), a name of up to 67 characters takes two lines "
-        "at that size and one of 87 to 147 characters three to five, and all of these fit in every status; a name of 184 characters (seven lines at 800 by 480) "
-        "runs past the bottom by 6 px with the strip up and a location of two lines, and by 39 px when the room is free for the rest of the day.",
+        "A room name goes down to 1.3 rem and no further. Room names over about 150 characters (five lines of the smallest type on a 7-inch 800 by 480 sign) run off the sign; use a shorter name.",
     ):
         assert needle in text, needle
     # what the sign no longer is
+    for gone in ("only 480 to 500 px high", "runs past the bottom by 6 px", "by 39 px when the room is free", "POST /api/settings` changes `sign_background` and `sign_scores`, and"):
+        assert gone not in text, gone                                                                                      # the pixel counts of the limit, and the settings route's two keys
     assert "| Green when free, amber ten minutes before a booking, red while in use or booked. |" not in text
     assert "a room name that takes two lines (Conference Room Twelve) with a location under it can push" not in text     # the limit before the chip lost its title
     assert "a room name that takes three lines of the smaller type (31 characters or more" not in text                   # and the one before a name stepped down

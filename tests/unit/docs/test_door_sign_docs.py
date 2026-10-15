@@ -54,9 +54,17 @@ def test_the_spec_says_what_a_long_title_and_a_long_room_name_do():
         "On a sign 560 px high or less (the Raspberry Pi's 7-inch 800 by 480 panel is one) the chip says only the status, without the booking's title, "
         "which the Today list shows beside it (\"Starts in 8 minutes\", \"Starting now\").",
         "is set in smaller type, 3.6 rem at most, so it is never cut and a short sign keeps its chip",
-        "the lines are measured on the sign after layout, and again when the name, the sign's size or the view changes and when a font arrives",
-        "on a sign 560 px high or less a name that still takes more than two lines goes on down in 0.1 rem steps to 1.3 rem, until it takes two",
-        "a title cut after two lines with an ellipsis (after one on a sign 560 px high or less, and the week's bookings after two, one in portrait)",
+        "the lines are measured on the sign after layout",
+        "on a sign 560 px high or less a name that still takes more than two lines goes on down in 0.1 rem steps to 1.3 rem, until it takes two, and on a sign of any "
+        "height a name goes on down, to the same floor, while the status column is what runs the sign off the screen (the Today list beside it is not the name's to cure)",
+        "and again when the name, the sign's size or the view changes, when the words of the status or the bookings change and when a font arrives",
+        "the chip's words, the detail line and the location are two lines and an ellipsis at most, so that no title or location grows the status past the sign, and every character stays in the page",
+        "a title cut after two lines with an ellipsis (after one on a sign 560 px high or less, and the week's bookings after two, one in portrait and on a landscape sign 700 px high or less)",
+        # the week on a short landscape sign, and in portrait
+        "Up to 700 px of height, strip or no strip, the status gives up its detail line and its location and sets the room's name smaller, and on a landscape sign a booking is the time "
+        "with one line of title under it, without the platform (a day is narrower than a time and a title side by side), so that today's bookings show on a 7-inch panel",
+        "a landscape sign narrower than 1000 px names its days by their first three letters (\"Wed\")",
+        "In portrait a day with nothing booked is the height of its own words and the days with bookings share the rest.",
     ):
         assert needle in text, needle
 
@@ -149,6 +157,9 @@ def test_the_docs_state_the_numbers_the_code_has():
     soon_minutes = js_constant("SOON_MS") // 60000
     config = re.search(r'^CONFIG_DIR="([^"]+)"', installer, re.M).group(1) + "/config.yaml"
     short_sign = re.search(r'matchMedia\("\(max-height: (\d+)px\)"\)', (SIGN / "sign.js").read_text(encoding="utf-8")).group(1)
+    narrow_week = int(re.search(r'matchMedia\("\(orientation: landscape\) and \(max-width: (\d+)px\)"\)', (SIGN / "sign.js").read_text(encoding="utf-8")).group(1)) + 1
+    week_height = re.search(r'@media\(max-height:(\d+)px\)\{body\[data-view="week"\] \.detail,body\[data-view="week"\] \.location\{display:none;\}', css).group(1)
+    assert squash(f"@media (orientation: landscape) and (max-height: {week_height}px) {{ .slots {{") in css       # a landscape sign's short booking is for the same height
     assert f"@media(max-height:{short_sign}px){{" in css                                   # the script's short sign is the stylesheet's
     large = re.search(r"\.room\{[^}]*font-size:clamp\([^,]+,[^,]+,([\d.]+)rem\)", css).group(1)           # the room name's largest type, in rem
     smaller = re.search(r"\.room\.long\{font-size:clamp\([^,]+,[^,]+,([\d.]+)rem\)", css).group(1)
@@ -183,6 +194,11 @@ def test_the_docs_state_the_numbers_the_code_has():
         ("how far a name goes down on a short sign", guide, f"goes down to {js_decimal('NAME_FLOOR_REM'):g} rem and no further"),
         ("how far a name goes down on a short sign", readme, f"goes down to {js_decimal('NAME_FLOOR_REM'):g} rem and no further"),
         ("what a short sign is", guide, f"{short_sign} pixels high or less"),
+        ("how short a sign gives its week the room", spec, f"Up to {week_height} px of height"),
+        ("how short a sign gives its week the room", guide, f"At {week_height} pixels high or less the week leaves out"),
+        ("how short a sign gives its week the room", guide, f"lying down and {week_height} pixels high or less"),
+        ("how narrow a sign names its days by three letters", spec, f"narrower than {narrow_week} px"),
+        ("how narrow a sign names its days by three letters", guide, f"narrower than {narrow_week} pixels"),
         ("the length of a room name that takes the smaller type", guide, f"as one of more than {js_constant('LONG_NAME')} characters is"),
         ("how many lines a room name may take in the large type", guide, f"would take more than {WORDS[js_constant('NAME_LINES')]} lines"),
         ("the length of a room name that takes the smaller type", spec, f"A name of more than {js_constant('LONG_NAME')} characters"),

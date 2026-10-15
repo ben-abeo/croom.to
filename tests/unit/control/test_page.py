@@ -142,6 +142,7 @@ def test_join_by_id_mute_and_leave_flow(browser):
         page.click("#meeting-actions button:has-text('Mute')")
         page.wait_for_selector("#meeting-actions button:has-text('Unmute')", timeout=5000)
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert server.meeting.leaves == 1
@@ -2061,6 +2062,7 @@ def test_the_keyboard_opens_on_the_idle_screen_only_and_hides_when_a_meeting_sta
         page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
         assert page.locator("#keyboard").is_hidden() and not page.evaluate("document.body.classList.contains('keyboard-open')")
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
         assert page.locator(".schedule").is_visible()
@@ -2074,6 +2076,7 @@ def test_the_keyboard_opens_on_the_idle_screen_only_and_hides_when_a_meeting_sta
         page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)
         assert page.locator("#keyboard").is_hidden() and not page.evaluate("document.body.classList.contains('keyboard-open')")
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
         page.click("#open-options")
@@ -2203,12 +2206,14 @@ def test_the_join_request_carries_a_passcode_only_when_the_field_has_one(browser
         page.click("#link-form button[type=submit]")
         page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.fill("#link-input", "https://meet.google.com/abc-defg-hij")       # no field for this one
         page.click("#link-form button[type=submit]")
         page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.fill("#link-input", "5590000559")
@@ -2833,6 +2838,7 @@ def test_the_page_keyboard_does_not_type_into_a_passcode_field_that_has_gone(bro
         tap(page, *"940104", "join")
         page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.click("#keyboard-toggle")
@@ -3193,6 +3199,7 @@ def test_the_page_switches_to_the_meeting_screen_and_back_on_its_own(browser):
         page.click("#back-from-camera")
         assert page.evaluate("document.body.dataset.view") == "meeting"      # Back from the camera returns to the mode's screen
         page.click("#meeting-actions button:has-text('Leave')")
+        page.wait_for_timeout(600)                                            # a tap within half a second of the ask is a bounce, not the second tap
         page.click("#meeting-actions button:has-text('Tap again to leave')")
         page.wait_for_function("document.body.dataset.view === 'idle'", timeout=5000)
         assert page.locator("#link-form").is_visible() and page.locator("#open-options").is_visible()
@@ -4173,6 +4180,7 @@ def test_a_meeting_that_ends_under_a_held_arrow_still_stops_the_camera(browser):
         page = open_page(browser, server)
         join_by_id(page)
         page.click("#open-camera-live")
+        page.wait_for_timeout(600)                                            # the view changed in a meeting: the page ignores taps for half a second
         press(page, "#arrow-pad button[data-pan='1']")
         page.wait_for_timeout(200)
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave", data="{}", headers={"Content-Type": "application/json"})
@@ -6060,6 +6068,7 @@ def test_the_host_screen_offers_the_host_actions_with_a_second_tap_to_end(browse
         assert page.locator("#host-actions .button", has_text="Tap again to end").count() == 1
         assert ("host.end", None) not in server.meeting.controls_called
         assert fits(page)
+        page.wait_for_timeout(600)                                            # the second tap is a deliberate one: a tap within half a second of the ask would be a bounce
         page.locator("#host-actions .button", has_text="Tap again to end").click()
         wait_for_calls(page, server, 5)
         assert server.meeting.controls_called == [("host.mute_all", None), ("host.record", None), ("host.lock", None), ("host.ask_unmute", None), ("host.end", None)]
@@ -6129,6 +6138,7 @@ def test_remove_asks_for_a_second_tap_on_its_own_row_and_the_ask_lapses_after_fi
         page.clock.run_for(1500)
         assert tom.inner_text().strip() == "Remove" and server.meeting.controls_called == []      # five: lapsed
         tom.click()
+        page.clock.run_for(600)                                                   # (a second tap within half a second of the ask is a bounce)
         tom.click()                                                               # the second tap, in time: Tom is removed
         wait_for_calls(page, server, 1)
         assert server.meeting.controls_called == [("host.remove", 16777220)]
@@ -6631,4 +6641,121 @@ def test_the_sub_screens_on_a_phone_never_scroll_sideways(browser):
                 assert page.evaluate(wide) and page.locator("#host-actions .button").last.is_visible()
             page.click(f"#back-from-{view}")
             page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        page.close()
+
+
+# --- fix round 1: every view change in a meeting settles the page, and an armed button cannot be confirmed by a bounce ---
+
+@pytest.mark.parametrize("opener, back", [("#open-camera-live", "#back-from-camera"), ("#open-upcoming", "#back-from-upcoming")])
+def test_a_double_tap_on_back_from_camera_or_upcoming_does_not_toggle_the_rooms_mute(browser, opener, back):
+    """Back is 64 px high at the top of the screen, and the meeting screen's Mute begins under its lower edge at the kiosk's 1280 by 800: the second tap of
+    a double tap lands on Mute. Every view change in a meeting settles the page, not only the three sub-screens."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server, touchscreen=True)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        x, y = centre(page, opener)
+        page.touchscreen.tap(x, y)
+        page.wait_for_function("document.body.dataset.view !== 'meeting'", timeout=5000)
+        page.clock.run_for(600)                                               # the half second of the way in
+        box = page.locator(back).bounding_box()
+        x, y = box["x"] + box["width"] / 2, box["y"] + box["height"] - 10    # the lower edge of Back
+        page.touchscreen.tap(x, y)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert button_under(page, x, y) == "Mute", "the thumb is not over Mute: this test means nothing"
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)                                            # the second tap of a double tap
+        page.wait_for_timeout(300)
+        assert server.meeting.muted is False
+        page.clock.run_for(500)
+        page.touchscreen.tap(x, y)                                            # a tap meant for Mute, once the screen has settled
+        page.wait_for_function("document.querySelector('#meeting-actions .button').textContent.trim() === 'Unmute'", timeout=5000)
+        assert server.meeting.muted is True
+        page.close()
+
+
+def test_each_view_change_in_a_meeting_starts_its_half_second_again(browser):
+    """A second view change 300 ms after the first keeps the page settling until half a second after the second, not the first."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        page.evaluate("window.croomPage.setView('camera')")
+        page.clock.run_for(300)
+        page.evaluate("window.croomPage.setView('meeting')")
+        page.clock.run_for(300)                                               # 600 ms after the first change, 300 after the second
+        assert page.evaluate("document.body.classList.contains('settling')")
+        page.clock.run_for(250)                                               # 550 ms after the second
+        assert not page.evaluate("document.body.classList.contains('settling')")
+        page.close()
+
+
+@pytest.mark.parametrize("what", ["remove", "end", "leave"])
+def test_a_second_tap_within_half_a_second_of_the_ask_does_not_confirm(browser, what):
+    """A bounce, or a double tap, is not the second tap that was asked for: the ask ignores a tap for half a second. A deliberate one after that confirms."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server, touchscreen=True)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        if what == "remove":
+            set_people(server, a_roster(2))
+            poll_until(page, "window.croomPage.model.status.meeting.participants.list.length === 5")
+        page.clock.run_for(600)
+        if what == "remove":
+            open_sub_screen(page, "Participants", "participants")
+            page.clock.run_for(600)
+            ask = "#participant-list .participant:has-text('Priya') .button:last-child"
+        elif what == "end":
+            open_sub_screen(page, "Host", "host")
+            page.clock.run_for(600)
+            ask = "#host-actions .button:last-child"
+        else:
+            ask = "#meeting-actions .button.danger"
+        x, y = centre(page, ask)
+        page.touchscreen.tap(x, y)                                            # the ask
+        assert "Tap again" in page.locator(ask).inner_text()
+        x, y = centre(page, ask)                                              # where the asking button is now
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)                                            # the bounce
+        page.wait_for_timeout(300)
+        assert server.meeting.controls_called == [] and page.evaluate("document.body.dataset.state") == "meeting"
+        page.clock.run_for(400)                                               # 550 ms since the ask
+        page.touchscreen.tap(x, y)
+        if what == "leave":
+            page.wait_for_function("document.body.dataset.state !== 'meeting'", timeout=5000)
+        else:
+            wait_for_calls(page, server, 1)
+            assert server.meeting.controls_called == ([("host.remove", 16777219)] if what == "remove" else [("host.end", None)])      # Priya's id, or the meeting
+        page.close()
+
+
+@pytest.mark.parametrize("words, view, ask, back", [
+    ("Host", "host", "#host-actions .button:last-child", "#back-from-host"),
+    ("Participants", "participants", "#participant-list .participant:has-text('Priya') .button:last-child", "#back-from-participants"),
+])
+def test_each_button_that_asks_for_a_second_tap_has_its_own_five_seconds(browser, words, view, ask, back):
+    """Leave asks on the meeting screen, and the person goes to Host (or Participants) and asks there, End (or Remove): the one's five seconds are not
+    the other's, and Leave has lapsed by itself when they come back, though the other asked later."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        set_people(server, a_roster(2))
+        poll_until(page, "window.croomPage.model.status.meeting.participants.list.length === 5")
+        page.clock.run_for(600)
+        page.locator("#meeting-actions .button.danger").click()               # Leave asks
+        assert page.locator("#meeting-actions .button.danger").inner_text().strip() == "Tap again to leave"
+        page.clock.run_for(1000)
+        open_sub_screen(page, words, view)
+        page.clock.run_for(600)
+        page.locator(ask).click()                                             # and so does the other, 1.6 s after Leave
+        assert "Tap again" in page.locator(ask).inner_text()
+        page.clock.run_for(4000)                                              # 5.6 s after Leave asked: its five seconds are over, the other's have a second to go
+        assert "Tap again" in page.locator(ask).inner_text()
+        page.click(back)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-actions .button.danger").inner_text().strip() == "Leave"
+        assert server.meeting.controls_called == [] and server.meeting.leaves == 0
         page.close()

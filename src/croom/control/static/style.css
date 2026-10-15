@@ -431,6 +431,6 @@ body.keyboard-open .schedule { display: none; }
   .sound-buttons { margin-top: 8px; }
 }
 
-/* The screen ignores taps while it settles after its layout has moved, or after the view has changed into or out of one of the meeting screen's
-   sub-screens (app.js, settle): the whole screen, not the meeting screen alone, as a thumb aimed at one lands on the other. */
+/* The screen ignores taps while it settles after its layout has moved, or after the view has changed in a meeting (app.js, settle): the whole
+   screen, not the meeting screen alone, as a thumb aimed at one lands on the other. */
 body.settling .screen { pointer-events: none; }

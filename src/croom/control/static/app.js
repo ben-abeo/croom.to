@@ -96,9 +96,10 @@
   }
   function setView(name, automatic) {
     if (view() === name) return;
-    // A finger aimed at the screen that was lands on the one that is (the second tap of a double tap on Host lands on Mute all, one on Back on
-    // Mute): a change into or out of a sub-screen settles the page as the meeting screen's own moves do.
-    if (SUB_SCREENS.includes(view()) || SUB_SCREENS.includes(name)) settle();
+    // A finger aimed at the screen that was lands on the one that is (the second tap of a double tap on Host lands on Mute all; on Back, at the
+    // kiosk's 1280 by 800, on Mute, which begins under Back's lower edge, from Camera and Upcoming as much as from the three sub-screens): every
+    // view change in a meeting settles the page, as the meeting screen's own moves do. Idle mode has nothing under Back's edge to be hit.
+    if (mode() === "meeting") settle();
     applyView(name, automatic);
     render();
   }
@@ -119,6 +120,11 @@
   document.addEventListener("pointerdown", armIdleReturn, true);
 
   let confirmTimer = null;
+  // A second tap within half a second of the ask is not the one that was asked for: the bounce of a finger, or the second of a double tap, on a
+  // button whose words have just changed under it. Leave, End meeting for everyone and Remove are the buttons that ask; each has its own time.
+  const ARMED_BOUNCE_MS = 500;
+  const askedAt = { leave: 0, end: 0, remove: 0 };
+  const bounced = (which) => Date.now() < askedAt[which] + ARMED_BOUNCE_MS;
   let lastEventsKey = null;
   let lastPickerKey = null;
   let lastUpcomingKey = null;
@@ -363,12 +369,14 @@
   function leaveSpec() {
     if (model.confirmLeave) {
       return { id: "leave", label: "Tap again to leave", className: "danger", icon: "phone-off", onClick: () => {
+        if (bounced("leave")) return;
         clearTimeout(confirmTimer);
         model.confirmLeave = false;
         leave();
       } };
     }
     return { id: "leave", label: "Leave", className: "danger", icon: "phone-off", onClick: () => {
+      askedAt.leave = Date.now();
       model.confirmLeave = true;
       clearTimeout(confirmTimer);
       confirmTimer = setTimeout(() => { model.confirmLeave = false; render(); }, CONFIRM_MS);
@@ -643,12 +651,14 @@
   function forgetRemove() { clearTimeout(removeTimer); model.confirmRemove = null; }
   function askToEnd() {
     forgetEnd();
+    askedAt.end = Date.now();
     model.confirmEnd = true;
     endTimer = setTimeout(() => { model.confirmEnd = false; render(); }, CONFIRM_MS);
     render();
   }
   function askToRemove(key) {
     forgetRemove();
+    askedAt.remove = Date.now();
     model.confirmRemove = key;
     removeTimer = setTimeout(() => { model.confirmRemove = null; render(); }, CONFIRM_MS);
     render();
@@ -698,7 +708,7 @@
     if (can(host, "remove")) {
       const asking = model.confirmRemove === key;
       specs.push({ id: "remove", label: asking ? "Tap again to remove" : "Remove", icon: "x-circle", className: asking ? "danger" : "quiet", disabled: model.pending.has("host.remove"),
-        onClick: () => { if (model.confirmRemove === key) { forgetRemove(); control("host.remove", p.id); } else askToRemove(key); } });
+        onClick: () => { if (model.confirmRemove !== key) askToRemove(key); else if (!bounced("remove")) { forgetRemove(); control("host.remove", p.id); } } });
     }
     return specs;
   }
@@ -811,7 +821,7 @@
     if (can(h, "end")) {
       const end = { id: "host.end", icon: "x-circle", className: "danger", disabled: model.pending.has("host.end") };
       specs.push(model.confirmEnd
-        ? Object.assign(end, { label: "Tap again to end", onClick: () => { forgetEnd(); control("host.end"); } })
+        ? Object.assign(end, { label: "Tap again to end", onClick: () => { if (bounced("end")) return; forgetEnd(); control("host.end"); } })
         : Object.assign(end, { label: "End meeting for everyone", onClick: askToEnd }));
     }
     return specs;

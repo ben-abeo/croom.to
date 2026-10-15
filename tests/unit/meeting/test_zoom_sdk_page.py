@@ -6,12 +6,13 @@ the stub ZoomMtg with Zoom's CDN blocked (spec 2026-09-25 Zoom, section 4.5).
 import asyncio
 import json
 import time
+from datetime import datetime, timezone
 
 import pytest
 
 playwright = pytest.importorskip("playwright.async_api")
 
-from croom.meeting.providers.zoom_sdk_site import ZoomSdkSite  # noqa: E402
+from croom.meeting.providers.zoom_sdk_site import SDK_VERSION, ZoomSdkSite  # noqa: E402
 from tests.unit.meeting.zoom_stub import STUB_JS, block_sdk_cdn  # noqa: E402
 
 JOIN = {"meetingNumber": "99612060433", "passWord": "abc123", "userName": "Room 1", "signature": "sig.nature.x",
@@ -3010,3 +3011,103 @@ async def test_chat_messages_from_other_builds_come_in_other_shapes():
         assert [c["at"] for c in got[:2]] == ["2023-11-14T22:13:20.000Z", "2023-11-14T22:14:20.000Z"] and got[5]["at"] == "2023-11-14T22:15:20.000Z"
         assert all(c["at"].endswith("Z") and c["at"].startswith("20") for c in got[2:5])
         assert run.errors == []
+
+
+# ---- Diagnostics for the first real meeting (spec 2026-10-13, section 7): the attendees' field names, the dialogs seen and the SDK version ----
+
+
+async def test_diagnostics_name_the_attendees_fields_every_record_s_once_in_the_order_met():
+    """The inventory pins Zoom's real field names: the attendees' as well as the current user's. A person in the waiting room may have a field the
+    others lack, so every record is read, not only the first."""
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("""() => { const Z = window.ZoomMtg, record = Z._record;
+            Z._record = function (a) { const r = record.call(this, a); if (a.userName === "Raj Patel") r.inWaitingRoom = true; return r; }; }""")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        keys = data["attendee_keys"]
+        assert {"userId", "userName", "muted", "video", "raiseHand", "isHold", "isHost"} <= set(keys)
+        assert keys[:3] == ["userId", "self", "userName"] and keys[-1] == "inWaitingRoom"         # the room's record first, a field only another record has last
+        assert len(keys) == len(set(keys))                                                         # none twice
+        assert "video" in data["user_keys"] and data["state"]["videoOn"] is True                    # the current user's, as before
+        assert [(p["name"], p["waiting"]) for p in data["meeting"]["participants"]] == [("Room 1", False), ("Ann Lee", False), ("Raj Patel", False)]
+        assert data["meeting"]["role"] == "participant" and data["meeting"]["me"]["muted"] is False   # the whole meeting as the bridge reads it
+
+
+async def test_diagnostics_have_no_attendee_fields_while_zoom_lists_nobody():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.silentAttendees = true;") as run:
+        await settled(run)
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["attendee_keys"] == []
+
+
+async def test_diagnostics_say_which_sdk_version_the_page_loaded():
+    async with PageRun({"sdkVersion": "6.9.9"}) as run:                                           # what the device asked for
+        await settled(run)
+        assert (await run.page.evaluate("window.crystalMeet.diagnostics()"))["sdk_version"] == "6.9.9"
+        assert ["setZoomJSLib", "https://source.zoom.us/6.9.9/lib", "/av"] in await run.page.evaluate("window.__zoomCalls")      # the library path was built from it
+    async with PageRun({"sdkVersion": None}) as run:                                              # nothing asked for: the page's own, from the site's meta tag
+        await settled(run)
+        assert (await run.page.evaluate("window.crystalMeet.diagnostics()"))["sdk_version"] == SDK_VERSION
+
+
+async def test_diagnostics_list_the_dialogs_open_and_every_dialog_met_and_how_each_went():
+    """What the inventory run reads back after a real meeting: the dialogs still on the screen, and every dialog the page met with its words, its buttons, when
+    it was first seen, the button the page pressed on it (whoever asked: the device's acknowledgement or a tap on the table) and whether it has gone."""
+    async with PageRun() as run:
+        await settled(run)
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["dialogs"] == [] and data["dialogs_seen"] == []                                # nothing yet
+        await show(run, "Recording consent", "This meeting is being recorded.", ["Leave Meeting", "Got it"])
+        passing = await show(run, "Transcription", "This meeting is being transcribed.", ["OK"])
+        await show(run, "Unmute?", "The host would like you to unmute.", ["Stay muted", "Unmute"])
+        first, second, third = await reported(run, "dialog", 3)
+        assert await run.page.evaluate(f"window.crystalMeet.answerDialog({first['id']}, ' GOT-it ')") is True      # pressed, and the client took it
+        await run.page.evaluate(f"window.ZoomMtg._closeDialog('{passing}')")                                       # went by itself
+        await reported(run, "dialog-closed", 2)
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert data["dialogs"] == [third]                                                           # the one still waiting, as it was reported
+        seen = data["dialogs_seen"]
+        assert [{k: d[k] for k in ("id", "title", "text", "buttons")} for d in seen] == [first, second, third]
+        assert [d["title"] for d in seen] == ["Recording consent", "Transcription", "Unmute?"] and seen[0]["buttons"] == ["Leave Meeting", "Got it"]
+        assert [(d["pressed"], d["closed"]) for d in seen] == [("Got it", True), (None, True), (None, False)]    # answered; went by itself; waiting
+        assert [d["label"] for d in seen] == ["Recording consent", "Transcription", "Unmute?"]                      # the aria-label of each one's root
+        for d in seen:                                                                              # first seen now, as an ISO date
+            assert abs((datetime.now(timezone.utc) - datetime.fromisoformat(d["at"].replace("Z", "+00:00"))).total_seconds()) < 60, d["at"]
+        assert run.errors == []
+
+
+async def test_diagnostics_give_the_label_of_a_modal_that_has_no_body_for_its_words():
+    """A body-less modal has nothing to say but a developer's name for itself in its root's aria-label, which the dialog's words do not take for
+    theirs (the label does not begin with the title): the inventory is where it is read."""
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("""() => {
+            const d = document.createElement("div"); d.setAttribute("role", "dialog"); d.setAttribute("aria-label", "Mute Video Modal");
+            d.innerHTML = '<button>Mute</button><button>Cancel</button>'; document.body.appendChild(d);
+        }""")
+        [d] = await reported(run, "dialog")
+        assert (d["title"], d["text"], d["buttons"]) == ("", "", ["Mute", "Cancel"])
+        [seen] = (await run.page.evaluate("window.crystalMeet.diagnostics()"))["dialogs_seen"]
+        assert seen["label"] == "Mute Video Modal" and seen["text"] == ""
+
+
+async def test_diagnostics_show_a_press_the_client_did_not_take_as_pressed_and_not_closed():
+    async with PageRun(stub=STUB_JS + "window.ZoomMtg._behaviour.dialogStays = true;") as run:
+        await settled(run)
+        await show(run, "Unmute?", "The host would like you to unmute.", ["Stay muted", "Unmute"])
+        [d] = await reported(run, "dialog")
+        with pytest.raises(Exception, match="did not close"):
+            await run.page.evaluate(f"window.crystalMeet.answerDialog({d['id']}, 'Unmute')")
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        assert [(x["id"], x["pressed"], x["closed"]) for x in data["dialogs_seen"]] == [(d["id"], "Unmute", False)] and [x["id"] for x in data["dialogs"]] == [d["id"]]
+
+
+async def test_diagnostics_keep_the_last_fifty_dialogs_met():
+    async with PageRun() as run:
+        await settled(run)
+        await run.page.evaluate("""() => { for (let i = 1; i <= 60; i++) window.ZoomMtg._showDialog("Dialog " + i, "Words " + i, ["OK"]); }""")
+        await reported(run, "dialog", 60, timeout=10)
+        data = await run.page.evaluate("window.crystalMeet.diagnostics()")
+        seen = data["dialogs_seen"]
+        assert len(seen) == 50 and seen[0]["title"] == "Dialog 11" and seen[-1]["title"] == "Dialog 60"      # the newest are kept
+        assert len(data["dialogs"]) == 60                                                                     # what is on the screen is not the record's to cap

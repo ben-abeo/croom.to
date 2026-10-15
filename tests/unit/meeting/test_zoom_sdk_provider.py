@@ -477,6 +477,9 @@ class TestReviewFixes:
             data = await provider.diagnostics()
             assert "video" in data["user_keys"] and data["state"]["muted"] is False
             assert {"label": "stop my video", "text": "Video"} in data["buttons"]
+            assert {"userId", "userName", "raiseHand", "isHold"} <= set(data["attendee_keys"])        # the attendees' field names, beside the current user's
+            assert data["sdk_version"] == provider.SDK_VERSION                                          # the version the provider handed the page
+            assert data["dialogs"] == [] and data["dialogs_seen"] == []                                 # no dialog yet in this meeting
         finally:
             await shutdown(provider)
 

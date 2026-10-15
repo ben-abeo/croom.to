@@ -282,8 +282,10 @@
     const m = await bridge.readMeeting();
     return Object.assign({}, m.me, { keys: m.keys });
   };
-  // What the page sees, for pinning Zoom's real field names and button wording from a device: the footer's buttons, the View
-  // widget's (outside the footer), and under `popovers` what the reactions picker and the View dropdown hold.
+  // What the page sees, for pinning Zoom's real field names, button wording and dialog texts from a device: the current user's and the
+  // attendees' field names, the whole meeting as read (the roster with its waiting-room flags, the buttons the bridge found), the footer's
+  // buttons, the View widget's (outside the footer), under `popovers` what the reactions picker and the View dropdown hold, the dialogs
+  // open now and every dialog met in this meeting (the Dialogs section below), and the SDK version the page loaded.
   const wordsOf = (b) => {
     const label = (b.getAttribute("aria-label") || "").trim();
     const text = (b.textContent || "").replace(/\s+/g, " ").trim().slice(0, 40);
@@ -297,9 +299,17 @@
     if (view) found.add(view);
     return Array.from(found).filter((b) => !b.closest("#wc-footer") && !b.closest(POPOVERS) && !b.closest(DIALOG_SELECTOR));
   }
+  // The names of the fields of Zoom's attendee records as it gave them: every record's, each once, in the order first met (a person in the
+  // waiting room may have a field the others lack).
+  const attendeeKeys = () => {
+    const keys = new Set();
+    for (const record of lastRoster) for (const key of Object.keys(record || {})) keys.add(key);
+    return Array.from(keys);
+  };
   bridge.diagnostics = async function () {
     const inventory = popoverInventory();      // among the controls, in the order asked: queued now, not after the read
-    const state = await bridge.readState();
+    const meeting = await bridge.readMeeting();
+    const state = Object.assign({}, meeting.me, { keys: meeting.keys });      // as readState() answers it
     const buttons = [];
     const add = (b, where) => {      // an item of a popover that is open is listed under popovers, not as a button of the footer's
       const words = wordsOf(b);
@@ -308,7 +318,11 @@
     const footer = document.getElementById("wc-footer");
     for (const b of footer ? footer.querySelectorAll("button") : []) add(b);
     for (const b of viewButtons()) add(b, "view widget");
-    return { user_keys: state.keys, state: state, video: bridge.video(), buttons: buttons, popovers: await inventory, page: document.title };
+    return {
+      user_keys: state.keys, attendee_keys: attendeeKeys(), state: state, meeting: meeting, video: bridge.video(), buttons: buttons,
+      popovers: await inventory, dialogs: bridge.dialogs(), dialogs_seen: dialogsSeen.map((d) => Object.assign({}, d)),
+      sdk_version: bridge.sdkVersion || null, page: document.title,
+    };
   };
   // A change Zoom makes (the host muting the room, someone raising a hand, a person joining, recording starting) reaches
   // the device as a "state" event: the whole meeting is read on every such change and every five seconds, and reported
@@ -668,6 +682,14 @@
   const DIALOG_LOOK_MS = 50, DIALOG_MS = 2000;
   const dialogs = new Map();      // element -> id, for the dialogs that are open and have been reported
   let dialogIds = 0;
+  // Every dialog this page has met, newest last and at most DIALOGS_SEEN: what the inventory reads back (diagnostics). Each is what was
+  // reported of it, the aria-label of its root (a modal with no body has only that, a developer's name for it), when the page first saw it
+  // (`at`, ISO), the button the page pressed on it (`pressed`: the device's acknowledgement and a tap on the table both come through
+  // answerDialog), and whether the client has taken it away (`closed`): pressed and closed is answered, closed alone went by itself (the
+  // host withdrew it, the meeting ended), neither is waiting.
+  const DIALOGS_SEEN = 50;
+  const dialogsSeen = [];
+  const metDialog = (id) => dialogsSeen.find((d) => d.id === Number(id));
   const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
   const dialogButtons = (el) => Array.from(el.querySelectorAll("button")).filter((b) => clean(labelOf(b)));
   const isOpen = (el) => el.isConnected && el.matches(DIALOG_SELECTOR) && dialogButtons(el).length > 0;
@@ -704,12 +726,20 @@
       if (!dialogs.has(el)) {
         const id = ++dialogIds;
         dialogs.set(el, id);
-        reportJson("dialog", dialogInfo(el, id));
+        const info = dialogInfo(el, id);
+        dialogsSeen.push(Object.assign({}, info, { label: clean(el.getAttribute("aria-label")), at: new Date().toISOString(), pressed: null, closed: false }));
+        if (dialogsSeen.length > DIALOGS_SEEN) dialogsSeen.shift();
+        reportJson("dialog", info);
       }
       open.add(el);
     }
     for (const [el, id] of Array.from(dialogs)) {
-      if (!open.has(el)) { dialogs.delete(el); reportJson("dialog-closed", { id: id }); }
+      if (!open.has(el)) {
+        dialogs.delete(el);
+        const met = metDialog(id);
+        if (met) met.closed = true;
+        reportJson("dialog-closed", { id: id });
+      }
     }
   }
   let dialogTimer = null;
@@ -729,6 +759,8 @@
     const button = dialogButtons(el).find((b) => named(b, [norm(wanted)]));
     if (!button) throw new Error("The dialog has no button called " + wanted);
     if (unready(button)) throw new Error("The dialog's " + wanted + " button is not ready yet; try again in a moment");
+    const met = metDialog(entry[1]);
+    if (met) met.pressed = clean(labelOf(button));
     button.click();
     if (!await settle(() => !isOpen(el), DIALOG_MS)) throw new Error("Zoom's dialog did not close when " + wanted + " was pressed; try again in a moment");
     scanDialogs();
@@ -811,6 +843,7 @@
     }
     const meta = document.querySelector('meta[name="sdk-version"]');
     const version = params.sdkVersion || (meta && meta.content) || "6.5.0";
+    bridge.sdkVersion = version;      // for the diagnostics
     ZoomMtg.setZoomJSLib("https://source.zoom.us/" + version + "/lib", "/av");
     ZoomMtg.preLoadWasm();
     ZoomMtg.prepareWebSDK();

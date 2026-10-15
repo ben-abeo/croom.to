@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Door sign mockup</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --ink-900: #1C2024;
+  --free: #1FA971; --soon: #E8A013; --busy: #E5484D;
+  --status: var(--free);
+  --gutter: clamp(24px, 4vw, 56px);
+  --font: "Lexend", "Segoe UI", Arial, sans-serif;
+}
+body[data-state="free"] { --status: var(--free); }
+body[data-state="soon"] { --status: var(--soon); }
+body[data-state="busy"] { --status: var(--busy); }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--navy-900); color: #fff; font-family: var(--font); line-height: 1.35; overflow: hidden; }
+.sign { position: relative; height: 100%; display: grid; grid-template-rows: auto 1fr auto; padding: var(--gutter) var(--gutter) 0 calc(var(--gutter) + 26px); }
+/* The status rail: the one place the status colour is solid. */
+.rail { position: absolute; left: 0; top: 0; bottom: 0; width: 22px; background: var(--status); }
+.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
+.brand { display: flex; align-items: center; gap: 14px; }
+.brand img { height: 30px; }
+.brand .company { font-size: 1.05rem; color: var(--periwinkle-300); letter-spacing: 0.01em; }
+.when { text-align: right; }
+.clock { margin: 0; font-size: 2.6rem; font-weight: 400; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.date { margin: 4px 0 0; color: var(--periwinkle-300); font-size: 1rem; }
+.main { display: grid; grid-template-columns: 1.3fr 1fr; gap: clamp(24px, 4vw, 64px); align-content: start; padding-top: clamp(20px, 4vh, 48px); position: relative; z-index: 1; }
+.room { margin: 0; font-size: clamp(3rem, 7.2vw, 5.4rem); font-weight: 600; line-height: 1.02; letter-spacing: -0.02em; }
+.location { margin: 6px 0 0; color: var(--periwinkle-300); font-size: 1.15rem; }
+.chip { display: inline-flex; align-items: center; gap: 12px; margin-top: 26px; padding: 12px 22px 12px 18px; border-radius: 999px; background: var(--status); color: var(--navy-900); font-size: 1.5rem; font-weight: 600; }
+body[data-state="busy"] .chip { color: #fff; }
+.chip .dot { width: 14px; height: 14px; border-radius: 50%; background: currentColor; opacity: 0.85; }
+.detail { margin: 14px 0 0; color: var(--periwinkle-300); font-size: 1.2rem; max-width: 30ch; }
+.today { align-self: start; }
+.today-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.today-head h2 { margin: 0; font-size: 1.05rem; font-weight: 600; color: var(--periwinkle-300); }
+.button { font: inherit; font-size: 1rem; font-weight: 600; color: #fff; background: transparent; border: 2px solid rgba(255,255,255,0.55); border-radius: 12px; padding: 10px 18px; display: inline-flex; align-items: center; gap: 8px; }
+.button svg { width: 18px; height: 18px; }
+.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.event { display: grid; grid-template-columns: 8.5ch 1fr; gap: 14px; align-items: baseline; padding: 10px 14px; border-radius: 12px; background: rgba(255,255,255,0.06); }
+.event time { font-variant-numeric: tabular-nums; color: var(--periwinkle-300); }
+.event .title { margin: 0; }
+.event.now { box-shadow: inset 0 0 0 2px var(--status); }
+.event .who { margin: 2px 0 0; color: var(--periwinkle-300); font-size: 0.9em; }
+/* The scenery: a silhouette along the bottom, tinted in the status colour, so the status reads from the hallway. */
+.scene { position: absolute; left: 0; right: 0; bottom: 0; height: 34%; pointer-events: none; z-index: 0; }
+.scene svg { width: 100%; height: 100%; display: block; }
+.scene .fill { fill: var(--status); opacity: 0.28; }
+.scene .fill2 { fill: var(--status); opacity: 0.12; }
+.scene .line { fill: none; stroke: var(--status); stroke-opacity: 0.55; stroke-width: 2; }
+body[data-bg="plain"] .scene { display: none; }
+body[data-bg="plain"] .glow { position: absolute; right: -10%; bottom: -30%; width: 60%; height: 70%; border-radius: 50%; background: radial-gradient(closest-side, color-mix(in srgb, var(--status) 28%, transparent), transparent); pointer-events: none; }
+.glow { display: none; }
+body[data-bg="plain"] .glow { display: block; }
+/* The scoreboard strip, off by default. */
+.score { position: relative; z-index: 1; margin: 0 calc(-1 * var(--gutter)) 0 calc(-1 * (var(--gutter) + 26px)); padding: 14px var(--gutter) 14px calc(var(--gutter) + 26px); background: rgba(0, 0, 0, 0.35); border-top: 1px solid rgba(255,255,255,0.12); display: flex; justify-content: space-between; align-items: center; gap: 24px; font-size: 1.1rem; }
+.score .last { font-weight: 600; }
+.score .last b { color: #FFB366; font-weight: 600; }
+.score .next { color: var(--periwinkle-300); }
+body[data-score="off"] .score { display: none; }
+@media (orientation: portrait) {
+  .main { grid-template-columns: 1fr; }
+  .room { font-size: clamp(2.6rem, 11vw, 4.6rem); }
+  .scene { height: 22%; }
+}
+</style>
+</head>
+<body data-state="free" data-bg="skyline" data-score="off">
+<main class="sign">
+  <div class="rail"></div>
+  <div class="glow"></div>
+  <header class="top">
+    <div class="brand">
+      <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+      <span class="company">Crystal Practice Management</span>
+    </div>
+    <div class="when">
+      <p class="clock">12:50&nbsp;PM</p>
+      <p class="date">Monday, October 13, 2026</p>
+    </div>
+  </header>
+
+  <section class="main">
+    <div class="status">
+      <h1 class="room" id="room">Boardroom</h1>
+      <p class="location">2nd floor, by the kitchen</p>
+      <div class="chip"><span class="dot"></span><span id="chip-text">Free until 1:00 PM</span></div>
+      <p class="detail" id="detail">Next: Customer call with Lone Star Eye Care</p>
+    </div>
+    <div class="today">
+      <div class="today-head">
+        <h2>Today</h2>
+        <button class="button" type="button"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>This week</button>
+      </div>
+      <ul class="events">
+        <li class="event"><time>1:00&nbsp;PM</time><div><p class="title">Customer call with Lone Star Eye Care</p><p class="who">Zoom</p></div></li>
+        <li class="event"><time>2:30&nbsp;PM</time><div><p class="title">Design review</p><p class="who">Google Meet</p></div></li>
+        <li class="event"><time>4:00&nbsp;PM</time><div><p class="title">Sales pipeline</p><p class="who">Zoom</p></div></li>
+      </ul>
+    </div>
+  </section>
+
+  <div class="scene" id="scene"></div>
+
+  <footer class="score">
+    <span class="last">Texas <b>(#4)</b> 45 &ndash; Texas A&amp;M 42</span>
+    <span class="next">Next: 10/19 &middot; Texas (#4) @ Missouri (#9)</span>
+  </footer>
+</main>
+<script>
+  const SCENES = {
+    skyline: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <defs><clipPath id="water"><rect x="0" y="254" width="1280" height="46"/></clipPath></defs>
+      <g id="city"><path class="fill" d="M0 236 L0 198.8 L70 198.8 L70 236 Z M60 236 L60 183.92 L110 183.92 L110 236 Z M118 236 L118 189.5 L178 189.5 L178 236 Z M186 236 L186 133.7 L209.0 107.7 L232 133.7 L232 236 Z M240 236 L240 165.32 L298 165.32 L298 236 Z M302 236 L302 150.44 L342 150.44 L342 236 Z M346 236.0 L346 216.7 L400 216.7 L400 236.0 Z M362 216.7 L362 197.3 L416 197.3 L416 216.7 Z M346 197.3 L346 178.0 L400 178.0 L400 197.3 Z M362 178.0 L362 158.6 L416 158.6 L416 178.0 Z M346 158.6 L346 139.3 L392 139.3 L392 158.6 Z M420 236 L420 170.9 L486 170.9 L486 236 Z M492 236 L492 150.7 L483 126.7 L483 116.7 L511.8 116.7 L518.0 98.7 L524.2 116.7 L553 116.7 L553 126.7 L544 150.7 L544 236 Z M552 236 L552 157.88 L608 157.88 L608 236 Z M612 236 L612 112.08000000000001 L654 112.08000000000001 L654 236 Z M620 236 L620 102.08000000000001 L646 102.08000000000001 L646 236 Z M660 236 L660 143.0 L740 143.0 L740 236 Z M746 236 L746 87.19999999999999 L788 87.19999999999999 L788 236 Z M792 236 L792 79.76000000000002 L828 79.76000000000002 L828 236 Z M838 236 L838 96.0 Q 870.4 60.0 910 50.0 L910 236 Z M916 236 L916 98.36000000000001 L966 98.36000000000001 L966 236 Z M972 236 L972 128.12 L1032 128.12 L1032 236 Z M1036 236 L1036 165.32 L1086 165.32 L1086 236 Z M1092 236 L1092 180.2 L1162 180.2 L1162 236 Z M1168 236 L1168 191.36 L1228 191.36 L1228 236 Z M1232 236 L1232 198.8 L1280 198.8 L1280 236 Z"/><path class="fill2" d="M0 236 L0 202 L60 202 L60 236 Z M60 236 L60 192 L120 192 L120 236 Z M120 236 L120 196 L180 196 L180 236 Z M180 236 L180 200 L240 200 L240 236 Z M240 236 L240 190 L300 190 L300 236 Z M300 236 L300 196 L360 196 L360 236 Z M360 236 L360 192 L420 192 L420 236 Z M420 236 L420 198 L480 198 L480 236 Z M480 236 L480 190 L540 190 L540 236 Z M540 236 L540 196 L600 196 L600 236 Z M600 236 L600 192 L660 192 L660 236 Z M660 236 L660 198 L720 198 L720 236 Z M720 236 L720 190 L780 190 L780 236 Z M780 236 L780 194 L840 194 L840 236 Z M840 236 L840 190 L900 190 L900 236 Z M900 236 L900 196 L960 196 L960 236 Z M960 236 L960 192 L1020 192 L1020 236 Z M1020 236 L1020 198 L1080 198 L1080 236 Z M1080 236 L1080 194 L1140 194 L1140 236 Z M1140 236 L1140 200 L1200 200 L1200 236 Z M1200 236 L1200 196 L1260 196 L1260 236 Z M1260 236 L1260 202 L1320 202 L1320 236 Z"/></g>
+      <path class="fill2" d="M0 300 L0 248 Q 15 236 30 248 Q 45 239 60 248 Q 75 242 90 248 Q 105 236 120 248 Q 135 239 150 248 Q 165 242 180 248 Q 195 236 210 248 Q 225 239 240 248 Q 255 242 270 248 Q 285 236 300 248 Q 315 239 330 248 Q 345 242 360 248 Q 375 236 390 248 Q 405 239 420 248 Q 435 242 450 248 Q 465 236 480 248 Q 495 239 510 248 Q 525 242 540 248 Q 555 236 570 248 Q 585 239 600 248 Q 615 242 630 248 Q 645 236 660 248 Q 675 239 690 248 Q 705 242 720 248 Q 735 236 750 248 Q 765 239 780 248 Q 795 242 810 248 Q 825 236 840 248 Q 855 239 870 248 Q 885 242 900 248 Q 915 236 930 248 Q 945 239 960 248 Q 975 242 990 248 Q 1005 236 1020 248 Q 1035 239 1050 248 Q 1065 242 1080 248 Q 1095 236 1110 248 Q 1125 239 1140 248 Q 1155 242 1170 248 Q 1185 236 1200 248 Q 1215 239 1230 248 Q 1245 242 1260 248 Q 1275 236 1290 248 L1280 300 Z"/>
+      <g clip-path="url(#water)" opacity="0.4" transform="translate(0 506) scale(1 -1)"><use href="#city"/></g>
+      <path class="line" style="stroke-opacity: 0.35" d="M0 254 L1280 254"/>
+    </svg>`,
+    capitol: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill2" d="M0 300 L0 236 Q 30 196 60 236 Q 90 210 120 236 Q 150 196 180 236 Q 210 210 240 236 Q 270 196 300 236 L300 300 Z M980 300 L980 236 Q 1010 198 1040 236 Q 1070 210 1100 236 Q 1130 198 1160 236 Q 1190 210 1220 236 Q 1250 198 1280 236 L1280 300 Z"/>
+      <path class="fill" d="M300 236 L300 176 L980 176 L980 236 Z M560 236 L560 150 L720 150 L720 236 Z M592 150 L596 110 L684 110 L688 150 Z M592 110 A48 54 0 0 1 688 110 Z M628 236 L628 44 L652 44 L652 236 Z M628 44 A12 10 0 0 1 652 44 Z M637 34 L640 10 L643 34 Z"/>
+      <path d="M318 236 L318 194 L328 194 L328 236 Z M342 236 L342 194 L352 194 L352 236 Z M366 236 L366 194 L376 194 L376 236 Z M390 236 L390 194 L400 194 L400 236 Z M414 236 L414 194 L424 194 L424 236 Z M438 236 L438 194 L448 194 L448 236 Z M462 236 L462 194 L472 194 L472 236 Z M486 236 L486 194 L496 194 L496 236 Z M510 236 L510 194 L520 194 L520 236 Z M534 236 L534 194 L544 194 L544 236 Z M728 236 L728 194 L738 194 L738 236 Z M752 236 L752 194 L762 194 L762 236 Z M776 236 L776 194 L786 194 L786 236 Z M800 236 L800 194 L810 194 L810 236 Z M824 236 L824 194 L834 194 L834 236 Z M848 236 L848 194 L858 194 L858 236 Z M872 236 L872 194 L882 194 L882 236 Z M896 236 L896 194 L906 194 L906 236 Z M920 236 L920 194 L930 194 L930 236 Z M944 236 L944 194 L954 194 L954 236 Z" style="fill: var(--navy-900); opacity: 0.7"/>
+      <path class="fill" d="M0 300 L0 236 L1280 236 L1280 300 Z"/>
+    </svg>`,
+    star: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill2" d="M520 236 L520 24 L760 24 L760 236 Z M300 236 L300 140 L420 140 L420 236 Z M860 236 L860 110 L1010 110 L1010 236 Z"/>
+      <path d="M520 40 L760 40 M520 62 L760 62 M520 84 L760 84 M520 106 L760 106 M520 128 L760 128 M520 150 L760 150 M520 172 L760 172 M520 194 L760 194 M520 216 L760 216" style="stroke: var(--navy-900); stroke-width: 3; fill: none; opacity: 0.8"/>
+      <path class="fill" d="M640.0 32.0 L668.2 111.2 L752.2 113.5 L685.7 164.8 L709.4 245.5 L640.0 198.0 L570.6 245.5 L594.3 164.8 L527.8 113.5 L611.8 111.2 Z M600 236 L600 236 L680 236 L680 236 Z"/>
+      <path class="fill" d="M0 300 L0 236 L1280 236 L1280 300 Z"/>
+    </svg>`,
+    tower: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill2" d="M40 236 L40 214 L70 200 L100 214 L100 236 Z M110 236 L110 214 L140 200 L170 214 L170 236 Z M180 236 L180 214 L210 200 L240 214 L240 236 Z M250 236 L250 214 L280 200 L310 214 L310 236 Z M320 236 L320 214 L350 200 L380 214 L380 236 Z M390 236 L390 214 L420 200 L450 214 L450 236 Z M830 236 L830 214 L860 200 L890 214 L890 236 Z M900 236 L900 214 L930 200 L960 214 L960 236 Z M970 236 L970 214 L1000 200 L1030 214 L1030 236 Z M1040 236 L1040 214 L1070 200 L1100 214 L1100 236 Z M1110 236 L1110 214 L1140 200 L1170 214 L1170 236 Z M1180 236 L1180 214 L1210 200 L1240 214 L1240 236 Z"/>
+      <path class="fill" d="M470 236 L470 196 L810 196 L810 236 Z M560 236 L560 180 L720 180 L720 236 Z M614 236 L614 70 L666 70 L666 236 Z M606 236 L606 56 L674 56 L674 236 Z M606 236 L606 70 L674 70 L674 236 Z M618 236 L618 36 L662 36 L662 236 Z M626 236 L626 28 L654 28 L654 236 Z M626 28 L640 18 L654 28 Z"/>
+      <path d="M622 236 L622 36 L628 36 L628 236 Z M634 236 L634 36 L640 36 L640 236 Z M646 236 L646 36 L652 36 L652 236 Z M656 236 L656 36 L662 36 L662 236 Z  M626 104 L626 170 L634 170 L634 104 Z M646 104 L646 170 L654 170 L654 104 Z" style="fill: var(--navy-900); opacity: 0.7"/>
+      <circle cx="640" cy="88" r="8" style="fill: var(--navy-900); opacity: 0.8"/>
+      <path class="fill" d="M0 300 L0 236 L1280 236 L1280 300 Z"/>
+    </svg>`,
+    stadium: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill2" d="M0 300 L0 246 L1280 246 L1280 300 Z"/>
+      <ellipse cx="640" cy="190" rx="420" ry="112" class="fill"/>
+      <ellipse cx="640" cy="190" rx="334" ry="76" style="fill: var(--navy-900)"/>
+      <rect x="470" y="150" width="340" height="80" rx="4" class="fill2"/>
+      <rect x="470" y="150" width="36" height="80" class="fill"/>
+      <rect x="774" y="150" width="36" height="80" class="fill"/>
+      <path d="M506 150 L506 230 M540 150 L540 230 M574 150 L574 230 M608 150 L608 230 M642 150 L642 230 M676 150 L676 230 M710 150 L710 230 M744 150 L744 230 M778 150 L778 230" style="stroke: var(--navy-900); stroke-width: 2; fill: none; opacity: 0.8"/>
+    </svg>`,
+    bridge: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill2" d="M0 300 L0 196 Q 180 146 360 182 T 720 160 T 1080 184 T 1280 150 L1280 300 Z"/>
+      <path class="fill" d="M0 300 L0 252 L1280 252 L1280 300 Z"/>
+      <path class="line" style="stroke-width: 11; stroke-opacity: 0.9" d="M250 236 Q 640 -124 1030 236"/>
+      <path class="line" style="stroke-width: 2.5; stroke-opacity: 0.7" d="M300 222 L300 192.8 M350 222 L350 155.5 M400 222 L400 124.2 M450 222 L450 98.7 M500 222 L500 79.2 M550 222 L550 65.6 M600 222 L600 57.9 M650 222 L650 56.1 M700 222 L700 60.3 M750 222 L750 70.3 M800 222 L800 86.3 M850 222 L850 108.2 M900 222 L900 136.0 M950 222 L950 169.7"/>
+      <path class="fill" d="M150 230 L150 218 L1130 218 L1130 230 Z"/>
+    </svg>`,
+    pool: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill" d="M0 0 L1280 0 L1280 66 Q 1120 50 1000 78 Q 880 104 760 86 Q 640 70 520 90 Q 380 112 260 128 Q 140 144 60 190 Q 20 214 0 240 Z"/>
+      <path class="fill2" d="M560 236 L560 200 Q 660 176 760 198 T 980 190 T 1280 184 L1280 236 Z"/>
+      <path class="fill2" d="M0 300 L0 244 L1280 244 L1280 300 Z"/>
+      <path class="line" style="stroke-width: 5; stroke-opacity: 0.85" d="M884 92 L886 244"/>
+      <path class="fill" d="M0 300 L0 262 Q 60 236 120 256 T 240 258 T 360 262 L360 300 Z"/>
+    </svg>`,
+    hills: `<svg viewBox="0 0 1280 300" preserveAspectRatio="none">
+      <path class="fill2" d="M0 300 L0 150 Q 160 110 320 140 T 640 118 T 960 150 T 1280 122 L1280 300 Z"/>
+      <path class="fill2" d="M0 300 L0 198 Q 200 160 400 194 T 800 180 T 1280 198 L1280 300 Z"/>
+      <path class="fill" d="M0 300 L0 246 Q 240 206 480 240 T 960 232 T 1280 246 L1280 300 Z"/>
+      <path class="line" style="stroke-width: 3; stroke-opacity: 0.7" d="M1060 300 Q 1000 250 900 244 T 720 220 T 580 190"/>
+    </svg>`,
+    plain: ``,
+  };
+  const q = new URLSearchParams(location.search);
+  const state = q.get("state") || "free", bg = q.get("bg") || "skyline";
+  document.body.dataset.state = state;
+  document.body.dataset.bg = bg;
+  document.body.dataset.score = q.get("score") === "1" ? "on" : "off";
+  document.getElementById("scene").innerHTML = SCENES[bg] || "";
+  const chip = document.getElementById("chip-text"), detail = document.getElementById("detail");
+  if (state === "soon") { chip.textContent = "Customer call starts in 8 minutes"; detail.textContent = "1:00 PM to 2:00 PM"; }
+  if (state === "busy") { chip.textContent = "In use until 2:00 PM"; detail.textContent = "Customer call with Lone Star Eye Care"; document.querySelector(".event").classList.add("now"); }
+  if (q.get("room")) document.getElementById("room").textContent = q.get("room");
+</script>
+</body>
+</html>

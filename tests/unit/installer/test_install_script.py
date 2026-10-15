@@ -54,6 +54,15 @@ def test_default_config_has_the_control_section(tmp_path):
     assert "enabled: false" in text.split("ai:")[1].split("\n\n")[0]
 
 
+def test_default_config_names_the_company_for_the_door_sign(tmp_path):
+    result = run_bash(
+        f"source {SCRIPT}; CONFIG_DIR={tmp_path}; CROOM_USER=$(id -un); create_config",
+    )
+    assert result.returncode == 0, result.stderr
+    room = (tmp_path / "config.yaml").read_text().split("room:")[1].split("\n\n")[0]
+    assert 'company: "Crystal Practice Management"' in room
+
+
 def test_prepared_config_is_installed_verbatim(tmp_path):
     room = tmp_path / "room.yaml"
     room.write_text("version: 2\nroom:\n  name: Room 9\n")

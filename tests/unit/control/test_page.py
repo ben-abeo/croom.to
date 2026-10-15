@@ -7,20 +7,34 @@ when Playwright or its browser is not installed.
 """
 
 import asyncio
+import base64
+import json
+import re
 import socket
+import struct
 import tempfile
 import threading
-from datetime import datetime, timedelta
+import time
+import urllib.request
+import zlib
+from datetime import datetime, time as time_of_day, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from aiohttp import web
 
-from croom.control.service import ControlService
+from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
+from croom.control import service as control_service
+from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService, read_setting
+from croom.control.settings import SettingsStore
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASKED
+from croom.scores.espn import ScheduleUnavailable
+from croom.scores.service import ScoresService
 from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
+from tests.unit.scores.schedules import Feed, every_school, game, longest_names, schedule, texas_sample
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -28,12 +42,16 @@ playwright = pytest.importorskip("playwright.sync_api")
 class PageServer:
     """ControlService with stubs, served on an ephemeral port from a background thread."""
 
-    def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None):
+    def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
+                 room_company=None, schedules=None):
         self.events = list(calendar_events)
         self.room_name = room_name
         self.room_location = room_location
+        self.room_company = room_company   # None: the config says nothing, so the service's own default shows
         self.calendar_connected = calendar_connected
         self.port_arg = port
+        self.schedules = schedules      # team id -> the schedule ESPN would answer; None leaves the room without a scoreboard
+        self.feed = None                # the scoreboard's fake feed, once the server runs: what it was asked, and `down` to fail it
         self.devices = devices if devices is not None else StubDevices()
         self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
         self.meeting = None
@@ -52,11 +70,22 @@ class PageServer:
 
     async def _main(self):
         self.meeting = StubMeeting()
+        config = {"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
+                  "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")}
+        if self.room_company is not None:
+            config["room_company"] = self.room_company
+        store = SettingsStore(config["settings_file"])
+        scores = None
+        if self.schedules is not None:
+            # The agent's wiring, over a fake feed: the schools come from the page's own store, and a school is read within a moment of
+            # being turned on and again every fifth of a second, so that what a test changes in the feed shows at the sign's next poll.
+            self.feed = Feed(self.schedules)
+            scores = ScoresService(self.feed, lambda: read_setting(store, "sign_scores"), interval_s=0.2, retry_s=0.2, check_s=0.05)
+            await scores.start()
         service = ControlService(
-            config={"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
-                    "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")},
+            config=config,
             meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
-            devices=self.devices,
+            devices=self.devices, store=store, scores=scores,
         )
         await service.start()
         self.port = service.bound_port
@@ -64,6 +93,8 @@ class PageServer:
         self._ready.set()
         await self._stop.wait()
         await service.stop()
+        if scores is not None:
+            await scores.stop()
 
     def __enter__(self):
         self._thread.start()
@@ -85,6 +116,25 @@ def browser():
             pytest.skip(f"Chromium not available: {e}")
         yield instance
         instance.close()
+
+
+LEFT_OPEN = []     # the contexts the next test's look at the browser must find closed
+
+
+def test_a_sign_page_a_test_leaves_open_is_closed_when_that_test_ends(browser):
+    """No page outlives its test (the whole-branch review): the browser is one for the whole module and every `new_page()` makes a context of its own,
+    so a test that fails before its `page.close()` would leave a page polling a server that has gone, and its route handler, to every test after it.
+    This one opens a page, hangs a route handler on it and leaves it open on purpose; the test after it looks."""
+    page = browser.new_page()
+    page.route("**/*", lambda route: route.abort())
+    LEFT_OPEN.append(page.context)
+    assert page.context in browser.contexts
+
+
+def test_the_next_sign_test_finds_the_browser_with_no_page_open(browser):
+    if not LEFT_OPEN:
+        pytest.skip("the test before it leaves a page open, and this one looks for it")
+    assert LEFT_OPEN[0] not in browser.contexts and browser.contexts == []
 
 
 def open_page(browser, server):
@@ -186,23 +236,38 @@ def test_long_names_do_not_overflow_on_phone(browser):
         page.close()
 
 
+SIGN_GREEN, SIGN_AMBER, SIGN_RED, SIGN_NAVY = "rgb(31, 169, 113)", "rgb(232, 160, 19)", "rgb(229, 72, 77)", "rgb(0, 22, 54)"   # #1FA971 #E8A013 #E5484D #001636
+
+
+def sign_colors(page):
+    rail = page.locator(".rail").evaluate("e => getComputedStyle(e).backgroundColor")
+    chip = page.locator(".chip").evaluate("e => getComputedStyle(e).backgroundColor")
+    body = page.evaluate("getComputedStyle(document.body).backgroundColor")
+    return rail, chip, body
+
+
 def test_door_sign_follows_the_room_state(browser):
+    skip_if_day_ends_within(1)   # the booking is 25 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1") as server:
-        page = browser.new_page(viewport={"width": 1024, "height": 600})
-        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
-        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        assert page.locator("#headline").inner_text().startswith("Free until")
-        assert page.locator("#kicker").inner_text().upper() == "AVAILABLE"
-        assert page.locator("button").count() == 0  # a sign has nothing to press
+        page = sign_on_a_stopped_clock(browser, server, 1024, 600)          # its polls are the test's to bring: nothing waits for a real five seconds
+        assert page.locator("#chip-text").inner_text().startswith("Free until")
+        assert sign_colors(page) == (SIGN_GREEN, SIGN_GREEN, SIGN_NAVY)   # a green rail and chip on navy, never a green wall
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY   # navy words on green
+        assert [b.get_attribute("id") for b in page.locator("button:visible").all()] == ["this-week"]  # a sign has one thing to press at a time (Back waits, hidden, for the week view)
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
                           data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
-        page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=8000)
-        assert page.locator("#headline").inner_text() == "In use"
-        assert page.locator("#kicker").inner_text().upper() == "IN USE"
+        wait_for("the meeting to be joined", lambda: status_of(server)["meeting"]["state"] == "connected")
+        poll(page)
+        assert page.evaluate("document.body.dataset.state") == "occupied"
+        assert page.locator("#chip-text").inner_text() == "In use"
+        assert sign_colors(page) == (SIGN_RED, SIGN_RED, SIGN_NAVY)
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == "rgb(255, 255, 255)"   # white words on red
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave",
                           data="{}", headers={"Content-Type": "application/json"})
-        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        wait_for("the meeting to be left", lambda: status_of(server)["meeting"]["state"] == "idle")
+        poll(page)
+        assert page.evaluate("document.body.dataset.state") == "free"
         page.close()
 
 
@@ -216,19 +281,24 @@ def test_door_sign_shows_bookings_without_a_video_link(browser):
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=5000)
-        assert page.locator("#headline").inner_text().startswith("Booked until")
-        assert page.locator("#kicker").inner_text().upper() == "BOOKED"
+        assert page.locator("#chip-text").inner_text().startswith("Booked until")
         assert page.locator("#detail").inner_text() == "Board lunch"
+        assert sign_colors(page) == (SIGN_RED, SIGN_RED, SIGN_NAVY)   # a booking holds the room as much as a call does
+        assert page.locator("#events .event.now .title").inner_text() == "Board lunch"   # the booking in progress is ringed, and only it
+        assert page.locator("#events .event.now").count() == 1 and page.locator("#events .event").first.get_attribute("class") == "event now"
+        assert page.locator("#events .event.now").evaluate("e => getComputedStyle(e).boxShadow") == "rgb(229, 72, 77) 0px 0px 0px 2px inset"   # the ring: 2 px, inside, in the status colour
+        assert page.locator("#events .event:not(.now)").first.evaluate("e => getComputedStyle(e).boxShadow") == "none"
         page.close()
 
 
 def test_door_sign_warns_before_the_next_meeting(browser):
+    skip_if_day_ends_within(1)   # the booking is 6 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Standup", 6)], room_name="Room 1") as server:
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
-        assert page.locator("#headline").inner_text().startswith("Standup starts in")
-        assert page.locator("#kicker").inner_text().upper() == "STARTING SOON"
+        assert page.locator("#chip-text").inner_text().startswith("Standup starts in")
+        assert page.locator("#detail").inner_text().count(" to ") == 1   # "1:06 PM to 1:36 PM"
         page.close()
 
 
@@ -237,8 +307,10 @@ def test_door_sign_hides_the_schedule_without_a_calendar(browser):
         page = browser.new_page(viewport={"width": 1024, "height": 600})
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-        assert page.locator("#headline").inner_text() == "Free"
-        assert page.locator("#upcoming").count() == 1 and not page.locator("#upcoming").is_visible()
+        assert page.locator("#chip-text").inner_text() == "Free"
+        assert page.locator("#today").count() == 1 and not page.locator("#today").is_visible()
+        assert page.locator("#room-name").inner_text() == "Lab" and page.locator("#company").is_visible()   # the brand row and the name stay
+        assert page.locator("#clock").inner_text() and page.locator("#date").inner_text()
         page.close()
 
 
@@ -276,6 +348,2889 @@ def test_the_door_sign_shows_the_location_line_when_the_room_has_one(browser):
         page.close()
 
 
+def test_the_sign_shows_the_status_as_a_rail_and_a_chip_over_a_photograph_that_is_not_tinted(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 8)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'soon'", timeout=5000)
+        rail, chip, body = sign_colors(page)
+        assert rail == chip == "rgb(232, 160, 19)" and body == "rgb(0, 22, 54)"      # amber on navy, never an amber wall
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY   # navy words on amber
+        assert page.locator("#chip-text").inner_text() == "Design review starts in 8 minutes"
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        layers = page.evaluate("""() => ['::before', '::after'].map(q => getComputedStyle(document.querySelector('.sign'), q).backgroundImage).join(' ')""")
+        assert "backgrounds/skyline.jpg" in layers and "232, 160, 19" not in layers   # the status colour is the rail's, the chip's and the ring's; the photograph is left as it is
+        for layer in ("::before", "::after"):                                          # and the layers do nothing to it: no blend, no filter, no fading, no colour behind it
+            style = page.evaluate("""(q) => { const s = getComputedStyle(document.querySelector('.sign'), q);
+                return [s.opacity, s.filter, s.mixBlendMode, s.backgroundBlendMode, s.backgroundColor]; }""", layer)
+            assert style[:3] == ["1", "none", "normal"] and set(style[3].split(", ")) == {"normal"} and style[4] == "rgba(0, 0, 0, 0)", (layer, style)   # one blend mode per background layer
+        picture = page.evaluate("(q) => { const s = getComputedStyle(document.querySelector('.sign'), q); return [s.backgroundSize, s.backgroundPosition, s.backgroundRepeat]; }", "::before")
+        assert picture == ["cover", "50% 40%", "repeat"], picture                       # it fills the sign, whatever its shape, and is cropped about 40 % of the way down
+        assert page.locator("#scene").count() == 0 and page.locator(".backdrop svg").count() == 0   # the drawn scenery is gone
+        assert page.locator("#company").inner_text() == "Crystal Practice Management"
+        assert fits(page)
+        page.close()
+
+
+def test_the_sign_without_a_calendar_keeps_its_brand_name_and_clock(browser):
+    with PageServer(calendar_connected=False) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#chip-text").inner_text() == "Free"
+        assert page.locator("#today").is_hidden() and page.locator("#this-week").is_hidden()
+        assert page.locator("#company").is_visible() and page.locator("#clock").inner_text()
+        assert fits(page)
+        page.close()
+
+
+def test_long_names_wrap_inside_the_sign_at_both_sizes(browser):
+    skip_if_day_ends_within(1)
+    title = "Quarterly planning review with the regional leadership teams and the partners"
+    for width, height in ((1280, 800), (800, 1280)):
+        with PageServer(calendar_events=[event("e1", title, 30)], room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen") as server:
+            page = browser.new_page(viewport={"width": width, "height": height})
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            clock = page.locator("#clock").bounding_box()
+            assert clock["x"] + clock["width"] <= width
+            assert fits(page)
+            page.close()
+
+
+def test_the_sign_keeps_its_words_on_the_sign_when_names_are_long_over_a_photograph(browser):
+    """With a long room name, location, company and title, free or about to start, at both sizes: every block of words ends
+    inside the sign, on the photograph, and nothing needs to scroll."""
+    skip_if_day_ends_within(1)
+    title = "Quarterly planning review with the regional leadership teams and the partners"
+    for width, height in ((1280, 800), (800, 1280)):
+        for minutes, state in ((30, "free"), (8, "soon")):   # soon puts the long title in the chip too, at 1.5 rem
+            with PageServer(calendar_events=[event("e1", title, minutes)], room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen",
+                            room_company="Lone Star Eye Care and Surgery Partners") as server:
+                page = open_sign(browser, server, width, height, state)
+                page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+                for selector in (".top", ".status", "#today"):
+                    box = page.locator(selector).bounding_box()
+                    assert box["x"] >= 0 and box["x"] + box["width"] <= width, (width, height, state, selector)
+                    assert box["y"] >= 0 and box["y"] + box["height"] <= height, (width, height, state, selector)
+                assert fits(page)
+                page.close()
+
+
+def test_the_sign_names_the_company_from_the_room_config(browser):
+    with PageServer(room_company="Lone Star Eye Care") as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#company").inner_text() == "Lone Star Eye Care"
+        page.close()
+    with PageServer(room_company="") as server:   # a practice that wants the logo alone
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#company").is_hidden() and page.locator(".brand img").is_visible()
+        assert page.locator("#room-name").inner_text() == "Lab" and fits(page)
+        page.close()
+
+
+def test_the_sign_lists_the_next_three_bookings_as_rows_with_their_platform(browser):
+    skip_if_day_ends_within(3)   # the last booking is 100 minutes out
+    bookings = [event("e1", "Customer call", 40),
+                event("e2", "Design review", 70, url="https://meet.google.com/abc-defg-hij", platform=MeetingPlatform.GOOGLE_MEET),
+                event("e3", "Offsite lunch", 100, url=None, platform=MeetingPlatform.UNKNOWN),
+                event("e4", "Fourth booking", 130)]
+    with PageServer(calendar_events=bookings) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        rows = page.locator("#events .event")
+        assert rows.count() == 3                                                    # the next three, not the fourth
+        assert page.locator("#events .title").all_text_contents() == ["Customer call", "Design review", "Offsite lunch"]
+        assert page.locator("#events .who").all_text_contents() == ["Zoom", "Google Meet"]   # an in-person booking names no platform
+        assert all(re.match(TWELVE_HOUR, t) for t in page.locator("#events time").all_text_contents())
+        assert page.locator("#events .event.now").count() == 0                       # nothing is in progress
+        assert page.locator("#chip-text").inner_text().startswith("Free until") and page.locator("#detail").inner_text() == "Next: Customer call"
+        assert page.locator("#today h2").inner_text() == "Today" and page.locator("#this-week").inner_text() == "This week"
+        assert page.locator("#score").is_hidden()                                   # the scoreboard strip is off until it has a score
+        assert errors == []
+        page.close()
+
+
+def test_the_sign_without_bookings_says_so_instead_of_showing_an_empty_list(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#chip-text").inner_text() == "Free for the rest of the day"
+        assert page.locator("#detail").inner_text() == "Nothing else is booked in here today."
+        assert page.locator("#events .event").count() == 0 and page.locator("#calendar-note").inner_text() == "Nothing else scheduled today."
+        assert page.locator("#today").is_visible() and fits(page)
+        page.close()
+
+
+def test_the_sign_sits_side_by_side_in_landscape_and_stacks_in_portrait(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 30)]) as server:
+        for (width, height), stacked in (((1280, 800), False), ((800, 1280), True)):
+            page = browser.new_page(viewport={"width": width, "height": height})
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            status, today = page.locator(".status").bounding_box(), page.locator("#today").bounding_box()
+            if stacked:
+                assert today["y"] >= status["y"] + status["height"]                  # the bookings under the status
+            else:
+                assert today["x"] >= status["x"] + status["width"]                   # the bookings beside it
+            assert fits(page)
+            page.close()
+
+
+def test_the_sign_loads_nothing_but_its_own_files(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        urls = []
+        page.on("request", lambda r: urls.append(r.url))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert urls and all(u.startswith(f"http://127.0.0.1:{server.port}/") for u in urls), urls
+        page.close()
+
+
+# --- the door sign's photographs (spec 2026-10-13, section 2.4) and the room settings that choose them ---
+
+PHOTOGRAPHS = sorted(p.stem for p in (STATIC_DIR / "backgrounds").glob("*.jpg"))   # the backgrounds with a file on disk: the others show plain until one is added
+BACKGROUND_LABELS = ["Austin skyline", "Capitol", "UT Tower", "Pennybacker Bridge", "Hamilton Pool", "Texas star", "Hill Country", "DKR stadium", "Plain"]   # the table's buttons, in the spec's order
+SCHOOL_LABELS = ["Texas", "Michigan", "Texas A&M", "Missouri"]
+NAVY = (0, 22, 54)
+
+
+def choose(server, **settings):
+    """Change the room's settings through the route the table's page uses."""
+    request = urllib.request.Request(f"http://127.0.0.1:{server.port}/api/settings", data=json.dumps(settings).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+
+
+def open_sign(browser, server, width=1280, height=800, state="free", **options):
+    page = browser.new_page(viewport={"width": width, "height": height}, **options)
+    page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+    page.wait_for_function(f"document.body.dataset.state === '{state}'", timeout=5000)
+    return page
+
+
+def sign_on_a_stopped_clock(browser, server, width=1280, height=800, init_script=None, state="free"):
+    """The sign, loaded, with its timers stopped: its polls run only when the test calls page.clock.run_for. `init_script` runs before the sign's own."""
+    page = browser.new_page(viewport={"width": width, "height": height})
+    page.clock.install()
+    if init_script:
+        page.add_init_script(init_script)
+    page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+    page.wait_for_function(f"document.body.dataset.state === '{state}'", timeout=5000)
+    page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+    return page
+
+
+def poll(page):
+    """One status poll of the sign (every 5 s of page time), answered and drawn."""
+    with page.expect_response("**/api/status"):
+        page.clock.run_for(5000)
+    page.wait_for_timeout(150)
+
+
+def photo_request_methods(page):
+    """What the page asks of the photographs' folder, as (method, status) pairs, in the order the answers arrive."""
+    asked = []
+    page.on("response", lambda r: asked.append((r.request.method, r.status)) if "/static/backgrounds/" in r.url else None)
+    return asked
+
+
+def screenshot_pixel(page, x, y):
+    """The colour of one pixel as the browser draws it, from a screenshot of just that pixel (a PNG of one pixel needs no decoder:
+    whichever filter its row byte names, a first pixel is its raw bytes)."""
+    png = page.screenshot(clip={"x": x, "y": y, "width": 1, "height": 1})
+    assert png[:8] == b"\x89PNG\r\n\x1a\n"
+    position, data = 8, b""
+    while position < len(png):
+        length, kind = struct.unpack(">I4s", png[position:position + 8])
+        body = png[position + 8:position + 8 + length]
+        if kind == b"IHDR":
+            assert body[8] == 8 and body[9] in (2, 6)                      # 8 bits a channel, RGB or RGBA
+        elif kind == b"IDAT":
+            data += body
+        position += 12 + length
+    return tuple(zlib.decompress(data)[1:4])
+
+
+def wait_for_the_photograph_to_paint(page):
+    """The photograph the sign shows is decoded and two frames have been drawn with it: a screenshot from here has it in."""
+    page.evaluate("""async () => {
+        const address = getComputedStyle(document.body).getPropertyValue('--photo').match(/url\\('(.*)'\\)/)[1];
+        const image = new Image();
+        image.src = address;
+        await image.decode();
+        await new Promise((done) => requestAnimationFrame(() => requestAnimationFrame(done)));
+    }""")
+
+
+def white_photograph():
+    """A solid white picture, one pixel of it: with `cover` it fills the sign with white, so what a screenshot reads back at a point
+    is white seen through the overlay, and the overlay can be measured."""
+    def chunk(kind, data):
+        return struct.pack(">I", len(data)) + kind + data + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF)
+    header = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)                          # 1 by 1, 8 bits, RGB
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", header) + chunk(b"IDAT", zlib.compress(b"\x00\xff\xff\xff")) + chunk(b"IEND", b"")
+
+
+# The navy overlay (spec 2.4) as alpha at fractions of the way across the sign (94 % at the left edge, 84 % at 45 %, 55 % at the right)
+# and of the way down (60 % at the top edge, none from 40 % down, 55 % at the bottom edge): the two gradients, one over the other.
+OVERLAY_ACROSS = [(0, 0.94), (0.45, 0.84), (1, 0.55)]
+OVERLAY_DOWN = [(0, 0.6), (0.4, 0.0), (1, 0.55)]
+
+
+def stop_between(fraction, stops):
+    for (a, low), (b, high) in zip(stops, stops[1:]):
+        if fraction <= b:
+            return low + (high - low) * (fraction - a) / (b - a)
+    return stops[-1][1]
+
+
+def white_under_the_overlay(x, y, width, height):
+    """What the pixel at (x, y) shows when the photograph is white: white and navy mixed by the two gradients together."""
+    across, down = stop_between((x + 0.5) / width, OVERLAY_ACROSS), stop_between((y + 0.5) / height, OVERLAY_DOWN)
+    alpha = 1 - (1 - across) * (1 - down)
+    return tuple(255 * (1 - alpha) + navy * alpha for navy in NAVY)
+
+
+def open_door_sign_screen(page):
+    page.click("#open-options")
+    page.click("#open-door-sign")
+    page.wait_for_function("document.body.dataset.view === 'door-sign'", timeout=5000)
+
+
+def test_the_background_choice_made_on_the_table_shows_on_the_sign(browser):
+    shows_bridge = ("document.body.dataset.bg === 'bridge' && document.body.dataset.photo === 'bridge'"
+                    " && getComputedStyle(document.body).getPropertyValue('--photo').includes('backgrounds/bridge.jpg')")
+    with PageServer() as server:
+        sign = open_sign(browser, server)
+        assert sign.evaluate("document.body.dataset.bg") == "skyline"      # the default
+        sign.wait_for_function("getComputedStyle(document.body).getPropertyValue('--photo').includes('backgrounds/skyline.jpg')", timeout=5000)
+        table = open_page(browser, server)
+        open_door_sign_screen(table)
+        assert table.locator("#sign-picker button[aria-pressed='true']").inner_text() == "Austin skyline"
+        table.click("#sign-picker button:has-text('Pennybacker Bridge')")
+        table.wait_for_function("document.querySelector(\"#sign-picker button[aria-pressed='true']\").innerText === 'Pennybacker Bridge'", timeout=5000)
+        sign.wait_for_function(shows_bridge, timeout=8000)                  # the sign's own poll (5 s) brings it
+        sign.reload(wait_until="networkidle")
+        sign.wait_for_function(shows_bridge, timeout=5000)                  # and a reload keeps it: it is the room's, not the page's
+        table.close()
+        sign.close()
+
+
+@pytest.mark.parametrize("key", SIGN_BACKGROUNDS)
+def test_each_background_loads_its_photograph_and_plain_shows_the_glow(browser, key):
+    has_file = key in PHOTOGRAPHS
+    with PageServer() as server:
+        choose(server, sign_background=key)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        asked = photo_request_methods(page)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function(f"document.body.dataset.state === 'free' && document.body.dataset.bg === '{key}'", timeout=5000)
+        if has_file:
+            page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)     # shown once it has decoded
+        elif key != "plain":
+            page.wait_for_function("'photoMissing' in document.body.dataset", timeout=5000)
+        page.wait_for_load_state("networkidle")
+        layer = lambda q: page.evaluate(f"getComputedStyle(document.querySelector('.sign'), '{q}').backgroundImage")
+        glow = page.locator(".glow").evaluate("e => getComputedStyle(e).display")
+        if has_file:
+            assert asked == [("GET", 200)]                                 # one request, answered: the style sheet draws the picture already loaded
+            assert f"backgrounds/{key}.jpg" in layer("::before")           # the photograph, as a layer of its own ...
+            assert layer("::after").count("linear-gradient") == 2          # ... under the navy overlay (the left-to-right one and the top-to-bottom one)
+            assert glow == "none"
+        else:
+            assert page.evaluate("document.body.dataset.photo === undefined")
+            assert layer("::before") == "none" and layer("::after") == "none"      # no photograph, no overlay: the navy, with the glow
+            assert glow == "block"
+            assert asked == ([] if key == "plain" else [("GET", 404)])     # plain asks for nothing at all; a file that is not there, once
+        assert page.evaluate("document.body.dataset.bg") == key             # whichever it shows, the page says which was chosen
+        assert fits(page)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_overlay_over_a_white_photograph_reads_back_at_fixed_pixels_and_the_status_stays_solid(browser, width, height):
+    """What the sign draws, measured on the screen: a white photograph under the overlay, read back at ten points (seven at the edges
+    and the corners, three more at 1280 by 800 where nothing is written), each within 3 of the white and navy that the two gradients
+    mix; and the rail and the chip exactly the status colour, which they are only while they are stacked above the overlay."""
+    with PageServer(calendar_events=[event("e1", "Design review", 45)], room_name="Boardroom") as server:
+        choose(server, sign_background="skyline")
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.route("**/static/backgrounds/skyline.jpg", lambda route: route.fulfill(status=200, body=white_photograph(), content_type="image/png"))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.photo === 'skyline'", timeout=8000)
+        wait_for_the_photograph_to_paint(page)
+        points = [(40, 20), (width // 2, 20), (width - 40, 20), (40, height - 20), (width // 2, height - 20), (width - 40, height - 20), (width - 40, height - 60)]
+        if height == 800:
+            points += [(40, 600), (576, 600), (width - 40, 600)]             # clear of the words at 1280 by 800
+        for x, y in points:
+            got, want = screenshot_pixel(page, x, y), white_under_the_overlay(x, y, width, height)
+            assert all(abs(g - w) <= 3 for g, w in zip(got, want)), ((x, y), got, tuple(round(v) for v in want))
+        chip = page.locator(".chip").bounding_box()
+        assert screenshot_pixel(page, 10, height // 2) == (31, 169, 113)    # the rail: #1FA971 itself, not a mix with anything
+        assert screenshot_pixel(page, int(chip["x"]) + 5, int(chip["y"] + chip["height"] / 2)) == (31, 169, 113)   # and the chip
+        page.close()
+
+
+def test_the_booking_rows_sit_on_translucent_navy_over_a_photograph_and_on_a_pale_veil_over_plain(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        for key, row in (("capitol", "rgba(0, 22, 54, 0.55)"), ("plain", "rgba(255, 255, 255, 0.06)")):
+            choose(server, sign_background=key)
+            page = open_sign(browser, server)
+            page.wait_for_selector("#events .event", timeout=5000)
+            page.wait_for_function(f"document.body.dataset.bg === '{key}' && (document.body.dataset.photo === 'capitol') === {str(key == 'capitol').lower()}", timeout=5000)
+            assert page.locator("#events .event").first.evaluate("e => getComputedStyle(e).backgroundColor") == row, key
+            page.close()
+
+
+@pytest.mark.parametrize("key", PHOTOGRAPHS)
+def test_the_words_stay_readable_over_every_photograph(browser, key):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        choose(server, sign_background=key)
+        page = open_sign(browser, server)
+        page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
+        page.wait_for_load_state("networkidle")
+        wait_for_the_photograph_to_paint(page)
+        assert colour(page, "#room-name") == "rgb(255, 255, 255)"          # the words and the chip keep their colours, as on plain navy
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY
+        assert page.locator(".chip").evaluate("e => getComputedStyle(e).backgroundColor") == SIGN_GREEN
+        overlay = page.evaluate("getComputedStyle(document.querySelector('.sign'), '::after').backgroundImage")
+        red, green, blue, alpha = re.search(r"rgba\((\d+), (\d+), (\d+), ([\d.]+)\) 0%", overlay).groups()   # the left edge of the left-to-right gradient
+        assert (int(red), int(green), int(blue)) == NAVY and float(alpha) >= 0.9
+        # So at the left edge, where the words are, the screen is navy whatever the photograph: at 90 % the photograph moves a channel
+        # by 26 at most (a tenth of 255), and the overlay is 94 %.
+        pixel = screenshot_pixel(page, 40, 400)
+        assert all(abs(c - n) <= 26 for c, n in zip(pixel, NAVY)), (key, pixel)
+        page.close()
+
+
+SIGN_WORDS = {"company": "#company", "room name": "#room-name", "location": "#room-location", "detail": "#detail", "clock": "#clock", "date": "#date",
+              "Today": ".today-head h2", "This week": "#this-week", "booking time": "#events .event time", "booking title": "#events .event .title", "booking platform": "#events .event .who"}
+BRIGHTEST_BEHIND = """async ([png, boxes]) => {
+    const image = new Image();
+    image.src = 'data:image/png;base64,' + png;
+    await image.decode();
+    const canvas = document.createElement('canvas');
+    canvas.width = image.width;
+    canvas.height = image.height;
+    const context = canvas.getContext('2d');
+    context.drawImage(image, 0, 0);
+    const linear = (v) => { v /= 255; return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4); };
+    return boxes.map((b) => {
+        const data = context.getImageData(Math.floor(b.x), Math.floor(b.y), Math.ceil(b.width), Math.ceil(b.height)).data;
+        const lights = [];
+        for (let i = 0; i < data.length; i += 4) lights.push(0.2126 * linear(data[i]) + 0.7152 * linear(data[i + 1]) + 0.0722 * linear(data[i + 2]));
+        lights.sort((a, b) => a - b);
+        return lights[Math.floor(lights.length * 0.99)];
+    });
+}"""
+
+
+def luminance(colour):
+    """The WCAG relative luminance of a colour given as (red, green, blue), each 0 to 255."""
+    def channel(value):
+        value /= 255
+        return value / 12.92 if value <= 0.03928 else ((value + 0.055) / 1.055) ** 2.4
+    red, green, blue = (channel(v) for v in colour)
+    return 0.2126 * red + 0.7152 * green + 0.0722 * blue
+
+
+# The week view's words, found when it is open on a week with every kind of day (a busy one with "+N more", an empty one); a hidden
+# one (a booking left out, a "+N more" not needed) has no box to measure.
+WEEK_WORDS = {"week heading": ".week-head h2", "Back": "#week-back", "day name": "#week .day-name", "date": "#week .day-date",
+              "booking time": "#week .slot:not([hidden]) time", "booking title": "#week .slot:not([hidden]) .title", "booking platform": "#week .slot:not([hidden]) .who",
+              "nothing booked": "#week .none", "more": "#week .more:not([hidden])"}
+# The scoreboard strip's words (spec 2.5), found while a school is on: the score line, its ranks (burnt orange) and the next game.
+SCORE_WORDS = {"score line": "#score-last", "score rank": "#score .rank", "next game": "#score-next"}
+LABELS = {"This week", "Back"}    # a button's label: measured over its own text, so that a fill behind it counts
+HIDE_TODAYS_WORDS = (".top *, .status *, .today-head h2, .event > *, .score .last, .score .next { visibility: hidden !important; } "     # the rows keep their own veil, the buttons their border and fill, the strip its dark band
+                     "#this-week { color: transparent !important; }")
+HIDE_THE_WEEKS_WORDS = (".top *, .status *, .week-head h2, .day-head *, .slot > *, .none, .more, .score .last, .score .next { visibility: hidden !important; } "
+                        "#week-back { color: transparent !important; }")
+
+
+def contrast_of_every_word(page, browser, selectors, hide):
+    """The words named in `selectors` (name -> CSS selector), each with its WCAG contrast against the brightest 1 % of the picture behind it
+    (the screen with the words hidden by the CSS in `hide`): [(name, contrast, least allowed)]. A label's box is its text alone, and
+    only its colour is hidden, so that whatever the button has behind the label is part of what the label is read against."""
+    words = page.evaluate("""([selectors, labels]) => Object.entries(selectors).flatMap(([name, selector]) => [...document.querySelectorAll(selector)].map((e) => {
+        let r = e.getBoundingClientRect();
+        if (labels.includes(name)) {                                                   // the box of the label's text, not of the button around it
+            const range = document.createRange();
+            range.selectNodeContents([...e.childNodes].find((n) => n.nodeType === 3 && n.textContent.trim()));
+            r = range.getBoundingClientRect();
+        }
+        const s = getComputedStyle(e);
+        return { name: name, x: r.x, y: r.y, width: r.width, height: r.height, color: s.color, size: parseFloat(s.fontSize), weight: parseInt(s.fontWeight) };
+    }))""", [selectors, sorted(LABELS)])
+    assert {w["name"] for w in words} == set(selectors)                                # every kind of word was found
+    hiding = page.add_style_tag(content=hide)
+    picture = base64.b64encode(page.screenshot()).decode()
+    hiding.evaluate("e => e.remove()")
+    reader = browser.new_page()
+    try:
+        lights = reader.evaluate(BRIGHTEST_BEHIND, [picture, words])
+    finally:
+        reader.close()
+    measured = []
+    for word, light in zip(words, lights):
+        ink = tuple(int(v) for v in re.findall(r"\d+", word["color"])[:3])
+        large = word["size"] >= 24 or (word["size"] >= 18.66 and word["weight"] >= 700)
+        measured.append((word["name"], (luminance(ink) + 0.05) / (light + 0.05), 3.0 if large else 4.5))
+    return measured
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+@pytest.mark.parametrize("key", PHOTOGRAPHS)
+def test_every_word_keeps_its_contrast_over_every_photograph(browser, key, width, height):
+    """Measured, not looked at: with the words hidden, the brightest 1 % of the picture behind each word (so each word is judged at the
+    hardest it is to read over this photograph) against the word's own colour: 4.5 to 1 for text, 3 to 1 for large text (WCAG AA). A
+    photograph swapped in later that is too bright where the words are fails here, by name. At both sizes (the photograph is cropped
+    differently on a tall sign, and the words sit elsewhere on it), on the Today list with the scoreboard strip up along the bottom (its score line,
+    its orange ranks and its next game) and on the week view.
+
+    The page's clock is pinned. The date and the clock are right-aligned, so a short one is a narrow box at the very edge, where the
+    brightest part of a photograph is (the stadium's floodlights are under the date); a long one reaches over darker picture. Friday,
+    May 1, 2026 at 1:05 AM is among the shortest strings the sign shows (the date within 2 px of the shortest), so the test measures
+    the worst case, and measures it on every day, not only on the days of the calendar that happen to be short."""
+    skip_if_day_ends_within(2)
+    bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 70), event("e3", "Sales pipeline", 100)]
+    bookings += [event_on(f"w{n}", f"Planning review {n}", 1, 8 + n, 0, url=None, platform=MeetingPlatform.UNKNOWN if n % 2 else MeetingPlatform.ZOOM) for n in range(8)]   # a busy tomorrow
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        choose(server, sign_background=key, sign_scores=["texas"])        # with the scoreboard strip up along the bottom
+        scoreboard_has(server, ["texas"])
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.clock.install(time=datetime(2026, 5, 1, 1, 5))
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert page.locator("#date").inner_text() == "Friday, May 1, 2026" and page.locator("#clock").inner_text() == "1:05\u00a0AM"   # the pin took
+        page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
+        page.wait_for_selector("#events .event", timeout=5000)
+        page.wait_for_selector("#score:not([hidden])", timeout=5000)
+        wait_for_the_photograph_to_paint(page)
+        for name, contrast, least in contrast_of_every_word(page, browser, {**SIGN_WORDS, **SCORE_WORDS}, HIDE_TODAYS_WORDS):
+            assert contrast >= least, (key, width, height, "Today", name, round(contrast, 2))
+        open_the_week(page)
+        wait_for_the_photograph_to_paint(page)
+        for name, contrast, least in contrast_of_every_word(page, browser, WEEK_WORDS, HIDE_THE_WEEKS_WORDS):
+            assert contrast >= least, (key, width, height, "week", name, round(contrast, 2))
+        page.close()
+
+
+def test_the_picker_on_the_table_offers_every_background_and_posts_the_one_pressed(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_door_sign_screen(page)
+        picker = page.locator("#sign-picker")
+        assert picker.locator("button").all_inner_texts() == BACKGROUND_LABELS     # the spec's order
+        assert picker.locator("button[aria-pressed='true']").all_inner_texts() == ["Austin skyline"]
+        for key, label in zip(SIGN_BACKGROUNDS, BACKGROUND_LABELS):
+            page.click(f"#sign-picker button:text-is('{label}')")
+            page.wait_for_function(f"document.querySelector(\"#sign-picker button[aria-pressed='true']\").innerText === {label!r}", timeout=5000)
+            assert page.request.get(f"http://127.0.0.1:{server.port}/api/settings").json()["sign_background"] == key
+            assert picker.locator("button[aria-pressed='true']").count() == 1
+        page.close()
+
+
+def test_the_school_switches_round_trip(browser):
+    with PageServer() as server:
+        base = f"http://127.0.0.1:{server.port}"
+        page = open_page(browser, server)
+        schools = lambda: page.request.get(base + "/api/settings").json()["sign_scores"]
+        open_door_sign_screen(page)
+        switches = page.locator("#scores-picker button")
+        assert "FOOTBALL SCORES" in page.locator(".door-section").inner_text().upper()   # the label the four switches sit under
+        assert switches.all_inner_texts() == SCHOOL_LABELS
+        assert page.locator("#scores-picker button[aria-pressed='true']").count() == 0 and schools() == []   # off until someone turns a school on
+        pressed = lambda: page.locator("#scores-picker button[aria-pressed='true']").all_inner_texts()
+        page.click("#scores-picker button:text-is('Texas A&M')")
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 1", timeout=5000)
+        assert schools() == ["texas_am"] and pressed() == ["Texas A&M"]
+        page.click("#scores-picker button:text-is('Texas')")
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 2", timeout=5000)
+        assert schools() == ["texas", "texas_am"] and pressed() == ["Texas", "Texas A&M"]      # in the list's own order, not the order of the taps
+        assert page.request.get(base + "/api/status").json()["settings"]["sign_scores"] == ["texas", "texas_am"]   # what the sign reads
+        page.click("#scores-picker button:text-is('Texas A&M')")                                  # a switch turns off as it turned on
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 1", timeout=5000)
+        assert schools() == ["texas"]
+        page.reload(wait_until="networkidle")                                                      # and the page shows what the room remembers
+        open_door_sign_screen(page)
+        assert pressed() == ["Texas"]
+        page.click("#scores-picker button:text-is('Texas')")
+        page.wait_for_function("document.querySelectorAll(\"#scores-picker button[aria-pressed='true']\").length === 0", timeout=5000)
+        assert schools() == []
+        refused = page.request.post(base + "/api/settings", data='{"sign_scores": ["ohio_state"]}', headers=JSON)   # a school nobody listed
+        assert refused.status == 400 and "ohio_state" in refused.json()["error"] and schools() == []
+        page.close()
+
+
+def test_the_door_sign_buttons_are_not_rebuilt_while_nothing_changes(browser):
+    """As the screensaver picker's: a tap is never lost to a re-render, so the buttons stay while the page polls."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_door_sign_screen(page)
+        handles = [page.locator("#sign-picker button").first.element_handle(), page.locator("#scores-picker button").first.element_handle()]
+        page.wait_for_timeout(2600)                                          # the page polls every two seconds
+        assert all(h.evaluate("e => e.isConnected") for h in handles)
+        page.close()
+
+
+def test_options_leads_to_the_door_sign_screen_and_back(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        page.click("#open-options")
+        assert page.locator("#open-door-sign").inner_text() == "Door sign" and page.locator("#open-door-sign").is_visible()
+        page.click("#open-door-sign")
+        assert page.evaluate("document.body.dataset.view") == "door-sign"
+        assert page.locator("#sign-picker").is_visible() and page.locator("#scores-picker").is_visible()
+        assert page.locator("#link-form").is_hidden()                       # the idle screen is gone
+        page.click("#back-from-door-sign")
+        assert page.evaluate("document.body.dataset.view") == "options"
+        page.click("#back-from-options")
+        assert page.evaluate("document.body.dataset.view") == "idle"
+        page.close()
+
+
+def test_the_door_sign_screen_is_a_sub_screen_of_idle_mode_like_the_screensaver(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        open_door_sign_screen(page)
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join", data='{"url": "https://zoom.us/j/98765432100"}', headers=JSON)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=8000)   # a call that begins takes the page back to its own screen
+        page.close()
+
+
+def test_the_door_sign_choices_are_hidden_while_the_room_cannot_be_reached(browser):
+    """What the page shows there would be a guess: it says so as the other pickers do, and comes back with the room."""
+    port = free_port()
+    page = browser.new_page(viewport={"width": 1280, "height": 800})
+    with PageServer(port=port):
+        page.goto(f"http://127.0.0.1:{port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        open_door_sign_screen(page)
+        assert page.locator(".door-section").is_visible()
+    page.wait_for_function("document.body.dataset.state === 'offline'", timeout=10000)
+    assert page.locator(".door-section").is_hidden()
+    with PageServer(port=port):
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=10000)
+        assert page.locator(".door-section").is_visible()
+    page.close()
+
+
+def test_the_sign_fits_with_a_photograph_at_both_sizes_and_on_a_full_hd_screen(browser):
+    skip_if_day_ends_within(1)
+    bookings = [event("e1", "Quarterly planning review with the regional leadership teams and the partners", 30),
+                event("e2", "Design review", 70), event("e3", "Offsite lunch", 100, url=None, platform=MeetingPlatform.UNKNOWN)]
+    for key in ("capitol", "star"):                                          # a pale photograph and a busy one
+        with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen") as server:
+            choose(server, sign_background=key)
+            for width, height in ((1280, 800), (800, 1280), (1920, 1080)):
+                page = open_sign(browser, server, width, height)
+                page.wait_for_function(f"document.body.dataset.photo === '{key}'", timeout=5000)
+                assert fits(page), (key, width, height)
+                page.close()
+
+
+def test_a_long_room_name_gets_smaller_type_on_the_sign(browser):
+    short, edge, long = "Second Floor Conf Room 2", "Second Floor Conf Room 22", "Executive Conference Room North Wing"
+    assert (len(short), len(edge), len(long)) == (24, 25, 36)               # a name of 24 characters keeps the full size; 25 is "long"
+    sizes = {}
+    for width, height in ((1280, 800), (800, 1280)):
+        for name in (short, edge, long):
+            with PageServer(room_name=name) as server:
+                page = open_sign(browser, server, width, height)
+                sizes[(width, name)] = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+                assert page.locator("#room-name").evaluate("e => e.classList.contains('long')") == (name != short)
+                assert page.locator("#room-name").inner_text() == name and fits(page), (width, name)
+                page.close()
+        assert sizes[(width, edge)] < sizes[(width, short)] and sizes[(width, long)] == sizes[(width, edge)]
+        assert sizes[(width, edge)] <= 0.7 * sizes[(width, short)]          # clearly smaller, not a point less
+
+
+def test_the_sign_header_wraps_instead_of_breaking_the_company_name(browser):
+    """The clock and date used to squeeze the brand row until "Management" broke mid-word. At every width from a small phone to a
+    desktop, in steps of four pixels (the clock and date share the row from about 584 px; a brand row allowed down to 14 rem still
+    broke the word at 552 to 560), every word of the company name stays whole on one line and nothing runs off the sign."""
+    with PageServer(room_company="Crystal Practice Management") as server:
+        page = open_sign(browser, server)
+        for width in [*range(320, 700, 4), 768, 1024, 1280]:
+            page.set_viewport_size({"width": width, "height": 800})
+            lines = page.evaluate("""() => {
+                const node = document.getElementById('company').firstChild, text = node.textContent, range = document.createRange();
+                const tops = [...text].map((_, i) => { range.setStart(node, i); range.setEnd(node, i + 1); return Math.round(range.getBoundingClientRect().top); });
+                let at = 0; return text.split(' ').map((word) => { const t = tops.slice(at, at + word.length); at += word.length + 1; return new Set(t).size; });
+            }""")
+            assert lines == [1, 1, 1], (width, lines)                        # each word on one line: none is split
+            clock, date = page.locator("#clock").bounding_box(), page.locator("#date").bounding_box()
+            assert clock["x"] >= 0 and clock["x"] + clock["width"] <= width and date["x"] + date["width"] <= width, width
+            assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth"), width
+        page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_sign(browser):
+    """The status words are aria-live: writing the same words again is announced again, so they are written when they change. The
+    backdrop is drawn once, when the room's choice is first known or changes, not at every poll."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        page.evaluate("""() => {
+            window.records = [];
+            const watch = (node, options, label) => new MutationObserver((list) => list.forEach((r) => window.records.push(label + ':' + r.type + ':' + (r.attributeName || ''))))
+                .observe(node, options);
+            watch(document.querySelector('[aria-live]'), { subtree: true, childList: true, characterData: true, attributes: true }, 'status');
+            watch(document.querySelector('.backdrop'), { subtree: true, childList: true, characterData: true, attributes: true }, 'backdrop');
+            watch(document.body, { attributes: true, attributeFilter: ['style', 'data-bg', 'data-photo', 'data-photo-missing'] }, 'body');
+        }""")
+        poll(page)
+        assert page.evaluate("window.records") == []                         # the same status and the same choice: nothing is written
+        choose(server, sign_background="capitol")
+        poll(page)
+        page.wait_for_function("document.body.dataset.photo === 'capitol'", timeout=5000)
+        records = page.evaluate("window.records")
+        assert any(r.startswith("body:attributes:") for r in records)        # the observers do see a real change ...
+        assert not any(r.startswith(("status:", "backdrop:")) for r in records)   # ... which is the choice and nothing else
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, root", [(1280, 800, 16), (1920, 1080, 24)])
+def test_the_dot_the_calendar_icon_and_the_row_padding_scale_with_the_text(browser, width, height, root):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = open_sign(browser, server, width, height)
+        px = lambda selector, prop: page.locator(selector).first.evaluate(f"e => parseFloat(getComputedStyle(e).{prop})")
+        assert page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)") == root     # the sign grows with a bigger screen
+        assert px(".chip .dot", "width") == px(".chip .dot", "height") == 0.875 * root
+        assert px("#this-week svg", "width") == px("#this-week svg", "height") == 1.125 * root
+        assert px("#events .event", "paddingTop") == px("#events .event", "paddingBottom") == 0.625 * root
+        assert px("#events .event", "paddingLeft") == px("#events .event", "paddingRight") == 0.875 * root
+        assert fits(page)
+        page.close()
+
+
+def test_a_photograph_that_is_there_is_asked_for_once_and_not_again_at_a_poll(browser):
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        asked = photo_request_methods(page)
+        page.clock.install()
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.photo === 'capitol'", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        page.wait_for_timeout(300)
+        assert asked == [("GET", 200)]                                       # one request, answered: the picture is held, and the style sheet draws that one
+        for _ in range(3):
+            poll(page)
+        assert asked == [("GET", 200)] and page.evaluate("document.body.dataset.photo") == "capitol"      # nothing across polls
+        page.close()
+
+
+def test_a_reload_asks_for_the_photograph_once_and_the_room_may_say_it_is_unchanged(browser):
+    with PageServer() as server:
+        choose(server, sign_background="tower")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        asked = photo_request_methods(page)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.photo === 'tower'", timeout=8000)
+        assert asked == [("GET", 200)]
+        page.reload(wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.photo === 'tower'", timeout=8000)
+        assert len(asked) == 2 and asked[1][0] == "GET" and asked[1][1] in (200, 304)                   # a 304 is the browser's copy, still good
+        page.close()
+
+
+def test_a_new_choice_keeps_the_old_photograph_on_screen_until_its_own_has_decoded(browser):
+    held = []
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/bridge.jpg", lambda route: held.append(route))                # not answered until the test says
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.photo === 'capitol'", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        choose(server, sign_background="bridge")
+        poll(page)
+        page.wait_for_function("document.body.dataset.bg === 'bridge'", timeout=5000)                   # the sign knows what was chosen ...
+        page.wait_for_timeout(300)
+        assert [route.request.method for route in held] == ["GET"]                                      # the picture itself is the one request
+        assert page.evaluate("document.body.dataset.photo") == "capitol"                                # ... and the sign shows the old photograph, as it was
+        assert "backgrounds/capitol.jpg" in page.evaluate("getComputedStyle(document.body).getPropertyValue('--photo')")
+        assert "backgrounds/capitol.jpg" in page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage")
+        assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"      # not the glow, not bare navy
+        held[0].fulfill(status=200, body=(STATIC_DIR / "backgrounds" / "bridge.jpg").read_bytes(), content_type="image/jpeg")
+        page.wait_for_function("document.body.dataset.photo === 'bridge'", timeout=8000)
+        assert "backgrounds/bridge.jpg" in page.evaluate("getComputedStyle(document.body).getPropertyValue('--photo')")
+        page.close()
+
+
+@pytest.mark.parametrize("failure", ["not found", "not a picture", "connection refused"])
+def test_a_photograph_that_fails_to_load_shows_plain_and_is_asked_for_once(browser, failure):
+    """A file the room has no copy of, one that is not an image, a request that fails on the way: the same to the sign, which shows
+    the navy with the glow, keeps saying which background was chosen, and does not ask again at a poll."""
+    asked = []
+
+    def answer(route):
+        asked.append(failure)
+        if failure == "not found":
+            route.fulfill(status=404, body="Not Found", content_type="text/plain")
+        elif failure == "not a picture":
+            route.fulfill(status=200, body=b"<html>this is not a picture</html>", content_type="image/jpeg")
+        else:
+            route.abort()
+
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/capitol.jpg", answer)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && 'photoMissing' in document.body.dataset", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "block"
+        assert page.evaluate("document.body.dataset.photo === undefined && document.body.dataset.bg") == "capitol"
+        assert page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage") == "none"
+        poll(page)
+        poll(page)
+        assert asked == [failure] and page.evaluate("'photoMissing' in document.body.dataset")           # once, and not at every poll
+        page.close()
+
+
+def test_a_photograph_that_failed_is_asked_for_again_after_an_outage(browser):
+    """The room going away and coming back is an update, which may have brought the photograph: the sign asks once more."""
+    photograph = (STATIC_DIR / "backgrounds" / "bridge.jpg").read_bytes()
+    there, answers = {"now": False}, []
+
+    def answer(route):
+        answers.append(200 if there["now"] else 404)
+        if there["now"]:
+            route.fulfill(status=200, body=photograph, content_type="image/jpeg")
+        else:
+            route.fulfill(status=404, body="Not Found", content_type="text/plain")
+
+    with PageServer() as server:
+        choose(server, sign_background="bridge")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.clock.install()
+        page.route("**/static/backgrounds/bridge.jpg", answer)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free' && 'photoMissing' in document.body.dataset", timeout=8000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        assert page.evaluate("document.body.dataset.photo === undefined") and answers == [404]      # plain's look; the room was asked once
+        poll(page)
+        poll(page)
+        assert answers == [404] and page.evaluate("document.body.dataset.bg") == "bridge"          # and not at every poll
+        there["now"] = True                                                                          # an update brings the file ...
+        page.route("**/api/status", lambda route: route.abort())                                      # ... and restarts the room
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        page.unroute("**/api/status")
+        poll(page)                                                                                    # the room is back
+        page.wait_for_function("document.body.dataset.photo === 'bridge'", timeout=8000)
+        assert answers.count(404) == 1 and 200 in answers
+        assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"
+        assert page.evaluate("'photoMissing' in document.body.dataset") is False
+        page.close()
+
+
+def test_a_photograph_whose_request_never_answers_is_given_up_on_after_twenty_seconds(browser, monkeypatch):
+    """A connection that went half open neither answers nor fails. The sign waits twenty seconds and then counts the photograph as
+    failed (plain, with the glow); until then it waits on bare navy, and it never asks again at a poll. The request is held by the
+    server itself (the test's own middleware answers nothing until told to), and the page's clock runs the twenty seconds in a moment, one
+    status poll at a time (the page's clock also drives AbortSignal.timeout, so a poll inside a longer jump could abort under load, which
+    shows the sign as outage and has it ask for the photograph again). Giving up also lets go of the request: the server sees the
+    connection close, which it does not while the sign still waits."""
+    release, held, dropped = threading.Event(), [], []
+    served = control_service._static_no_cache
+
+    @web.middleware
+    async def stalling(request, handler):
+        if request.path == "/static/backgrounds/capitol.jpg":
+            held.append(request.method)
+            while not release.is_set():
+                dropped.append(request.transport is None or request.transport.is_closing())   # aiohttp drops the transport once the browser has closed the connection
+                await asyncio.sleep(0.05)
+        return await served(request, handler)
+
+    monkeypatch.setattr(control_service, "_static_no_cache", stalling)
+    with PageServer() as server:
+        choose(server, sign_background="capitol")
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        try:
+            page.clock.install()
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="commit")           # the held picture would keep "networkidle" waiting
+            page.wait_for_function("document.body.dataset.state === 'free' && document.body.dataset.bg === 'capitol'", timeout=8000)
+            page.wait_for_timeout(300)
+            assert held == ["GET"]                                                             # the picture was asked for, and is not answered
+            page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+            for _ in range(3):
+                poll(page)                                                                     # about 17 seconds in: still waiting
+            assert page.evaluate("document.body.dataset.photo === undefined && !('photoMissing' in document.body.dataset)")
+            assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "none"            # bare navy: not given up yet
+            assert dropped and not any(dropped)                                                # and the request is still held open: the sign has not let go
+            poll(page)                                                                         # about 22 seconds in: given up
+            page.wait_for_function("'photoMissing' in document.body.dataset", timeout=5000)
+            assert page.evaluate("getComputedStyle(document.querySelector('.glow')).display") == "block"           # plain, with the glow
+            assert page.evaluate("getComputedStyle(document.querySelector('.sign'), '::before').backgroundImage") == "none"
+            assert page.evaluate("document.body.dataset.bg") == "capitol"                      # and it still says which was chosen
+            for _ in range(50):                                                                # the let-go reaches the server a moment after the give-up
+                if dropped[-1]:
+                    break
+                page.wait_for_timeout(100)
+            assert dropped[-1], "the sign gave the photograph up but left its request open"   # the request was released, not just forgotten
+            poll(page)
+            poll(page)                                                                         # two polls more
+            assert held == ["GET"]                                                             # one request, while it stalled and after it was given up
+        finally:
+            release.set()                                                                       # the server may stop: its held request goes
+            page.close()
+
+
+# --- the week view: This week replaces the Today list with seven days, today first (spec 2026-10-13, section 2.3) ---
+
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def event_on(event_id, title, days_ahead, hour, minute, duration=45, url="https://zoom.us/j/98765432100?pwd=abc", platform=MeetingPlatform.ZOOM):
+    """A booking `days_ahead` days from today at hour:minute on the device's clock (event() counts minutes from now instead)."""
+    start = datetime.combine(datetime.now().astimezone().date() + timedelta(days=days_ahead), time_of_day(hour, minute)).astimezone()
+    return CalendarEvent(id=event_id, title=title, start_time=start, end_time=start + timedelta(minutes=duration), meeting_url=url, meeting_platform=platform)
+
+
+def the_next_seven_days():
+    """What the week view heads its columns with, from the test's own clock: the day names and the dates ("Oct 14")."""
+    today = datetime.now().astimezone().date()
+    days = [today + timedelta(days=n) for n in range(7)]
+    return [WEEKDAYS[d.weekday()] for d in days], [f"{d:%b} {d.day}" for d in days]
+
+
+def open_the_week(page):
+    page.click("#this-week")
+    page.wait_for_function("document.body.dataset.view === 'week' && document.querySelectorAll('#week .day').length === 7", timeout=5000)
+
+
+def visible_buttons(page):
+    return page.locator("button:visible").evaluate_all("buttons => buttons.map(b => b.id)")
+
+
+def test_this_week_shows_seven_columns_and_back_returns(browser):
+    skip_if_day_ends_within(1)                                              # the first booking is 40 minutes out, on today's list
+    names, dates = the_next_seven_days()
+    bookings = [event("e1", "Customer call", 40),
+                event_on("e2", "Design review", 1, 10, 0, url="https://meet.google.com/abc-defg-hij", platform=MeetingPlatform.GOOGLE_MEET),
+                event_on("e3", "Sales pipeline", 1, 14, 30),
+                event_on("e4", "Offsite lunch", 3, 12, 0, url=None, platform=MeetingPlatform.UNKNOWN)]
+    for width, height in ((1280, 800), (800, 1280)):
+        with PageServer(calendar_events=bookings, room_name="Boardroom") as server:
+            page = open_sign(browser, server, width, height)
+            errors, asked = [], []
+            page.on("pageerror", lambda e: errors.append(str(e)))
+            page.on("request", lambda r: asked.append(r.url) if r.url.endswith("/api/calendar/week") else None)
+            page.wait_for_selector("#events .event", timeout=5000)
+            assert page.locator("#week").is_hidden() and page.evaluate("document.body.dataset.view") == "today"
+            assert asked == [] and visible_buttons(page) == ["this-week"]    # the week is asked for when it is wanted; a sign has one thing to press
+            today_head = page.locator(".today-head").bounding_box()
+            open_the_week(page)
+            assert page.locator("#today").is_hidden() and page.locator("#week").is_visible() and len(asked) == 1
+            days = page.locator("#week .day")
+            assert page.locator("#week .day-name").all_text_contents() == names           # today first, then the six days after it
+            assert page.locator("#week .day-date").all_text_contents() == dates
+            assert page.locator("#week .day[aria-current='date']").count() == 1 and days.first.get_attribute("aria-current") == "date"
+            rows = lambda selector: [days.nth(n).locator(selector).all_text_contents() for n in range(7)]
+            assert rows(".slot .title") == [["Customer call"], ["Design review", "Sales pipeline"], [], ["Offsite lunch"], [], [], []]
+            assert rows(".slot .who") == [["Zoom"], ["Google Meet", "Zoom"], [], [], [], [], []]       # the platform in small type; none for a booking with no link
+            assert rows(".slot time")[1] == ["10:00 AM", "2:30 PM"] and rows(".slot time")[3] == ["12:00 PM"]
+            assert all(re.match(TWELVE_HOUR, t) for column in rows(".slot time") for t in column)
+            assert rows(".none") == [[], [], ["Nothing booked"], [], ["Nothing booked"], ["Nothing booked"], ["Nothing booked"]]   # a day with no bookings says so
+            assert page.locator("#chip-text").inner_text().startswith("Free until") and page.locator("#room-name").inner_text() == "Boardroom"   # the status stays
+            assert page.locator("#week-back").inner_text() == "Back" and visible_buttons(page) == ["week-back"]
+            boxes = [days.nth(n).bounding_box() for n in range(7)]
+            week_head = page.locator(".week-head").bounding_box()
+            assert all(abs(week_head[k] - today_head[k]) <= 1 for k in ("x", "y", "width")), (width, height, week_head, today_head)   # the head stands where the Today list's did, in both orientations: Back is where This week was
+            if width > height:                                              # landscape: side by side in one row, the same width
+                assert all(abs(b["y"] - boxes[0]["y"]) <= 0.5 and abs(b["height"] - boxes[0]["height"]) <= 0.5 for b in boxes)
+                assert all(abs(b["width"] - boxes[0]["width"]) <= 1 for b in boxes)
+                assert all(a["x"] + a["width"] <= b["x"] for a, b in zip(boxes, boxes[1:]))
+            else:                                                           # portrait: stacked, one under the next; the days with bookings share the height, a day with nothing booked is as tall as its words
+                assert all(abs(b["x"] - boxes[0]["x"]) <= 0.5 and abs(b["width"] - boxes[0]["width"]) <= 0.5 for b in boxes)
+                booked = days.evaluate_all("days => days.map((d) => d.querySelector('.slots') !== null)")
+                busy = [b["height"] for b, has in zip(boxes, booked) if has]
+                empty = [b["height"] for b, has in zip(boxes, booked) if not has]
+                assert busy and empty and max(busy) - min(busy) <= 1 and max(empty) - min(empty) <= 1 and max(empty) < min(busy), (busy, empty)
+                assert all(a["y"] + a["height"] <= b["y"] for a, b in zip(boxes, boxes[1:]))
+                assert abs(boxes[0]["y"] - (week_head["y"] + week_head["height"]) - 10) <= 1       # the head and the days, ten pixels apart
+            assert all(b["x"] >= 0 and b["x"] + b["width"] <= width and b["y"] >= 0 and b["y"] + b["height"] <= height for b in boxes)
+            assert fits(page)
+            page.click("#week-back")                                         # Back: the Today list again
+            assert page.locator("#week").is_hidden() and page.locator("#today").is_visible() and page.evaluate("document.body.dataset.view") == "today"
+            assert page.locator("#events .event").count() == 1 and visible_buttons(page) == ["this-week"] and fits(page)
+            open_the_week(page)                                              # and again: asked for afresh, shown afresh
+            assert len(asked) == 2 and page.locator("#week .day").count() == 7
+            assert errors == []
+            page.close()
+
+
+def test_the_week_view_returns_to_today_after_thirty_idle_seconds(browser):
+    """On the page's own clock, stopped: each jump below lets every timer that falls due in it fire once, at its end."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        view = lambda: page.evaluate("document.body.dataset.view")
+
+        def pass_seconds(seconds):
+            page.clock.fast_forward(seconds * 1000)
+            page.wait_for_timeout(300)
+
+        open_the_week(page)
+        pass_seconds(29)
+        assert view() == "week"                                              # 29 seconds without a tap: still there ...
+        pass_seconds(2)
+        assert view() == "today" and page.locator("#today").is_visible() and page.locator("#week").is_hidden()   # ... and at 31 it is back on Today
+        assert page.locator("#events .event").count() == 1 and visible_buttons(page) == ["this-week"]
+
+        open_the_week(page)                                                  # a tap inside the week view starts the 30 seconds again
+        pass_seconds(25)
+        page.click("#week .day >> nth=2")
+        pass_seconds(29)
+        assert view() == "week"                                              # 54 seconds since it opened, 29 since the tap
+        pass_seconds(2)
+        assert view() == "today"                                             # 31 since the tap
+
+        open_the_week(page)                                                  # Back puts the wait away: the next visit has its own
+        pass_seconds(10)
+        page.click("#week-back")
+        assert view() == "today"
+        pass_seconds(10)
+        open_the_week(page)
+        pass_seconds(29)
+        assert view() == "week"                                              # 49 seconds after the first visit began: its wait would have closed this one at 30
+        pass_seconds(2)
+        assert view() == "today"
+        page.close()
+
+
+def test_a_week_that_is_loading_or_cannot_be_loaded_says_so_and_back_still_works(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = open_sign(browser, server)
+        errors, held = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.route("**/api/calendar/week", lambda route: held.append(route))           # not answered until the test says
+        page.click("#this-week")
+        page.wait_for_function("document.body.dataset.view === 'week'", timeout=5000)
+        for _ in range(50):                                                  # the request reaches the test a moment after the tap
+            if held:
+                break
+            page.wait_for_timeout(100)
+        assert len(held) == 1 and page.locator("#week-note").inner_text() == "Loading the week." and page.locator("#week .day").count() == 0
+        assert visible_buttons(page) == ["week-back"] and page.locator("#week-days").is_hidden() and fits(page)    # Back is there while the days are not
+        held[0].abort()                                                              # the request fails
+        page.wait_for_function("document.getElementById('week-note').innerText === 'The week could not be loaded.'", timeout=5000)
+        assert page.locator("#week .day").count() == 0
+        assert page.evaluate("document.body.dataset.view") == "week" and visible_buttons(page) == ["week-back"] and fits(page)
+        page.click("#week-back")
+        assert page.locator("#today").is_visible() and page.locator("#week").is_hidden()
+        page.unroute("**/api/calendar/week")
+        open_the_week(page)                                                  # the next visit tries again, and the note is gone
+        assert page.locator("#week-note").inner_text() == "" and page.locator("#week-note").is_hidden()
+        assert errors == []
+        page.close()
+
+
+def test_the_weeks_first_day_leaves_out_what_has_ended_and_rings_what_is_on(browser):
+    skip_if_day_ends_within(2)
+    now = datetime.now().astimezone()
+    if now - now.replace(hour=0, minute=0, second=0, microsecond=0) < timedelta(hours=1):
+        pytest.skip("less than an hour has passed in the local day")        # the finished booking began 50 minutes ago
+    ended, on, later = event("e1", "Finished standup", -50, duration=30), event("e2", "Design review", -10, duration=40), event("e3", "Sales pipeline", 90)
+    with PageServer(calendar_events=[ended, on, later]) as server:
+        page = open_sign(browser, server, state="occupied")
+        open_the_week(page)
+        today = page.locator("#week .day").first
+        assert today.locator(".slot .title").all_text_contents() == ["Design review", "Sales pipeline"]   # what is over is not on the sign's week
+        assert today.locator(".slot.now .title").all_text_contents() == ["Design review"] and page.locator("#week .slot.now").count() == 1
+        assert today.locator(".slot.now").evaluate("e => getComputedStyle(e).boxShadow") == "rgb(229, 72, 77) 0px 0px 0px 2px inset"   # ringed as on the Today list
+        assert today.locator(".slot:not(.now)").evaluate("e => getComputedStyle(e).boxShadow") == "none"
+        page.close()
+    with PageServer(calendar_events=[ended]) as server:                      # nothing left today
+        page = open_sign(browser, server)
+        open_the_week(page)
+        assert page.locator("#week .day").first.locator(".none").all_text_contents() == ["Nothing booked"]
+        page.close()
+
+
+def test_the_week_view_goes_when_the_calendar_does_and_comes_back_with_it(browser):
+    """The week needs the calendar as the Today list does: with it gone the sign shows neither, and the view a person left open is
+    there again when the calendar returns."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        open_the_week(page)
+
+        def without_the_calendar(route):
+            body = route.fetch().json()
+            body["calendar"]["connected"] = False
+            route.fulfill(json=body)
+
+        page.route("**/api/status", without_the_calendar)
+        poll(page)
+        assert page.locator("#week").is_hidden() and page.locator("#today").is_hidden() and page.evaluate("document.body.dataset.view") == "today"
+        page.unroute("**/api/status")
+        poll(page)
+        assert page.locator("#week").is_visible() and page.locator("#week .day").count() == 7 and page.locator("#today").is_hidden()
+        page.close()
+
+
+def week_fit(page):
+    """What each day of the open week view shows: [bookings, shown, the "+N more" text or None, clipped], clipped when a day's
+    bookings stick out of its box."""
+    return page.evaluate("""() => [...document.querySelectorAll('#week .day')].map((day) => {
+        const slots = day.querySelector('.slots'), rows = [...day.querySelectorAll('.slot')], more = day.querySelector('.more');
+        return [rows.length, rows.filter((row) => !row.hidden).length, more && !more.hidden ? more.textContent : null, slots ? slots.scrollHeight > slots.clientHeight : false];
+    })""")
+
+
+FULL_WEEK_TITLES = ["Standup", "Design review", "Quarterly planning review with the regional leadership teams", "Customer call", "Sales pipeline", "Vendor demo",
+                    "Board meeting", "Wrap up"]
+
+
+def a_full_week():
+    """Three bookings today, an hour apart from 40 minutes out, and eight on each of the six days after it."""
+    return ([event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+            + [event_on(f"d{d}{n}", FULL_WEEK_TITLES[n], d, 8 + n, 0) for d in range(1, 7) for n in range(8)])
+
+
+def test_the_week_view_fits_a_full_week_at_every_size_and_counts_what_it_leaves_out(browser):
+    """A day shows the bookings that fit its box, whole (none cut across), and "+N more" says how many it left out. A day with the
+    three bookings the Today list holds shows all three, at both sizes of the sign."""
+    skip_if_day_ends_within(3)
+    for width, height, least in ((1280, 800, 3), (800, 1280, 2), (1920, 1080, 2)):
+        with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen") as server:
+            page = open_sign(browser, server, width, height)
+            open_the_week(page)
+            assert fits(page), (width, height)
+            week = week_fit(page)
+            assert week[0] == [3, 3, None, False], (width, height, week[0])                  # today's three: all of them, and no "+N more"
+            for rows, shown, more, clipped in week[1:]:
+                assert rows == 8 and shown >= least and not clipped, (width, height, rows, shown, clipped)
+                assert more == f"+{rows - shown} more", (width, height, shown, more)         # what is left out is counted
+            page.close()
+
+
+def test_the_week_view_fits_a_full_week_with_long_names_on_every_sign(browser):
+    """The worst case for room: a room name over two lines, a long location, company and titles, on the signs from a small kiosk to a
+    full HD one. Fewer bookings show, and none is cut across or runs off the sign."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen, past the elevators",
+                    room_company="Lone Star Eye Care and Surgery Partners") as server:
+        for width, height in ((1280, 800), (800, 1280), (1920, 1080), (1024, 600), (1080, 1920)):
+            page = open_sign(browser, server, width, height)
+            open_the_week(page)
+            assert fits(page), (width, height)
+            for n, (rows, shown, more, clipped) in enumerate(week_fit(page)):
+                assert not clipped, (width, height, n)
+                assert more == (f"+{rows - shown} more" if shown < rows else None), (width, height, n, rows, shown, more)
+            boxes = page.locator("#week .day").evaluate_all("days => days.map((d) => { const b = d.getBoundingClientRect(); return [b.left, b.top, b.right, b.bottom]; })")
+            assert all(left >= 0 and top >= 0 and right <= width and bottom <= height for left, top, right, bottom in boxes), (width, height)
+            page.close()
+
+
+def test_the_week_view_refits_when_the_sign_is_turned(browser):
+    """A day's bookings are fitted to the box it has: turned on its stand, the sign shows what fits the new box, more or fewer than
+    before, as a sign loaded in that position would."""
+    skip_if_day_ends_within(3)
+    landscape, portrait = {"width": 1280, "height": 800}, {"width": 800, "height": 1280}
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom") as server:
+        fresh = {}
+        for name, size in (("landscape", landscape), ("portrait", portrait)):
+            page = open_sign(browser, server, **size)
+            open_the_week(page)
+            fresh[name] = week_fit(page)
+            page.close()
+        assert fresh["landscape"] != fresh["portrait"]                          # the two boxes do hold different numbers
+        page = open_sign(browser, server, **landscape)
+        open_the_week(page)
+        for name, size in (("portrait", portrait), ("landscape", landscape), ("portrait", portrait)):
+            page.set_viewport_size(size)
+            for _ in range(50):
+                if week_fit(page) == fresh[name]:
+                    break
+                page.wait_for_timeout(100)
+            assert week_fit(page) == fresh[name], name
+            assert fits(page), name
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_week_view_gives_way_to_the_scoreboard_strip_when_it_comes_up(browser, width, height, central_time):
+    """The strip (spec section 2.5) takes the bottom of the sign when a school is on and has a score: the days refit above it and nothing
+    runs under it, while the status, the head and the tops of the days stay exactly where they were."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        page = sign_on_a_stopped_clock(browser, server, width, height)      # the poll that brings the strip is the test's to bring
+        open_the_week(page)
+        before, kept = week_fit(page), boxes(page, ".top", ".status", ".week-head")
+        tops = page.locator("#week .day").evaluate_all("days => days.map((d) => d.getBoundingClientRect().top)")
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        poll(page)
+        assert page.evaluate("!document.getElementById('score').hidden")
+        for _ in range(50):                                                  # the box shrinks at once; the days are fitted to it a moment later
+            after = week_fit(page)
+            if after != before and not any(clipped for _, _, _, clipped in after):
+                break
+            page.wait_for_timeout(100)
+        assert sum(shown for _, shown, _, _ in after) < sum(shown for _, shown, _, _ in before)           # less room, so fewer bookings
+        assert not any(clipped for _, _, _, clipped in after) and fits(page)
+        assert boxes(page, ".top", ".status", ".week-head") == kept          # nothing above the days moved
+        now = page.locator("#week .day").evaluate_all("days => days.map((d) => d.getBoundingClientRect().top)")
+        assert now[0] == tops[0] and (now == tops if width > height else True)   # the first day starts where it did; side by side they all do (stacked, the rows share what is left)
+        assert page.locator("#week-days").evaluate("e => e.getBoundingClientRect().bottom") <= page.locator("#score").evaluate("e => e.getBoundingClientRect().top")
+        page.close()
+
+
+def test_a_poll_that_changes_nothing_redraws_nothing_in_the_week(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        open_the_week(page)
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || '') + ':' + r.target.nodeName)))
+                .observe(document.getElementById('week'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == []                             # the same week: the days are not drawn again
+        assert page.locator("#week .day").count() == 7
+        page.close()
+
+
+@pytest.mark.parametrize("zone", ["America/Los_Angeles", "Pacific/Auckland"])
+def test_the_weeks_dates_are_the_rooms_days_whatever_zone_the_browser_keeps(browser, zone):
+    """"2026-10-14" is a day, not a moment: read as midnight UTC it would be the evening of the 13th in Los Angeles."""
+    skip_if_day_ends_within(1)                                              # the names and dates below are today's, and the page asks for its own
+    names, dates = the_next_seven_days()
+    with PageServer() as server:
+        page = open_sign(browser, server, timezone_id=zone)
+        open_the_week(page)
+        assert page.locator("#week .day-name").all_text_contents() == names
+        assert page.locator("#week .day-date").all_text_contents() == dates
+        page.close()
+
+
+def test_the_week_view_is_opened_kept_and_left_by_touch(browser):
+    """The hallway screen is a touchscreen: its taps are touches, which must open the week, keep it open and put it away."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800}, has_touch=True)
+        page.clock.install()
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+        view = lambda: page.evaluate("document.body.dataset.view")
+        page.tap("#this-week")
+        page.wait_for_function("document.body.dataset.view === 'week' && document.querySelectorAll('#week .day').length === 7", timeout=5000)
+        page.clock.fast_forward(25_000)
+        page.wait_for_timeout(300)
+        page.tap("#week .day >> nth=1")                                      # a touch inside the week view starts the 30 seconds again
+        page.clock.fast_forward(29_000)
+        page.wait_for_timeout(300)
+        assert view() == "week"                                              # 54 seconds since it opened, 29 since the touch
+        page.clock.fast_forward(2_000)
+        page.wait_for_timeout(300)
+        assert view() == "today"
+        page.tap("#this-week")
+        page.wait_for_function("document.body.dataset.view === 'week'", timeout=5000)
+        page.tap("#week-back")
+        assert view() == "today" and page.locator("#today").is_visible()
+        page.close()
+
+
+def test_the_week_view_can_be_opened_and_left_from_the_keyboard(browser):
+    """Focus goes where the person is: to Back when the week opens, and to This week when it closes."""
+    with PageServer() as server:
+        page = open_sign(browser, server)
+        page.focus("#this-week")
+        page.keyboard.press("Enter")
+        page.wait_for_function("document.body.dataset.view === 'week'", timeout=5000)
+        assert page.evaluate("document.activeElement.id") == "week-back"
+        page.keyboard.press("Enter")
+        assert page.evaluate("document.body.dataset.view") == "today" and page.evaluate("document.activeElement.id") == "this-week"
+        page.close()
+
+
+def test_the_weeks_ring_is_on_the_one_booking_that_ends_first_and_only_todays_column_has_the_outline(browser):
+    """Two bookings in progress together (neither has a video link, so the sign itself decides which one the room is in): the ring goes
+    to the one that ends first, once, in today's column, as it does on the Today list; the bookings of the other days, three of which
+    have some, are never ringed; and today's column alone has the thin outline."""
+    skip_if_day_ends_within(3)
+    now = datetime.now().astimezone()
+    if now - now.replace(hour=0, minute=0, second=0, microsecond=0) < timedelta(hours=1):
+        pytest.skip("less than an hour has passed in the local day")        # the long booking began 50 minutes ago
+    in_person = {"url": None, "platform": MeetingPlatform.UNKNOWN}
+    bookings = [event("long", "Long review", -50, duration=180, **in_person),   # 50 minutes in, 130 to go
+                event("short", "Short sync", -20, duration=40, **in_person),    # 20 minutes in, 20 to go: it ends first
+                event("later", "Sales pipeline", 100),
+                event_on("t1", "Design review", 1, 10, 0), event_on("t2", "Planning", 1, 14, 0),
+                event_on("w1", "Offsite lunch", 2, 12, 0, **in_person), event_on("w2", "Vendor demo", 4, 9, 30)]
+    with PageServer(calendar_events=bookings) as server:
+        page = open_sign(browser, server, state="occupied")
+        assert page.locator("#events .event.now .title").all_text_contents() == ["Short sync"]      # the Today list rings it ...
+        open_the_week(page)
+        days = page.locator("#week .day")
+        assert days.first.locator(".slot .title").all_text_contents() == ["Long review", "Short sync", "Sales pipeline"]
+        assert [days.nth(n).locator(".slot").count() for n in range(7)] == [3, 2, 1, 0, 1, 0, 0]   # bookings on today and on three other days
+        assert page.locator("#week .slot.now").count() == 1                 # ... and the week rings it, once, whatever the other days hold
+        assert days.first.locator(".slot.now .title").all_text_contents() == ["Short sync"]
+        outlines = days.evaluate_all("""days => days.map((day) => {
+            const style = getComputedStyle(day);
+            return [style.outlineStyle, style.outlineWidth, style.outlineColor, style.outlineOffset];
+        })""")
+        assert outlines[0] == ["solid", "1px", "rgba(255, 255, 255, 0.4)", "-1px"]    # today's own: 1 px, drawn inside the panel
+        assert [outline[0] for outline in outlines[1:]] == ["none"] * 6                # and no other day has one
+        page.close()
+
+
+def test_a_second_visit_to_the_week_whose_request_fails_shows_the_failure_and_none_of_the_first_visits_days(browser):
+    """What the first visit drew is not kept for the next: a visit that cannot be loaded says so, with no days under the note."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = open_sign(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        open_the_week(page)
+        assert page.locator("#week .slot").count() == 2                      # the first visit has bookings to show
+        page.click("#week-back")
+        page.route("**/api/calendar/week", lambda route: route.abort())
+        page.click("#this-week")
+        page.wait_for_function("document.getElementById('week-note').innerText === 'The week could not be loaded.'", timeout=5000)
+        assert page.locator("#week .day").count() == 0 and page.locator("#week .slot").count() == 0
+        assert page.evaluate("document.body.dataset.view") == "week" and visible_buttons(page) == ["week-back"] and fits(page)
+        page.click("#week-back")
+        page.unroute("**/api/calendar/week")
+        open_the_week(page)                                                  # and the visit after it, with its request answered, is whole again
+        assert page.locator("#week-note").inner_text() == "" and page.locator("#week .slot").count() == 2
+        assert errors == []
+        page.close()
+
+
+def test_the_week_stays_up_while_the_sign_cannot_reach_the_room_and_back_and_the_return_still_work(browser):
+    """Under "Sign not connected" the week that was on screen stays (nothing it shows has changed), Back puts the Today list in its
+    place, and a week opened then goes back to Today after thirty seconds, all without the room."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40), event_on("e2", "Sales pipeline", 2, 9, 0)]) as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        view = lambda: page.evaluate("document.body.dataset.view")
+
+        def pass_seconds(seconds):
+            page.clock.fast_forward(seconds * 1000)
+            page.wait_for_timeout(300)
+
+        open_the_week(page)
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)                                         # the next poll fails: the room has gone
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        assert page.locator("#chip-text").inner_text() == "Sign not connected"
+        assert view() == "week" and page.locator("#week .day").count() == 7 and page.locator("#week").is_visible()   # the week it had stays
+        assert visible_buttons(page) == ["week-back"]
+        page.click("#week-back")                                             # Back works without the room
+        assert view() == "today" and page.locator("#today").is_visible() and visible_buttons(page) == ["this-week"]
+        open_the_week(page)                                                  # and so does a new visit, which the thirty seconds close
+        pass_seconds(29)
+        assert view() == "week" and page.locator("#chip-text").inner_text() == "Sign not connected"
+        pass_seconds(2)
+        assert view() == "today" and page.locator("#today").is_visible() and page.locator("#week").is_hidden()
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(390, 844), (600, 1000), (800, 1280), (1080, 1920)])
+def test_in_portrait_the_weeks_head_stands_where_todays_did_at_every_width(browser, width, height):
+    """The space between the status and what follows it grows with the width (24 px up to 64): the week's head keeps to that same
+    space, so that Back is where This week was, and the days start ten pixels under the head."""
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)], room_name="Boardroom") as server:
+        page = open_sign(browser, server, width, height)
+        today_head = page.locator(".today-head").bounding_box()
+        open_the_week(page)
+        head, days = page.locator(".week-head").bounding_box(), page.locator("#week-days").bounding_box()
+        assert all(abs(head[k] - today_head[k]) <= 1 for k in ("x", "y", "width")), (head, today_head)
+        assert abs(days["y"] - (head["y"] + head["height"]) - 10) <= 1, (head, days)
+        page.close()
+
+
+def test_a_weeks_booking_has_one_size_of_type_for_its_time_and_title_and_the_signs_panel_fill(browser):
+    skip_if_day_ends_within(1)
+    with PageServer(calendar_events=[event("e1", "Design review", 40)]) as server:
+        page = open_sign(browser, server)
+        open_the_week(page)
+        slot = page.locator("#week .slot").first
+        style = lambda selector, prop: slot.locator(selector).evaluate(f"e => getComputedStyle(e).{prop}")
+        assert style("time", "fontSize") == style(".title", "fontSize") == "14px"      # one size, not 13 beside 14
+        assert style(".who", "fontSize") == "12px"                                      # the platform stays in small type
+        assert slot.evaluate("e => getComputedStyle(e).backgroundColor") == "rgba(255, 255, 255, 0.06)"   # the sign's one panel fill
+        page.close()
+
+
+def test_a_weeks_day_with_nothing_booked_keeps_its_words_on_one_line_on_a_small_screen(browser):
+    """At 800 by 480 a day is about 95 px wide, less than "Nothing booked" asks for: the words are cut with an ellipsis, not wrapped."""
+    with PageServer(room_name="Boardroom") as server:
+        page = open_sign(browser, server, 800, 480)
+        open_the_week(page)
+        nones = page.locator("#week .none")
+        assert nones.count() == 7
+        assert nones.first.evaluate("e => { const s = getComputedStyle(e); return [s.whiteSpace, s.overflow, s.textOverflow]; }") == ["nowrap", "hidden", "ellipsis"]
+        lines = nones.evaluate_all("els => els.map((e) => e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight))")
+        assert all(abs(n - 1) < 0.01 for n in lines), lines                 # one line each, though the words are wider than the day
+        assert nones.first.evaluate("e => e.scrollWidth > e.clientWidth")
+        assert fits(page)
+        page.close()
+
+
+@pytest.mark.parametrize("room, location", [("Boardroom", "2nd floor, by the kitchen"), ("Conference Room Twelve", "2nd floor, by the kitchen, past the elevators")])
+def test_on_a_short_screen_the_week_gives_up_the_status_detail_and_the_dates_to_keep_its_plus_n_more(browser, room, location):
+    """Up to 560 px of height the status's detail line and the days' dates are not shown while the week is, so that the days have the room for the count of
+    what each leaves out ("+8 more"), which a day's box clips when it has none; the Today list brings the detail back. The dates come back at 561 px, and
+    the detail (with the location and the name's size, by height alone: the next test) stays away to 700."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name=room, room_location=location) as server:
+        for width, height in ((800, 480), (900, 500), (1024, 560)):
+            page = open_sign(browser, server, width, height)
+            assert page.locator("#detail").is_visible()                      # on the Today list the detail is there
+            open_the_week(page)
+            assert page.locator("#detail").is_hidden() and page.locator("#week .day-date").first.is_hidden(), (width, height)
+            assert fits(page), (width, height)
+            counts = page.evaluate("""() => [...document.querySelectorAll('#week .day')].map((day) => {
+                const more = day.querySelector('.more');
+                if (!more || more.hidden) return null;
+                const inside = more.getBoundingClientRect(), box = day.getBoundingClientRect();
+                return [inside.top >= box.top && inside.bottom <= box.bottom, more.textContent];
+            })""")
+            assert all(count is not None for count in counts[1:]) and all(count[0] for count in counts[1:]), (room, width, height, counts)   # every busy day shows its count, whole
+            page.click("#week-back")
+            assert page.locator("#detail").is_visible(), (width, height)
+            page.close()
+        page = open_sign(browser, server, 1024, 561)                         # one pixel more height and the dates are back; the detail is not
+        open_the_week(page)
+        assert page.locator("#week .day-date").first.is_visible() and page.locator("#detail").is_hidden() and fits(page)
+        page.close()
+        page = open_sign(browser, server, 1024, 701)                         # and above 700 px the detail stays
+        open_the_week(page)
+        assert page.locator("#detail").is_visible() and fits(page)
+        page.close()
+
+
+# --- the week on a short landscape sign, and with empty days in portrait (the whole-branch review) ---
+
+WEEK_SIGNS = ((800, 480), (900, 500), (1024, 600), (1280, 600), (1366, 620))
+ROOM_WITH_A_LONG_LOCATION = {"room_name": "Conference Room Twelve", "room_location": "2nd floor, by the kitchen, past the elevators"}
+
+
+def day_names_are_whole(page):
+    """Whether every day's name is drawn whole: not cut at its end with an ellipsis."""
+    return page.locator("#week .day-name").evaluate_all("names => names.every((n) => n.scrollWidth <= n.clientWidth)")
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+def test_on_a_short_landscape_sign_the_week_shows_todays_bookings_and_the_days_names_whole(browser, scores, central_time):
+    """At 800 by 480 and 1024 by 600 today, with three bookings, showed "+3 more" and not one of them (strip up), or one in full (strip down), and "Wednesday"
+    was cut to "Wedne...". By height alone, up to 700 px, the status gives up its detail, its location and some of the name's size, a booking is the time
+    and a title of one line, and a day under 1000 px wide is named by its first three letters. Today's column shows its bookings, in every one of five
+    sizes, and the sign is whole."""
+    skip_if_day_ends_within(3)
+    names, _ = the_next_seven_days()
+    with PageServer(calendar_events=a_full_week(), schedules=every_school(), **ROOM_WITH_A_LONG_LOCATION) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        for width, height in WEEK_SIGNS:
+            page = open_sign(browser, server, width, height)
+            if scores:
+                strip_is_up(page)
+            open_the_week(page)
+            page.wait_for_timeout(200)
+            where = (bool(scores), width, height)
+            assert fits(page), (*where, page.evaluate("document.documentElement.scrollHeight") - height)
+            today = week_fit(page)[0]
+            assert today[0] == 3 and today[1] >= 1 and not today[3], (*where, today)                      # at least one of today's three bookings shows, whole
+            assert today[2] == (f"+{3 - today[1]} more" if today[1] < 3 else None), (*where, today)
+            assert page.locator("#week .day-name").all_text_contents() == [n[:3] if width < 1000 else n for n in names], where
+            assert day_names_are_whole(page), where
+            page.close()
+
+
+def test_the_days_are_named_by_three_letters_on_a_landscape_sign_narrower_than_1000_px_and_in_full_on_every_other(browser, central_time):
+    """"Wednesday" is wider than a seventh of a sign under 1000 px wide, in landscape: there the days are "Mon" to "Sun", every one of them whole, with the
+    whole name for a screen reader. Every other sign, upright ones included, names them in full, and the names follow the sign when it is resized."""
+    skip_if_day_ends_within(1)
+    names, _ = the_next_seven_days()
+    short = [n[:3] for n in names]
+    with PageServer(calendar_events=[event("e1", "Design review", 40)], room_name="Boardroom") as server:
+        for width, height, abbreviated in ((800, 480, True), (999, 600, True), (1000, 600, False), (1024, 600, False), (1280, 800, False), (800, 1280, False), (999, 1000, False)):      # an upright sign names its days in full: they are rows there
+            page = open_sign(browser, server, width, height)
+            open_the_week(page)
+            assert page.locator("#week .day-name").all_text_contents() == (short if abbreviated else names), (width, height)
+            assert day_names_are_whole(page), (width, height)
+            assert page.locator("#week .day-name").evaluate_all("names => names.map((n) => n.getAttribute('aria-label'))") == (names if abbreviated else [None] * 7)
+            page.close()
+        page = sign_on_a_stopped_clock(browser, server, 800, 480, init_script="document.fonts.addEventListener = () => {};")
+        open_the_week(page)
+        for width, height, abbreviated in ((1280, 800, False), (800, 480, True), (1000, 480, False), (999, 480, True)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                       # the page's own timers are stopped: this is the test's time
+            assert page.locator("#week .day-name").all_text_contents() == (short if abbreviated else names), (width, height)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, compact", [(1280, 700, True), (1280, 701, False), (800, 480, True), (1024, 600, True), (1920, 1080, False), (800, 1280, False)])
+def test_up_to_700_px_high_a_landscape_weeks_booking_is_the_time_and_one_line_of_title_and_has_no_platform(browser, width, height, compact, central_time):
+    """The full booking (the time, a title of two lines, the platform) is 86 px; the compact one is 46. A sign standing upright keeps the platform at any height,
+    and its days are rows, with the title on the time's line."""
+    skip_if_day_ends_within(3)
+    title = "Quarterly planning review with the regional leadership teams and the partners, the board and the finance group"
+    with PageServer(calendar_events=[event_on(f"d{n}", title, 1, 9 + n, 0) for n in range(2)], room_name="Boardroom") as server:
+        page = open_sign(browser, server, width, height)
+        open_the_week(page)
+        page.wait_for_timeout(200)
+        slot = page.locator("#week .slot:not([hidden])").first
+        assert slot.locator(".who").is_hidden() == compact, (width, height)                                           # the platform: not in the compact slot
+        lines = lines_of(page, "#week .slot:not([hidden]) .title")
+        assert set(lines) == {1 if compact or width < height else 2}, (width, height, lines)                         # a title of one line, but in the full slot of a landscape sign
+        if compact:
+            box = slot.bounding_box()
+            assert 40 <= box["height"] <= 52, (width, height, box)                                                    # the time over one line of title, in its own pill
+        page.close()
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+def test_a_long_room_name_in_the_week_on_a_short_sign_steps_down_and_the_sign_fits(browser, scores, central_time):
+    """The week sets the name in a size of its own on a short sign; a name of 67 characters there is stepped down as it is in Today, to two lines."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name=FLOOR_NAMES[67], room_location=TWO_LINE_LOCATION, schedules=every_school()) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        page = open_sign(browser, server, 800, 480)
+        if scores:
+            strip_is_up(page)
+        open_the_week(page)
+        page.wait_for_timeout(200)
+        size, stepped, lines = room_name_type(page)
+        assert lines <= 2 and fits(page) and week_fit(page)[0][1] >= 1, (size, stepped, lines, week_fit(page)[0])
+        assert page.locator("#room-name").inner_text() == FLOOR_NAMES[67]                       # whole: smaller, never cut
+        page.close()
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+def test_in_portrait_the_weeks_days_with_nothing_booked_take_one_line_and_the_others_share_the_rest(browser, scores, central_time):
+    """Seven rows of one seventh each gave "Nothing booked" a whole row and a day with bookings a seventh of the height, "+N more" and little else. Now a day
+    with nothing booked is the height of its own words (the name and the date), and the days with bookings share what is left, equally."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)] + [event_on(f"m{d}{n}", f"Meeting {n}", d, 9 + n, 0) for d in (2, 5) for n in range(5)]
+    with PageServer(calendar_events=bookings, room_name="Boardroom", schedules=every_school()) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        page = open_sign(browser, server, 800, 1280)
+        if scores:
+            strip_is_up(page)
+        open_the_week(page)
+        page.wait_for_timeout(200)
+        heights = page.locator("#week .day").evaluate_all("days => days.map((d) => [d.getBoundingClientRect().height, d.querySelector('.slots') === null])")
+        empty = [h for h, nothing in heights if nothing]
+        busy = [h for h, nothing in heights if not nothing]
+        assert len(empty) == 4 and len(busy) == 3, heights
+        assert max(empty) <= 64 and max(empty) - min(empty) < 1, heights                                  # the name over the date: 40 px of words in a pill with its padding
+        assert max(busy) - min(busy) < 1 and min(busy) > 135, heights                                     # three days share the rest of the height: 105 px each when all seven were equal
+        assert fits(page) and week_fit(page)[0][1] == 3, (week_fit(page)[0], heights)                     # today's three bookings are shown in full
+        page.close()
+
+
+# --- the scoreboard strip (spec 2026-10-13, section 2.5): the last score and the next game of each school the room has on, along the bottom ---
+
+BURNT_ORANGE = "rgb(255, 179, 102)"      # #FFB366, the rank: the one colour the strip adds to the sign's
+PERIWINKLE = "rgb(189, 206, 255)"         # #BDCEFF
+WHITE = "rgb(255, 255, 255)"
+TEXAS_LAST, TEXAS_NEXT = "Texas (#4) 45 \u2013 Texas A&M 42", "Next: 10/19 \u00b7 Texas (#4) @ Missouri (#9)"          # the spec's own words
+MICHIGAN_LAST, MICHIGAN_NEXT = "Michigan (#12) 31 \u2013 Ohio State 24", "Next: 10/24 \u00b7 Michigan (#12) @ Purdue"
+
+
+def status_of(server):
+    with urllib.request.urlopen(f"http://127.0.0.1:{server.port}/api/status", timeout=5) as response:
+        return json.loads(response.read())
+
+
+def wait_for(what, condition, seconds=5):
+    for _ in range(int(seconds / 0.05)):
+        if condition():
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
+def scoreboard_has(server, schools):
+    """Waits until exactly `schools` have something to show (the server's own loop reads a school a moment after it is turned on)."""
+    wait_for(f"the scoreboard to hold {schools}", lambda: [e["school"] for e in status_of(server).get("scores", []) if e["last"] or e["next"]] == schools)
+
+
+def strip_text(page):
+    return [page.locator("#score-last").inner_text(), page.locator("#score-next").inner_text()]
+
+
+def strip_is_up(page):
+    page.wait_for_function("!document.getElementById('score').hidden", timeout=8000)      # the sign's own poll (5 s) brings it
+
+
+def boxes(page, *selectors):
+    """Where each element of each selector is, as [x, y, width, height] in whole tenths of a pixel."""
+    return page.evaluate("""(selectors) => selectors.map((s) => [...document.querySelectorAll(s)].map((e) => {
+        const r = e.getBoundingClientRect();
+        return [r.x, r.y, r.width, r.height].map((v) => Math.round(v * 10) / 10);
+    }))""", list(selectors))
+
+
+def test_the_strip_is_hidden_until_a_school_is_on_and_nothing_is_read_for_a_room_that_has_none(browser):
+    with PageServer(schedules=every_school()) as server:
+        page = open_sign(browser, server)
+        page.wait_for_timeout(300)                                           # the scoreboard's loop has looked a good many times
+        assert page.locator("#score").is_hidden() and server.feed.asked == []
+        assert "scores" not in status_of(server) and fits(page)
+        page.close()
+
+
+def test_the_strip_shows_the_last_score_and_the_next_game_in_the_specs_words_with_the_ranks_in_burnt_orange(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        page = open_sign(browser, server)
+        errors, urls = [], []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        page.on("request", lambda r: urls.append(r.url))
+        choose(server, sign_scores=["texas"])
+        strip_is_up(page)
+        assert strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]                  # one school: no name leading
+        ranks = page.locator("#score .rank")
+        assert ranks.all_inner_texts() == ["(#4)", "(#4)", "(#9)"]            # the ranks of both lines, and only a rank
+        assert set(ranks.evaluate_all("els => els.map((e) => getComputedStyle(e).color)")) == {BURNT_ORANGE}
+        inks = page.locator("#score").evaluate("""strip => { const seen = new Set(), walk = (node) => { for (const child of node.childNodes) {
+            if (child.nodeType === 3 && child.textContent.trim()) seen.add(getComputedStyle(node).color); else if (child.nodeType === 1) walk(child); } };
+            walk(strip); return [...seen]; }""")
+        assert sorted(inks) == sorted([WHITE, PERIWINKLE, BURNT_ORANGE])     # white and periwinkle as elsewhere: the orange of the ranks is the one new colour
+        assert page.locator("#score-last").evaluate("e => getComputedStyle(e).color") == WHITE
+        assert page.locator("#score-next").evaluate("e => getComputedStyle(e).color") == PERIWINKLE
+        assert page.locator("#score").evaluate("e => getComputedStyle(e).textTransform") == "none"      # no capitals
+        assert fits(page) and errors == []
+        assert urls and all(u.startswith(f"http://127.0.0.1:{server.port}/") for u in urls)             # the sign asks nobody but its own room
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, root", [(1280, 800, 16), (1920, 1080, 24)])
+def test_the_strip_is_set_in_the_signs_own_type_and_sits_flush_along_the_bottom_edge(browser, width, height, root, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, width, height)
+        strip_is_up(page)
+        style = lambda selector, prop: page.locator(selector).evaluate(f"e => getComputedStyle(e).{prop}")
+        assert page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)") == root
+        assert float(style("#score", "fontSize").removesuffix("px")) == pytest.approx(1.1 * root) and style("#score", "fontFamily").startswith("Lexend")   # 1.1 rem: between the sign's 1.05 and 1.15
+        assert (style("#score-last", "fontWeight"), style("#score-next", "fontWeight")) == ("600", "400")                   # the score in the sign's bold, the next game in its regular
+        assert style("#score", "backgroundColor") == "rgba(0, 0, 0, 0.35)"
+        box = page.locator("#score").bounding_box()
+        assert box["x"] == 0 and abs(box["x"] + box["width"] - width) <= 0.5 and abs(box["y"] + box["height"] - height) <= 0.5      # across the sign, on its bottom edge
+        last, following = page.locator("#score-last").bounding_box(), page.locator("#score-next").bounding_box()
+        assert abs(last["x"] - page.locator("#room-name").bounding_box()["x"]) <= 1                          # its words start where the others do, past the rail
+        assert following["x"] >= last["x"] + last["width"]                                                  # the last game on the left, the next on the right ...
+        margin = float(style("#score", "paddingRight").removesuffix("px"))
+        assert abs(following["x"] + following["width"] - (width - margin)) <= 1                              # ... to the sign's right margin
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        wait_for_the_photograph_to_paint(page)
+        assert screenshot_pixel(page, 10, height - 10) == (31, 169, 113)    # the status rail runs on, solid, past the strip to the bottom edge (#1FA971)
+        assert screenshot_pixel(page, 10, height // 2) == (31, 169, 113)
+        page.close()
+
+
+TEXAS_AM_LAST, TEXAS_AM_NEXT = "Texas A&M (#20) 21 \u2013 LSU (#18) 24", "Next: 10/17 \u00b7 Arkansas @ Texas A&M (#20)"
+MISSOURI_LAST, MISSOURI_NEXT = "Missouri (#9) 35 \u2013 Vanderbilt 10", "Next: 10/19 \u00b7 Texas (#4) @ Missouri (#9)"
+SCHOOL_LINES = {"Texas": ["Texas: " + TEXAS_LAST, TEXAS_NEXT], "Michigan": ["Michigan: " + MICHIGAN_LAST, MICHIGAN_NEXT],
+                "Texas A&M": ["Texas A&M: " + TEXAS_AM_LAST, TEXAS_AM_NEXT], "Missouri": ["Missouri: " + MISSOURI_LAST, MISSOURI_NEXT]}
+EVERY_SCHOOL_ON = ["texas", "michigan", "texas_am", "missouri"]                        # in the order the table lists them
+
+
+def sign_whose_turns_can_be_stepped(browser, server, width=1280, height=800):
+    """The sign on a stopped clock that has noted when it set its 8-second timer (the strip's turns from school to school), so that a test can
+    step the page's clock to the very instant of a turn. Returns the page and that moment, in the page's own milliseconds."""
+    page = browser.new_page(viewport={"width": width, "height": height})
+    page.clock.install()
+    page.add_init_script("""(() => {
+        const set = window.setInterval;
+        window.timersSetAt = [];
+        window.setInterval = function (handler, delay, ...rest) { window.timersSetAt.push([delay, Date.now()]); return set.call(this, handler, delay, ...rest); };
+    })()""")
+    page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+    page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+    strip_is_up(page)
+    page.clock.pause_at(datetime.now() + timedelta(seconds=2))
+    return page, page.evaluate("window.timersSetAt.find(([delay]) => delay === 8000)[1]")
+
+
+def next_turn(page, set_at):
+    """The next instant after now at which the strip turns: the timer fires 8000 ms after it was set, and every 8000 ms after that."""
+    now = page.evaluate("Date.now()")
+    turn = set_at + 8000 * ((now - set_at) // 8000 + 1)
+    return turn if turn - now >= 500 else turn + 8000
+
+
+def run_to(page, instant):
+    """Runs the page's clock to `instant` (its milliseconds), firing every timer due by then, and lets the page draw."""
+    page.clock.run_for(instant - page.evaluate("Date.now()"))
+    page.wait_for_timeout(150)
+
+
+def school_on_the_strip(page):
+    return strip_text(page)[0].split(":")[0]
+
+
+def test_the_strip_turns_to_the_next_school_at_exactly_eight_seconds_on_the_pages_own_clock_with_the_schools_name_leading(browser, central_time):
+    """The page's clock is stepped to the millisecond before the timer's next firing and to the firing itself: a timer set for 7999, 8001 or
+    7000 ms, or one that does not run on the page's clock, turns at the wrong step."""
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas", "michigan"])
+        scoreboard_has(server, ["texas", "michigan"])
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        first = school_on_the_strip(page)
+        if page.evaluate("Date.now()") - set_at < 8000:                          # the pause came before the first turn, as it does unless the machine is very slow
+            assert strip_text(page) == SCHOOL_LINES["Texas"]                     # the first school in the settings' order is first, its name leading
+        order = ["Texas", "Michigan"]
+        turn = next_turn(page, set_at)
+        for step in range(3):
+            run_to(page, turn - 1)
+            assert school_on_the_strip(page) == order[(order.index(first) + step) % 2], step          # a millisecond short: still the school it was
+            run_to(page, turn)
+            assert strip_text(page) == SCHOOL_LINES[order[(order.index(first) + step + 1) % 2]], step      # on the turn: the next, whole
+            turn += 8000
+        assert page.locator("#score .rank").count() >= 2 and fits(page) and errors == []
+        page.close()
+
+
+def test_with_four_schools_on_the_strip_goes_round_them_in_the_settings_order(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=EVERY_SCHOOL_ON)
+        scoreboard_has(server, EVERY_SCHOOL_ON)
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server)
+        order = ["Texas", "Michigan", "Texas A&M", "Missouri"]
+        shown = school_on_the_strip(page)
+        turn, seen = next_turn(page, set_at), [shown]
+        for _ in range(6):
+            run_to(page, turn)
+            assert strip_text(page) == SCHOOL_LINES[school_on_the_strip(page)]      # each school's own two lines, whole
+            seen.append(school_on_the_strip(page))
+            turn += 8000
+        start = order.index(shown)
+        assert seen == [order[(start + n) % 4] for n in range(7)], seen             # each once, in the settings' order, and round again: none skipped
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(800, 1280), (800, 480), (1024, 600), (1099, 800)])
+def test_in_a_sign_under_1100_px_wide_the_strip_is_two_lines_for_every_school_so_that_its_height_and_the_weeks_rows_never_change_on_a_turn(browser, width, height, central_time):
+    """Four schools whose lines differ: Texas has only a last game (its season is over), Michigan only a next one (its season has not begun),
+    Texas A&M the longest names an SEC opponent gives (Mississippi State, Louisiana State, with ranks) and Missouri the usual pair."""
+    skip_if_day_ends_within(3)
+    schedules = every_school()
+    schedules[245] = longest_names()
+    schedules[251]["events"] = [e for e in schedules[251]["events"] if e["competitions"][0]["status"]["type"]["completed"]]
+    schedules[130]["events"] = [e for e in schedules[130]["events"] if not e["competitions"][0]["status"]["type"]["completed"]]
+    with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=schedules) as server:
+        choose(server, sign_scores=EVERY_SCHOOL_ON)
+        scoreboard_has(server, EVERY_SCHOOL_ON)
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server, width, height)
+        turn = next_turn(page, set_at)
+        shapes, seen = [], []
+        for step in range(4):
+            if step:
+                run_to(page, turn)
+                turn += 8000
+            strip, last, following = (page.locator(selector).bounding_box() for selector in ("#score", "#score-last", "#score-next"))
+            if last and following:                                                  # a school with both lines: the next game is under the last one, never beside it
+                assert following["y"] >= last["y"] + last["height"] - 1, (step, last, following)
+            if following and not last:                                              # one with only a next game has it at the left, where the lines start, not pushed right
+                assert abs(following["x"] - page.locator("#room-name").bounding_box()["x"]) <= 1, (step, following)
+            shapes.append((round(strip["y"], 1), round(strip["height"], 1)))
+            seen.append(school_on_the_strip(page))
+        assert len(set(seen)) == 4                                                  # every school was drawn
+        assert len(set(shapes)) == 1, (seen, shapes)                                # and the strip's box is the same for each: no school is a line shorter
+        line = 1.1 * 16 * 1.35
+        assert abs(shapes[0][1] - (14 + 14 + 1 + 4 + 2 * line)) <= 1                 # two lines, a gap and the band's padding
+        open_the_week(page)
+        weeks = []
+        for step in range(4):
+            if step:
+                run_to(page, turn)
+                turn += 8000
+            weeks.append(page.locator("#week .day").evaluate_all("days => days.map((d) => { const b = d.getBoundingClientRect(); return [Math.round(b.top * 10) / 10, Math.round(b.height * 10) / 10]; })"))
+        assert all(rows == weeks[0] for rows in weeks), weeks                      # the seven days keep their rows across the turns
+        choose(server, sign_scores=["michigan"])                                    # one school on, with only a next game: no name leads and the next game has the strip to itself
+        scoreboard_has(server, ["michigan"])
+        poll(page)
+        assert page.locator("#score-last").evaluate("e => e.textContent") == ""
+        alone, strip = page.locator("#score-next").bounding_box(), page.locator("#score").bounding_box()
+        assert abs(alone["x"] - page.locator("#room-name").bounding_box()["x"]) <= 1, alone      # at the left, where the lines start, not pushed to the right
+        assert abs(strip["height"] - shapes[0][1]) <= 0.5, strip                    # and the band is as high as ever
+        page.close()
+
+
+def test_a_school_with_nothing_to_show_is_left_out_of_the_rotation_and_the_strip_goes_when_none_has_anything(browser, central_time):
+    with PageServer(schedules={**every_school(), 130: {"events": []}}) as server:       # Michigan's feed has no games in it
+        choose(server, sign_scores=["michigan", "texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == ["Texas: " + TEXAS_LAST, TEXAS_NEXT]      # two schools are on, so the name leads; only Texas has anything to say
+        page.clock.run_for(8500)
+        page.wait_for_timeout(150)
+        assert strip_text(page)[0] == "Texas: " + TEXAS_LAST                  # and the rotation has nowhere else to go
+        choose(server, sign_scores=["michigan"])
+        scoreboard_has(server, [])
+        poll(page)
+        assert page.locator("#score").is_hidden()                            # one school on, with nothing to say: no strip
+        page.close()
+
+
+def test_a_school_with_only_a_last_game_or_only_a_next_one_shows_that_one(browser, central_time):
+    schedules = every_school()
+    schedules[251]["events"] = [e for e in schedules[251]["events"] if e["competitions"][0]["status"]["type"]["completed"]]          # the season is over
+    schedules[130]["events"] = [e for e in schedules[130]["events"] if not e["competitions"][0]["status"]["type"]["completed"]]      # it has not begun
+    with PageServer(schedules=schedules) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)                     # the polls that change the strip are the test's to bring
+        strip_is_up(page)
+        assert strip_text(page) == [TEXAS_LAST, ""] and page.locator("#score-next").evaluate("e => getComputedStyle(e).display") == "none"      # a half with nothing in it takes no room
+        choose(server, sign_scores=["michigan"])
+        scoreboard_has(server, ["michigan"])
+        poll(page)
+        assert strip_text(page) == ["", MICHIGAN_NEXT] and page.locator("#score-last").evaluate("e => getComputedStyle(e).display") == "none"
+        box, nxt = page.locator("#score").bounding_box(), page.locator("#score-next").bounding_box()
+        assert nxt["x"] + nxt["width"] > box["x"] + box["width"] * 0.6      # the next game stays on the right when it is alone
+        choose(server, sign_scores=["texas", "michigan"])                    # with two on, the name leads a school that has only a next game to give
+        scoreboard_has(server, ["texas", "michigan"])
+        poll(page)                                                           # Michigan stays up: a poll does not move the strip on (the turn is eight seconds of the page's time)
+        assert strip_text(page) == ["Michigan", MICHIGAN_NEXT]
+        page.close()
+
+
+def test_a_game_lost_on_the_road_reads_with_the_school_first_and_the_next_one_with_the_visitor_first(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas_am"])                             # Texas A&M lost at LSU, 24 to 21: LSU is the home side, listed first in the feed
+        scoreboard_has(server, ["texas_am"])
+        page = open_sign(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == ["Texas A&M (#20) 21 \u2013 LSU (#18) 24", "Next: 10/17 \u00b7 Arkansas @ Texas A&M (#20)"]   # the school's own score first; the visitor "@" the host
+        page.close()
+
+
+def test_the_strip_keeps_the_last_score_through_a_feed_that_fails_or_has_nothing_to_say_and_goes_with_the_schools(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        strip_is_up(page)
+
+        def reads_after(change):
+            asked = len(server.feed.asked)
+            change()
+            wait_for("three more reads", lambda: len(server.feed.asked) >= asked + 3)
+
+        reads_after(lambda: setattr(server.feed, "down", ScheduleUnavailable("ESPN answered 503")))     # the feed goes down: the scoreboard keeps what it has ...
+        assert status_of(server)["scores"][0]["last"]["home_score"] == 45
+        poll(page)
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]    # ... and so does the strip
+        server.feed.down = None
+        reads_after(lambda: server.schedules.__setitem__(251, {"events": []}))                         # the feed answers, with no games in it: that is no news about Texas
+        poll(page)
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT] and fits(page)
+        changed = texas_sample()                                                                       # and a schedule with games in it is an answer again, with a new score
+        changed["events"][3]["competitions"][0]["competitors"][0]["score"] = {"value": 52.0, "displayValue": "52"}
+        server.schedules[251] = changed
+        wait_for("the new score", lambda: status_of(server)["scores"][0]["last"]["home_score"] == 52)
+        poll(page)
+        assert strip_text(page) == ["Texas (#4) 52 \u2013 Texas A&M 42", TEXAS_NEXT]
+        choose(server, sign_scores=[])                                                                 # every school off: the strip goes, and nothing is read after
+        poll(page)
+        assert page.locator("#score").is_hidden() and "scores" not in status_of(server)
+        asked = len(server.feed.asked)
+        time.sleep(0.3)
+        assert len(server.feed.asked) == asked and errors == []
+        page.close()
+
+
+def test_a_feed_that_is_down_from_the_start_leaves_the_sign_with_no_strip_and_no_error(browser):
+    with PageServer(calendar_events=[event("e1", "Design review", 40)], schedules=every_school()) as server:
+        server.feed.down = ScheduleUnavailable("ESPN could not be reached: no route to host")
+        choose(server, sign_scores=["texas", "michigan"])
+        wait_for("the first reads", lambda: len(server.feed.asked) >= 2)
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        problems = []
+        page.on("pageerror", lambda e: problems.append(str(e)))
+        page.on("console", lambda m: problems.append(m.text) if m.type in ("error", "warning") else None)
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        scores = status_of(server)["scores"]                                  # the status answers, listing the schools with nothing to show
+        assert [(e["school"], e["last"], e["next"]) for e in scores] == [("texas", None, None), ("michigan", None, None)]
+        assert page.locator("#score").is_hidden() and fits(page)
+        assert "ESPN" not in page.locator("body").inner_text() and "score" not in page.locator("body").inner_text().lower()      # no error to read on the sign
+        assert page.locator("#chip-text").inner_text().startswith("Free until") and problems == []
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (800, 1280)])
+def test_the_strip_coming_up_moves_nothing_on_the_today_list_and_the_sign_still_fits(browser, width, height, central_time):
+    skip_if_day_ends_within(3)
+    bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 100), event("e3", "Sales pipeline", 160)]
+    with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        page = sign_on_a_stopped_clock(browser, server, width, height)      # the polls that bring and take the strip are the test's to bring
+        page.wait_for_selector("#events .event", timeout=5000)
+        page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
+        parts = (".top", ".brand", ".when", ".status", ".chip", "#detail", "#today", ".today-head", "#events .event")
+        before = boxes(page, *parts)
+        assert fits(page)
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        poll(page)
+        assert page.evaluate("!document.getElementById('score').hidden")
+        assert boxes(page, *parts) == before                                  # every box of the sign above the strip is where it was
+        strip, today = page.locator("#score").bounding_box(), page.locator("#today").bounding_box()
+        assert today["y"] + today["height"] <= strip["y"]                    # the strip takes room of its own and covers nothing
+        assert abs(strip["y"] + strip["height"] - height) <= 0.5 and fits(page)
+        choose(server, sign_scores=[])                                       # and its going moves nothing either
+        poll(page)
+        assert page.evaluate("document.getElementById('score').hidden")
+        assert boxes(page, *parts) == before and fits(page)
+        page.close()
+
+
+LONGEST_LINES = ["Texas A&M: Texas A&M (#12) 45 \u2013 Mississippi State (#15) 42", "Next: 10/19 \u00b7 Louisiana State (#9) @ Texas A&M (#12)"]   # with the name leading, as it does with two schools on
+
+
+def what_a_side_of_the_strip_is(page, selector):
+    """[its height in lines, scrollHeight == clientHeight, whether its text runs past its box] for #score-last or #score-next."""
+    return page.locator(selector).evaluate("""(e) => { const s = getComputedStyle(e);
+        return [e.getBoundingClientRect().height / parseFloat(s.lineHeight), e.scrollHeight === e.clientHeight, e.scrollWidth > e.clientWidth, s.whiteSpace, s.overflow, s.textOverflow]; }""")
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1080), (1100, 800), (1099, 800), (1024, 600), (800, 1280), (420, 900)])
+def test_the_strip_never_wraps_so_its_height_is_the_same_for_the_longest_names_as_for_a_short_pair_at_every_width_and_school_turn(browser, width, height, central_time):
+    """Each side of the strip is one clipped line (no wrapping, hidden overflow, an ellipsis), so the strip is the same height for Texas's short pair
+    and for the longest names an SEC opponent gives (Texas A&M (#12) 45 - Mississippi State (#15) 42 over Next: 10/19 - Louisiana State (#9) @ Texas A&M
+    (#12)), at every width: one line from 1100 px wide, the two sides sharing it, and two lines, one side to a line, below it. The text is clipped where it
+    does not fit, the final score last."""
+    with PageServer(schedules={**every_school(), 245: longest_names()}) as server:
+        choose(server, sign_scores=["texas", "texas_am"])                         # two on: the name leads, the longest line the strip can have
+        scoreboard_has(server, ["texas", "texas_am"])
+        page, set_at = sign_whose_turns_can_be_stepped(browser, server, width, height)
+        root = page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)")
+        one_line, two_lines = 29 + 1.485 * root, 33 + 2 * 1.485 * root              # the band's padding and rule, one line of 1.1 rem at 1.35, or two with the gap
+        seen = {}
+        for step in range(2):
+            if step:
+                run_to(page, next_turn(page, set_at))
+            school = school_on_the_strip(page)
+            seen[school] = {"text": strip_text(page), "strip": page.locator("#score").bounding_box(),
+                            "last": what_a_side_of_the_strip_is(page, "#score-last"), "next": what_a_side_of_the_strip_is(page, "#score-next")}
+        assert set(seen) == {"Texas", "Texas A&M"}
+        assert seen["Texas A&M"]["text"] == LONGEST_LINES, seen["Texas A&M"]["text"]                         # the whole text is there, whatever is shown of it
+        expected = one_line if width >= 1100 else two_lines
+        for school, drawn in seen.items():
+            assert abs(drawn["strip"]["height"] - expected) <= 1, (school, drawn["strip"], expected)         # the same height for the short pair and the long one
+            for side in ("last", "next"):
+                lines, whole, _, white_space, overflow, ellipsis = drawn[side]
+                assert abs(lines - 1) < 0.01 and whole, (school, side, drawn[side])                         # one line, never a second
+                assert (white_space, overflow, ellipsis) == ("nowrap", "hidden", "ellipsis"), (school, side, drawn[side])
+        assert abs(seen["Texas"]["strip"]["y"] - seen["Texas A&M"]["strip"]["y"]) <= 0.5                     # so the top edge does not move on a turn
+        short_last, short_next = seen["Texas"]["last"][2], seen["Texas"]["next"][2]
+        assert not short_last and not short_next                                 # Texas's pair is never clipped
+        if width == 1100:                                                       # the narrowest one-line strip: the longest pair does not fit, and the next game gives way
+            assert not seen["Texas A&M"]["last"][2] and seen["Texas A&M"]["next"][2], seen["Texas A&M"]
+        if width == 420:                                                        # a phone: each side is clipped to its own line
+            assert seen["Texas A&M"]["last"][2] and seen["Texas A&M"]["next"][2], seen["Texas A&M"]
+        sides = page.locator("#score-last").bounding_box(), page.locator("#score-next").bounding_box()
+        if width >= 1100:
+            assert abs(sides[0]["y"] - sides[1]["y"]) <= 2 and sides[1]["x"] >= sides[0]["x"] + sides[0]["width"]     # side by side
+        else:
+            assert sides[1]["y"] >= sides[0]["y"] + sides[0]["height"] - 1                                          # one under the other
+        if width != 420:
+            assert fits(page)
+        page.close()
+
+
+def test_the_scoreboards_last_game_is_clipped_inside_the_strip_when_a_team_name_is_wider_than_the_whole_strip(browser, central_time):
+    """The strip's last-game side is `max-width: 100%` of the strip's content: without it, a side that does not shrink is as wide as its text and runs
+    off the sign (the next game with it). A feed can send a name of any length, so a team name of 167 characters, wider than a 1280 px strip (the line of
+    one of 90 is 961 px of the strip's 1151, and fits), is cut with an ellipsis at the strip's own edge, is whole in the page's text, and leaves the strip
+    the height of one line."""
+    name = ("Louisiana State University and Agricultural and Mechanical College Fighting Tigers of 1860, "
+            "the flagship campus on the bluff above the Mississippi River in Baton Rouge")
+    assert len(name) == 167
+    long_name = schedule("Texas", [game("Texas", name, "2026-10-12T00:00Z", home_score=45, away_score=42, home_rank=4, state="post"),
+                                   game("Texas", "Rice", "2026-10-19T19:00Z", home_rank=4)])
+    with PageServer(schedules={**every_school(), 251: long_name}) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, 1280, 800)
+        strip_is_up(page)
+        assert strip_text(page)[0] == f"Texas (#4) 45 \u2013 {name} 42"                  # every character is in the page, whatever is shown of it
+        drawn = page.evaluate("""() => { const strip = document.getElementById('score'), last = document.getElementById('score-last'), s = getComputedStyle(strip);
+            const box = strip.getBoundingClientRect(), side = last.getBoundingClientRect(), root = document.documentElement;
+            return {inside_left: box.left + parseFloat(s.paddingLeft), inside_right: box.right - parseFloat(s.paddingRight), left: side.left, right: side.right,
+                    height: box.height, clipped: last.scrollWidth > last.clientWidth, wider_than_the_sign: root.scrollWidth > root.clientWidth}; }""")
+        assert drawn["clipped"], drawn                                                      # the line is wider than the strip, so ...
+        assert drawn["left"] >= drawn["inside_left"] - 0.5 and drawn["right"] <= drawn["inside_right"] + 0.5, drawn      # ... its side stops at the strip's content edge
+        assert what_a_side_of_the_strip_is(page, "#score-last")[3:] == ["nowrap", "hidden", "ellipsis"]       # by being cut, not wrapped
+        assert abs(drawn["height"] - (29 + 1.485 * 16)) <= 1 and not drawn["wider_than_the_sign"] and fits(page), drawn      # one line of it, on a sign that does not move
+        page.close()
+
+
+def test_the_scoreboard_reads_vs_for_a_next_game_at_a_neutral_site_in_the_order_espn_lists_it_and_a_last_game_is_unchanged(browser, central_time):
+    """The Red River game is marked neutralSite with Oklahoma listed home: "Texas (#4) @ Oklahoma" would call Oklahoma the host. A bowl or a
+    championship game would read the same way. The line of the last game is the same at a neutral site as anywhere."""
+    red_river = schedule("Texas", [game("Oklahoma", "Texas", "2026-10-10T19:30Z", home_score=27, away_score=24, away_rank=1, state="post", neutral=True),
+                                   game("Oklahoma", "Texas", "2026-10-17T19:00Z", away_rank=4, neutral=True)])
+    with PageServer(schedules={251: red_river}) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server)
+        strip_is_up(page)
+        assert strip_text(page) == ["Texas (#1) 24 \u2013 Oklahoma 27", "Next: 10/17 \u00b7 Texas (#4) vs Oklahoma"]     # the visitor first, "vs" and not "@"
+        assert page.locator("#score .rank").all_inner_texts() == ["(#1)", "(#4)"]
+        page.close()
+
+
+def test_the_scoreboards_next_game_reads_at_unless_the_status_says_neutral_is_true(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        flag = {}
+
+        def status(route):
+            body = route.fetch().json()
+            game = {"date": "2026-10-17", "home": "Oklahoma", "home_rank": None, "away": "Texas", "away_rank": 4}
+            body["scores"] = [{"school": "texas", "name": "Texas", "last": None, "next": {**game, **flag}}]
+            route.fulfill(json=body)
+
+        page.route("**/api/status", status)
+        for flag, shown in (({"neutral": True}, "vs"), ({"neutral": False}, "@"), ({}, "@"), ({"neutral": "yes"}, "@"), ({"neutral": 1}, "@"), ({"neutral": None}, "@")):
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            strip_is_up(page)
+            assert page.locator("#score-next").inner_text() == f"Next: 10/17 \u00b7 Texas (#4) {shown} Oklahoma", flag
+        page.close()
+
+
+def test_the_scoreboard_date_is_the_month_and_the_day_without_leading_zeros(browser):
+    """The strip's date is "10/19" for the 19th of October and "9/5" for the 5th of September, as Americans write it."""
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        dates = ["2026-09-05", "2026-12-31", "2027-01-09", "2026-10-19"]
+
+        def status(route):
+            body = route.fetch().json()
+            body["scores"] = [{"school": "texas", "name": "Texas", "last": None,
+                               "next": {"date": dates[0], "home": "Texas", "home_rank": None, "away": "Rice", "away_rank": None}}]
+            route.fulfill(json=body)
+
+        page.route("**/api/status", status)
+        for date, shown in zip(dates, ["9/5", "12/31", "1/9", "10/19"]):
+            dates[0] = date
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+            strip_is_up(page)
+            assert page.locator("#score-next").inner_text() == f"Next: {shown} \u00b7 Rice @ Texas", date
+        page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_scoreboard_strip(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || '') + ':' + r.target.nodeName)))
+                .observe(document.getElementById('score'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == []                         # the same score: the strip is not drawn again
+        page.close()
+
+
+def a_sign_served_this_status(browser, server, scores):
+    """A sign on a room whose status route is made to carry `scores` (whatever the test says: the scoreboard behind it is not asked); returns
+    the page, the list of what went wrong on it (page errors and console errors) and a function that serves something else at the next load."""
+    page = browser.new_page(viewport={"width": 1280, "height": 800})
+    problems, served = [], {"scores": scores}
+
+    def status(route):
+        body = route.fetch().json()
+        if served["scores"] is not None:
+            body["scores"] = served["scores"]
+        route.fulfill(json=body)
+
+    page.on("pageerror", lambda e: problems.append(str(e)))
+    page.on("console", lambda m: problems.append(m.text) if m.type == "error" else None)
+    page.route("**/api/status", status)
+
+    def load(scores_now):
+        served["scores"] = scores_now
+        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+
+    return page, problems, load
+
+
+def test_a_scores_list_with_junk_in_it_draws_what_it_can_and_throws_nothing(browser):
+    """The status is the room's own, but the sign never takes its shape on trust."""
+    def michigan(**ranks):
+        return {"school": "michigan", "name": "Michigan", "next": {"date": "2026-10-24", "home": "", "away": "Purdue"},
+                "last": {"home": "Michigan", "home_score": 3, "away": "Ohio State", "away_score": 0, **ranks}}
+
+    junk = [None, 7, "texas", {}, {"school": "texas"}, {"school": "texas", "name": "Texas", "last": {"home": "Texas"}, "next": {"date": "soon", "home": "A", "away": "B"}},
+            michigan(home_rank="x", away_rank=99.5)]
+    with PageServer() as server:
+        page, problems, load = a_sign_served_this_status(browser, server, junk)
+        load(junk)
+        strip_is_up(page)
+        assert strip_text(page) == ["Michigan: Michigan 3 \u2013 Ohio State 0", ""]      # the one entry that holds a whole game; a next game with no host is left out
+        for ranks, drawn in (({"home_rank": 25, "away_rank": 1}, "Michigan (#25) 3 \u2013 Ohio State (#1) 0"),                       # the Top 25 are ranks, ...
+                             ({"home_rank": 26, "away_rank": 99}, "Michigan 3 \u2013 Ohio State 0"),                               # ... and nothing past it is, 99 being ESPN's "no rank"
+                             ({"home_rank": 0, "away_rank": -3}, "Michigan 3 \u2013 Ohio State 0"),
+                             ({"home_rank": True, "away_rank": "7"}, "Michigan 3 \u2013 Ohio State 0"),
+                             ({"home_rank": 4.5, "away_rank": None}, "Michigan 3 \u2013 Ohio State 0")):
+            load([michigan(**ranks), None, 7])                                                    # one whole entry among the junk: no name leads
+            strip_is_up(page)
+            assert strip_text(page)[0] == drawn, ranks
+        for nothing in ([None, 7, "x", {}], "texas", {"school": "texas"}, [], None):
+            load(nothing)                                                      # nothing a strip can be drawn from
+            assert page.locator("#score").is_hidden(), nothing
+        assert problems == []
+        page.close()
+
+
+def test_a_scoreboard_team_name_with_markup_in_it_is_drawn_as_the_text_it_is_and_nothing_is_injected(browser):
+    """Names come from ESPN and are written to the sign's own page: a name with markup in it must show as typed and run nothing."""
+    onerror, script, bold, italic = '<img src=x onerror="window.pwned = 1">', "</span><script>window.pwned = 2</script>", "<b>Ohio State</b>", "a &amp; b <i>c</i>"
+    scores = [{"school": "michigan", "name": onerror,
+               "last": {"home": script, "home_score": 3, "away": bold, "away_score": 0},
+               "next": {"date": "2026-10-24", "home": "Purdue", "away": italic}},
+              {"school": "texas", "name": "<u>Texas</u>", "last": None, "next": {"date": "2026-10-19", "home": "Missouri", "away": "Texas"}}]
+    with PageServer() as server:
+        page, problems, load = a_sign_served_this_status(browser, server, scores)
+        load(scores)
+        strip_is_up(page)
+        assert strip_text(page) == [f"{onerror}: {script} 3 \u2013 {bold} 0", f"Next: 10/24 \u00b7 {italic} @ Purdue"]      # as typed, tags and entities and all
+        assert page.locator("#score img, #score script, #score b, #score i, #score u").count() == 0         # no element came of it
+        assert page.evaluate("window.pwned") is None
+        page.wait_for_timeout(300)
+        assert page.evaluate("window.pwned") is None and problems == []                                   # and nothing ran, or failed to load, afterwards
+        page.close()
+
+
+def test_the_strip_stays_as_it_was_while_the_sign_cannot_reach_the_room(browser, central_time):
+    with PageServer(schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server)
+        strip_is_up(page)
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        assert page.locator("#score").is_visible() and strip_text(page) == [TEXAS_LAST, TEXAS_NEXT]    # as the rest of what the sign last knew stays
+        page.close()
+
+
+@pytest.mark.parametrize("room, location", [("Boardroom", "2nd floor, by the kitchen"), ("Conference Room Twelve", "2nd floor, by the kitchen, past the elevators")])
+def test_on_a_short_sign_with_a_school_on_the_week_counts_the_strip_and_keeps_every_days_plus_n_more_whole(browser, room, location, central_time):
+    """The strip takes 53 to 81 px of a short screen's height, which the short-screen rules did not count: on a 1024 by 600 sign with a long room
+    name the days were 74 px tall and their "+N more" cut off, on 900 by 500 they were 43 and on 800 by 480, 20. While a school is on, up to
+    700 px of height the week gives the days room (the strip is 81 px tall under 1100 px wide, where it is two lines, and a 1024 by 641 sign's
+    "+N more" was cut off by it, as a 1280 by 641 sign's was before; on a wide panel the root font grows with the long side, so with the rule at
+    680 a 1366 by 681 sign's and a 1400 by 690 one's were cut off too, and the rule's edge is pinned at 700 and 701): the status gives up its detail
+    and its location and shrinks the room's name (the days keep their dates down to 561 px, where the rule for short signs takes them); and up to
+    560 the Today list's status gives up its detail too. Every busy day's "+N more" is then whole: inside its day and inside the box its bookings
+    are in."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name=room, room_location=location, schedules=every_school()) as server:
+        choose(server, sign_scores=["texas", "texas_am"])                      # two on: the name leads, the longest line the strip has
+        scoreboard_has(server, ["texas", "texas_am"])
+        for width, height in ((1024, 700), (1024, 641), (1280, 641), (1024, 600), (1024, 561), (900, 500), (800, 480), (1024, 560), (1280, 561), (1024, 701), (1280, 720),
+                              (1366, 681), (1400, 690)):
+            page = open_sign(browser, server, width, height)
+            strip_is_up(page)
+            today_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+            assert fits(page), ("Today", width, height)                       # the Today list's status fits above the strip, the long name included
+            assert page.locator("#detail").is_hidden() == (height <= 560), ("Today", width, height)     # and on the shortest screens does without its detail line
+            open_the_week(page)
+            page.wait_for_timeout(200)
+            assert fits(page), ("week", width, height)
+            short = height <= 700
+            assert page.locator("#detail").is_hidden() == short, (width, height)                       # up to 700 px of height the detail goes while the strip is up ...
+            assert page.locator("#room-location").is_hidden() == short, (width, height)                # ... and the location ...
+            assert page.locator("#week .day-date").first.is_hidden() == (height <= 560), (width, height)        # while the days keep their dates until 560
+            week_size = page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+            root = page.evaluate("parseFloat(getComputedStyle(document.documentElement).fontSize)")           # 16 px, and more on a panel wider than 1280
+            assert (week_size == pytest.approx(min(max(1.8 * root, 0.036 * width), 2.6 * root))) if short else (week_size == today_size), (width, height, week_size)   # ... and the name is smaller
+            counts = page.evaluate("""() => [...document.querySelectorAll('#week .day')].slice(1).map((day) => {
+                const more = day.querySelector('.more'), slots = day.querySelector('.slots');
+                if (!more || more.hidden) return null;
+                const a = more.getBoundingClientRect(), b = slots.getBoundingClientRect(), c = day.getBoundingClientRect();
+                return [a.top >= b.top - 0.5 && a.bottom <= b.bottom + 0.5 && a.bottom <= c.bottom && more.scrollWidth <= more.clientWidth, more.textContent];
+            })""")
+            assert all(count is not None and count[0] for count in counts), (room, width, height, counts)         # every busy day says how many it leaves out, whole
+            strip, days = page.locator("#score").bounding_box(), page.locator("#week-days").bounding_box()
+            assert days["y"] + days["height"] <= strip["y"] + 0.5, (width, height)                            # and the days end above the strip
+            page.close()
+
+
+def test_the_weeks_short_sign_rules_are_by_height_alone_and_the_strip_coming_and_going_changes_none_of_them(browser, central_time):
+    """At 1024 by 600 the week has no detail line, no location and the smaller name whether the strip is up or not (the days were 100 px tall without it, with
+    "+3 more" for today and no booking), and has them all, in full, at 1024 by 701. The page's polls are stopped here: the test brings each one."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=a_full_week(), room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        page = sign_on_a_stopped_clock(browser, server, 1024, 600)
+        open_the_week(page)
+        hidden = lambda: [page.locator(selector).is_hidden() for selector in ("#detail", "#room-location")]
+        size = lambda: page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)")
+        week_size = size()
+        assert hidden() == [True, True] and week_size < 45 and page.evaluate("'strip' in document.body.dataset") is False
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        poll(page)                                                                                      # the next poll brings the strip
+        assert page.evaluate("'strip' in document.body.dataset") and hidden() == [True, True] and size() == week_size
+        choose(server, sign_scores=[])
+        poll(page)                                                                                      # and the next takes it away
+        assert page.evaluate("'strip' in document.body.dataset") is False
+        assert hidden() == [True, True] and size() == week_size and page.locator("#week .day").count() == 7
+        page.close()
+        page = open_sign(browser, server, 1024, 701)
+        open_the_week(page)
+        assert [page.locator(selector).is_visible() for selector in ("#detail", "#room-location")] == [True, True]
+        assert page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") > 60 and fits(page)
+        page.close()
+
+
+# --- what a long booking title and a long room name do to a short sign (the task 5 review) ---
+
+BOOKING_TITLES = ("Customer call with Lone Star Eye Care", "Quarterly planning review with the regional leadership teams")   # 37 and 60 characters
+SHORT_SIGNS = ((800, 480), (900, 500), (1024, 480), (1024, 500), (1280, 480), (1366, 500))
+THREE_LINE_NAMES = ("Sales Conference Room", "Large Conference Room", "Executive Conference Roo")   # 21, 21 and 24 characters: three lines at the large size on a 1280 px sign
+
+
+def lines_of(page, selector):
+    """How many lines each element of the selector takes as it is drawn now, whatever is cut off."""
+    return page.evaluate("""(selector) => [...document.querySelectorAll(selector)].map((e) =>
+        Math.round(e.getBoundingClientRect().height / parseFloat(getComputedStyle(e).lineHeight)))""", selector)
+
+
+def room_name_is_long(page):
+    return page.locator("#room-name").evaluate("e => e.classList.contains('long')")
+
+
+def room_name_needs_the_smaller_type(page):
+    """Whether the name takes more than two lines at the large size, measured by taking the smaller type off for a moment."""
+    return page.evaluate("""() => { const r = document.getElementById('room-name'), had = r.classList.contains('long'); r.classList.remove('long');
+        const lines = Math.round(r.getBoundingClientRect().height / parseFloat(getComputedStyle(r).lineHeight)); r.classList.toggle('long', had); return lines > 2; }""")
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+@pytest.mark.parametrize("title", BOOKING_TITLES, ids=["37 characters", "60 characters"])
+def test_on_a_short_sign_a_long_booking_title_is_clamped_in_today_so_that_the_sign_fits_with_the_strip_up_or_down(browser, title, scores, central_time):
+    """A booking's title is two lines and an ellipsis in the Today list, and one line on a sign 560 px high or less, where the list has no height to
+    spare: with the strip up, three bookings whose titles take two lines (what a two-line clamp alone leaves) pushed the strip 33 to 58 px past the bottom
+    of an 800 by 480, 900 by 500, 1024 by 480 or 1024 by 500 sign. Every character is still in the page, and a sign with room to spare keeps two lines."""
+    skip_if_day_ends_within(3)
+    assert (len(BOOKING_TITLES[0]), len(BOOKING_TITLES[1])) == (37, 60)
+    bookings = [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        for width, height in (*SHORT_SIGNS, (1280, 800)):
+            page = open_sign(browser, server, width, height)
+            if scores:
+                strip_is_up(page)
+                strip = page.locator("#score").bounding_box()
+                assert strip["y"] >= 0 and strip["y"] + strip["height"] <= height + 0.5, ("the strip is not wholly on the sign", width, height, strip)
+            assert fits(page), (width, height)
+            assert page.locator("#events .title").all_text_contents() == [title] * 3, (width, height)        # the whole title is in the page, whatever is drawn of it
+            most = 1 if height <= 560 else 2
+            title_lines = lines_of(page, "#events .title")
+            assert max(title_lines) <= most, (width, height, title_lines)
+            if len(title) > 40 and height <= 560:                                # the long one fills the one line it has, and is cut after it
+                assert title_lines == [1] * 3 and page.locator("#events .title").first.evaluate("e => e.scrollHeight > e.clientHeight"), (width, height, title_lines)
+            page.close()
+
+
+@pytest.mark.parametrize("height, lines", [(560, 1), (561, 2)])
+def test_on_the_sign_a_long_booking_title_in_today_is_one_line_at_560_px_high_and_two_lines_at_561(browser, height, lines, central_time):
+    """The edge of the short sign's rule for the Today list, pinned to the pixel: the title is cut after one line on a sign 560 px high or less and after two on a
+    sign one pixel taller, with every character in the page either way."""
+    skip_if_day_ends_within(3)
+    title = BOOKING_TITLES[1]
+    with PageServer(calendar_events=[event(f"t{n}", title, 40 + 60 * n) for n in range(3)], room_name="Boardroom") as server:
+        page = open_sign(browser, server, 1280, height)
+        assert page.locator("#events .title").all_text_contents() == [title] * 3
+        assert lines_of(page, "#events .title") == [lines] * 3, (height, lines_of(page, "#events .title"))
+        page.close()
+
+
+def test_a_long_booking_title_is_two_lines_and_an_ellipsis_in_today_and_in_the_week_and_one_line_in_the_portrait_week(browser, central_time):
+    skip_if_day_ends_within(3)
+    title = "Quarterly planning review with the regional leadership team and the partners, the board and the finance group"   # long enough to be cut
+    bookings = [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location="2nd floor") as server:
+        for width, height, week_lines in ((1280, 800, 2), (800, 1280, 1)):
+            page = open_sign(browser, server, width, height)
+            assert page.locator("#events .title").all_text_contents() == [title] * 3                          # whole in the page, whatever is drawn
+            assert max(lines_of(page, "#events .title")) <= 2, (width, height)
+            if width > height:                                                    # beside the status the list is a narrow column: the title is cut after two lines
+                assert lines_of(page, "#events .title") == [2] * 3 and page.locator("#events .title").first.evaluate("e => e.scrollHeight > e.clientHeight")
+            open_the_week(page)
+            page.wait_for_timeout(200)
+            shown = "#week .slot:not([hidden]) .title"
+            assert page.locator(shown).count() >= 1 and set(lines_of(page, shown)) == {week_lines}, (width, height, lines_of(page, shown))
+            assert set(page.locator(shown).all_text_contents()) == {title}                                   # whole in the page
+            assert page.locator(shown).first.evaluate("e => e.scrollHeight > e.clientHeight"), (width, height)    # and cut where it does not fit
+            page.close()
+
+
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+@pytest.mark.parametrize("name", THREE_LINE_NAMES)
+def test_a_room_name_that_would_take_three_lines_takes_the_smaller_type_so_that_the_chip_stays_on_a_short_sign(browser, name, scores, central_time):
+    """"Sales Conference Room" is three lines at the large size on a 1280 px sign, and three lines of that type pushed the chip, the strip or both past
+    the bottom of a 1280 by 480, 1366 by 500, 1024 by 500 or (with the strip up) 800 by 480 sign by 7 to 100 px. A name that would take more than two
+    lines takes the smaller type that a name of 25 characters takes, and never more than two lines of it, so the chip is whole on every one of them."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name=name, room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
+        choose(server, sign_scores=scores)
+        if scores:
+            scoreboard_has(server, scores)
+        assert len(name) <= 24                                                    # it is not the length that makes them small
+        for width, height in SHORT_SIGNS:
+            page = open_sign(browser, server, width, height)
+            if scores:
+                strip_is_up(page)
+            assert fits(page), (width, height)
+            assert room_name_is_long(page) and lines_of(page, "#room-name") == [2], (width, height, lines_of(page, "#room-name"))
+            chip = page.locator(".chip").bounding_box()
+            floor = page.locator("#score").bounding_box()["y"] if scores else height
+            assert chip["y"] + chip["height"] <= floor + 0.5, ("the chip is not wholly on the sign", width, height, chip, floor)
+            assert page.locator("#room-name").inner_text() == name                # the name is whole: smaller, never cut
+            page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1280, 480), (1366, 500), (800, 480), (800, 1280), (1920, 1080)])
+def test_a_short_room_name_keeps_the_large_type_on_the_sign(browser, width, height):
+    root = min(max(16, 0.0125 * max(width, height)), 24)                          # the sign's rem: 16 px up to 1280, then growing with the long side
+    large = min(max(2.6 * root, 0.11 * width), 4.6 * root) if height > width else min(max(3 * root, 0.072 * width), 5.4 * root)
+    for name in ("Boardroom", "Room 1"):
+        with PageServer(room_name=name) as server:
+            page = open_sign(browser, server, width, height)
+            assert not room_name_is_long(page) and lines_of(page, "#room-name") == [1], (name, width, height)
+            assert page.locator("#room-name").evaluate("e => parseFloat(getComputedStyle(e).fontSize)") == pytest.approx(large), (name, width, height)
+            page.close()
+
+
+def test_a_room_name_is_fitted_again_when_the_sign_is_turned_or_its_width_or_height_alone_changes(browser, central_time):
+    """Two lines at the large size on a sign standing upright, three on one lying down: turned, the name takes the smaller type, and takes the large
+    one back when it is turned again, whether the width and the height both change or only one of them does."""
+    with PageServer(room_name="Sales Conference Room", room_location="2nd floor") as server:
+        # Nothing but the sign being resized may fit the name here: its polls are stopped, and the font events (which this Chromium fires again when the
+        # viewport changes) are switched off, so that the resize is what is tested and not a font that seems to arrive.
+        page = sign_on_a_stopped_clock(browser, server, 800, 1280, init_script="document.fonts.addEventListener = () => {};")
+        assert not room_name_is_long(page) and lines_of(page, "#room-name") == [2]
+        for width, height, long in ((1280, 800, True), (800, 1280, False), (1024, 500, True), (800, 1280, False),
+                                    (1280, 1000, True), (900, 1000, False),             # only the width changes, and the sign is turned
+                                    (1280, 800, True), (1280, 1400, False)):            # only the height changes, and the sign is turned
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                  # the page's own timers are stopped: this is the test's time
+            lines = lines_of(page, "#room-name")[0]
+            assert room_name_is_long(page) == long and lines <= 2 and (lines == 2 or not long) and fits(page), (width, height, lines)
+        page.close()
+
+
+def test_the_room_names_type_is_fitted_again_when_the_week_is_left_on_a_short_sign_with_the_strip_up(browser, central_time):
+    """In the week with the strip up, a short sign sets the name in a size of its own, in which "Sales Conference Room" takes one line: measured there,
+    it loses the smaller type that Today needs. Back in Today it has it again."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Sales Conference Room", room_location="2nd floor", schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = open_sign(browser, server, 1280, 480)
+        strip_is_up(page)
+        assert room_name_is_long(page) and fits(page)
+        open_the_week(page)
+        page.set_viewport_size({"width": 1281, "height": 480})                    # the name is measured again, at the size the week gives it
+        page.wait_for_function("!document.getElementById('room-name').classList.contains('long')", timeout=3000)
+        page.click("#week-back")
+        page.wait_for_function("document.body.dataset.view === 'today'", timeout=3000)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
+        page.close()
+
+
+def test_the_weeks_name_keeps_its_size_when_the_strip_goes_while_the_week_is_up_and_has_todays_type_back_in_today(browser, central_time):
+    """The week sets the name in a size of its own on a short sign by height alone, with the strip up or down, so the strip going changes nothing in the week; the
+    name is set as it is in Today once the week is left. The page's polls are stopped here: the test brings the one that takes the strip away."""
+    skip_if_day_ends_within(3)
+    bookings = [event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)]
+    with PageServer(calendar_events=bookings, room_name="Sales Conference Room", room_location="2nd floor", schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server, 1280, 480)
+        strip_is_up(page)
+        open_the_week(page)
+        week_type = room_name_type(page)
+        assert not room_name_is_long(page) and week_type[2] == 1                   # at the week's own size the name takes one line: the large type is fitted to it
+        choose(server, sign_scores=[])
+        poll(page)                                                                 # the next poll takes the strip away
+        assert page.evaluate("'strip' in document.body.dataset") is False
+        assert room_name_type(page) == week_type and fits(page)                    # and the week's size, being by height alone, has not moved
+        page.click("#week-back")
+        page.wait_for_function("document.body.dataset.view === 'today'", timeout=3000)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
+        page.close()
+
+
+def a_narrow_fallback_font():
+    """An init script that puts a font in the sign's font stack after Lexend, for the time Lexend takes to arrive: Lexend's own file under another name, set at 60 % of its
+    size (size-adjust), so that the fallback is narrower than Lexend by construction and is the same on every machine, whatever fonts it has."""
+    data = base64.b64encode((STATIC_DIR / "fonts" / "lexend-400.woff2").read_bytes()).decode()
+    css = ('@font-face { font-family: "Narrow Fallback"; src: url("data:font/woff2;base64,' + data + '") format("woff2"); size-adjust: 60%; } '
+           ':root { --font: "Lexend", "Narrow Fallback", sans-serif !important; }')
+    return ("(() => { const css = " + json.dumps(css) + "; const add = () => { const style = document.createElement('style'); style.textContent = css; document.documentElement.append(style); };"
+            " if (document.documentElement) add(); else new MutationObserver((records, observer) => { if (document.documentElement) { observer.disconnect(); add(); } }).observe(document, { childList: true }); })();")
+
+
+def test_a_room_names_type_is_fitted_again_when_the_signs_font_arrives(browser):
+    """Until Lexend arrives the name is set in a fallback font, whose lines are not Lexend's: "Sales Conference Room" takes three lines of Lexend at the large size
+    on a 1280 px sign and one of the fallback here (a narrow one, the same on every machine), so it needs the smaller type in Lexend and not before. The font's
+    files are held back until the test lets them go: the name must end with the type its lines in Lexend need."""
+    held = []
+    with PageServer(room_name="Sales Conference Room", room_location="") as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.add_init_script(a_narrow_fallback_font())
+        try:
+            page.route("**/static/fonts/*.woff2", lambda route: held.append(route))
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="domcontentloaded")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            assert page.evaluate("document.fonts.status") == "loading" and held                  # Lexend is on its way, held
+            page.wait_for_function("[...document.fonts].some((f) => f.family.includes('Narrow Fallback') && f.status === 'loaded')", timeout=5000)
+            page.set_viewport_size({"width": 1281, "height": 800})                                # fitted again, now that the fallback is on the screen (while Lexend is held
+            page.wait_for_function("!document.getElementById('room-name').classList.contains('long')", timeout=3000)          # no font event comes: the first fit may have been before it)
+            assert not room_name_needs_the_smaller_type(page) and lines_of(page, "#room-name") == [1]
+            while held:
+                held.pop().continue_()
+            page.wait_for_function("document.fonts.status === 'loaded'", timeout=5000)
+            assert room_name_needs_the_smaller_type(page)                                       # in Lexend it takes three lines at the large size
+            page.wait_for_function("document.getElementById('room-name').classList.contains('long')", timeout=3000)           # and has the type for them
+            assert lines_of(page, "#room-name") == [2]
+        finally:
+            while held:                                                                         # a failure before the files were let go leaves no request hanging
+                held.pop().continue_()
+            page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_signs_room_name(browser):
+    with PageServer(room_name="Sales Conference Room") as server:
+        page = sign_on_a_stopped_clock(browser, server)
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || ''))))
+                .observe(document.getElementById('room-name'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == [] and room_name_is_long(page)      # the same name in the same place: neither measured nor written again
+        page.close()
+
+
+# --- the chip and the room name on a sign 560 px high or less (the task 5 review, round 1b) ---
+
+TWO_LINE_LOCATION = "2nd floor, by the kitchen, past the elevators"
+LONGEST_TWO_LINE_NAME = "North Wing Training Room 2"          # 26 characters: two lines of the smaller type at 800, 900, 1024 and 1280 px wide; 31 take three on the first three
+STATUSES = ("free", "free all day", "starting soon", "booked", "in use", "not connected")
+
+
+def join_the_booking(server, event_id):
+    request = urllib.request.Request(f"http://127.0.0.1:{server.port}/api/meeting/join", data=json.dumps({"event_id": event_id}).encode(),
+                                     headers={"Content-Type": "application/json"}, method="POST")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 202                                              # accepted: the join goes on in the background
+
+
+@pytest.mark.parametrize("width, height, short", [(800, 480, True), (1366, 500, True), (1280, 560, True), (1280, 561, False), (1280, 800, False), (800, 1280, False)])
+def test_on_a_sign_560_px_high_or_less_the_chip_before_a_booking_carries_the_status_words_and_not_its_title(browser, width, height, short, central_time):
+    """Today's rows beside the chip say which booking it is, and a long title in the chip made it three lines: 72 px past the bottom of an 800 by 480
+    sign with the strip up. On a sign 560 px high or less the chip says "Starts in 8 minutes" or "Starting now"; a taller one keeps its title."""
+    skip_if_day_ends_within(3)
+    title = BOOKING_TITLES[1]
+    for minutes, short_words, tall_words in ((8, r"Starts in \d+ minutes?", r"{} starts in \d+ minutes?"), (0.4, "Starting now", r"{} is starting")):
+        with PageServer(calendar_events=[event(f"t{n}", title, minutes + 60 * n) for n in range(2)], room_name="Boardroom") as server:
+            page = open_sign(browser, server, width, height, state="soon")
+            chip = page.locator("#chip-text").inner_text()
+            assert re.fullmatch(short_words if short else tall_words.format(re.escape(title)), chip), (width, height, chip)
+            assert page.locator("#events .title").first.inner_text() == title            # and the title is in Today, beside it, on every sign
+            assert fits(page), (width, height)
+            page.close()
+
+
+@pytest.mark.parametrize("width, height", [(800, 480), (1280, 561), (1280, 800)])
+def test_the_chip_says_the_same_words_on_every_sign_when_the_room_is_free_booked_or_in_use(browser, width, height, central_time):
+    skip_if_day_ends_within(3)
+    title = BOOKING_TITLES[0]
+    with PageServer(calendar_events=[event(f"t{n}", title, 40 + 60 * n) for n in range(2)], room_name="Boardroom") as server:
+        page = open_sign(browser, server, width, height)
+        assert re.fullmatch(r"Free until \d+:\d\d.[AP]M", page.locator("#chip-text").inner_text())
+        page.close()
+    with PageServer(room_name="Boardroom") as server:
+        page = open_sign(browser, server, width, height)
+        assert page.locator("#chip-text").inner_text() == "Free for the rest of the day"
+        page.close()
+    with PageServer(calendar_events=[event("now", title, -10, duration=50)], room_name="Boardroom") as server:
+        page = sign_on_a_stopped_clock(browser, server, width, height, state="occupied")     # the poll that says "In use" is the test's to bring
+        assert re.fullmatch(r"Booked until \d+:\d\d.[AP]M", page.locator("#chip-text").inner_text())
+        join_the_booking(server, "now")
+        wait_for("the meeting to be joined", lambda: status_of(server)["meeting"]["state"] == "connected")
+        poll(page)
+        assert re.fullmatch(r"In use until \d+:\d\d.[AP]M", page.locator("#chip-text").inner_text())
+        page.close()
+
+
+def test_the_chip_and_the_room_name_follow_the_sign_across_560_px_without_waiting_for_a_poll(browser, central_time):
+    """The chip's words and the name's type are those of the sign's height now: its polls are stopped here and the font events switched off, so only the
+    media query's change, and the resize, can bring the new words and type, and they do, both ways."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=[event("t0", "Standup", 8)], room_name="Conference Room Twelve", room_location="2nd floor") as server:
+        page = sign_on_a_stopped_clock(browser, server, 1280, 800, init_script="document.fonts.addEventListener = () => {};", state="soon")
+        words = lambda: page.locator("#chip-text").inner_text()
+        assert re.fullmatch(r"Standup starts in \d+ minutes?", words()) and not room_name_is_long(page)
+        for width, height, short in ((800, 480, True), (1280, 800, False), (1280, 560, True), (1280, 561, False)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                  # the page's own timers are stopped: this is the test's time
+            assert bool(re.fullmatch(r"Starts in \d+ minutes?", words())) == short and room_name_is_long(page) == short, (width, height, words())
+            assert short or re.fullmatch(r"Standup starts in \d+ minutes?", words()), (width, height, words())
+        page.close()
+
+
+@pytest.mark.parametrize("name", ["Conference Room Twelve", "Second Floor Conf Room 2"])
+def test_on_a_sign_560_px_high_or_less_a_room_name_that_would_take_two_lines_takes_the_smaller_type(browser, name, central_time):
+    """Two lines of the large type, a location, a chip and a detail are more than a sign 560 px high or less has, with the strip up or down: by 1 to 6
+    px at 1280 by 480 and 1366 by 500 with the strip up, 14 to 21 px with a long title under the chip and none. At 561 px and above the name keeps
+    the large type, as it does in portrait."""
+    with PageServer(room_name=name, room_location="2nd floor, by the kitchen") as server:
+        for width, height, short in ((1280, 480, True), (1366, 500, True), (800, 480, True), (900, 500, True), (1024, 500, True), (1280, 560, True),
+                                     (1280, 561, False), (1280, 800, False), (800, 1280, False)):
+            page = open_sign(browser, server, width, height)
+            assert room_name_is_long(page) == short, (width, height)
+            assert lines_of(page, "#room-name")[0] <= 2 and fits(page), (width, height, lines_of(page, "#room-name"))
+            if not short:
+                assert lines_of(page, "#room-name") == [2], (width, height)                              # the large type: two lines, as before
+            page.close()
+
+
+def how_far_past_the_bottom(browser, name, location, state, sizes, title=BOOKING_TITLES[1]):
+    """{(strip up, width, height): px the sign runs past the bottom (0 when it is whole)} for a room that is free all day, starting soon, or booked."""
+    skip_if_day_ends_within(3)
+    bookings = {"free all day": [], "starting soon": [event(f"t{n}", title, 8 + 60 * n) for n in range(3)],
+                "booked": [event("now", title, -10, duration=50)] + [event(f"t{n}", "Later", 60 + 60 * n) for n in range(2)]}[state]
+    found = {}
+    with PageServer(calendar_events=bookings, room_name=name, room_location=location, schedules=every_school()) as server:
+        for scores in ([], ["texas"]):
+            choose(server, sign_scores=scores)
+            if scores:
+                scoreboard_has(server, scores)
+            for width, height in sizes:
+                page = open_sign(browser, server, width, height, state={"free all day": "free", "starting soon": "soon", "booked": "occupied"}[state])
+                if scores:
+                    strip_is_up(page)
+                found[(bool(scores), width, height)] = max(0, page.evaluate("document.documentElement.scrollHeight") - height)
+                page.close()
+    return found
+
+
+def a_room_in_a_status(status, title=BOOKING_TITLES[1]):
+    """(the bookings, the state the sign reaches) for a room that is in `status`, one of STATUSES."""
+    now_booking = [event("now", title, -10, duration=50)] + [event(f"t{n}", "Later", 60 + 60 * n) for n in range(2)]
+    bookings = {"free": [event(f"t{n}", title, 40 + 60 * n) for n in range(3)], "free all day": [], "starting soon": [event(f"t{n}", title, 8 + 60 * n) for n in range(3)],
+                "booked": now_booking, "in use": now_booking, "not connected": [event(f"t{n}", title, 40 + 60 * n) for n in range(3)]}[status]
+    reached = {"free": "free", "free all day": "free", "starting soon": "soon", "booked": "occupied", "in use": "occupied", "not connected": "free"}[status]
+    return bookings, reached
+
+
+def sign_in_a_status(browser, server, status, reached, width, height):
+    """The sign at the size with the room in `status` (for "not connected": the room is lost after the sign has seen it, and the name and the strip stay)."""
+    if status == "not connected":
+        page = sign_on_a_stopped_clock(browser, server, width, height)
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        return page
+    return open_sign(browser, server, width, height, state=reached)
+
+
+@pytest.mark.parametrize("status", STATUSES)
+def test_nothing_runs_off_a_sign_480_to_500_px_high_in_any_status(browser, status, central_time):
+    """800 by 480 is the Raspberry Pi's 7-inch panel: whatever the room is doing, with the strip up or down, a name of up to two lines of the smaller type
+    (the longest is 26 characters), a location of two lines and a booking title of 60 characters, at 800 by 480, 900 by 500, 1024 by 480, 1024 by 500,
+    1280 by 480 and 1366 by 500 the sign stays whole: the chip, the status under it and the strip are on the screen. (Before this, a two-line name and a
+    long title in the chip pushed it up to 72 px off.) A name that would take more lines goes down a size at a time, as the next tests say."""
+    skip_if_day_ends_within(3)
+    bookings, reached = a_room_in_a_status(status)
+    for name in ("Conference Room Twelve", LONGEST_TWO_LINE_NAME):                                   # two lines in the large type, and the longest of two in the smaller
+        with PageServer(calendar_events=bookings, room_name=name, room_location=TWO_LINE_LOCATION, schedules=every_school()) as server:
+            if status == "in use":
+                join_the_booking(server, "now")
+            for scores in ([], ["texas"]):
+                choose(server, sign_scores=scores)
+                if scores:
+                    scoreboard_has(server, scores)
+                for width, height in SHORT_SIGNS:
+                    page = sign_in_a_status(browser, server, status, reached, width, height)
+                    if scores:
+                        strip = page.locator("#score").bounding_box()
+                        assert strip["y"] >= 0 and strip["y"] + strip["height"] <= height + 0.5, ("the strip is not wholly on the sign", name, width, height, strip)
+                    chip = page.locator(".chip").bounding_box()
+                    assert chip["y"] + chip["height"] <= (page.locator("#score").bounding_box()["y"] if scores else height) + 0.5, ("the chip", name, width, height, chip)
+                    assert fits(page), (status, name, bool(scores), width, height, page.evaluate("document.documentElement.scrollHeight") - height)
+                    page.close()
+
+
+# --- the status column's free text takes two lines at most (the whole-branch review) ---
+
+def skip_if_the_day_began_within(minutes):
+    """A booking that began `minutes` ago is yesterday's, and not on today's list, until the local day is that old: what needs it there skips till then."""
+    now = datetime.now().astimezone()
+    if now - now.replace(hour=0, minute=0, second=0, microsecond=0) < timedelta(minutes=minutes):
+        pytest.skip(f"less than {minutes} minutes have passed in the local day")
+
+
+LONG_TITLE = ("Quarterly planning review with the regional leadership teams and the partners, " * 3)[:230]
+LONG_LOCATION = ("2nd floor, by the kitchen, past the elevators and through the double doors, " * 4)[:230]
+
+
+@pytest.mark.parametrize("status", ["free", "starting soon", "booked", "in use"])
+def test_a_booking_title_and_a_location_of_230_characters_take_two_lines_in_the_status_and_the_sign_fits(browser, status, central_time):
+    """The detail line, the chip's words and the location had no limit: a title of 230 characters ran 7 px off an 800 by 480 sign (strip down), 92 px off a
+    1366 by 500 one, and in "starting soon" the chip pushed the strip 36 to 68 px off at 1280 by 561 and 1024 by 600. Each is two lines and an ellipsis; every
+    character is still in the page, and the sign is whole at the four sizes, with the strip up or down."""
+    skip_if_day_ends_within(3)
+    if status in ("booked", "in use"):
+        skip_if_the_day_began_within(15)                                      # the booking in progress began 10 minutes ago: today's list has it only if that was today
+    assert len(LONG_TITLE) == len(LONG_LOCATION) == 230
+    bookings, reached = a_room_in_a_status(status, title=LONG_TITLE)
+    with PageServer(calendar_events=bookings, room_name="Boardroom", room_location=LONG_LOCATION, schedules=every_school()) as server:
+        if status == "in use":
+            join_the_booking(server, "now")
+        for scores in ([], ["texas"]):
+            choose(server, sign_scores=scores)
+            if scores:
+                scoreboard_has(server, scores)
+            for width, height in ((800, 480), (1024, 600), (1280, 561), (1366, 500)):
+                page = open_sign(browser, server, width, height, state=reached)
+                if scores:
+                    strip_is_up(page)
+                where = (status, bool(scores), width, height)
+                assert fits(page), (*where, page.evaluate("document.documentElement.scrollHeight") - height)
+                for selector in ("#detail", "#chip-text", "#room-location"):
+                    assert max(lines_of(page, selector)) <= 2, (*where, selector, lines_of(page, selector))
+                assert page.locator("#room-location").text_content() == LONG_LOCATION                              # whole in the page, whatever is drawn
+                words = page.locator("#chip-text").text_content() + " | " + page.locator("#detail").text_content()
+                assert (LONG_TITLE in words) == (status != "starting soon" or height > 560), (*where, words)       # the status carries the title, but the short chip
+                assert page.locator("#events .title").first.text_content() == LONG_TITLE, where
+                page.close()
+
+
+# --- a long name steps down on a short sign until it takes two lines (the task 5 review, round 1c) ---
+
+STEPPED_NAMES = {36: "Executive Conference Room North Wing", 45: "Executive Conference Room North Wing, Floor 2",
+                 55: "The Executive Conference Room, North Wing, Second Floor"}
+STEPPED_SIZES = ((800, 480), (1024, 500), (1280, 480), (1366, 500))
+FLOOR_REM = 1.3                                                                        # the smallest a name is set on a short sign, and the step is 0.1 rem
+
+
+def room_name_type(page):
+    """(its size in rem, the inline size it was stepped to or "", how many lines it takes)."""
+    return page.evaluate("""() => { const r = document.getElementById('room-name'), rem = parseFloat(getComputedStyle(document.documentElement).fontSize);
+        return [parseFloat(getComputedStyle(r).fontSize) / rem, r.style.fontSize, Math.round(r.getBoundingClientRect().height / parseFloat(getComputedStyle(r).lineHeight))]; }""")
+
+
+@pytest.mark.parametrize("status", STATUSES)
+def test_on_a_sign_560_px_high_or_less_a_name_that_still_takes_more_than_two_lines_steps_down_until_it_takes_two(browser, status, central_time):
+    """After the smaller type a name of 36, 45 or 55 characters still takes three lines on the narrow signs, and three lines of it ran off the bottom of an
+    800 by 480 sign (8 px, free all day, with the strip up and a location of two lines). It goes down 0.1 rem at a time, to 1.3 rem, until it takes two
+    lines: in every status, with the strip up and a location of two lines, at the four sizes, the name is two lines or less (or is at the floor), is
+    whole in the page, sits on the 0.1 rem steps, and the sign is whole."""
+    skip_if_day_ends_within(3)
+    bookings, reached = a_room_in_a_status(status)
+    for length, name in STEPPED_NAMES.items():
+        assert len(name) == length
+        with PageServer(calendar_events=bookings, room_name=name, room_location=TWO_LINE_LOCATION, schedules=every_school()) as server:
+            choose(server, sign_scores=["texas"])
+            scoreboard_has(server, ["texas"])
+            if status == "in use":
+                join_the_booking(server, "now")
+            for width, height in STEPPED_SIZES:
+                page = sign_in_a_status(browser, server, status, reached, width, height)
+                size, stepped, lines = room_name_type(page)
+                assert page.locator("#room-name").inner_text() == name, (length, width, height)              # whole: smaller, never cut
+                assert lines <= 2 or size == pytest.approx(FLOOR_REM, abs=0.01), (status, length, width, height, size, lines)
+                assert not stepped or abs(size * 10 - round(size * 10)) < 0.02 and size >= FLOOR_REM - 0.01, (length, width, height, size, stepped)
+                assert lines > 2 or fits(page), (status, length, width, height, size, page.evaluate("document.documentElement.scrollHeight") - height)
+                page.close()
+
+
+def test_a_stepped_name_goes_back_to_the_stylesheets_size_when_the_sign_grows_past_560_px_and_steps_again_when_it_shrinks(browser, central_time):
+    """The steps are for a short sign only, so they are undone when the sign is a pixel taller than 560 and made again when it is not: with its polls
+    stopped and the font events off, only the resize can do it."""
+    with PageServer(room_name=STEPPED_NAMES[55], room_location="2nd floor") as server:
+        page = sign_on_a_stopped_clock(browser, server, 800, 480, init_script="document.fonts.addEventListener = () => {};")
+        size, stepped, lines = room_name_type(page)
+        assert stepped and lines == 2 and size < 2.4, (size, stepped, lines)                    # 2.4 rem is the smaller type at 800 px wide
+        for width, height, short in ((1280, 800, False), (800, 480, True), (1280, 561, False), (1280, 560, True), (1280, 561, False)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                  # the page's own timers are stopped: this is the test's time
+            size, stepped, lines = room_name_type(page)
+            rem = min(max(16, 0.0125 * max(width, height)), 24)
+            smaller = min(max(2.2 * rem, 0.048 * width), 3.6 * rem) / rem                  # the stylesheet's .long size in rem
+            assert bool(stepped) == short and (size < smaller - 0.05 if short else size == pytest.approx(smaller)), (width, height, size, stepped)
+            assert lines <= 2 or not short, (width, height, lines)
+        page.close()
+
+
+@pytest.mark.parametrize("length", [45, 55, 67])
+def test_a_stepped_name_resized_from_one_short_sign_to_another_ends_where_a_fresh_load_at_the_new_size_puts_it(browser, length, central_time):
+    """The steps begin from the stylesheet's size every time, so a name stepped for 800 by 480 and then resized to 1280 by 480 (and on to 1024 by 500, and round the
+    four short sizes and back) has the size and the lines of a sign loaded at the new size. The page's polls are stopped here and its font events off."""
+    name = {45: STEPPED_NAMES[45], 55: STEPPED_NAMES[55], 67: FLOOR_NAMES[67]}[length]
+    assert len(name) == length
+    walk = ((800, 480), (1280, 480), (1024, 500), (1366, 500), (800, 480), (1366, 500), (1024, 500), (1280, 480))
+    with PageServer(room_name=name, room_location="2nd floor") as server:
+        fresh = {}
+        for size in STEPPED_SIZES:
+            page = open_sign(browser, server, *size)
+            page.wait_for_function("document.fonts.status === 'loaded'", timeout=5000)
+            page.wait_for_timeout(100)                                                          # the font's arrival is fitted a moment later
+            size_in_rem, stepped, lines = room_name_type(page)
+            fresh[size] = (round(size_in_rem, 2), lines)
+            page.close()
+        page = sign_on_a_stopped_clock(browser, server, *walk[0], init_script="document.fonts.addEventListener = () => {};")
+        for width, height in walk[1:]:
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                          # the page's own timers are stopped: this is the test's time
+            size_in_rem, stepped, lines = room_name_type(page)
+            assert (round(size_in_rem, 2), lines) == fresh[(width, height)], (width, height, size_in_rem, stepped, lines)
+        page.close()
+
+
+@pytest.mark.parametrize("width, height, sizes", [(800, 480, {36: 2.3, 45: 1.9, 55: 1.5, 67: 1.3}), (1280, 480, {36: 3.6, 45: 3.1, 55: 2.4, 67: 2.1})])
+def test_a_name_goes_down_to_the_largest_tenth_of_a_rem_at_which_it_takes_two_lines_on_a_short_sign(browser, width, height, sizes):
+    """From the smaller type (2.4 rem at 800 px wide, 3.6 rem at 1280) in steps of 0.1 rem, and it stops at the first size at which it takes two lines, so
+    the steps are those and not 0.2 rem, and it does not go on to one line. (36 characters are two lines of the smaller type at 1280: no step.)"""
+    for length, rem_wanted in sizes.items():
+        with PageServer(room_name=FLOOR_NAMES[67] if length == 67 else STEPPED_NAMES[length], room_location="2nd floor") as server:
+            page = open_sign(browser, server, width, height)
+            size, stepped, lines = room_name_type(page)
+            assert size == pytest.approx(rem_wanted, abs=0.001) and lines == 2, (width, length, size, stepped, lines)
+            assert bool(stepped) == (length != 36 or width == 800), (width, length, stepped)
+            page.close()
+
+
+def test_a_name_that_needs_the_smaller_type_keeps_it_when_a_tall_sign_is_fitted_again(browser, central_time):
+    """Fitted again with the smaller type on (the week opens and closes, so the view changes twice), "Sales Conference Room" is measured with it taken off, as it
+    is the first time: it needs the type, and has it, as it does on a short sign, where the limit is one line and a name of two lines of it keeps it anyway."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=[event("t0", "Standup", 40)], room_name="Sales Conference Room", room_location="2nd floor") as server:
+        page = open_sign(browser, server, 1280, 800)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2]
+        open_the_week(page)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2]
+        page.click("#week-back")
+        page.wait_for_function("document.body.dataset.view === 'today'", timeout=3000)
+        assert room_name_is_long(page) and lines_of(page, "#room-name") == [2] and fits(page)
+        page.close()
+
+
+def test_a_name_too_long_for_two_lines_even_at_the_floor_stays_at_the_floor_and_whole_on_a_short_sign(browser):
+    """5 x 36 characters is seven lines at 1.3 rem on an 800 px sign and four on a 1280 px one: it goes down to the floor and no further, and none of it is cut."""
+    name = " ".join([STEPPED_NAMES[36]] * 5)
+    with PageServer(room_name=name, room_location="2nd floor") as server:
+        for width, height in ((800, 480), (1280, 480)):
+            page = open_sign(browser, server, width, height)
+            size, stepped, lines = room_name_type(page)
+            assert size == pytest.approx(FLOOR_REM, abs=0.01) and stepped == "1.3rem" and lines > 2, (width, height, size, stepped, lines)
+            assert page.locator("#room-name").inner_text() == name
+            page.close()
+
+
+@pytest.mark.parametrize("name", ["Boardroom", "Conference Room Twelve", "Sales Conference Room", "North Wing Training Room 2"])
+def test_a_name_that_takes_two_lines_or_less_is_not_stepped_on_a_short_sign(browser, name):
+    """One line at the large size, or two lines at the large or the smaller size: the sizes of the stylesheet are the sizes it has, with no step."""
+    with PageServer(room_name=name, room_location="2nd floor") as server:
+        for width, height in SHORT_SIGNS:
+            page = open_sign(browser, server, width, height)
+            size, stepped, lines = room_name_type(page)
+            assert stepped == "" and lines <= 2, (name, width, height, size, stepped, lines)
+            page.close()
+
+
+def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_signs_stepped_name(browser):
+    with PageServer(room_name=STEPPED_NAMES[55]) as server:
+        page = sign_on_a_stopped_clock(browser, server, 800, 480)
+        assert room_name_type(page)[1]                                                      # it is stepped
+        page.evaluate("""() => {
+            window.records = [];
+            new MutationObserver((list) => list.forEach((r) => window.records.push(r.type + ':' + (r.attributeName || ''))))
+                .observe(document.getElementById('room-name'), { subtree: true, childList: true, characterData: true, attributes: true });
+        }""")
+        poll(page)
+        poll(page)
+        assert page.evaluate("window.records") == []                                        # neither measured nor stepped again
+        page.close()
+
+
+FLOOR_NAMES = {67: "The Executive Conference Room, North Wing, Second Floor, East Annex",
+               87: "The Executive Conference Room, North Wing, Second Floor, East Annex, Building B, Austin",
+               110: " ".join([STEPPED_NAMES[36]] * 3), 147: " ".join([STEPPED_NAMES[36]] * 4), 184: " ".join([STEPPED_NAMES[36]] * 5)}
+
+
+def test_the_limit_the_docs_state_for_a_name_at_the_floor_is_the_one_the_sign_has(browser, central_time):
+    """What the guide and the README say is left on a screen 480 to 500 px high: a name goes down to 1.3 rem and no further. A name of up to 67 characters takes
+    two lines at that size and one of 87 to 147 characters three to five (at 800 by 480), and the sign is whole at the six sizes, in every status, with a location
+    of two lines and the strip up or down. A room name over about 150 characters runs off the sign (the docs say to use a shorter one, and no number of pixels). When
+    one of these stops being so, the docs change."""
+    assert {length: len(name) for length, name in FLOOR_NAMES.items()} == {length: length for length in FLOOR_NAMES}
+    for length in (67, 87, 110, 147):
+        found = how_far_past_the_bottom(browser, FLOOR_NAMES[length], TWO_LINE_LOCATION, "free all day", SHORT_SIGNS)
+        assert set(found.values()) == {0}, (length, found)
+    for length, lines in ((67, 2), (87, 3), (147, 5)):
+        with PageServer(room_name=FLOOR_NAMES[length], room_location=TWO_LINE_LOCATION) as server:
+            page = open_sign(browser, server, 800, 480)
+            size, stepped, taken = room_name_type(page)
+            assert (round(size, 2), taken) == (FLOOR_REM if length > 67 else size, lines), (length, size, stepped, taken)
+            page.close()
+    too_long = how_far_past_the_bottom(browser, FLOOR_NAMES[184], TWO_LINE_LOCATION, "free all day", ((800, 480),))
+    assert max(too_long.values()) > 0, too_long                                  # a name of 184 characters (seven lines at the floor) runs off the sign
+
+
+# --- a long name steps down at any height when the status would not fit (the whole-branch review) ---
+
+BAND_SIGNS = ((1024, 600), (1280, 561), (1280, 600), (1366, 620))            # 561 to 700 px high, where the steps were not made
+
+
+@pytest.mark.parametrize("status", ["free", "starting soon"])
+@pytest.mark.parametrize("scores", [[], ["texas"]], ids=["strip down", "strip up"])
+def test_a_long_name_steps_down_on_a_sign_taller_than_560_px_until_the_status_fits(browser, status, scores, central_time):
+    """The steps were made for a sign 560 px high or less only. Above it, a name of 67 or 87 characters (four or five lines of the smaller type) ran the chip, the
+    detail and the strip 9 to 112 px off a sign 561 to 620 px high. At any height the name now goes down 0.1 rem at a time, to 1.3 rem, until the sign is whole:
+    in free and in starting soon, with a location of two lines and the strip up or down, at four sizes between 561 and 620 px, with every character of the name in
+    the page."""
+    skip_if_day_ends_within(3)
+    bookings, reached = a_room_in_a_status(status)
+    for length in (67, 87):
+        name = FLOOR_NAMES[length]
+        with PageServer(calendar_events=bookings, room_name=name, room_location=TWO_LINE_LOCATION, schedules=every_school()) as server:
+            choose(server, sign_scores=scores)
+            if scores:
+                scoreboard_has(server, scores)
+            for width, height in BAND_SIGNS:
+                page = open_sign(browser, server, width, height, state=reached)
+                if scores:
+                    strip_is_up(page)
+                size, stepped, lines = room_name_type(page)
+                where = (status, length, bool(scores), width, height, size, stepped, lines)
+                assert fits(page), (*where, page.evaluate("document.documentElement.scrollHeight") - height)
+                assert page.locator("#room-name").inner_text() == name, where                                      # whole: smaller, never cut
+                assert size >= FLOOR_REM - 0.01 and (not stepped or abs(size * 10 - round(size * 10)) < 0.02), where       # on the 0.1 rem steps, to the floor
+                page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 700), (1280, 800), (1920, 1080)])
+def test_a_long_name_keeps_the_stylesheets_size_on_a_sign_that_it_does_not_run_off(browser, width, height, central_time):
+    """The steps are for a sign that would run off: a name of 67 characters on a sign with room for it is the smaller type of the stylesheet, as it was."""
+    skip_if_day_ends_within(3)
+    bookings, reached = a_room_in_a_status("starting soon")
+    with PageServer(calendar_events=bookings, room_name=FLOOR_NAMES[67], room_location=TWO_LINE_LOCATION) as server:
+        page = open_sign(browser, server, width, height, state=reached)
+        size, stepped, lines = room_name_type(page)
+        assert stepped == "" and room_name_is_long(page) and fits(page), (width, height, size, stepped, lines)
+        page.close()
+
+
+def test_a_name_stepped_above_560_px_is_fitted_again_when_the_status_changes_and_when_the_sign_is_resized(browser, central_time):
+    """Fitted again by the triggers a short sign's steps have (here the resize, with the page's polls stopped and its font events off), and by a status that
+    changes too: at 1280 by 597 with the strip up, the 67-character name fits beside "Next: Standup" (one line of detail) and does not beside the two lines
+    of "Sign not connected". It goes down when the room is lost, goes back to the stylesheet's size when the sign has room to spare, is stepped again to the
+    size it had, and has the stylesheet's size once the room is back."""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=[event("t0", "Standup", 40), event("t1", "Later", 100)], room_name=FLOOR_NAMES[67], room_location=TWO_LINE_LOCATION,
+                    schedules=every_school()) as server:
+        choose(server, sign_scores=["texas"])
+        scoreboard_has(server, ["texas"])
+        page = sign_on_a_stopped_clock(browser, server, 1280, 597, init_script="document.fonts.addEventListener = () => {};")
+        strip_is_up(page)
+        assert room_name_type(page)[1] == "" and fits(page)                                   # free, with one line of detail: the stylesheet's size
+        page.route("**/api/status", lambda route: route.abort())
+        with page.expect_event("requestfailed"):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        size, stepped, lines = room_name_type(page)
+        assert stepped and fits(page), (size, stepped, lines)                                  # two lines of detail: the name has gone down to make the room
+        for width, height, steps in ((1280, 900, False), (1280, 597, True)):
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                         # the page's own timers are stopped: this is the test's time
+            assert (room_name_type(page)[1] != "") == steps and fits(page), (width, height)
+            assert not steps or room_name_type(page)[0] == pytest.approx(size)                 # the same steps as before
+        page.unroute("**/api/status")
+        poll(page)
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        assert room_name_type(page)[1] == "" and fits(page)                                    # the room is back: one line of detail, and the stylesheet's size
+        page.close()
+
+
+def test_a_name_is_not_stepped_for_a_sign_that_runs_off_because_of_the_today_list(browser, central_time):
+    """The Today list beside the status is not the name's to cure: with a list taller than the status the name keeps the stylesheet's size, however far
+    the sign runs off. (The list is made 600 px taller here, with a style rule of the test's own, so that it is the one that runs off.)"""
+    skip_if_day_ends_within(3)
+    with PageServer(calendar_events=[event(f"t{n}", f"Today {n}", 40 + 60 * n) for n in range(3)], room_name=FLOOR_NAMES[67], room_location="2nd floor") as server:
+        page = sign_on_a_stopped_clock(browser, server, 1280, 800, init_script="document.fonts.addEventListener = () => {};")
+        assert fits(page) and room_name_type(page)[1] == ""
+        page.add_style_tag(content="#events { margin-bottom: 600px; }")
+        page.set_viewport_size({"width": 1281, "height": 800})                                  # fitted again, with a list that runs the sign off
+        page.wait_for_timeout(150)
+        size, stepped, lines = room_name_type(page)
+        assert not fits(page) and stepped == "" and lines == 4, (size, stepped, lines)         # the name is as the stylesheet has it: smaller type, four lines
+        page.close()
+
+
 def free_port():
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -289,7 +3244,9 @@ def test_door_sign_goes_offline_and_recovers(browser):
         page.goto(f"http://127.0.0.1:{port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
     page.wait_for_function("document.body.dataset.state === 'offline'", timeout=10000)
-    assert page.locator("#headline").inner_text() == "Sign not connected"
+    assert page.locator("#chip-text").inner_text() == "Sign not connected"
+    rail, chip, body = sign_colors(page)
+    assert rail == chip and rail not in (SIGN_GREEN, SIGN_AMBER, SIGN_RED) and body == SIGN_NAVY   # a sign that lost its room claims no status
     with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1", port=port):
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=10000)
     page.close()
@@ -2939,6 +5896,10 @@ def test_every_idle_screen_fits_the_kiosk_without_scrolling(browser):
         page.click("#back-from-camera")
         page.click("#open-screensaver")
         assert fits(page), "the screensaver screen scrolls"
+        page.click("#back-from-screensaver")
+        page.click("#open-door-sign")
+        assert page.locator("#scores-picker").is_visible()
+        assert fits(page), "the door sign screen scrolls"
         page.close()
 
 
@@ -4112,18 +7073,18 @@ def test_a_camera_fault_shows_its_words_on_the_meeting_screen(browser):
 
 TWELVE_HOUR = r"^\d{1,2}:\d{2}\u00a0[AP]M$"   # the no-break space is the pin: a time never splits across lines on the sign or the TV
 AMERICAN_DATE = r"^(January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"
+SIGN_DATE = r"^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (January|February|March|April|May|June|July|August|September|October|November|December) \d{1,2}, \d{4}$"   # the sign adds the weekday: "Monday, October 13, 2026"
 
 
 def test_the_clock_the_date_and_the_booking_times_read_the_american_way_under_a_twenty_four_hour_locale(browser):
     """The Pi's Chromium follows the system locale, which showed 24-hour times; the pages pin the format instead."""
-    import re
     skip_if_day_ends_within(2)                                 # the booking is 90 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 90)]) as server:
         page = browser.new_page(viewport={"width": 1280, "height": 800}, locale="en-GB")
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
-        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
+        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())   # the room page's date has no weekday: only the sign's does
         page.wait_for_selector("#events .event time", timeout=5000)
         assert re.match(TWELVE_HOUR, page.locator("#events .event time").first.inner_text())
         assert fits(page)
@@ -4131,11 +7092,13 @@ def test_the_clock_the_date_and_the_booking_times_read_the_american_way_under_a_
 
 
 def test_the_door_sign_clock_and_date_read_the_american_way_under_a_twenty_four_hour_locale(browser):
-    import re
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 1024, "height": 600}, locale="en-GB")
         page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         assert re.match(TWELVE_HOUR, page.locator("#clock").inner_text())
-        assert re.match(AMERICAN_DATE, page.locator("#date").inner_text())
+        shown = page.locator("#date").inner_text()
+        assert re.match(SIGN_DATE, shown)                                       # "Monday, October 13, 2026"
+        earlier, later = datetime.now().astimezone() - timedelta(seconds=2), datetime.now().astimezone()   # the date can change between the tick and here
+        assert shown in {d.strftime("%A, %B ") + str(d.day) + d.strftime(", %Y") for d in (earlier, later)}   # the weekday is today's
         page.close()

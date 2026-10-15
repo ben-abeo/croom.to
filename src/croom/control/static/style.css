@@ -59,6 +59,7 @@ body[data-view="idle"] .view[data-view="idle"],
 body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
+body[data-view="door-sign"] .view[data-view="door-sign"],
 body[data-view="meeting"] .view[data-view="meeting"],
 body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 .view[data-view="idle"] {
@@ -74,7 +75,7 @@ body[data-view="upcoming"] .view[data-view="upcoming"] { display: grid; }
 .schedule { grid-area: schedule; display: flex; flex-direction: column; }
 .upcoming-box { display: flex; flex-direction: column; width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
-.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="upcoming"] { grid-template-rows: auto 1fr; justify-items: start; }
+.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="door-sign"], .view[data-view="upcoming"] { grid-template-rows: auto 1fr; justify-items: start; }
 .view[data-view="meeting"] { grid-template-rows: auto auto auto auto 1fr; }   /* the line, the refusal when there is one, the buttons, Sound, the menu */
 #meeting-detail { margin: 0; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
@@ -264,8 +265,10 @@ body.keyboard-open { height: auto; min-height: 100vh; }
 body.keyboard-open .schedule { display: none; }
 @media (max-width: 480px) { .keyboard .key { height: 44px; font-size: 1rem; } }
 
-/* Screensaver: the picker; the chosen style stays filled in every room state. */
+/* Screensaver and door sign: the pickers; the chosen style, background and the schools that are on stay filled in every room
+   state. The door sign's two groups sit under their own labels. */
 .picker { display: flex; flex-wrap: wrap; gap: 10px; }
+.door-section .kicker:not(:first-child) { margin-top: 28px; }
 .picker .button { min-height: 48px; padding: 0 18px; }
 .picker .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
 /* Options > Keyboard (spec 2026-10-13, 3.3): the group sits right under the menu's buttons, not at the foot of the screen. */

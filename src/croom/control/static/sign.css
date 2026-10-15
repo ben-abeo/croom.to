@@ -1,87 +1,267 @@
-/* Crystal Meet door sign: the background is the room's status. */
+/* Crystal Meet door sign: a photograph of Austin under a navy overlay, with the room's status in a rail down the left
+   edge and a solid chip under the room's name. Nothing else is coloured (but the ranks on the scoreboard strip, when a
+   school's score is up, in burnt orange), so the sign reads from the hallway and still looks calm up close. */
 @font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-400.woff2") format("woff2"); font-weight: 400; font-display: swap; }
 @font-face { font-family: "Lexend"; src: url("/static/fonts/lexend-600.woff2") format("woff2"); font-weight: 600; font-display: swap; }
 
 :root {
   --navy-900: #001636;
-  --navy-800: #16244F;
-  --surface-900: #111827;
+  --blue-600: #1B52E5;            /* focus, and nothing else */
   --periwinkle-300: #BDCEFF;
+  --slate-500: #647087;
   --free: #1FA971;
   --soon: #E8A013;
-  --busy: #B42318;
-  --gutter: clamp(20px, 4vw, 56px);
+  --busy: #E5484D;
+  --status: var(--slate-500);     /* loading and offline: a sign with no status to show colours nothing */
+  --rail: 1.375rem;
+  --gutter: clamp(1.5rem, 4vw, 3.5rem);
+  --inset: calc(var(--gutter) + 1.625rem);   /* the left edge of the words: the rail and a little air */
   --font: "Lexend", "Segoe UI", Arial, sans-serif;
 }
+body[data-state="free"] { --status: var(--free); }
+body[data-state="soon"] { --status: var(--soon); }
+body[data-state="occupied"] { --status: var(--busy); }
 
 * { box-sizing: border-box; }
-html, body { height: 100%; }
+[hidden] { display: none !important; }
+/* 16px up to a 1280 pixel screen, growing with a bigger one (the long side, so a portrait sign grows too). */
+html { height: 100%; font-size: clamp(16px, 1.25vmax, 24px); }
 body {
+  height: 100%;
   margin: 0;
-  background: var(--surface-900);
+  background: var(--navy-900);
   color: #fff;
   font-family: var(--font);
-  font-size: clamp(16px, 1.6vw, 24px);
-  line-height: 1.4;
-  transition: background-color 500ms ease, color 500ms ease;
+  line-height: 1.35;
+  overflow: hidden;
 }
-@media (prefers-reduced-motion: reduce) { body { transition: none; } }
-
-body[data-state="free"] { background: var(--free); }
-body[data-state="soon"] { background: var(--soon); color: var(--navy-800); }
-body[data-state="occupied"] { background: var(--busy); }
-body[data-state="offline"], body[data-state="loading"] { background: var(--surface-900); }
 
 .sign {
-  min-height: 100%;
-  padding: var(--gutter);
+  position: relative;
+  height: 100%;
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto 1fr auto;
-  gap: clamp(20px, 3vh, 40px);
+  padding: var(--gutter) var(--gutter) 0 var(--inset);
 }
-.top { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; }
-.brand { display: flex; flex-direction: column; gap: 12px; min-width: 0; }
-.logo { width: clamp(110px, 12vw, 170px); height: auto; display: block; }
-body[data-state="soon"] .logo { filter: brightness(0) saturate(100%) invert(11%) sepia(38%) saturate(2400%) hue-rotate(205deg) brightness(90%); }
-h1 { margin: 0; font-size: clamp(1.3rem, 2.6vw, 2.4rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
-.location { margin: 2px 0 0; opacity: 0.85; }
-.when { display: flex; flex-direction: column; align-items: flex-end; }
-.date { margin: 6px 0 0; font-size: clamp(0.95rem, 1.8vw, 1.5rem); white-space: nowrap; opacity: 0.85; }
-.clock {
-  margin: 0;
-  font-size: clamp(2.2rem, 7vw, 6rem);
-  font-weight: 400;
-  line-height: 1;
-  letter-spacing: -0.02em;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
+/* The status rail: the one place the status colour is solid, with the chip. Above everything, the scoreboard strip's band too, so that
+   it runs on to the bottom edge as it does without one (nothing else is that far left). */
+.rail { position: absolute; z-index: 2; left: 0; top: 0; bottom: 0; width: var(--rail); background: var(--status); }
 
-.kicker {
-  margin: 0 0 10px;
-  font-size: clamp(0.75rem, 1.4vw, 1.1rem);
-  font-weight: 700;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  opacity: 0.9;
+/* Behind everything. The room's choice is body[data-bg] (sign.js reads it from the status). When the room has the choice's
+   photograph, sign.js sets body[data-photo] and puts its address in --photo, and the two layers below draw it. "plain" has
+   none, and neither has a choice whose file the room does not have (body[data-photo-missing]): the navy alone, with a soft
+   glow in the corner in the status colour. The backdrop clips the glow, so it never adds to the sign's size. */
+.backdrop { position: absolute; z-index: 0; top: 0; right: 0; bottom: 0; left: 0; overflow: hidden; pointer-events: none; }
+.glow { display: none; position: absolute; right: -10%; bottom: -30%; width: 60%; height: 70%; border-radius: 50%; background: radial-gradient(closest-side, var(--status), transparent); opacity: 0.28; }
+body[data-bg="plain"] .glow, body[data-photo-missing] .glow { display: block; }
+
+/* The photograph under a navy overlay that is heaviest on the left, where the words are (94 % at the left edge, 55 % at the
+   right, and darker again along the top and the bottom edges, the top so that the date reads over the brightest photograph): the
+   room name, the chip and the bookings read as they do on plain navy, and the place shows through on the right. The photograph is
+   not tinted: the status colour stays in the rail, the chip and the ring. */
+body[data-photo] .sign::before { content: ""; position: absolute; z-index: 0; top: 0; right: 0; bottom: 0; left: 0; background-image: var(--photo); background-size: cover; background-position: center 40%; }
+body[data-photo] .sign::after {
+  content: "";
+  position: absolute;
+  z-index: 0;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  background: linear-gradient(90deg, rgba(0, 22, 54, 0.94) 0%, rgba(0, 22, 54, 0.84) 45%, rgba(0, 22, 54, 0.55) 100%),
+              linear-gradient(180deg, rgba(0, 22, 54, 0.6) 0%, rgba(0, 22, 54, 0) 40%, rgba(0, 22, 54, 0.55) 100%);
 }
-.status { align-self: center; }
-.headline {
-  margin: 0;
-  font-size: clamp(2.4rem, 9vw, 8rem);
+body[data-photo] .event, body[data-photo] .day { background: rgba(0, 22, 54, 0.55); backdrop-filter: blur(2px); }
+
+/* A narrow sign wraps: the clock and date drop to a line of their own, on the right, and the company name keeps its words
+   whole. The brand row will not shrink under 16 rem, which is the logo, its gap and "Management" with a little to spare
+   (overflow-wrap would otherwise break the word mid-way). */
+.top { position: relative; z-index: 1; display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 24px; row-gap: 0.5rem; }
+.brand { display: flex; align-items: center; gap: 14px; flex: 1 1 16rem; min-width: 0; }
+.logo { height: 1.875rem; width: auto; flex: none; display: block; }
+.company { color: var(--periwinkle-300); font-size: 1.05rem; letter-spacing: 0.01em; overflow-wrap: anywhere; }
+.company:empty { display: none; }
+.when { flex: none; margin-left: auto; text-align: right; }
+.clock { margin: 0; font-size: 2.6rem; font-weight: 400; line-height: 1; letter-spacing: -0.02em; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.date { margin: 4px 0 0; color: var(--periwinkle-300); font-size: 1rem; white-space: nowrap; }
+
+.main {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(0, 1fr);
+  --gap: clamp(24px, 4vw, 64px);    /* between the status and what follows it; the week's head keeps to it too (below) */
+  gap: var(--gap);
+  align-content: start;
+  padding-top: clamp(20px, 4vh, 48px);
+}
+.room { margin: 0; font-size: clamp(3rem, 7.2vw, 5.4rem); font-weight: 600; line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere; }
+.room.long { font-size: clamp(2.2rem, 4.8vw, 3.6rem); }   /* a name over 24 characters, or one that would take more than two lines at the large size, so it takes fewer (sign.js fitRoomName) */
+.room:empty { display: none; }
+.location { margin: 6px 0 0; color: var(--periwinkle-300); font-size: 1.15rem; overflow-wrap: anywhere; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  margin-top: 26px;
+  padding: 12px 22px 12px 18px;
+  border-radius: 1.75rem;           /* a pill on one line, a rounded block when a long title wraps */
+  background: var(--status);
+  color: var(--navy-900);           /* navy on green and amber, white on red and on the neutral grey */
+  font-size: 1.5rem;
   font-weight: 600;
-  line-height: 1.02;
-  letter-spacing: -0.02em;
-  max-width: 14ch;
-  overflow-wrap: anywhere;
 }
-.headline.long { font-size: clamp(1.8rem, 5.4vw, 4.6rem); max-width: 24ch; }
-.detail { margin: 14px 0 0; font-size: clamp(1.1rem, 2.4vw, 2rem); max-width: 40ch; overflow-wrap: anywhere; opacity: 0.92; }
+body[data-state="occupied"] .chip, body[data-state="offline"] .chip, body[data-state="loading"] .chip { color: #fff; }
+.chip .dot { flex: none; width: 0.875rem; height: 0.875rem; border-radius: 50%; background: currentColor; opacity: 0.85; }
+#chip-text { min-width: 0; overflow-wrap: anywhere; }
+.detail { margin: 14px 0 0; max-width: 30ch; color: var(--periwinkle-300); font-size: 1.2rem; overflow-wrap: anywhere; }
 .detail:empty { display: none; }
+/* What comes from outside the sign (a booking's title in the chip and in the detail line, the room's location) is two lines and an ellipsis at
+   most, so that no title or location, however long, grows the status column past the sign; the whole of each is in the page. */
+.location, #chip-text, .detail { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 
-.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
-.event { display: grid; grid-template-columns: 8.5ch 1fr; gap: 14px; align-items: baseline; }   /* "10:30 AM" is eight characters */
-.event time { font-variant-numeric: tabular-nums; opacity: 0.85; }
-.event .title { margin: 0; overflow-wrap: anywhere; }
-.note { margin: 6px 0 0; opacity: 0.85; }
+.today { align-self: start; min-width: 0; }
+.today-head, .week-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 10px; }
+.today-head h2, .week-head h2 { margin: 0; color: var(--periwinkle-300); font-size: 1.05rem; font-weight: 600; }
+.button {
+  font: inherit;
+  font-size: 1rem;
+  font-weight: 600;
+  color: #fff;
+  background: transparent;
+  border: 2px solid rgba(255, 255, 255, 0.55);
+  border-radius: 12px;
+  padding: 10px 18px;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+.button svg { width: 1.125rem; height: 1.125rem; flex: none; }
+.button:focus-visible { outline: 3px solid var(--blue-600); outline-offset: 3px; }
+.events { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.event { display: grid; grid-template-columns: 8.5ch minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 0.625rem 0.875rem; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }   /* "10:30 AM" is eight characters */
+.event time { font-variant-numeric: tabular-nums; color: var(--periwinkle-300); }
+.event .title { margin: 0; overflow: hidden; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }   /* two lines, then an ellipsis: a long title does not grow the list; the whole of it is in the page */
+.event .who { margin: 2px 0 0; color: var(--periwinkle-300); font-size: 0.9em; }
+.event.now { box-shadow: inset 0 0 0 2px var(--status); }   /* the booking in progress, ringed in the status colour */
+.note { margin: 6px 0 0; color: var(--periwinkle-300); }
 .note:empty { display: none; }
+
+/* The week view (spec 2.3) takes the Today list's place: the next seven days, today first, each a panel with its name and date over
+   its bookings. Its head (This week and Back) stands where the Today list's did, beside the status, and the days run across the whole
+   width under the status, side by side, because a seventh of the Today list's 480 px is too narrow for a booking; in portrait the head
+   and the days stack under the status, and each day is a row. Nothing scrolls: the bookings that do not fit a day's box are left
+   out, and "+N more" counts them (sign.js fitWeek). */
+body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0, 1fr); row-gap: 1.25rem; padding-bottom: clamp(1rem, 3vh, 2rem); }
+.week { display: contents; }   /* its parts take their places in the .main grid */
+.week-head { grid-column: 2; grid-row: 1; align-self: start; }
+.week .note { grid-column: 1 / -1; grid-row: 2; align-self: start; margin: 0; }
+.days { grid-column: 1 / -1; grid-row: 2; list-style: none; margin: 0; padding: 0; min-width: 0; min-height: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); grid-template-rows: minmax(0, 1fr); gap: 0.5rem; }
+.days:empty { display: none; }
+.day { min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; padding: 0.625rem 0.75rem; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }
+.day[aria-current] { outline: 1px solid rgba(255, 255, 255, 0.4); outline-offset: -1px; }   /* today, among the seven */
+.day-head { flex: none; }
+.day-name { margin: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 1rem; font-weight: 600; }   /* "Wednesday" is one line, or an ellipsis on a small sign */
+.day-date { display: block; color: var(--periwinkle-300); font-size: 0.875rem; }
+.none { margin: 0.625rem 0 0; color: var(--periwinkle-300); font-size: 0.875rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }   /* one line, cut with an ellipsis on a day narrower than its words */
+.slots { list-style: none; margin: 0.5rem 0 0; padding: 0; flex: 1 1 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column; gap: 0.375rem; }
+.slot { flex: none; padding: 0.375rem 0.5rem; border-radius: 12px; background: rgba(255, 255, 255, 0.06); }
+.slot time { display: block; color: var(--periwinkle-300); font-size: 0.875rem; font-variant-numeric: tabular-nums; }   /* the title's size */
+.slot .title { margin: 0.125rem 0 0; overflow: hidden; overflow-wrap: anywhere; font-size: 0.875rem; line-height: 1.25; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }   /* two lines, then an ellipsis */
+.slot .who { margin: 0.125rem 0 0; color: var(--periwinkle-300); font-size: 0.75rem; }
+.slot.now { box-shadow: inset 0 0 0 2px var(--status); }   /* the booking in progress, ringed as on the Today list */
+.more { flex: none; padding: 0 0.5rem; color: var(--periwinkle-300); font-size: 0.75rem; }
+
+/* The scoreboard strip along the bottom edge (spec 2.5): hidden until a school the room has on has a score to show. It takes a row of
+   its own under the week or the Today list while it is up, and none while it is not, so that the status, the head and the tops of the
+   days never move for it. The strip never wraps: each side (the last game, the next one) is one line, clipped with an ellipsis where it
+   does not fit, so that its height is the same for every school and every name at every width and the strip's top edge, and the week's
+   rows with it, never move when it turns from one school to the next. From 1100 px wide the two sides share one line, the last game
+   on the left and the next one on the right; below that they are stacked, two lines, each side the full width. The ranks are burnt
+   orange, the one colour the strip adds. */
+.score {
+  position: relative;
+  z-index: 1;
+  margin: 0 calc(-1 * var(--gutter)) 0 calc(-1 * var(--inset));
+  padding: 14px var(--gutter) 14px var(--inset);
+  background: rgba(0, 0, 0, 0.35);
+  border-top: 1px solid rgba(255, 255, 255, 0.12);
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 4px 24px;
+  font-size: 1.1rem;
+}
+.score .last, .score .next { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.score .last { flex: none; max-width: 100%; font-weight: 600; }   /* on one line the next game gives way first: a final score is not the thing to cut */
+.score .next { color: var(--periwinkle-300); }
+.score .last:empty, .score .next:empty { display: none; }
+.score .last:empty + .next { margin-left: auto; }   /* a next game with no last one beside it stays on the right */
+.score .rank { color: #FFB366; }
+/* Under 1100 px wide (a 1024 px panel included) the two sides are stacked, whichever school is up and however short its lines are, and the band
+   keeps the height of two lines (the padding and the rule, the gap between them and two lines): a school with one line to give is as tall as
+   one with two. */
+@media (max-width: 1099px) {
+  .score { flex-direction: column; align-items: stretch; justify-content: center; min-height: calc(33px + 2 * 1.485rem); }
+  .score .last:empty + .next { margin-left: 0; }
+}
+
+/* A short screen (a 7-inch panel, 800 by 480) has no height to spare in the week view: the status gives up its detail line, which the
+   days need for what each leaves out ("+8 more"), and a day gives up its date, since its name says which day it is. */
+@media (max-height: 560px) {
+  body[data-view="week"] .detail, body[data-view="week"] .day-date { display: none; }
+}
+
+/* Up to 700 px of height the week has no room for the status in full either, strip or no strip: with the strip down the days were 133 px tall at 800 by
+   480 and 100 at 1024 by 600, and today's three bookings showed as "+3 more" and nothing else. So by height alone the status gives up its detail line and
+   its location and shrinks the room's name (to a size that still reads across a room: "Conference Room Twelve" is one line of it at 800 px wide), and
+   on a landscape sign a booking is the time and a title of one line (below). The days keep their dates until 560 px, where the rule above takes them.
+   The scoreboard strip takes 53 px of a short screen's height (81 under 1100 px wide, where it is two lines; body[data-strip], set by sign.js while it is
+   up), and its rules are those of Today, below. Without the 700 a long name's "+N more" is cut off up to 641 px high on a 1024 px sign, 650 on a 1280 px one, 686 on a 1366 px one and
+   700 on a 1400 px one (above 1280 px the root font, and the status with it, grows with the long side), so 700 takes in all four; a panel wider than 2 to 1
+   (1440 by 710) would be cut off still. On a screen of 560 or less, with the strip up, the Today list gives up its detail line too (the status would not
+   fit above the strip at 800 by 480 with a long name), and each booking's title keeps to one line (three of two lines pushed the strip 33 to 58 px past the
+   bottom of an 800 by 480, 900 by 500, 1024 by 480 or 1024 by 500 sign). The two rules sign.js keeps for the same 560 px (its shortSign) are not in this
+   file: the chip says only the status, without the booking's title that Today shows beside it ("Starts in 8 minutes"), and a room name takes the smaller
+   type, .room.long above, as soon as it would take two lines. */
+@media (max-height: 700px) {
+  body[data-view="week"] .detail, body[data-view="week"] .location { display: none; }
+  body[data-view="week"] .room { font-size: clamp(1.8rem, 3.6vw, 2.6rem); }
+}
+@media (max-height: 560px) {
+  body[data-strip] .detail { display: none; }
+  .event .title { -webkit-line-clamp: 1; }
+}
+/* A day on a landscape sign is a seventh of the width, 95 px at 800, narrower than a time and a title side by side as they are in portrait, and up to 700
+   px high it is short too: a booking in full (the time, a title of two lines, the platform) is 86 px, and a day's room for them is 85 to 165 px at 800
+   by 480. A booking is the time with a title of one line under it, 46 px, and the platform is left out: today's column holds all three of its bookings at
+   800 by 480 with the strip down and one with it up, and "+N more" counts the rest. */
+@media (orientation: landscape) and (max-height: 700px) {
+  .slots { margin-top: 0.375rem; gap: 0.25rem; }
+  .slot { padding: 0.25rem 0.5rem; }
+  .slot .title { -webkit-line-clamp: 1; }
+  .slot .who { display: none; }
+}
+
+@media (orientation: portrait) {
+  .main { grid-template-columns: minmax(0, 1fr); }
+  .room { font-size: clamp(2.6rem, 11vw, 4.6rem); }
+  .room.long { font-size: clamp(2rem, 7vw, 3rem); }
+  body[data-view="week"] .main { grid-template-rows: auto auto minmax(0, 1fr); row-gap: var(--gap); }   /* the head where the Today head was */
+  .week-head { grid-column: 1; grid-row: 2; margin-bottom: calc(10px - var(--gap)); }   /* and the days ten pixels under it */
+  .week .note { grid-row: 3; }
+  .days { grid-row: 3; display: flex; flex-direction: column; }   /* the days under one another: those with bookings share the height ... */
+  .day { flex: 1 1 0; flex-direction: row; gap: 1rem; padding: 0.5rem 0.75rem; }
+  .day.empty { flex: none; }   /* ... and one with nothing booked takes the height of its own words, not a share */
+  .day-head { width: 7rem; }
+  .none { align-self: center; margin: 0; }
+  .slots { margin: 0; gap: 0.25rem; }
+  .slot { display: grid; grid-template-columns: 5rem minmax(0, 1fr) auto; grid-template-areas: "time title who"; column-gap: 0.5rem; align-items: baseline; padding: 0.1875rem 0.5rem; }
+  .slot time { grid-area: time; }
+  .slot .title { grid-area: title; margin: 0; -webkit-line-clamp: 1; }
+  .slot .who { grid-area: who; margin: 0; }
+}

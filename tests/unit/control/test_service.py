@@ -927,7 +927,7 @@ class TestPage:
         from croom.control.service import STATIC_DIR
         client = await client_factory(make_service())
         names = sorted(p.relative_to(STATIC_DIR).as_posix() for p in STATIC_DIR.rglob("*") if p.is_file())
-        assert {"app.js", "devices.js", "keyboard.js", "style.css"} <= set(names)
+        assert {"app.js", "devices.js", "keyboard.js", "remote.js", "style.css"} <= set(names)
         for name in names:
             resp = await client.get("/static/" + name)
             assert resp.status == 200, name

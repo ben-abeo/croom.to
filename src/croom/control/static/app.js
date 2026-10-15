@@ -8,14 +8,14 @@
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
   // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
   // belong to whichever mode showed them, so their Back returns there.
-  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting" };
+  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
   const el = (id) => document.getElementById(id);
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
-  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, lastLink: "", lastEvent: "" };
+  const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, settings: null, lastLink: "", lastEvent: "" };
   const renderHooks = [];   // devices.js and remote.js register their rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js, keyboard.js and remote.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
@@ -115,11 +115,18 @@
   let confirmTimer = null;
   let lastEventsKey = null;
   let lastPickerKey = null;
+  let lastDoorSignKey = null;
   let lastUpcomingKey = null;
   const deviceEpoch = { audio: 0, camera: 0, tv: 0 };   // counts each device's answers (and the TV's), so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
+
+  // The door sign's room settings (spec 2026-10-13): its backgrounds in the order the room page offers them, and the schools
+  // whose football scores it may show. The values are the service's keys; the labels are what the screen says.
+  const SIGN_BACKGROUNDS = [["skyline", "Austin skyline"], ["capitol", "Capitol"], ["tower", "UT Tower"], ["bridge", "Pennybacker Bridge"],
+    ["pool", "Hamilton Pool"], ["star", "Texas star"], ["hills", "Hill Country"], ["stadium", "DKR stadium"], ["plain", "Plain"]];
+  const SIGN_SCHOOLS = [["texas", "Texas"], ["michigan", "Michigan"], ["texas_am", "Texas A&M"], ["missouri", "Missouri"]];
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
@@ -164,6 +171,7 @@
       model.status = status;
       model.offline = false;
       if (model.status.screensaver) model.screensaver = model.status.screensaver;
+      if (model.status.settings) model.settings = model.status.settings;
     } catch (e) {
       model.offline = true;
     }
@@ -293,6 +301,7 @@
   // The keyboard's key click is the room's setting (spec 2026-10-13, 3.3): the service keeps it, and every status carries it.
   const setKeyClick = (on) => act(() => post("/api/settings", { key_click: on }));
   const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
+  const setSettings = (changes) => act(() => post("/api/settings", changes).then((data) => { model.settings = data; }));   // the answer is every setting
 
   // A press on a button leaves the focus where it is. On the kiosk the keys go when the field loses it: the page shrinks, the
   // button moves from under the finger before it lifts, and the tap is lost.
@@ -452,12 +461,14 @@
       setActions([], "actions", idleActionsKey);
       setActions([], "meeting-actions", meetingActionsKey);
       document.querySelector(".screen-section").hidden = true;
+      document.querySelector(".door-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;
       document.querySelector(".keyboard-section").hidden = true;
       return;
     }
     document.querySelector(".screen-section").hidden = false;
+    document.querySelector(".door-section").hidden = false;
     document.querySelector(".sound-section").hidden = false;
     document.querySelector(".camera-section").hidden = false;
     document.querySelector(".keyboard-section").hidden = false;
@@ -529,6 +540,7 @@
     renderEvents(cal);
     renderKeyClick(s);
     renderPicker();
+    renderDoorSign();
     for (const fn of renderHooks) fn(s);
     if (landing && kiosk && view() === "idle") focusPasscode();
   }
@@ -552,6 +564,27 @@
       return b;
     });
     el("screen-picker").replaceChildren(...buttons);
+  }
+
+  // The door sign's two groups: one button per background (the one in use is pressed) and one switch per school (pressed when its
+  // score is on). A school's switch sends the whole list, in the service's order, with that school turned on or off.
+  function renderDoorSign() {
+    // Rebuilt only when a choice or availability changes, as the screensaver's picker is, so a tap is never lost to a re-render.
+    const key = JSON.stringify([model.settings, model.busy]);
+    if (key === lastDoorSignKey) return;
+    lastDoorSignKey = key;
+    const settings = model.settings || {};
+    const schools = settings.sign_scores || [];
+    const pressed = (b, on) => { b.setAttribute("aria-pressed", on ? "true" : "false"); return b; };
+    el("sign-picker").replaceChildren(...SIGN_BACKGROUNDS.map(([value, label]) => {
+      const current = settings.sign_background === value;
+      return pressed(button(label, current ? "primary" : "quiet", () => setSettings({ sign_background: value }), false), current);
+    }));
+    el("scores-picker").replaceChildren(...SIGN_SCHOOLS.map(([value, label]) => {
+      const on = schools.includes(value);
+      const list = SIGN_SCHOOLS.map(([school]) => school).filter((school) => (school === value ? !on : schools.includes(school)));
+      return pressed(button(label, on ? "primary" : "quiet", () => setSettings({ sign_scores: list }), false), on);
+    }));
   }
 
   function renderIdle(cal) {
@@ -650,6 +683,8 @@
   el("open-camera-setup").addEventListener("click", () => setView("camera"));
   el("open-screensaver").addEventListener("click", () => setView("screensaver"));
   el("back-from-screensaver").addEventListener("click", () => setView("options"));
+  el("open-door-sign").addEventListener("click", () => setView("door-sign"));
+  el("back-from-door-sign").addEventListener("click", () => setView("options"));
   el("back-from-camera").addEventListener("click", () => setView(cameraMode === "meeting" ? "meeting" : "options"));
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));

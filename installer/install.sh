@@ -250,6 +250,8 @@ room:
   name: "Conference Room"
   location: ""
   timezone: "UTC"
+  # The practice's name beside the logo on the door sign; "" shows the logo alone.
+  company: "Crystal Practice Management"
 
 meeting:
   platforms:

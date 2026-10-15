@@ -14,7 +14,7 @@ import os
 import socket
 import sys
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -27,7 +27,11 @@ from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.core.config import Config, TvConfig
 from croom.core.service import Service
 from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, detect_platform
-from croom.control.service import ControlService
+from croom.scores.service import ScoresService
+from tests.unit.scores.schedules import Clock, Feed
+from croom.control import service as control_service
+from croom.control.service import ControlService, read_setting
+from croom.control.settings import SettingsStore
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TvError
 from croom.tv.pointer import BAD_MESSAGE, BAD_TARGET, BAD_TYPE, CODES, PiMouse
@@ -494,10 +498,11 @@ def skip_if_day_ends_within(hours: float) -> None:
         pytest.skip(f"less than {hours} hours left in the local day")
 
 
-def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, **config):
+def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
-    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse)
+    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse,
+                          scores=scores)
 
 
 @pytest.fixture(autouse=True)
@@ -549,6 +554,7 @@ class TestControlServiceBasics:
         config = Config()
         config.room.name = "Board Room"
         config.room.location = "HQ 3rd floor"
+        config.room.company = "Lone Star Eye Care"
         config.control.host = "127.0.0.1"
         config.control.port = 9090
         meeting, calendar = StubMeeting(), StubCalendar()
@@ -557,6 +563,7 @@ class TestControlServiceBasics:
         assert service.config["port"] == 9090
         assert service.config["room_name"] == "Board Room"
         assert service.config["room_location"] == "HQ 3rd floor"
+        assert service.config["room_company"] == "Lone Star Eye Care"
         assert service.config["static_dir"].endswith("croom/control/static")
         assert service._meeting is meeting
         assert service._calendar is calendar
@@ -599,7 +606,7 @@ class TestStatus:
         resp = await client.get("/api/status")
         assert resp.status == 200
         data = await resp.json()
-        assert data["room"] == {"name": "Lab", "location": "2nd floor"}
+        assert data["room"] == {"name": "Lab", "location": "2nd floor", "company": "Crystal Practice Management"}
         assert data["platforms"] == []
         assert data["meeting"] == {
             "state": "idle", "platform": None, "meeting_id": None, "title": "", "url": None,
@@ -607,6 +614,20 @@ class TestStatus:
         }
         assert data["calendar"] == {"connected": False, "provider": None, "current": None, "next": None}
         datetime.fromisoformat(data["server_time"])
+
+    async def test_the_status_names_the_company(self, client_factory):
+        """The sign beside the logo says whose room it is: the stock name when the config says nothing, else the config's."""
+        client = await client_factory(make_service())
+        assert (await (await client.get("/api/status")).json())["room"]["company"] == "Crystal Practice Management"
+        client = await client_factory(make_service(room_company="Lone Star Eye Care"))
+        assert (await (await client.get("/api/status")).json())["room"]["company"] == "Lone Star Eye Care"
+        client = await client_factory(make_service(room_company=""))   # a blank name is the config's choice, not a missing one
+        assert (await (await client.get("/api/status")).json())["room"]["company"] == ""
+
+    def test_the_company_travels_from_the_config_to_the_service(self):
+        assert ControlService.from_config(Config()).config["room_company"] == "Crystal Practice Management"
+        config = Config.from_dict({"room": {"name": "Room 1", "company": "Lone Star Eye Care"}})
+        assert ControlService.from_config(config).config["room_company"] == "Lone Star Eye Care"
 
     async def test_status_reports_platforms_and_calendar(self, client_factory):
         nxt = event("e1", "Design review", starts_in_minutes=20)
@@ -662,6 +683,89 @@ class TestCalendarEvents:
         assert [e["joinable"] for e in data["events"]] == [True, False, False]
         assert data["events"][0]["title"] == "Design review"
         assert data["events"][0]["meeting_platform"] == "zoom"
+
+
+def at(text, offset="Z", hours=1, **kwargs):
+    """A booking starting at an ISO moment ("2026-11-01T04:30"), an hour long unless `hours` says otherwise; offset is "Z" or "+09:00"."""
+    start = datetime.fromisoformat(text + ("+00:00" if offset == "Z" else offset))
+    return CalendarEvent(id=kwargs.pop("id", text), title=kwargs.pop("title", text), start_time=start,
+                         end_time=start + timedelta(hours=hours), meeting_url="https://zoom.us/j/98765432100",
+                         meeting_platform=MeetingPlatform.ZOOM)
+
+
+class TestCalendarWeek:
+    """GET /api/calendar/week: the next seven days from today, each with its bookings, by the device's local date (spec 2026-10-13, 2.3)."""
+
+    async def get_week(self, client_factory, events, today=date(2026, 10, 29), calendar=True):
+        service = make_service(meeting=StubMeeting(), calendar=StubCalendar(events=events) if calendar else None)
+        service._local_today = lambda: today                                   # the day the device's clock says it is
+        client = await client_factory(service)
+        response = await client.get("/api/calendar/week")
+        assert response.status == 200
+        return await response.json()
+
+    async def test_the_week_route_groups_by_local_day_across_a_month_boundary(self, client_factory, central_time):
+        # Thursday October 29 to Wednesday November 4, 2026; Central time is UTC-5 until 2 AM on November 1 and UTC-6 after it.
+        events = [
+            at("2026-11-02T15:00", id="monday", title="Monday 9 AM"),                          # 9:00 AM CST on the 2nd
+            at("2026-11-01T04:30", id="late", title="Saturday 11:30 PM"),                     # the 31st at 11:30 PM CDT: the 1st in UTC
+            at("2026-11-01T05:30", hours=20, id="early", title="Sunday 12:30 AM"),            # the 1st at 12:30 AM CDT: the same UTC day, the next local one; it runs long, so it ends after the 5 PM booking that follows it
+            at("2026-11-02T05:30", id="evening", title="Sunday 11:30 PM"),                    # the 1st at 11:30 PM CST: the 2nd in UTC, after the clocks went back
+            at("2026-11-02T08:00", "+09:00", id="tokyo", title="Booked from Tokyo"),          # the 2nd by its own offset, the 1st at 5:00 PM here
+            at("2026-10-29T15:00", id="today", title="Thursday 10 AM"),
+            at("2026-10-28T20:00", id="yesterday", title="Wednesday 3 PM"),                    # before today: not in the week
+            at("2026-11-05T15:00", id="eighth", title="Thursday the 5th"),                    # the eighth day: not in the week
+        ]
+        data = await self.get_week(client_factory, events)
+        assert list(data) == ["days"] and len(data["days"]) == 7
+        assert [(d["date"], d["label"]) for d in data["days"]] == [
+            ("2026-10-29", "Thursday"), ("2026-10-30", "Friday"), ("2026-10-31", "Saturday"), ("2026-11-01", "Sunday"),
+            ("2026-11-02", "Monday"), ("2026-11-03", "Tuesday"), ("2026-11-04", "Wednesday")]   # today first, across the month's end
+        assert all(list(d) == ["date", "label", "events"] for d in data["days"])
+        ids = {d["date"]: [e["id"] for e in d["events"]] for d in data["days"]}
+        assert ids == {"2026-10-29": ["today"], "2026-10-30": [], "2026-10-31": ["late"],                    # the 31st's last booking stays on the 31st
+                       "2026-11-01": ["early", "tokyo", "evening"],                                           # the 1st's, in start order (not end order: the first one ends after the second), whatever the order sent
+                       "2026-11-02": ["monday"], "2026-11-03": [], "2026-11-04": []}
+
+    async def test_an_empty_week_is_seven_empty_days(self, client_factory, central_time):
+        for calendar in (True, False):                                                                         # a calendar with no bookings, and none at all
+            data = await self.get_week(client_factory, [], today=date(2026, 12, 29), calendar=calendar)
+            assert [d["date"] for d in data["days"]] == ["2026-12-29", "2026-12-30", "2026-12-31", "2027-01-01", "2027-01-02", "2027-01-03", "2027-01-04"]
+            assert [d["label"] for d in data["days"]] == ["Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday", "Monday"]
+            assert all(d["events"] == [] for d in data["days"])
+
+    async def test_the_week_carries_each_booking_as_the_events_route_does(self, client_factory, central_time):
+        ev = at("2026-10-30T15:00", id="e1", title="Design review")
+        ev.description, ev.organizer, ev.location = "Agenda: next year's budget", "ceo@example.com", "HQ 3rd floor"
+        data = await self.get_week(client_factory, [ev])
+        booking = data["days"][1]["events"][0]
+        assert set(booking) == EVENT_FIELDS                                                                    # the page's fields, and nothing the room page keeps off the network
+        assert (booking["title"], booking["meeting_platform"], booking["joinable"]) == ("Design review", "zoom", True)
+        assert booking["start_time"] == ev.start_time.isoformat()
+
+    async def test_the_week_begins_on_the_local_day_of_the_devices_clock_not_the_utc_one(self, client_factory, central_time, monkeypatch):
+        """The device's clock says 3:30 AM UTC on November 2nd, which is 9:30 PM on November 1st in Central time: the room's own day is
+        the 1st, so that is where the week starts (the date in UTC would start it a day late and leave out the evening's bookings)."""
+        class Clock(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return datetime(2026, 11, 2, 3, 30, tzinfo=timezone.utc).astimezone(tz)
+
+        monkeypatch.setattr(control_service, "datetime", Clock)
+        evening = at("2026-11-02T03:00", id="evening", title="9:00 PM on the 1st")                              # 3:00 AM UTC on the 2nd
+        service = make_service(meeting=StubMeeting(), calendar=StubCalendar(events=[evening]))
+        assert service._local_today() == date(2026, 11, 1)
+        days = (await (await (await client_factory(service)).get("/api/calendar/week")).json())["days"]
+        assert [(d["date"], d["label"]) for d in (days[0], days[-1])] == [("2026-11-01", "Sunday"), ("2026-11-07", "Saturday")]
+        assert [e["id"] for e in days[0]["events"]] == ["evening"]
+
+    async def test_the_week_begins_on_the_devices_own_today(self, client_factory, central_time):
+        skip_if_day_ends_within(1)
+        soon = event("soon", "Standup", starts_in_minutes=20)
+        service = make_service(meeting=StubMeeting(), calendar=StubCalendar(events=[soon]))                    # no clock set: the real one
+        data = await (await (await client_factory(service)).get("/api/calendar/week")).json()
+        assert data["days"][0]["date"] == datetime.now().astimezone().date().isoformat()
+        assert [e["id"] for e in data["days"][0]["events"]] == ["soon"]
 
 
 class TestJoin:
@@ -949,6 +1053,36 @@ class TestPage:
             text = f.read()
         assert 'control/static/*' in text
 
+    def test_the_photographs_are_package_data(self):
+        """The room devices install the agent with pip, not from a checkout: a folder the package data does not name
+        (setuptools' "control/static/*" takes files only, which is why fonts has a line of its own) is missing there, and
+        every door sign would show plain."""
+        with open("pyproject.toml", encoding="utf-8") as f:
+            text = f.read()
+        assert "control/static/backgrounds/*" in text
+
+    def test_every_photograph_is_a_background_the_service_knows_and_has_its_credit(self):
+        """The set on disk, the whitelist and CREDITS.md cannot drift apart: a photograph the picker cannot choose is dead
+        weight, and one with no credit line breaks the licence it came under."""
+        from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR
+        folder = STATIC_DIR / "backgrounds"
+        credits = (folder / "CREDITS.md").read_text(encoding="utf-8")
+        photographs = sorted(p.stem for p in folder.glob("*.jpg"))
+        assert photographs, "no photographs found: the glob is looking at the wrong folder"
+        for name in photographs:
+            assert name in SIGN_BACKGROUNDS and name != "plain", name
+            assert f"`{name}.jpg`" in credits, name
+
+    async def test_the_photographs_are_served_as_images(self, client_factory):
+        from croom.control.service import STATIC_DIR
+        client = await client_factory(make_service())
+        for path in sorted((STATIC_DIR / "backgrounds").glob("*.jpg")):
+            response = await client.get(f"/static/backgrounds/{path.name}")
+            assert response.status == 200, path.name
+            assert response.headers["Content-Type"] == "image/jpeg", path.name
+            assert response.headers["Cache-Control"] == "no-cache", path.name
+        assert (await client.get("/static/backgrounds/not-there.jpg")).status == 404                   # the sign loads the picture as an image: a missing file is a failed load
+
     async def test_brand_assets_are_served(self, client_factory):
         client = await client_factory(make_service())
         for path, content_type in (
@@ -1229,6 +1363,227 @@ class TestScreensaver:
         service = ControlService.from_config(config)
         assert service.config["screensaver"] == "quiet"
         assert service.config["settings_file"] == str(config.resolve_data_dir() / "control-settings.json")
+
+
+class TestRoomSettings:
+    """The room's settings, chosen on the room page and read by the door sign: one route over a whitelist of keys
+    (key -> default and check), kept in the settings file beside the screensaver's choice."""
+
+    DEFAULTS = {"sign_background": "skyline", "sign_scores": []}
+    KEYS = tuple(DEFAULTS)
+
+    def settings(self, tmp_path, **overrides):
+        config = {"settings_file": str(tmp_path / "control-settings.json")}
+        config.update(overrides)
+        return config
+
+    @classmethod
+    def ours(cls, settings):
+        """Just the door sign's two settings: another setting added to the same route (the keyboard branch's key_click) is not these
+        tests' business, so they compare these two and the branch that merges second needs no change here."""
+        return {key: settings[key] for key in cls.KEYS}
+
+    @classmethod
+    async def read(cls, client):
+        response = await client.get("/api/settings")
+        assert response.status == 200
+        return cls.ours(await response.json())
+
+    async def test_the_settings_start_at_their_defaults_and_the_status_carries_them(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        assert self.ours((await (await client.get("/api/status")).json())["settings"]) == self.DEFAULTS
+
+    async def test_sign_settings_round_trip_and_refuse_bad_values(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        # One key at a time: the answer is every setting, as the status and a later GET give them.
+        response = await client.post("/api/settings", json={"sign_background": "bridge"})
+        assert response.status == 200
+        assert self.ours(await response.json()) == {"sign_background": "bridge", "sign_scores": []}
+        response = await client.post("/api/settings", json={"sign_scores": ["texas", "texas_am"]})
+        assert response.status == 200
+        both = {"sign_background": "bridge", "sign_scores": ["texas", "texas_am"]}
+        assert self.ours(await response.json()) == both
+        assert await self.read(client) == both
+        assert self.ours((await (await client.get("/api/status")).json())["settings"]) == both
+        # Both in one request, and every background the picker offers is accepted.
+        for key in ("skyline", "capitol", "tower", "bridge", "pool", "star", "hills", "stadium", "plain"):
+            response = await client.post("/api/settings", json={"sign_background": key, "sign_scores": []})
+            assert response.status == 200 and (await response.json())["sign_background"] == key, key
+        everyone = ["texas", "michigan", "texas_am", "missouri"]
+        assert (await (await client.post("/api/settings", json={"sign_scores": everyone})).json())["sign_scores"] == everyone
+        # Kept in the settings file under the keys the other services read, readable by the service user only.
+        file = tmp_path / "control-settings.json"
+        assert json.loads(file.read_text())["sign_background"] == "plain" and json.loads(file.read_text())["sign_scores"] == everyone   # the last background posted
+        assert oct(file.stat().st_mode & 0o777) == "0o600"
+        # A restart keeps them.
+        again = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(again) == {"sign_background": "plain", "sign_scores": everyone}
+        # Bad values are refused in words that name the value and what is allowed, and nothing changes.
+        before = await self.read(again)
+        on_disk = file.read_text()
+        refused = [
+            ({"sign_background": "disco"}, ["disco", "skyline", "plain"]),
+            ({"sign_background": "Skyline"}, ["Skyline"]),                   # the keys are exact
+            ({"sign_background": 7}, ["7", "skyline"]),
+            ({"sign_background": ["bridge"]}, ["skyline"]),
+            ({"sign_background": None}, ["skyline"]),
+            ({"sign_scores": "texas"}, ["list", "texas_am"]),
+            ({"sign_scores": ["texas", "ohio_state"]}, ["ohio_state", "michigan"]),
+            ({"sign_scores": [["texas"]]}, ["texas_am"]),
+            ({"sign_scores": [3]}, ["texas_am"]),
+            ({"sign_scores": None}, ["list"]),
+            ({"colour": "red"}, ["colour", "sign_background", "sign_scores"]),
+            ({"sign_background": "tower", "colour": "red"}, ["colour"]),     # one bad key spoils the whole request: the good one, which
+            ({"sign_scores": ["texas"], "sign_background": "disco"}, ["disco"]),   # differs from what is kept and comes first, is not kept either
+            ({}, ["sign_background"]),
+        ]
+        for body, words in refused:
+            response = await again.post("/api/settings", json=body)
+            assert response.status == 400, body
+            message = (await response.json())["error"]
+            assert all(word in message for word in words), (body, message)
+        assert (await again.post("/api/settings", data="sign_background=plain")).status == 415   # a form from another site
+        assert (await again.post("/api/settings", json=["plain"])).status == 400
+        assert await self.read(again) == before and file.read_text() == on_disk
+
+    async def test_the_scores_list_is_kept_in_the_order_sent_without_repeats(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        response = await client.post("/api/settings", json={"sign_scores": ["missouri", "texas", "missouri"]})
+        assert (await response.json())["sign_scores"] == ["missouri", "texas"]
+        assert (await client.post("/api/settings", json={"sign_scores": []})).status == 200       # empty means off
+        assert (await self.read(client))["sign_scores"] == []
+
+    async def test_only_the_whitelisted_keys_are_served_or_changed(self, client_factory, tmp_path):
+        """The settings file holds the screensaver and the camera's presets too: none of that is this route's."""
+        (tmp_path / "control-settings.json").write_text(json.dumps({"screensaver": "bounce", "camera_home": {"pan": 1}}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        assert (await client.post("/api/settings", json={"screensaver": "quiet"})).status == 400
+        assert (await client.post("/api/settings", json={"camera_home": None})).status == 400
+        assert json.loads((tmp_path / "control-settings.json").read_text()) == {"screensaver": "bounce", "camera_home": {"pan": 1}}
+        assert (await (await client.get("/api/screensaver")).json())["style"] == "bounce"
+
+    async def test_one_save_leaves_the_screensaver_choice_alone(self, client_factory, tmp_path):
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        await client.post("/api/screensaver", json={"style": "bounce"})
+        await client.post("/api/settings", json={"sign_background": "pool"})
+        stored = json.loads((tmp_path / "control-settings.json").read_text())
+        assert stored["screensaver"] == "bounce" and stored["sign_background"] == "pool"
+
+    async def test_stored_settings_that_are_no_longer_valid_fall_back_to_the_defaults(self, client_factory, tmp_path):
+        stored = {"sign_background": "disco", "sign_scores": ["texas", "ohio_state"]}
+        (tmp_path / "control-settings.json").write_text(json.dumps(stored))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        (tmp_path / "control-settings.json").write_text(json.dumps({"sign_background": ["plain"], "sign_scores": "texas"}))
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == self.DEFAULTS
+        (tmp_path / "control-settings.json").write_text(json.dumps({"sign_background": "plain", "sign_scores": ["missouri"]}))   # one good, one default
+        client = await client_factory(make_service(**self.settings(tmp_path)))
+        assert await self.read(client) == {"sign_background": "plain", "sign_scores": ["missouri"]}
+
+    async def test_the_lists_in_the_answers_are_copies(self, client_factory, tmp_path):
+        """The lists in the answers are copies: a caller that changes one has not changed the room."""
+        service = make_service(**self.settings(tmp_path))
+        client = await client_factory(service)
+        await client.post("/api/settings", json={"sign_scores": ["texas"]})
+        status = service._status()
+        status["settings"]["sign_scores"].append("michigan")
+        status["settings"]["sign_background"] = "plain"
+        assert (await self.read(client)) == {"sign_background": "skyline", "sign_scores": ["texas"]}
+
+    async def test_a_settings_write_that_fails_still_applies_the_choice_and_says_so_in_the_log(self, client_factory, tmp_path, caplog):
+        """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
+        class FullDisk:
+            path = tmp_path / "control-settings.json"
+            held = {}
+
+            def get(self, key, default=None):
+                return default
+
+            def save(self, key, value):
+                raise OSError(28, "No space left on device")
+
+            def hold(self, key, value):
+                self.held[key] = value
+
+        service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
+        client = await client_factory(service)
+        response = await client.post("/api/settings", json={"sign_background": "capitol"})
+        assert response.status == 200 and (await response.json())["sign_background"] == "capitol"
+        assert (await self.read(client))["sign_background"] == "capitol"
+        assert "No space left on device" in caplog.text and [r.levelname for r in caplog.records].count("WARNING") == 1     # one WARNING, as before
+        assert FullDisk.held == {"sign_background": "capitol"}                    # and the store goes on with the choice, as the service does: what reads it from there follows
+
+
+class TestScoresInTheStatus:
+    """The status carries the football scores for the door sign, one entry per school that is on, and nothing while none is (spec
+    2026-10-13, section 2.5). The scores service reads the schools from the same settings store the room page changes them in."""
+
+    def scoreboard(self, tmp_path, feed=None):
+        store = SettingsStore(tmp_path / "control-settings.json")
+        feed = Feed() if feed is None else feed
+        scores = ScoresService(feed, lambda: read_setting(store, "sign_scores"), clock=Clock())
+        service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=store, scores=scores)
+        return service, scores, feed
+
+    async def test_the_status_carries_no_scores_while_every_school_is_off(self, client_factory, tmp_path):
+        service, scores, feed = self.scoreboard(tmp_path)
+        client = await client_factory(service)
+        await scores.refresh()
+        status = await (await client.get("/api/status")).json()
+        assert "scores" not in status and feed.asked == []                   # no key at all, not an empty list, and nothing was fetched
+
+    async def test_the_status_carries_one_entry_per_school_that_is_on_and_only_then(self, client_factory, tmp_path, central_time):
+        service, scores, feed = self.scoreboard(tmp_path)
+        client = await client_factory(service)
+        status = lambda: client.get("/api/status")
+        assert (await client.post("/api/settings", json={"sign_scores": ["michigan", "texas"]})).status == 200
+        entries = (await (await status()).json())["scores"]
+        assert [(e["school"], e["name"], e["last"], e["next"]) for e in entries] == [("michigan", "Michigan", None, None), ("texas", "Texas", None, None)]   # on, and not read yet
+        await scores.refresh()
+        entries = (await (await status()).json())["scores"]
+        assert [e["school"] for e in entries] == ["michigan", "texas"] and all(set(e) == {"school", "name", "last", "next"} for e in entries)
+        assert entries[1]["last"]["home_score"] == 45 and entries[1]["next"]["date"] == "2026-10-19"
+        assert feed.asked == [130, 251]
+        assert (await client.post("/api/settings", json={"sign_scores": ["texas"]})).status == 200
+        assert [e["school"] for e in (await (await status()).json())["scores"]] == ["texas"]
+        assert (await client.post("/api/settings", json={"sign_scores": []})).status == 200
+        assert "scores" not in await (await status()).json()                  # off again: the key goes with the last school
+        assert (await (await client.get("/api/settings")).json())["sign_scores"] == []
+
+    async def test_the_status_has_no_scores_without_a_scores_service_whatever_the_setting(self, client_factory, tmp_path):
+        client = await client_factory(make_service(settings_file=str(tmp_path / "control-settings.json")))
+        assert (await client.post("/api/settings", json={"sign_scores": ["texas"]})).status == 200
+        status = await (await client.get("/api/status")).json()
+        assert status["settings"]["sign_scores"] == ["texas"] and "scores" not in status
+
+    async def test_the_status_still_answers_when_the_scores_service_fails_and_says_so_once(self, client_factory, caplog):
+        class Broken:
+            def current(self):
+                raise RuntimeError("the scoreboard broke")
+
+        client = await client_factory(make_service(scores=Broken()))
+        for _ in range(3):
+            response = await client.get("/api/status")
+            assert response.status == 200 and "scores" not in await response.json()
+        said = [r.getMessage() for r in caplog.records if r.levelno >= 30 and "scoreboard broke" in r.getMessage()]
+        assert len(said) == 1 and "football scores" in said[0]
+
+    def test_a_setting_is_read_as_the_page_loads_it_a_missing_broken_or_no_longer_valid_value_being_its_default(self, tmp_path):
+        store = SettingsStore(tmp_path / "control-settings.json")
+        assert read_setting(store, "sign_scores") == [] and read_setting(store, "sign_background") == "skyline"
+        store.save("sign_scores", ["texas_am", "texas", "texas_am"])
+        store.save("sign_background", "capitol")
+        assert read_setting(store, "sign_scores") == ["texas_am", "texas"] and read_setting(store, "sign_background") == "capitol"
+        store.save("sign_scores", ["texas", "ohio_state"])
+        store.save("sign_background", "disco")
+        assert read_setting(store, "sign_scores") == [] and read_setting(store, "sign_background") == "skyline"
+        store.save("sign_scores", "texas")
+        assert read_setting(store, "sign_scores") == []
+        read_setting(store, "sign_scores").append("texas")
+        assert read_setting(store, "sign_scores") == []                       # a list of its own each time, never the default itself
 
 
 class TestRoomDevices:
@@ -2953,6 +3308,7 @@ class TestKeyClickSetting:
         """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
         class FullDisk:
             path = tmp_path / "control-settings.json"
+            held = {}
 
             def get(self, key, default=None):
                 return default
@@ -2960,9 +3316,13 @@ class TestKeyClickSetting:
             def save(self, key, value):
                 raise OSError(28, "No space left on device")
 
+            def hold(self, key, value):
+                self.held[key] = value
+
         service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
         client = await client_factory(service)
         response = await client.post("/api/settings", json={"key_click": False})
         assert response.status == 200 and (await response.json())["key_click"] is False
         assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is False
         assert "No space left on device" in caplog.text
+        assert FullDisk.held == {"key_click": False}

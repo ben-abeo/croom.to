@@ -38,6 +38,7 @@ class TestRoomConfig:
         assert config.name == "Conference Room"
         assert config.location == ""
         assert config.timezone == "UTC"
+        assert config.company == "Crystal Practice Management"   # the door sign's name beside the logo
 
     def test_custom_values(self):
         """Test custom room configuration values."""
@@ -358,6 +359,24 @@ class TestTvConfig:
         assert config.tv == TvConfig(**tv)
         assert config.to_dict()["tv"] == tv
         assert Config.from_dict(config.to_dict()).tv == config.tv
+
+
+class TestRoomCompany:
+    """room.company is the practice's name on the door sign; the stock name when a config says nothing."""
+
+    def test_a_config_without_it_gets_the_stock_name(self):
+        assert Config.from_dict({"room": {"name": "Room 1"}}).room.company == "Crystal Practice Management"
+        assert Config().room.company == "Crystal Practice Management"
+
+    def test_a_configured_name_round_trips(self):
+        config = Config.from_dict({"room": {"name": "Room 1", "company": "Lone Star Eye Care"}})
+        assert config.room.company == "Lone Star Eye Care"
+        assert config.to_dict()["room"]["company"] == "Lone Star Eye Care"
+        assert Config.from_dict(config.to_dict()).room.company == "Lone Star Eye Care"
+
+    def test_the_stock_name_is_written_out_too(self):
+        assert Config().to_dict()["room"] == {"name": "Conference Room", "location": "", "timezone": "UTC",
+                                              "company": "Crystal Practice Management"}
 
 
 class TestRoomLocationPlaceholder:

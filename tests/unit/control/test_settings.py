@@ -72,3 +72,15 @@ def test_a_write_that_fails_changes_nothing(tmp_path, monkeypatch):
     monkeypatch.undo()
     store.save("screensaver", "quiet")
     assert json.loads((tmp_path / "s.json").read_text(encoding="utf-8")) == {"screensaver": "quiet"}
+
+
+def test_a_held_value_is_kept_in_memory_and_written_by_the_next_save(tmp_path):
+    """What the room goes on with after a save of one of the page's choices that failed: the store has it until the restart (the scoreboard reads the
+    schools from the store), the file has not, and the next save that works writes it with the rest."""
+    path = tmp_path / "s.json"
+    store = SettingsStore(path)
+    store.hold("sign_scores", ["texas"])
+    assert store.get("sign_scores") == ["texas"] and not path.exists()
+    assert SettingsStore(path).get("sign_scores") is None                      # a restart does not have it
+    store.save("screensaver", "quiet")
+    assert json.loads(path.read_text(encoding="utf-8")) == {"sign_scores": ["texas"], "screensaver": "quiet"}

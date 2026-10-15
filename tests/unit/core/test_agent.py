@@ -3,14 +3,19 @@ Tests for croom.core.agent: service registration and startup without hardware.
 """
 
 import asyncio
+import logging
 import signal
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from croom.core.agent import CroomAgent
 from croom.core.config import Config
+from croom.control.settings import SettingsStore
 from croom.core.service import ServiceState
+from croom.scores import espn
+from tests.unit.scores.schedules import Feed
 
 
 def make_config(tmp_path, dashboard_url: str = "", control: bool = False) -> Config:
@@ -230,3 +235,80 @@ class TestControlRegistration:
         finally:
             await agent.service_manager.stop_all()
         assert agent.service_manager.get_service("control").bound_port is None
+
+
+class TestScoresRegistration:
+    """The football scoreboard (spec 2026-10-13 door sign, section 2.5): a service the door sign's page needs, so it is registered when
+    the control page is, before it, and reads the schools that are on from the control page's own settings store."""
+
+    def test_the_scoreboard_is_registered_before_the_control_page_and_handed_to_it(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        scores, control = agent.service_manager.get_service("scores"), agent.service_manager.get_service("control")
+        assert scores is not None and scores.name == "scores" and control._scores is scores
+        order = agent.service_manager._start_order
+        assert order.index("scores") < order.index("control")
+        assert scores._fetcher is espn.fetch                                  # ESPN's feed, over a session of its own for each read
+
+    def test_the_scoreboard_is_absent_when_the_control_page_is_disabled(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=False))
+        agent._initialize_services()
+        assert agent.service_manager.get_service("scores") is None            # nothing would show it: the sign is the control page's
+
+    def test_the_scoreboard_lists_the_schools_the_room_has_on_as_the_store_holds_them_at_each_ask(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        scores, store = agent.service_manager.get_service("scores"), agent.service_manager.get_service("control")._store
+        assert scores.current() == []                                         # off until a room turns a school on
+        store.save("sign_scores", ["texas", "michigan"])                      # what the page's switches do, through /api/settings
+        assert [entry["school"] for entry in scores.current()] == ["texas", "michigan"]
+        store.save("sign_scores", ["missouri"])                               # the next ask sees the change: the list is read, not kept
+        assert [entry["school"] for entry in scores.current()] == ["missouri"]
+        store.save("sign_scores", ["texas", "ohio_state"])                    # a value the page would not load is the default, as it is there
+        assert scores.current() == []
+        store.save("sign_scores", [])
+        assert scores.current() == []
+
+    async def test_a_school_turned_on_from_the_page_is_read_and_shown_in_the_status(self, tmp_path, no_hardware, monkeypatch):
+        feed = Feed()
+        monkeypatch.setattr(espn, "fetch", feed)                              # ESPN is never asked: this is the fake feed
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        scores, control = agent.service_manager.get_service("scores"), agent.service_manager.get_service("control")
+        async with TestClient(TestServer(control.create_app())) as client:
+            assert "scores" not in await (await client.get("/api/status")).json()
+            await scores.refresh()
+            assert feed.asked == []                                           # nothing is read while every school is off
+            assert (await client.post("/api/settings", json={"sign_scores": ["texas"]})).status == 200
+            await scores.refresh()
+            assert feed.asked == [251]                                        # Texas's team id, and nobody else's
+            entries = (await (await client.get("/api/status")).json())["scores"]
+            assert [(e["school"], e["last"]["home_score"], e["last"]["away_score"]) for e in entries] == [("texas", 45, 42)]
+
+    async def test_a_school_switched_on_while_the_settings_file_cannot_be_written_is_still_read_until_the_restart(self, tmp_path, no_hardware, monkeypatch, caplog):
+        """The page's switch is answered and shown whether or not the choice reaches the disk, as the screensaver's is; the scoreboard reads the schools from the
+        store, so the store has to go on with it too, or the sign would say a school is on and show nothing, until a restart."""
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        scores, control = agent.service_manager.get_service("scores"), agent.service_manager.get_service("control")
+
+        def refuse(src, dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("croom.control.settings.os.replace", refuse)
+        async with TestClient(TestServer(control.create_app())) as client:
+            with caplog.at_level(logging.WARNING):
+                response = await client.post("/api/settings", json={"sign_scores": ["texas"]})
+            assert response.status == 200 and (await response.json())["sign_scores"] == ["texas"]
+        assert [entry["school"] for entry in scores.current()] == ["texas"]    # the scoreboard follows the switch
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "Could not save the room settings" in r.getMessage()]
+        assert len(warnings) == 1 and "No space left on device" in warnings[0]  # one WARNING, with the reason
+        assert SettingsStore(control._store.path).get("sign_scores") is None   # and the file has not got it: a restart does not either
+
+    def test_the_agent_says_so_when_the_scoreboard_cannot_be_had_for_want_of_a_settings_store(self, tmp_path, no_hardware, caplog):
+        """Without the store the school switches would do nothing: one WARNING says why there is no scoreboard, as the ImportError path says it."""
+        agent = make_agent(make_config(tmp_path, control=True))
+        with caplog.at_level(logging.WARNING, logger="croom.core.agent"):
+            assert agent._register_scores(None) is None
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1 and warnings[0].startswith("Football scores not available") and "settings store" in warnings[0], warnings

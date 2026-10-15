@@ -14,7 +14,7 @@ import json
 import logging
 import mimetypes
 import re
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 from urllib.parse import urlsplit
@@ -22,7 +22,7 @@ from urllib.parse import urlsplit
 from aiohttp import WSCloseCode, WSMsgType, web
 
 from croom.control.settings import SettingsStore
-from croom.core.config import Config
+from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingControlError, MeetingState
@@ -61,14 +61,58 @@ PLATFORM_HOSTS = {
 }
 # The only calendar fields the page needs; the rest stays off the network.
 EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
+# The week the door sign shows (spec 2026-10-13, section 2.3): today and the six days after it, named in English whatever the
+# machine's locale says (date.strftime would follow it).
+WEEK_DAYS = 7
+DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
 TV_REASON_LIMIT = 160   # how much of a failure's own text goes to the table (the TV service's words are never cut)
+# The door sign's backgrounds (spec 2026-10-13, section 2.4), in the order the room page offers them: a photograph of Austin
+# each, from static/backgrounds/<key>.jpg ("hills" and "stadium" wait for theirs; the sign shows plain until a file is there), and
+# plain, the navy alone. The schools whose football scores the sign may show (section 2.5).
+SIGN_BACKGROUNDS = ("skyline", "capitol", "tower", "bridge", "pool", "star", "hills", "stadium", "plain")
+SIGN_SCHOOLS = ("texas", "michigan", "texas_am", "missouri")
+
+
+def _one_of(label: str, options: Tuple[str, ...]) -> Callable[[Any], Any]:
+    """A check for a setting that is one of a few words: the word, or ValueError saying what is allowed."""
+    def check(value: Any) -> Any:
+        if not isinstance(value, str) or value not in options:
+            raise ValueError(f"Unknown {label} {value!r}; use one of {', '.join(options)}")
+        return value
+    return check
+
+
+def _some_of(label: str, options: Tuple[str, ...]) -> Callable[[Any], Any]:
+    """A check for a setting that is a list of a few words, each listed once, in the order sent."""
+    def check(value: Any) -> Any:
+        if not isinstance(value, list):
+            raise ValueError(f"{label}s must be a list; use any of {', '.join(options)}")
+        for item in value:
+            if not isinstance(item, str) or item not in options:
+                raise ValueError(f"Unknown {label} {item!r}; use any of {', '.join(options)}")
+        return list(dict.fromkeys(value))
+    return check
+
+
 # The room settings the page may change through /api/settings: each key's default and the check that turns what was sent
 # into what is kept (or raises ValueError, in words). Only these keys are served or changed; the settings file holds more.
 ROOM_SETTINGS: Dict[str, Tuple[Any, Callable[[Any], Any]]] = {
     "key_click": (True, _a_bool("key click")),
+    "sign_background": ("skyline", _one_of("door sign background", SIGN_BACKGROUNDS)),
+    "sign_scores": ([], _some_of("school", SIGN_SCHOOLS)),
 }
+
+
+def read_setting(store, key: str) -> Any:
+    """A room setting as the store holds it, else its default: a missing, broken or no longer valid value is not an error. What the page
+    loads at start, and what the scoreboard reads each time it needs the schools that are on, so that they cannot disagree."""
+    default, check = ROOM_SETTINGS[key]
+    try:
+        return check(store.get(key, default))
+    except ValueError:
+        return check(default)
 
 
 def first_line(error: BaseException) -> str:
@@ -155,8 +199,9 @@ class ControlService(Service):
     Room control service ("control" under the ServiceManager).
 
     Args:
-        config: dict with host, port, room_name, room_location, static_dir, screensaver
-            (the default idle style) and settings_file (where the chosen style is kept).
+        config: dict with host, port, room_name, room_location, room_company (the practice's name on the
+            door sign), static_dir, screensaver (the default idle style) and settings_file (where the chosen
+            style is kept).
         meeting: the MeetingService instance, or None.
         calendar: the CalendarService instance, or None.
         devices: the room devices the page controls (sound and camera), or None.
@@ -165,6 +210,7 @@ class ControlService(Service):
         discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
         mouse: the room Pi's virtual mouse that the touchpad drives (a croom.tv.pointer.PiMouse, made when it is first used, unless a
             test stands in for it).
+        scores: the scores service (current() lists the football scores of the schools that are on), or None.
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -180,6 +226,7 @@ class ControlService(Service):
         tv=None,
         discover=None,
         mouse=None,
+        scores=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -187,6 +234,7 @@ class ControlService(Service):
         self._port = int(self.config.get("port", 8080))
         self._room_name = self.config.get("room_name", "Conference Room")
         self._room_location = self.config.get("room_location", "")
+        self._room_company = self.config.get("room_company", DEFAULT_COMPANY)
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
         self._store = store or SettingsStore(
             self.config.get("settings_file", "control-settings.json")
@@ -205,6 +253,8 @@ class ControlService(Service):
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
         self._mouse = mouse if mouse is not None else PiMouse()
         self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
+        self._scores = scores
+        self._scores_failure: Optional[str] = None
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -217,7 +267,14 @@ class ControlService(Service):
 
     @classmethod
     def from_config(
-        cls, config: Config, meeting=None, calendar=None, devices=None, store=None, tv=None
+        cls,
+        config: Config,
+        meeting=None,
+        calendar=None,
+        devices=None,
+        store=None,
+        tv=None,
+        scores=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         return cls(
@@ -226,6 +283,7 @@ class ControlService(Service):
                 "port": config.control.port,
                 "room_name": config.room.name,
                 "room_location": config.room.location,
+                "room_company": config.room.company,
                 "static_dir": str(STATIC_DIR),
                 "screensaver": config.control.screensaver,
                 "settings_file": str(config.resolve_data_dir() / "control-settings.json"),
@@ -235,6 +293,7 @@ class ControlService(Service):
             devices=devices,
             store=store,
             tv=tv,
+            scores=scores,
         )
 
     @property
@@ -257,6 +316,7 @@ class ControlService(Service):
         app.router.add_get("/tv", self._handle_tv)
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/calendar/events", self._handle_events)
+        app.router.add_get("/api/calendar/week", self._handle_week)
         app.router.add_post("/api/meeting/join", self._handle_join)
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
@@ -391,15 +451,36 @@ class ControlService(Service):
         data["joinable"] = self._platform_for(event.meeting_url) is not None
         return data
 
+    def _local_today(self) -> date:
+        """Today's date on the device's clock: the room's day, so a booking at 11:30 PM is that day's, not the next UTC day's."""
+        return datetime.now().astimezone().date()
+
     def _today_events(self) -> List[Any]:
         """Today's events in start order, by the device's local date."""
         if self._calendar is None:
             return []
-        today = datetime.now().astimezone().date()
+        today = self._local_today()
         return sorted(
             (e for e in self._calendar.events if e.start_time.astimezone().date() == today),
             key=lambda e: e.start_time,
         )
+
+    def _week(self) -> List[Dict[str, Any]]:
+        """The next seven days, today first, each with its events in start order, by the device's local date as today's list is.
+        A day with nothing booked is still there, with an empty list. The calendar service holds the bookings from an hour ago to a week
+        ahead, which covers the six days after today whole and what is left of today."""
+        first = self._local_today()
+        days = []
+        for n in range(WEEK_DAYS):
+            day = first + timedelta(days=n)
+            days.append({"date": day.isoformat(), "label": DAY_NAMES[day.weekday()], "events": []})
+        if self._calendar is not None:
+            events_by_date = {day["date"]: day["events"] for day in days}
+            for e in sorted(self._calendar.events, key=lambda e: e.start_time):
+                bookings = events_by_date.get(e.start_time.astimezone().date().isoformat())
+                if bookings is not None:
+                    bookings.append(self._event_dict(e))
+        return days
 
     def _calendar_status(self) -> Dict[str, Any]:
         if self._calendar is None:
@@ -425,8 +506,8 @@ class ControlService(Service):
             # The provider refused the link before it started joining.
             state = "error"
         platforms = list(self._meeting.get_available_platforms()) if self._meeting is not None else []
-        return {
-            "room": {"name": self._room_name, "location": self._room_location},
+        status = {
+            "room": {"name": self._room_name, "location": self._room_location, "company": self._room_company},
             "server_time": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds"),
             "platforms": platforms,
             "meeting": {
@@ -447,6 +528,24 @@ class ControlService(Service):
             "camera": self._camera_state(),
             "tv": self._tv_status(),
         }
+        scores = self._scores_status()
+        if scores:
+            status["scores"] = scores   # only while a school is on: no key, not an empty list, when none is
+        return status
+
+    def _scores_status(self) -> List[Dict[str, Any]]:
+        """The football scores of the schools that are on, one entry each (spec 2026-10-13, section 2.5); nothing when none is on, there
+        is no scores service, or it fails: the status must always answer, and the door sign and the table both depend on it."""
+        if self._scores is None:
+            return []
+        try:
+            return list(self._scores.current())
+        except Exception as e:  # noqa: BLE001 - the status must always answer
+            message = f"Could not read the football scores: {type(e).__name__}: {e}"
+            if message != self._scores_failure:   # warned about once with its traceback, per distinct message, as the devices' reads are
+                self._scores_failure = message
+                logger.warning(message, exc_info=True)
+            return []
 
     # ------------------------------------------------------------------
     # The screensaver style
@@ -489,18 +588,12 @@ class ControlService(Service):
         return web.json_response(self._screensaver_payload())
 
     # ------------------------------------------------------------------
-    # Room settings: what the room page may change for the room (spec 2026-10-13 on-screen keyboard, 3.3)
+    # Room settings: the keyboard's click and the door sign's background and schools (spec 2026-10-13)
     # ------------------------------------------------------------------
 
     def _load_settings(self) -> Dict[str, Any]:
         """Each setting as stored, else its default: a missing, broken or no longer valid value is not an error."""
-        settings: Dict[str, Any] = {}
-        for key, (default, check) in ROOM_SETTINGS.items():
-            try:
-                settings[key] = check(self._store.get(key, default))
-            except ValueError:
-                settings[key] = check(default)
-        return settings
+        return {key: read_setting(self._store, key) for key in ROOM_SETTINGS}
 
     def _settings_payload(self) -> Dict[str, Any]:
         """Every setting, as copies: what an answer carries is not the room's own list."""
@@ -530,8 +623,11 @@ class ControlService(Service):
             for key, value in values.items():
                 self._store.save(key, value)
         except OSError as e:
-            # As the screensaver's choice: it holds until the restart, and the log says why it will not last.
+            # As the screensaver's choice: it holds until the restart, and the log says why it will not last. The store holds it too, so that what reads the
+            # choice from there (the scoreboard, for the schools) goes on with the page's and not with the one on the disk.
             logger.warning(f"Could not save the room settings to {self._store.path}: {e}")
+            for key, value in values.items():
+                self._store.hold(key, value)
         self._settings.update(values)
         logger.info(f"Room settings changed: {', '.join(f'{key} = {value}' for key, value in values.items())}")
         return web.json_response(self._settings_payload())
@@ -981,6 +1077,9 @@ class ControlService(Service):
         if self._calendar is None:
             return web.json_response({"events": []})
         return web.json_response({"events": [self._event_dict(e) for e in self._today_events()]})
+
+    async def _handle_week(self, request: web.Request) -> web.Response:
+        return web.json_response({"days": self._week()})
 
     @staticmethod
     def _require_json(request: web.Request) -> Optional[web.Response]:

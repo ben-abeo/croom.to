@@ -55,9 +55,44 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
 .trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
 .trouble .card h3 { font-size: 10.5pt; }
 .page-break { break-before: page; }
+.lead { break-after: avoid; }
+.kicker.lead { margin-top: 26px; }
+h3.sub { font-size: 12.5pt; color: var(--navy-800); margin: 18px 0 6px; break-after: avoid; }
+.keys { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 6px 0 12px; }
+.keys.wide { grid-template-columns: 1fr; }
+.key { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--tint-100); border-radius: var(--radius-sm); padding: 8px 12px; break-inside: avoid; }
+.key p { margin: 0; font-size: 9.5pt; color: var(--slate-500); }
+.key p:first-child { font-size: 10.5pt; color: var(--ink-900); margin-bottom: 2px; }
+.key b { font-weight: 600; color: var(--navy-800); }
+.icons { display: inline-flex; gap: 4px; flex: none; color: var(--blue-600); }
+.ic { width: 20px; height: 20px; flex: none; }
+.ic.sm { width: 13px; height: 13px; vertical-align: -2px; color: var(--blue-600); }
 </style>
 </head>
 <body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
+<symbol id="icon-mic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" x2="12" y1="19" y2="22"/></symbol>
+<symbol id="icon-mic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="2" x2="22" y1="2" y2="22"/><path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2"/><path d="M5 10v2a7 7 0 0 0 12 5"/><path d="M15 9.34V5a3 3 0 0 0-5.68-1.33"/><path d="M9 9v3a3 3 0 0 0 5.12 2.12"/><line x1="12" x2="12" y1="19" y2="22"/></symbol>
+<symbol id="icon-video" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 8-6 4 6 4V8Z"/><rect width="14" height="12" x="2" y="6" rx="2" ry="2"/></symbol>
+<symbol id="icon-video-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.66 6H14a2 2 0 0 1 2 2v2.34l1 1L22 8v8"/><path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2l10 10Z"/><line x1="2" x2="22" y1="2" y2="22"/></symbol>
+<symbol id="icon-hand" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 11V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v0"/><path d="M14 10V4a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v2"/><path d="M10 10.5V6a2 2 0 0 0-2-2v0a2 2 0 0 0-2 2v8"/><path d="M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2c-2.8 0-4.5-.86-5.99-2.34l-3.6-3.6a2 2 0 0 1 2.83-2.82L7 15"/></symbol>
+<symbol id="icon-smile" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M8 14s1.5 2 4 2 4-2 4-2"/><line x1="9" x2="9.01" y1="9" y2="9"/><line x1="15" x2="15.01" y1="9" y2="9"/></symbol>
+<symbol id="icon-thumbs-up" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 10v12"/><path d="M15 5.88 14 10h5.83a2 2 0 0 1 1.92 2.56l-2.33 8A2 2 0 0 1 17.5 22H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2h2.76a2 2 0 0 0 1.79-1.11L12 2h0a3.13 3.13 0 0 1 3 3.88Z"/></symbol>
+<symbol id="icon-heart" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/></symbol>
+<symbol id="icon-laugh" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M18 13a6 6 0 0 1-6 5 6 6 0 0 1-6-5h12Z"/><line x1="9" x2="9.01" y1="9" y2="9"/><line x1="15" x2="15.01" y1="9" y2="9"/></symbol>
+<symbol id="icon-party-popper" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5.8 11.3 2 22l10.7-3.79"/><path d="M4 3h.01"/><path d="M22 8h.01"/><path d="M15 2h.01"/><path d="M22 20h.01"/><path d="m22 2-2.24.75a2.9 2.9 0 0 0-1.96 3.12v0c.1.86-.57 1.63-1.45 1.63h-.38c-.86 0-1.6.6-1.76 1.44L14 10"/><path d="m22 13-.82-.33c-.86-.34-1.82.2-1.98 1.11v0c-.11.7-.72 1.22-1.43 1.22H17"/><path d="m11 2 .33.82c.34.86-.2 1.82-1.11 1.98v0C9.52 4.9 9 5.52 9 6.23V7"/><path d="M11 13c1.93 1.93 2.83 4.17 2 5-.83.83-3.07-.07-5-2-1.93-1.93-2.83-4.17-2-5 .83-.83 3.07.07 5 2Z"/></symbol>
+<symbol id="icon-phone-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.68 13.31a16 16 0 0 0 3.41 2.6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7 2 2 0 0 1 1.72 2v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.42 19.42 0 0 1-3.33-2.67m-2.67-3.34a19.79 19.79 0 0 1-3.07-8.63A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91"/><line x1="22" x2="2" y1="2" y2="22"/></symbol>
+<symbol id="icon-captions" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 13h4"/><path d="M15 13h2"/><path d="M7 9h2"/><path d="M13 9h4"/><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2Z"/></symbol>
+<symbol id="icon-layout" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
+<symbol id="icon-user" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></symbol>
+<symbol id="icon-users" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+<symbol id="icon-message" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></symbol>
+<symbol id="icon-lock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+<symbol id="icon-x-circle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="m15 9-6 6"/><path d="m9 9 6 6"/></symbol>
+<symbol id="icon-door" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><polyline points="10 17 15 12 10 7"/><line x1="15" x2="3" y1="12" y2="12"/></symbol>
+<symbol id="icon-unlock" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 9.9-1"/></symbol>
+<symbol id="icon-record" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></symbol>
+</svg>
 
 <section class="banner">
   <img src="crystalpm-logo-white.svg" alt="Crystal PM">
@@ -127,7 +162,7 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
 <ul>
   <li><strong>Open the room page.</strong> On your laptop or phone on the office network, go to <span class="chip">http://crystal-meet-room-1.local:8080</span>, or use the device's IP address with <span class="chip">:8080</span>.</li>
   <li><strong>Check the dashboard.</strong> On <span class="ui">Devices</span>, the room should show <span class="ui">online</span> within a minute.</li>
-  <li><strong>Join a test call.</strong> Paste a Zoom link, or a Zoom meeting ID, into <span class="ui">Join with a link</span> and press <span class="ui">Join</span>. A meeting ID, or a Zoom link without its passcode, makes a <span class="ui">Passcode</span> field appear under the box: type the meeting's passcode there before you press <span class="ui">Join</span> (on the table screen, tapping the field opens the on-screen keyboard on its digits). The TV shows the meeting joining; the page switches to the meeting screen, which offers <span class="ui">Mute</span>, <span class="ui">Turn camera off</span> and <span class="ui">Leave</span>.</li>
+  <li><strong>Join a test call.</strong> Paste a Zoom link, or a Zoom meeting ID, into <span class="ui">Join with a link</span> and press <span class="ui">Join</span>. A meeting ID, or a Zoom link without its passcode, makes a <span class="ui">Passcode</span> field appear under the box: type the meeting's passcode there before you press <span class="ui">Join</span> (on the table screen, tapping the field opens the on-screen keyboard on its digits). The TV shows the meeting joining; the page switches to the meeting screen, which offers <span class="ui">Mute</span>, <span class="ui">Turn camera off</span> and <span class="ui">Leave</span> and, depending on the platform, more (see <span class="ui">The meeting screen</span> below).</li>
   <li><strong>Leave.</strong> Press <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>. The TV returns to the screensaver.</li>
   <li><strong>Pick the TV's idle look.</strong> Tap <span class="ui">Options</span>, then <span class="ui">Screensaver</span> on the room page, and choose <span class="ui">Information</span> (name, status, next booking and the time), <span class="ui">Quiet</span> (name and status only), <span class="ui">Brand</span> (the logo) or <span class="ui">Bounce</span> (the logo drifting around the screen). The TV changes at once and the choice is remembered.</li>
   <li><strong>Connect the calendar.</strong> To show real bookings and let people join them, follow the guide <span class="ui">Connect Crystal Meet rooms to Google Calendar</span> next. Until then the room page works with pasted links only.</li>
@@ -142,6 +177,47 @@ li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px;
   <p class="kicker">Tip</p>
   <p>Zoom links that include their passcode (the part after <span class="chip">?pwd=</span>) join straight through. Google Meet needs the room signed in once as its own Workspace user; the guide "Let Crystal Meet rooms join Google Meet" covers it.</p>
 </div>
+</section>
+
+<section class="block flow">
+<p class="kicker lead">On the table</p>
+<h2 class="lead">The meeting screen</h2>
+<p>While a call lasts the page shows the meeting screen on its own, and draws only what the call's platform offers the room right now. This is the screen at its fullest, in a Zoom meeting where the room is the host. A Google Meet call offers Mute, Turn camera off, Raise hand, Captions and Leave, and no more. Every button has an icon before its label (a dialog's card, below, is the exception); where a button shows a state, the icon is the state and the words are what a tap does.</p>
+
+<h3 class="sub">The first row</h3>
+<div class="keys">
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-mic"></use></svg><svg class="ic" aria-hidden="true"><use href="#icon-mic-off"></use></svg></span><div><p><b>Mute</b> or <b>Unmute</b></p><p>The microphone as the meeting has it: a host muting the room changes the button within a few seconds.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-video"></use></svg><svg class="ic" aria-hidden="true"><use href="#icon-video-off"></use></svg></span><div><p><b>Turn camera off</b> or <b>Turn camera on</b></p><p>The same for the camera.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-hand"></use></svg></span><div><p><b>Raise hand</b> or <b>Lower hand</b></p><p>Zoom keeps the hand in its own Reactions list; the room presses it there.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-smile"></use></svg></span><div><p><b>Reactions</b></p><p>Opens a row for ten seconds: <svg class="ic sm" aria-hidden="true"><use href="#icon-thumbs-up"></use></svg> Thumbs up, <svg class="ic sm" aria-hidden="true"><use href="#icon-hand"></use></svg> Clap, <svg class="ic sm" aria-hidden="true"><use href="#icon-heart"></use></svg> Heart, <svg class="ic sm" aria-hidden="true"><use href="#icon-laugh"></use></svg> Laugh, <svg class="ic sm" aria-hidden="true"><use href="#icon-smile"></use></svg> Wow, <svg class="ic sm" aria-hidden="true"><use href="#icon-party-popper"></use></svg> Celebrate, and Cancel.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-phone-off"></use></svg></span><div><p><b>Leave</b></p><p>Asks for a second tap: Tap again to leave.</p></div></div>
+</div>
+
+<h3 class="sub">The second row</h3>
+<div class="keys">
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-captions"></use></svg></span><div><p><b>Captions on</b> or <b>Captions off</b></p><p>Zoom's captions on the TV.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-layout"></use></svg></span><div><p><b>Gallery view</b> or <b>Speaker view</b></p><p>The button names the view a tap switches to.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-user"></use></svg></span><div><p><b>Hide self view</b> or <b>Show self view</b></p><p>The room's own picture on the TV.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-users"></use></svg></span><div><p><b>Participants (7)</b></p><p>Opens the list of people; the count leaves out the waiting room.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-message"></use></svg></span><div><p><b>Chat (2)</b></p><p>Opens the chat; the number is the messages not yet read.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-lock"></use></svg></span><div><p><b>Host</b></p><p>Only while the room is host or co-host.</p></div></div>
+</div>
+
+<h3 class="sub">The screens behind the second row</h3>
+<div class="keys wide">
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-users"></use></svg></span><div><p><b>Participants</b></p><p>Everyone in the meeting, marked Host, Hand raised, Muted or Video off; the room says "(this room)". A host or co-host also gets <svg class="ic sm" aria-hidden="true"><use href="#icon-mic-off"></use></svg> Mute and <svg class="ic sm" aria-hidden="true"><use href="#icon-x-circle"></use></svg> Remove on each other person (Tap again to remove), and, under Waiting room, <svg class="ic sm" aria-hidden="true"><use href="#icon-door"></use></svg> Admit for each person waiting.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-message"></use></svg></span><div><p><b>Chat</b></p><p>The last 20 messages other people sent, newest at the bottom, with sender and time; No messages yet when there are none. It is read-only: there is no reply box.</p></div></div>
+  <div class="key"><span class="icons"><svg class="ic" aria-hidden="true"><use href="#icon-lock"></use></svg><svg class="ic" aria-hidden="true"><use href="#icon-unlock"></use></svg></span><div><p><b>Host controls</b></p><p><svg class="ic sm" aria-hidden="true"><use href="#icon-mic-off"></use></svg> Mute all, <svg class="ic sm" aria-hidden="true"><use href="#icon-mic"></use></svg> Ask all to unmute, <svg class="ic sm" aria-hidden="true"><use href="#icon-record"></use></svg> Start recording or Stop recording, <svg class="ic sm" aria-hidden="true"><use href="#icon-unlock"></use></svg> Lock meeting or <svg class="ic sm" aria-hidden="true"><use href="#icon-lock"></use></svg> Unlock meeting, and, for the host only, <svg class="ic sm" aria-hidden="true"><use href="#icon-x-circle"></use></svg> End meeting for everyone (Tap again to end).</p></div></div>
+</div>
+<p>Each of the three has <span class="ui">Back</span>, and each goes back to the meeting screen on its own after two idle minutes; Camera and Upcoming meetings stay where you leave them. A tap anywhere on the screen starts the two minutes again.</p>
+
+<h3 class="sub">What the meeting says to the room</h3>
+<ul>
+  <li><strong>The notice line.</strong> A line under the meeting's title says what the meeting has disclosed of itself (recorded, transcribed, AI Companion) and stays for the rest of the call.</li>
+  <li><strong>The dialog card.</strong> A Zoom dialog that waits for a tap is a card above the controls, with Zoom's own words and buttons in Zoom's order, the last one highlighted (Zoom puts the cancelling button first). The card's buttons carry no icons, because the words are Zoom's; its buttons ignore a tap for half a second after it appears, so a tap meant for the controls under it answers nothing by mistake. The Zoom guide says which dialogs wait and which are pressed for the room.</li>
+  <li><strong>Second taps.</strong> Leave, Remove and End meeting for everyone ask for a second tap: Tap again to leave, Tap again to remove, Tap again to end. Each must come within five seconds, and a double tap on the glass does not count as the second.</li>
+</ul>
+<p class="see">Icons are from Lucide (lucide.dev), ISC licence: the symbols above are the ones the table draws.</p>
 </section>
 
 <div class="page-break"></div>

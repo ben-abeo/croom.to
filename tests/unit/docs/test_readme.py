@@ -5,8 +5,12 @@ guides, and links every design spec and implementation plan.
 
 from pathlib import Path
 
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
+
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "README.md"
+SERVICE = REPO / "src" / "croom" / "control" / "service.py"
+SPRITE = REPO / "src" / "croom" / "control" / "static" / "icons.svg"
 
 
 def test_readme_starts_with_crystal_meet_and_keeps_upstream():
@@ -126,3 +130,65 @@ def test_readme_says_where_a_zoom_meetings_passcode_comes_from():
     assert "Zoom links need their passcode in the link" not in text
     # the Meet half of the bullet stays
     assert "A failed Meet join logs what Meet showed" in text
+
+
+def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps():
+    """The room page row says what the meeting screen draws (the first row, the second row, the three screens behind it, the card for a dialog, the
+    second taps and the two idle minutes), for Zoom and for Meet; the stale row that stopped at Leave is gone."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "a first row of Mute, Turn camera off, Raise hand, **Reactions** and Leave",
+        "a second row of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat** and, only while the room is host or co-host, **Host**",
+        "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more",
+        "a Zoom dialog that waits for a tap shows as a card above the controls with Zoom's own buttons",
+        "**Participants**, **Chat** (read only) and **Host** are screens of their own, each with **Back**, and each returns to the meeting screen after two idle minutes",
+        "Leave, Remove and End meeting for everyone ask for a second tap",
+        "Every button on the meeting screen has a [Lucide](https://lucide.dev) icon before its label (the buttons of a Zoom dialog's card excepted: their words are Zoom's)",
+    ):
+        assert needle in text, needle
+    assert "(Mute, Turn camera off, Leave, the room's volume" not in text
+
+
+def test_readme_names_the_dialog_policys_and_the_reactions_defaults_as_the_code_has_them():
+    """The config table names each default (the code's own lists, not a copy that can drift) and says what `ask_everything` and the leniency do."""
+    text = README.read_text(encoding="utf-8")
+    for phrase in DEFAULT_ACKNOWLEDGE + DEFAULT_REACTIONS:
+        assert f"`{phrase}`" in text, phrase
+    for needle in (
+        "| `meeting.dialogs` | `acknowledge`, `ask_everything` |",
+        "`ask_everything: true` (default `false`) makes every dialog wait for a tap",
+        "A value that is not a list (or an `ask_everything` that is not true or false) is replaced by its default, and an unknown key under `dialogs:` or `controls:` is ignored, each with a warning in the journal; nothing outside those two sections is read so gently",
+        "| `meeting.controls` | `reactions` |",
+        "(shown on the table as Thumbs up, Clap, Heart, Laugh, Wow and Celebrate)",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_lists_the_meeting_routes_and_says_who_can_read_the_status():
+    """The four routes this work added are named (and exist), a refusal is a 409 even for an unknown name, and the open status says what it now carries."""
+    text = README.read_text(encoding="utf-8")
+    source = SERVICE.read_text(encoding="utf-8")
+    for route in ("/api/meeting/control", "/api/meeting/dialog", "/api/meeting/chat/seen", "/api/meeting/diagnostics"):
+        assert f'"{route}"' in source, route
+        assert f"`{route}`" in text, route
+    for needle in (
+        "answer `{\"meeting\": ...}`, the block `/api/status` carries",
+        "a control the platform cannot carry out is a 409 with its words, an unknown name included",
+        "on a Zoom call it briefly opens the Reactions and View menus on the TV",
+        "`/api/status` is unauthenticated on the LAN, as the whole page is, and now carries the participants' names, the last twenty chat messages and the words of a waiting dialog, as it already carried the meeting link (its passcode too, when the link has one); `/api/meeting/diagnostics` is open the same way and lists more of the meeting (the whole roster with its flags, the words of every dialog met)",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_credits_lucide_and_ties_the_credit_to_the_sprite():
+    """The sprite says which Lucide it was built from; the README's credit line says the same version and the licence."""
+    text = README.read_text(encoding="utf-8")
+    sprite = SPRITE.read_text(encoding="utf-8")
+    assert "Lucide icons (https://lucide.dev), ISC License" in sprite and "lucide-react 0.303.0" in sprite
+    assert "Icons are [Lucide](https://lucide.dev) (ISC licence, lucide-react 0.303.0), in one sprite, `src/croom/control/static/icons.svg`, with the licence text beside it in `LICENSES.md`" in text
+
+
+def test_readme_says_the_wording_of_the_platforms_pages_is_not_yet_confirmed_on_a_live_meeting():
+    text = README.read_text(encoding="utf-8")
+    assert "were read from Zoom's 6.5.0 web client files, not yet from a live meeting, and the English labels it looks for on Google Meet's call page are the controls plan's wording" in text
+    assert "the Zoom guide's **In the meeting** section lists the inventory to run" in text

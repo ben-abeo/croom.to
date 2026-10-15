@@ -135,6 +135,11 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 <p class="see">You should now see the room join the internal meeting on its own and the outside meeting after being admitted.</p>
 </section>
 
+<div class="callout">
+  <p class="kicker">In the call</p>
+  <p>From the table a Meet call offers <span class="ui">Mute</span>, <span class="ui">Turn camera off</span>, <span class="ui">Raise hand</span> and <span class="ui">Captions</span>, and <span class="ui">Leave</span>: the room presses Meet's own keyboard shortcuts and reads each button's label back to see what happened. Meet has no chat, roster, reactions, view, pin, self view or host controls here, so the table draws no <span class="ui">Chat</span>, <span class="ui">Participants</span>, <span class="ui">Reactions</span> or <span class="ui">Host</span> button in a Meet call. A control Meet did not take answers in words on the screen, for example <span class="chip wrap">Meet did not change the camera; try again</span>, and so does <span class="ui">Captions</span> while something on the TV that takes typing has the keyboard: <span class="chip wrap">Meet's chat box has the keyboard; close it on the TV first</span>. The buttons are found by the English labels Meet showed at the time of writing, <span class="chip">"Turn off microphone"</span>, <span class="chip">"Turn on camera"</span>, <span class="chip">"Raise hand"</span> and <span class="chip">"Turn on captions"</span>, so a Meet whose labels differ hides the control instead of pressing the wrong thing. For the first real call open <span class="chip wrap">http://&lt;device&gt;:8080/api/meeting/diagnostics</span> during it: for Meet it lists every label the page draws, what the room made of them and what has the keyboard; then check that <span class="ui">Mute</span> and <span class="ui">Turn camera off</span> each change in Meet with one tap on the table. The table waits two seconds for a button's label to change; a real camera may take longer to start, and then the table says Meet did not change the camera while the camera comes on a moment later (the room reads Meet again every five seconds), so note how long yours takes.</p>
+</div>
+
 <div class="page-break"></div>
 <section class="block">
 <p class="kicker">If something is off</p>

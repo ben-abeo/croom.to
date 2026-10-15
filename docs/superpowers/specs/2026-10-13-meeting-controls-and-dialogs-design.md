@@ -79,7 +79,7 @@ async def control(self, name: str, value: Any = None) -> Dict[str, Any]
 
 `name` is a key of the model above (`raise_hand`, `reactions`, `captions`, `layout`, `hide_self`, `pin`, `host.mute_all`, `host.ask_unmute`, `host.record`, `host.lock`, `host.admit`, `host.hold`, `host.remove`, `host.mute_one`, `host.end`, `dialog`, `chat.seen`); `value` is the choice (a reaction, a layout, a participant id, a dialog button). It returns the control's new state, or raises `MeetingControlError` with words for the table. A provider that lacks a control raises `MeetingControlError("Not available in this meeting")`; the table never shows such a button in the first place because `available` was false.
 
-Two routes carry it: `POST /api/meeting/control {"name": "...", "value": ...}` → 200 with the new state, 409 with words on a `MeetingControlError` or any other failure (as the mute and camera routes answer today), 404 for an unknown name, 400 for a bad body; and `POST /api/meeting/dialog {"id": 7, "button": "Got it"}` (section 5). `toggle_mute`/`toggle_camera` and their routes stay for the existing page tests and the Meet provider.
+Two routes carry it: `POST /api/meeting/control {"name": "...", "value": ...}` → 200 with the new state, 409 with words on a `MeetingControlError` or any other failure (as the mute and camera routes answer today; an unknown name is one too, in the bridge's own words, "Unknown control wave": the control service keeps no list of names), 400 for a bad body; and `POST /api/meeting/dialog {"id": 7, "button": "Got it"}` (section 5). `toggle_mute`/`toggle_camera` and their routes stay for the existing page tests and the Meet provider.
 
 ## 4. Zoom: the bridge and the provider
 

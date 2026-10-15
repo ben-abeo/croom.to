@@ -3,10 +3,11 @@ The README explains how to set up and develop Crystal Meet, points at both
 guides, and links every design spec and implementation plan.
 """
 
+import dataclasses
 import logging
 from pathlib import Path
 
-from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, load_config
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config, load_config
 from croom.meeting.providers.base import DialogPolicy, controls_from
 from tests.unit.docs.documented_numbers import IDLE_RETURN_MIN, TAP_PX, TOUCHPAD_IDLE_MIN, TURN_ON, TV_RETURN_MIN, reconnect_words, words
 
@@ -176,7 +177,7 @@ def test_readme_says_exactly_what_the_config_loader_does_with_a_mistake_and_the_
     for needle in (
         "A mistake under `dialogs:` or `controls:` costs only its own setting, with a warning in the journal: a value that is not a list (`acknowledge: no`, which YAML reads as false) is replaced by its default; an `ask_everything` that is not true or false is read as false (the words yes, no, on and off, in quotes, are read as they say); an unknown key is ignored; a section that is not a set of settings gives the defaults.",
         "Without a warning: a bare word is a one-item list, a setting with nothing after it takes its default, and `acknowledge: []` acknowledges nothing, so every dialog waits.",
-        "Anywhere else in the file an unknown key makes the agent set the whole file aside (it prints `Warning: Failed to load config from ...`) and start on its built-in defaults.",
+        "Inside any other section an unknown key makes the agent set the whole file aside: none of the file's settings take effect and the agent runs on its built-in defaults (the one line it prints about it is block-buffered and reaches the journal only when the service stops); an unknown key at the top of the file, outside every section, is ignored without a word.",
     ):
         assert needle in text, needle
     caplog.set_level(logging.WARNING, logger="croom.core.config")
@@ -210,11 +211,23 @@ def test_readme_says_exactly_what_the_config_loader_does_with_a_mistake_and_the_
     assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(notice) == "acknowledge" and DialogPolicy(config.meeting.dialogs.acknowledge).decide(notice) == "ask"   # [] acknowledges nothing
     reading = {"buttons": {"reactions": {}}}                                                           # `reactions: []` offers none, so the Reactions button has nothing to open
     assert controls_from(reading, DEFAULT_REACTIONS)["reactions"]["available"] is True and controls_from(reading, config.meeting.controls.reactions)["reactions"]["available"] is False
-    # anywhere else an unknown key costs the whole file: the loader says so on its output, and the file's other settings are lost with it
-    capsys.readouterr()
+    # inside any other section an unknown key costs the whole file, the settings beside it included
+    for section in [f.name for f in dataclasses.fields(Config) if dataclasses.is_dataclass(getattr(Config(), f.name))]:
+        capsys.readouterr()
+        config, said = loaded(f"data_dir: /marker\nroom:\n  name: Lab\n{section}:\n  not_a_setting: 1\n")
+        assert config.data_dir == "" and config.room.name == "Conference Room", section                    # the file's settings did not take effect: the built-in defaults
     config, said = loaded("meeting:\n  platfroms: [zoom]\n  dialogs:\n    ask_everything: true\n")
+    assert config.meeting.dialogs.ask_everything is False and said == []                                     # the loader said nothing through the logger
+    # ... and the one line it prints about it is a print, which a process whose output goes to a pipe (the journal's) holds in its buffer: the unit does not unbuffer it
     assert "Warning: Failed to load config from" in capsys.readouterr().out
-    assert config.meeting.dialogs.ask_everything is False and config.room.name == "Conference Room"
+    source = (REPO / "src" / "croom" / "core" / "config.py").read_text(encoding="utf-8")
+    assert 'print(f"Warning: Failed to load config from {config_path}: {e}")' in source
+    install = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
+    assert "PYTHONUNBUFFERED" not in install and "python -u" not in install and "-m croom.core.agent -c $CONFIG_DIR/config.yaml" in install
+    # a key at the top of the file that no section is called is ignored: the file is kept, nothing is printed
+    capsys.readouterr()
+    config, said = loaded("not_a_section: 1\nroom:\n  name: Lab\n")
+    assert config.room.name == "Lab" and said == [] and capsys.readouterr().out == ""
 
 
 def test_the_notices_the_readme_says_disclose_nothing_are_the_ones_the_policy_treats_so():

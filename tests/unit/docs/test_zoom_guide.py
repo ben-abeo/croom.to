@@ -151,7 +151,7 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
         "A notice whose button the room cannot press is not left on the TV with nobody to answer it: it waits on the table like any other dialog",
         "A mistake under dialogs: or controls: costs only its own setting, with a warning in the journal: a value that is not a list (acknowledge: no, which YAML reads as false) is replaced by its default; an ask_everything that is not true or false is read as false (the words yes, no, on and off, in quotes, are read as they say); an unknown key is ignored; a section that is not a set of settings gives the defaults.",
         "Without a warning: a bare word is a one-item list, a setting with nothing after it takes its default, and acknowledge: [] acknowledges nothing, so every dialog waits.",
-        "Anywhere else in the file an unknown key makes the agent set the whole file aside (it prints Warning: Failed to load config from ...) and start on its built-in defaults.",
+        "Inside any other section an unknown key makes the agent set the whole file aside: none of the file's settings take effect and the agent runs on its built-in defaults (the one line it prints about it is block-buffered and reaches the journal only when the service stops); an unknown key at the top of the file, outside every section, is ignored without a word.",
         "A room installed before this release has no such lines and runs the defaults",
     ):
         assert needle in text, needle
@@ -159,8 +159,8 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
 
 # What a meeting meets, in the order it meets it: the leads of the inventory's numbered checks.
 INVENTORY = [
-    "The join.", "The footer.", "The Reactions picker.", "The View menu.", "A recording banner.", "The consent dialog.", "The host's request to unmute.",
-    "A raised hand.", "A person in the waiting room.", "The AI Companion notice.", "A breakout invitation.", "A modal with no words.", "Chat and its clock.",
+    "The join.", "The footer.", "The Reactions picker.", "The View menu.", "A person in the waiting room.", "A recording banner.", "The consent dialog.",
+    "The host's request to unmute.", "A raised hand.", "The AI Companion notice.", "A breakout invitation.", "A modal with no words.", "Chat and its clock.",
     "Recording from the Host screen.", "A rename.", "The host's calls and the SDK's own words.", "The room's own record.", "Leave.",
 ]
 
@@ -179,6 +179,7 @@ def test_zoom_guide_numbers_the_inventory_checks_in_the_order_a_meeting_meets_th
     text = visible_text(html[head:])
     for needle in (
         "This checklist is for the first real meeting a room joins on a device, and it comes out of this guide once the labels and wordings it collects are pinned in the code",
+        "You need a second person on another Zoom account, who hosts the meeting: they start a recording, ask the room to unmute, turn on AI Companion and open breakout rooms, raise a hand and send a chat message, and make the room co-host for the checks that need it. The waiting room needs a guest who is not the host, from another browser or a third person.",
         "The checks are numbered in the order a meeting meets them",
     ):
         assert needle in text, needle
@@ -209,7 +210,7 @@ def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_wh
         "a label with caption and show or hide (or closed caption)",
         "Speaker View, Gallery View and Hide Self View (Show Self View when hidden), the checked view having the class full-screen-widget__pop-menu--checked",
         "The View menu flashes on the TV for a moment just after the room joins",
-        "in meeting › participants the person shows waiting: true",
+        "in meeting › participants the guest shows waiting: true",
         "(the code reads isHold, waiting, bHold or isInWaitingRoom)",
         "its real title and words appear in dialogs_seen",
         "the stop notice's real wording too",
@@ -223,7 +224,7 @@ def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_wh
         "The microphone was not muted at join",
         "Zoom answers a participant's own rename with an error (neither host nor co-host) and then with success",
         "Then double-tap a reaction on the touchscreen: the row closes at the pick, and the second tap must land on nothing",
-        "Double-tap Leave quickly first: the second tap counts only half a second after the first, within five seconds, so a double tap confirms nothing",
+        "Double-tap Leave quickly first: the second tap counts only half a second after the first, within five seconds, so a double tap confirms nothing; the same holds for Remove (on the Participants screen) and End meeting for everyone (on the Host screen)",
         "Zoom did not confirm muteAll in time",
         "Zoom did not answer muteAll in time",
         "What to send back",
@@ -275,3 +276,24 @@ def test_zoom_guide_says_which_lines_a_stock_installs_journal_holds_and_how_to_t
     assert 'logger.info(f"The {what} control was not carried out: {words}")' in service
     zoom = (REPO / "src" / "croom" / "meeting" / "providers" / "zoom_sdk.py").read_text(encoding="utf-8")
     assert zoom.count("dialog_log.info(") == 3 and "logger.info(\"The dialog waits" not in zoom
+
+
+def test_zoom_guide_inventory_puts_the_waiting_room_before_the_checks_that_need_the_second_person_as_host():
+    """The second person hosts: they start the recording, ask the room to unmute, turn AI Companion on and open the breakout rooms. A person in the waiting room
+    is a guest who is not the host, and the check comes before the first of those."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    start = html.index('<ol class="checks">')
+    checks = html[start:html.index("</ol>", start)]
+    leads = re.findall(r"<li><strong>(.*?)</strong>", checks)
+    waiting = leads.index("A person in the waiting room.")
+    for later in ("A recording banner.", "The consent dialog.", "The host's request to unmute.", "The AI Companion notice.", "A breakout invitation."):
+        assert waiting < leads.index(later), later
+    text = visible_text(checks)
+    for needle in (
+        "Have the host turn the waiting room on and make the room co-host, then have a guest who is not the host join, from another browser or as a third person",
+        "the guest shows waiting: true",
+        "the table lists the guest under Waiting room with Admit and leaves them out of the Participants count",
+        "Tap Admit, and the guest is in the meeting",
+    ):
+        assert needle in text, needle
+    assert "have the second person join" not in text                                          # who waits is not the host

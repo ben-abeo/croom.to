@@ -165,25 +165,36 @@
     </section>
   </section>
 
-  <!-- The meeting screen's sub-screens (spec 2026-10-13, section 6.1). Each has its way back; what each shows is filled in apart. -->
+  <!-- The meeting screen's sub-screens (spec 2026-10-13, section 6.1). Each has its way back and returns to the meeting screen on its own after two idle
+       minutes; app.js draws what is in them. The heading and Back stay where they are while a list scrolls inside its box. -->
   <section class="view" data-view="participants">
     <button type="button" id="back-from-participants" class="button quiet back">Back</button>
-    <section class="sub-box">
+    <section class="list-box">
       <p class="kicker">Participants</p>
+      <div class="list-scroll">
+        <ul id="participant-list" class="participants"></ul>
+        <p id="waiting-kicker" class="kicker" hidden>Waiting room</p>
+        <ul id="waiting-list" class="participants"></ul>
+      </div>
+      <p id="participants-message" class="message" role="status"></p>
     </section>
   </section>
 
   <section class="view" data-view="chat">
     <button type="button" id="back-from-chat" class="button quiet back">Back</button>
-    <section class="sub-box">
+    <section class="list-box">
       <p class="kicker">Chat</p>
+      <ul id="chat-list" class="chat"></ul>
+      <p id="chat-empty" class="note" hidden>No messages yet</p>
     </section>
   </section>
 
   <section class="view" data-view="host">
     <button type="button" id="back-from-host" class="button quiet back">Back</button>
-    <section class="sub-box">
-      <p class="kicker">Host</p>
+    <section class="list-box">
+      <p class="kicker">Host controls</p>
+      <div id="host-actions" class="actions host-actions"></div>
+      <p id="host-message" class="message" role="status"></p>
     </section>
   </section>
 </main>

@@ -156,6 +156,11 @@ class StubMeeting:
             model["layout"]["value"] = value
         elif name == "dialog" and self.current_meeting.dialog and self.current_meeting.dialog.get("id") == (value or {}).get("id"):
             self.current_meeting.dialog = None      # the answered dialog is off the screen (a provider shows the next one waiting, if there is one)
+        elif name in ("host.record", "host.lock") and "on" in model.get("host", {}).get(name.split(".")[1], {}):
+            state = model["host"][name.split(".")[1]]
+            state["on"] = not state["on"]           # the recording starts, the meeting locks: and the next read says so
+        elif name == "chat.seen":
+            self.current_meeting.chat["unread"] = 0     # what has been seen is not counted any more
 
     async def diagnostics(self):
         if getattr(self, "fail_diagnostics", None) is not None:

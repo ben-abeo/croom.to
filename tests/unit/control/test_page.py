@@ -20,7 +20,7 @@ from croom.control.service import ControlService
 from croom.devices.errors import Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 from croom.meeting.providers.zoom_sdk import PASSCODE_ASKED as ZOOM_PASSCODE_ASKED
-from tests.unit.control.test_service import StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
+from tests.unit.control.test_service import STUB_PEOPLE, StubCalendar, StubDevices, StubMeeting, event, skip_if_day_ends_within
 
 playwright = pytest.importorskip("playwright.sync_api")
 
@@ -4531,6 +4531,27 @@ def test_the_door_sign_clock_and_date_read_the_american_way_under_a_twenty_four_
 
 LONG_TITLE = "Quarterly planning review with the regional leadership team and the product owners of every office"   # 98 characters: as long as a booking's title gets
 
+MORE_PEOPLE = ["Priya Nair", "Tom Becker", "Maria Santos", "Chen Wei", "Olu Adeyemi", "Sara Lindqvist", "Dmitri Volkov", "Hana Kobayashi", "Luis Ortega"]
+
+
+def a_roster(extra=0):
+    """The stub's three people (the room, the host Ann Lee, Raj Patel with his hand up and muted), then `extra` more, each with an id of their own."""
+    people = [dict(p) for p in STUB_PEOPLE]
+    for i in range(extra):
+        name = MORE_PEOPLE[i] if i < len(MORE_PEOPLE) else f"Guest {i + 1}"
+        people.append({"id": 16777219 + i, "name": name, "muted": False, "video": True, "hand": False, "host": False, "me": False})
+    return people
+
+
+def set_people(server, people, count=None):
+    server.meeting.current_meeting.people = {"count": len(people) if count is None else count, "list": people}
+
+
+def a_chat(count, unread=0, first=1):
+    """`count` messages of a chat, numbered from `first`, the first of all at 8:00 PM UTC and one a minute after another."""
+    return {"unread": unread, "messages": [
+        {"from": f"Person {n}", "text": f"Message number {n}", "at": f"2026-10-13T20:{n - 1:02d}:00Z"} for n in range(first, first + count)]}
+
 
 def test_the_meeting_screen_offers_every_available_control_from_the_model(browser):
     with PageServer() as server:
@@ -4566,7 +4587,7 @@ def test_the_meeting_screen_with_everything_still_fits_and_hides_the_unavailable
         meeting = server.meeting.current_meeting
         meeting.is_muted = True                                              # Unmute, Captions off, Participants (120), Chat (12): the widest of each
         meeting.controls["captions"]["on"] = True
-        meeting.people = {"count": 120, "list": []}
+        set_people(server, a_roster(9), count=120)                           # the page lists up to 50 of them, and the count is whole
         meeting.chat = {"unread": 12, "messages": []}
         meeting.notice = "This meeting is being recorded and transcribed."
         meeting.dialog = {"id": 1, "title": "Unmute?", "text": "The host would like you to unmute.", "buttons": ["Unmute", "Stay muted"]}
@@ -4691,7 +4712,7 @@ def test_the_screen_follows_the_model_at_every_poll(browser):
         meeting.controls["captions"] = {"available": False}
         meeting.controls["layout"]["value"] = "gallery"
         meeting.controls["hide_self"]["on"] = True
-        meeting.people = {"count": 12, "list": []}
+        set_people(server, a_roster(9))
         meeting.chat = {"unread": 2, "messages": []}
         page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Chat (2)')", timeout=5000)
         assert texts(page, "#meeting-secondary") == ["Speaker view", "Show self view", "Participants (12)", "Chat (2)"]
@@ -4701,7 +4722,7 @@ def test_the_screen_follows_the_model_at_every_poll(browser):
         meeting.controls["host"]["role"] = "participant"
         meeting.controls["raise_hand"]["on"] = True
         meeting.controls["reactions"] = {"available": False, "choices": ["Clap"]}                       # the client has no Reactions button: the configured names do not make one
-        meeting.people = {"count": 0, "list": []}
+        set_people(server, [])
         page.wait_for_function("document.getElementById('meeting-actions').textContent.includes('Lower hand')", timeout=5000)
         assert texts(page, "#meeting-actions") == ["Mute", "Turn camera off", "Lower hand", "Leave"]
         assert texts(page, "#meeting-secondary") == ["Speaker view", "Show self view", "Chat (2)"]      # no one listed: no Participants button
@@ -5046,7 +5067,7 @@ def test_the_rows_are_not_rebuilt_while_nothing_about_them_changes(browser):
 
 @pytest.mark.parametrize("row, words, sent, change, shows", [
     ("meeting-secondary", "Gallery view", ("layout", "gallery"), lambda m: setattr(m, "chat", {"unread": 1, "messages": []}), "Chat (1)"),          # a chat message comes in
-    ("meeting-secondary", "Hide self view", ("hide_self", None), lambda m: setattr(m, "people", {"count": 4, "list": []}), "Participants (4)"),   # someone joins
+    ("meeting-secondary", "Hide self view", ("hide_self", None), lambda m: setattr(m, "people", {"count": 4, "list": a_roster(1)}), "Participants (4)"),   # someone joins
     ("meeting-actions", "Raise hand", ("raise_hand", None), lambda m: setattr(m, "is_muted", True), "Unmute"),                                      # the host mutes the room
 ])
 def test_a_finger_down_on_a_button_still_finds_it_when_the_words_of_another_in_the_row_change(browser, row, words, sent, change, shows):
@@ -5494,9 +5515,10 @@ def test_only_a_move_of_more_than_a_few_pixels_settles_the_screen(browser, pixel
         page.close()
 
 
-def test_coming_back_from_a_sub_screen_is_not_the_screen_moving(browser):
-    """The meeting screen changed while it was out of sight (a notice came in): the person who comes back from Participants has not had it move
-    under a finger, and it is not settling."""
+def test_coming_back_from_a_sub_screen_settles_the_screen_once_and_the_notice_that_came_meanwhile_is_not_a_second_move(browser):
+    """The view change is the move: the screen ignores taps for half a second after Back (a thumb aimed at Back lands on Mute). The notice that
+    came in while the person was away is not another: the screen was laid out as it is now at the return, and a poll after the half second finds
+    nothing moving, so it is not settling again."""
     with PageServer() as server:
         page = page_on_a_stopped_clock(browser, server)
         join_by_id(page)
@@ -5506,8 +5528,14 @@ def test_coming_back_from_a_sub_screen_is_not_the_screen_moving(browser):
         page.wait_for_function("document.body.dataset.view === 'participants'", timeout=5000)
         server.meeting.current_meeting.notice = "This meeting is being recorded."
         poll_until(page, "document.getElementById('meeting-notice').textContent !== ''")
+        page.clock.run_for(600)                                                             # the half second of the way in
         page.click("#back-from-participants")
         page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.evaluate("document.body.classList.contains('settling')")
+        page.clock.run_for(600)
+        assert not page.evaluate("document.body.classList.contains('settling')")
+        page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
         assert not page.evaluate("document.body.classList.contains('settling')")
         page.close()
 
@@ -5778,7 +5806,7 @@ def test_the_screen_of_a_host_with_everything_and_a_waiting_dialog_still_fits(br
         meeting = server.meeting.current_meeting
         meeting.is_muted = True                                              # Unmute, Captions off, Participants (120), Chat (12): the widest of each
         meeting.controls["captions"]["on"] = True
-        meeting.people = {"count": 120, "list": []}
+        set_people(server, a_roster(9), count=120)
         meeting.chat = {"unread": 12, "messages": []}
         meeting.notice = TWO_LINES_OF_NOTICE
         put_up(server, dict(ZOOMS_DIALOG, text=LONGEST_TEXT))
@@ -5839,4 +5867,768 @@ def test_the_dialog_card_on_a_phone_puts_its_buttons_under_its_words_and_never_s
         for b in page.locator("#dialog-actions .button").all():
             box = b.bounding_box()
             assert box["x"] >= 0 and box["x"] + box["width"] <= 390, box
+        page.close()
+
+
+# --- the Participants, Chat and Host screens (spec 2026-10-13, section 6.1) ---
+
+NASTY = '<b>Bold</b> <img src=x onerror="window.__pwned = 1"> &amp; <script>window.__pwned = 2</script>'      # other people's words, with markup in them
+
+
+def open_sub_screen(page, words, view):
+    page.locator("#meeting-secondary .button", has_text=words).click()
+    page.wait_for_function(f"document.body.dataset.view === '{view}'", timeout=5000)
+
+
+def without(people, *names):
+    return [p for p in people if p["name"] not in names]
+
+
+def row_button(page, person, words):
+    """The button in this person's row of the participants list that has these words on it now."""
+    return page.locator(f"#participant-list .participant:has-text('{person}') .button", has_text=words)
+
+
+def person_under(page, x, y):
+    """Whose row a finger at this point of the page is over now: the name in it, or "" for anything else."""
+    return page.evaluate("""([x, y]) => { const r = [...document.querySelectorAll('.participant')].find((n) => { const b = n.getBoundingClientRect();
+        return b.width && x >= b.left && x <= b.right && y >= b.top && y <= b.bottom; }); return r ? r.querySelector('.name').textContent : ''; }""", [x, y])
+
+
+def a_meeting_with_a_roster(browser, server, extra, touchscreen=False, width=1280, height=800):
+    """The room page on a stopped clock, in the meeting, with the room and `extra` + 2 other people listed and the Participants screen open and
+    settled. Returns the page and the people."""
+    page = page_on_a_stopped_clock(browser, server, width, height, touchscreen=touchscreen)
+    join_by_id(page)
+    page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+    people = a_roster(extra)
+    set_people(server, people)
+    poll_until(page, f"window.croomPage.model.status.meeting.participants.list.length === {len(people)}")
+    page.clock.run_for(600)
+    open_sub_screen(page, "Participants", "participants")
+    page.clock.run_for(600)
+    return page, people
+
+
+def test_the_participants_screen_lists_the_room_and_lets_a_host_act(browser):
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        open_sub_screen(page, "Participants", "participants")
+        rows = page.locator("#participant-list .participant")
+        assert rows.count() == 3 and "Raj Patel" in rows.nth(2).inner_text()
+        assert rows.nth(0).locator(".name").inner_text() == "Room 1 (this room)"
+        assert rows.nth(1).locator(".mark").all_inner_texts() == ["Host"]
+        assert rows.nth(2).locator(".mark-hand").count() == 1 and rows.nth(2).locator(".mark-muted").count() == 1
+        assert rows.nth(2).locator(".mark").all_inner_texts() == ["Hand raised", "Muted", "Video off"]
+        assert rows.nth(0).locator(".button").count() == 0                                   # the room's own row: nothing to do to oneself
+        assert texts(page, "#participant-list li:nth-child(2)") == ["Mute", "Remove"]
+        assert texts(page, "#participant-list li:nth-child(3)") == ["Remove"]                # Raj is muted already: Mute is for those who are not
+        assert drawn_icons(page, "#participant-list li:nth-child(2)") == ["Mute: #icon-mic-off", "Remove: #icon-x-circle"]
+        ends = page.evaluate("[...document.querySelectorAll('#participant-list .participant')].slice(1).map((r) => Math.round(r.querySelector('.marks').getBoundingClientRect().right))")
+        assert len(set(ends)) == 1, ends                                                     # Ann has Mute and Remove, Raj only Remove: the marks end in one column all the same
+        assert fits(page)
+        rows.nth(1).locator(".button", has_text="Mute").click()
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called[-1] == ("host.mute_one", 16777217)
+        server.meeting.current_meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 9, "name": "Guest"}]}
+        page.wait_for_function("document.querySelector('#waiting-list .participant')", timeout=5000)
+        assert page.locator("#waiting-kicker").is_visible() and page.locator("#waiting-list .participant .name").inner_text() == "Guest"
+        assert drawn_icons(page, "#waiting-list") == ["Admit: #icon-door"] and fits(page)
+        page.locator("#waiting-list .button", has_text="Admit").click()
+        wait_for_calls(page, server, 2)
+        assert server.meeting.controls_called[-1] == ("host.admit", 9)
+        page.locator("#back-from-participants").click()
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        page.close()
+
+
+def test_a_participant_sees_no_host_buttons_on_the_participants_screen(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        server.meeting.current_meeting.controls["host"]["waiting_room"] = {"available": False, "waiting": [{"id": 9, "name": "Guest"}]}   # not for a participant to see
+        open_sub_screen(page, "Participants", "participants")
+        assert page.locator("#participant-list .participant").count() == 3
+        assert page.locator("#participant-list .button").count() == 0
+        page.evaluate("window.croomPage.refreshStatus()")                                    # a poll has been and gone
+        assert page.locator("#waiting-list .participant").count() == 0 and page.locator("#waiting-kicker").is_hidden()
+        assert fits(page)
+        page.close()
+
+
+def test_a_person_in_the_waiting_room_is_not_listed_among_those_in_the_meeting(browser):
+    """Zoom's attendee list holds the people in the waiting room too (waiting: true): they are in the waiting list, with Admit, and not also in
+    the meeting's."""
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        guest = {"id": 9, "name": "Guest", "muted": False, "video": False, "hand": False, "host": False, "me": False, "waiting": True}
+        set_people(server, a_roster(1) + [guest])
+        server.meeting.current_meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 9, "name": "Guest"}]}
+        page.wait_for_function("window.croomPage.model.status.meeting.participants.list.length === 5", timeout=5000)
+        open_sub_screen(page, "Participants", "participants")
+        assert page.locator("#participant-list .participant .name").all_inner_texts() == ["Room 1 (this room)", "Ann Lee", "Raj Patel", "Priya Nair"]
+        assert page.locator("#waiting-list .participant .name").all_inner_texts() == ["Guest"]
+        page.close()
+
+
+def test_the_chat_screen_shows_messages_and_clears_the_unread_count(browser):
+    with PageServer() as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800}, timezone_id="UTC")   # the times read 8:00 PM, as the messages say
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        join_by_id(page)
+        server.meeting.current_meeting.chat = {"unread": 2, "messages": [
+            {"from": "Ann", "text": "Can you hear us?", "at": "2026-10-13T20:00:00Z"}, {"from": "Raj", "text": "Yes", "at": "2026-10-13T20:00:30Z"},
+            {"from": "Sam", "text": "Loud and clear", "at": "some time ago"}]}         # the agent says "" when it does not know when; a time that cannot be read says nothing either
+        page.wait_for_function("document.querySelector('#meeting-secondary .button').parentElement.textContent.includes('Chat (2)')", timeout=5000)
+        open_sub_screen(page, "Chat", "chat")
+        assert [m.inner_text() for m in page.locator("#chat-list .chat-message .chat-text").all()] == ["Can you hear us?", "Yes", "Loud and clear"]
+        assert [m.inner_text() for m in page.locator("#chat-list .chat-message .chat-from").all()] == ["Ann, 8:00\u00a0PM", "Raj, 8:00\u00a0PM", "Sam"]
+        assert page.locator("#chat-empty").is_hidden() and fits(page)
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("chat.seen", None)]
+        page.wait_for_function("window.croomPage.model.status.meeting.chat.unread === 0", timeout=5000)     # the answer is in the model at once
+        page.click("#back-from-chat")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-secondary .button", has_text="Chat").inner_text().strip() == "Chat"      # and the button no longer counts them
+        page.close()
+
+
+def test_the_chat_screen_says_when_there_is_nothing_yet(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        open_sub_screen(page, "Chat", "chat")
+        assert page.locator("#chat-empty").is_visible() and page.locator("#chat-empty").inner_text() == "No messages yet"
+        assert page.locator("#chat-list .chat-message").count() == 0 and server.meeting.controls_called == []     # nothing unread: nothing to mark
+        server.meeting.current_meeting.chat = a_chat(1)
+        page.wait_for_function("document.querySelector('#chat-list .chat-message')", timeout=5000)
+        assert page.locator("#chat-empty").is_hidden()
+        page.close()
+
+
+def test_the_chat_list_opens_at_its_newest_message_and_only_grows_at_the_foot(browser):
+    """Newest last. The reader who has scrolled up is not pulled down by a new message, and one who is at the foot follows it; the list never
+    rebuilds the messages it has (the provider keeps the last twenty: the first goes as the next comes)."""
+    at_foot = "() => { const l = document.getElementById('chat-list'); return l.scrollHeight - l.scrollTop - l.clientHeight < 2; }"
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        meeting = server.meeting.current_meeting
+        meeting.chat = a_chat(20)
+        page.wait_for_function("window.croomPage.model.status.meeting.chat.messages.length === 20", timeout=5000)
+        open_sub_screen(page, "Chat", "chat")
+        assert page.evaluate("document.getElementById('chat-list').scrollHeight > document.getElementById('chat-list').clientHeight")    # twenty do not fit: it scrolls inside itself
+        assert page.evaluate(at_foot) and fits(page)
+        page.evaluate("window.__old = [...document.querySelectorAll('#chat-list .chat-message')]; document.getElementById('chat-list').scrollTop = 0")
+        meeting.chat = a_chat(20, first=2)                                    # message 21 comes in, and message 1 is the one that goes
+        poll_until(page, "document.querySelectorAll('#chat-list .chat-text')[19].textContent === 'Message number 21'")
+        assert page.locator("#chat-list .chat-message").count() == 20 and not page.evaluate("window.__old[0].isConnected")
+        assert page.evaluate("window.__old.slice(1).every((li, i) => li === document.querySelectorAll('#chat-list .chat-message')[i])")    # the others are the same elements
+        assert page.evaluate("document.getElementById('chat-list').scrollTop") == 0           # the reader at the top stays there
+        page.evaluate("document.getElementById('chat-list').scrollTop = document.getElementById('chat-list').scrollHeight")
+        meeting.chat = a_chat(20, first=3)
+        poll_until(page, "document.querySelectorAll('#chat-list .chat-text')[19].textContent === 'Message number 22'")
+        assert page.evaluate(at_foot)                                                         # the one at the foot follows it
+        page.close()
+
+
+def test_the_host_screen_offers_the_host_actions_with_a_second_tap_to_end(browser):
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        open_sub_screen(page, "Host", "host")
+        labels = [b.inner_text().strip() for b in page.locator("#host-actions .button").all()]
+        assert labels == ["Mute all", "Ask all to unmute", "Start recording", "Lock meeting", "End meeting for everyone"]
+        assert drawn_icons(page, "#host-actions") == ["Mute all: #icon-mic-off", "Ask all to unmute: #icon-mic", "Start recording: #icon-record",
+                                                      "Lock meeting: #icon-unlock", "End meeting for everyone: #icon-x-circle"]      # the picture is the state: an open padlock
+        assert fits(page)
+        page.locator("#host-actions .button", has_text="Mute all").click()
+        wait_for_calls(page, server, 1)
+        page.evaluate("window.__record = [...document.querySelectorAll('#host-actions .button')][2]")
+        page.locator("#host-actions .button", has_text="Start recording").click()
+        page.wait_for_function("document.querySelector('#host-actions').textContent.includes('Stop recording')", timeout=5000)
+        assert page.evaluate("window.__record.isConnected && window.__record.textContent.trim() === 'Stop recording'")       # the same button, with the words of its state
+        page.locator("#host-actions .button", has_text="Lock meeting").click()
+        page.wait_for_function("document.querySelector('#host-actions').textContent.includes('Unlock meeting')", timeout=5000)
+        assert drawn_icons(page, "#host-actions")[2:4] == ["Stop recording: #icon-record", "Unlock meeting: #icon-lock"]      # a closed padlock, while it is locked
+        page.locator("#host-actions .button", has_text="Ask all to unmute").click()
+        wait_for_calls(page, server, 4)
+        page.locator("#host-actions .button", has_text="End meeting").click()
+        assert page.locator("#host-actions .button", has_text="Tap again to end").count() == 1
+        assert ("host.end", None) not in server.meeting.controls_called
+        assert fits(page)
+        page.locator("#host-actions .button", has_text="Tap again to end").click()
+        wait_for_calls(page, server, 5)
+        assert server.meeting.controls_called == [("host.mute_all", None), ("host.record", None), ("host.lock", None), ("host.ask_unmute", None), ("host.end", None)]
+        page.close()
+
+
+def test_the_host_screen_draws_only_what_the_model_offers(browser):
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        open_sub_screen(page, "Host", "host")
+        host = server.meeting.current_meeting.controls["host"]
+        host["mute_all"] = {"available": False}
+        host["record"] = {"available": False, "on": False}
+        page.wait_for_function("document.querySelectorAll('#host-actions .button').length === 3", timeout=5000)
+        assert texts(page, "#host-actions") == ["Ask all to unmute", "Lock meeting", "End meeting for everyone"]
+        page.close()
+
+
+def test_a_co_host_has_the_host_screen_without_the_end_that_is_the_hosts(browser):
+    with PageServer(role="co-host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        open_sub_screen(page, "Host", "host")
+        assert texts(page, "#host-actions") == ["Mute all", "Ask all to unmute", "Start recording", "Lock meeting"]
+        page.close()
+
+
+def test_the_second_tap_to_end_lapses_after_five_seconds_and_is_forgotten_on_leaving_the_screen(browser):
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        open_sub_screen(page, "Host", "host")
+        page.clock.run_for(600)
+        end = page.locator("#host-actions .button").last                          # End is the last of them, whatever it says
+        end.click()
+        assert end.inner_text().strip() == "Tap again to end"
+        page.clock.run_for(4000)
+        assert end.inner_text().strip() == "Tap again to end"                      # four seconds: still asking
+        page.clock.run_for(1500)
+        assert end.inner_text().strip() == "End meeting for everyone"             # five: it has lapsed, and nothing was sent
+        end.click()
+        page.click("#back-from-host")                                             # the ask is not carried to the next visit
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        page.clock.run_for(600)
+        open_sub_screen(page, "Host", "host")
+        assert end.inner_text().strip() == "End meeting for everyone"
+        assert server.meeting.controls_called == []
+        page.close()
+
+
+def test_remove_asks_for_a_second_tap_on_its_own_row_and_the_ask_lapses_after_five_seconds(browser):
+    """One stray tap must not throw someone out of the meeting: the first tap on Remove asks for a second, on that row alone, for five seconds."""
+    with PageServer(role="host") as server:
+        page, _ = a_meeting_with_a_roster(browser, server, 2)                     # Room, Ann, Raj, Priya, Tom
+        priya, tom = row_button(page, "Priya", "Remove"), row_button(page, "Tom", "Remove")
+        priya.click()
+        assert priya.inner_text().strip() == "Tap again to remove" and tom.inner_text().strip() == "Remove"
+        assert drawn_icons(page, "#participant-list li:nth-child(4)")[-1] == "Tap again to remove: #icon-x-circle"      # Priya's, the fourth
+        assert server.meeting.controls_called == []                               # asked, not done
+        tom.click()                                                               # another row's Remove: the ask moves there
+        assert tom.inner_text().strip() == "Tap again to remove" and priya.inner_text().strip() == "Remove"
+        page.clock.run_for(4000)
+        assert tom.inner_text().strip() == "Tap again to remove"                  # four seconds: still asking
+        page.clock.run_for(1500)
+        assert tom.inner_text().strip() == "Remove" and server.meeting.controls_called == []      # five: lapsed
+        tom.click()
+        tom.click()                                                               # the second tap, in time: Tom is removed
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("host.remove", 16777220)]
+        page.close()
+
+
+def test_the_ask_to_remove_is_forgotten_on_leaving_the_screen_and_when_the_person_goes(browser):
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 2)
+        row_button(page, "Tom", "Remove").click()
+        page.click("#back-from-participants")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        page.clock.run_for(600)
+        open_sub_screen(page, "Participants", "participants")
+        page.clock.run_for(600)
+        assert row_button(page, "Tom", "Remove").inner_text().strip() == "Remove"      # not carried to the next visit
+        row_button(page, "Tom", "Remove").click()
+        set_people(server, without(people, "Tom Becker"))                         # he leaves of his own accord ...
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 4")
+        set_people(server, people)                                                # ... and a person with his id is back
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 5")
+        assert row_button(page, "Tom", "Remove").inner_text().strip() == "Remove"      # nobody is asked about on his account
+        assert server.meeting.controls_called == []
+        page.close()
+
+
+def test_a_slow_mute_makes_the_mute_buttons_inert_and_leaves_the_rest_of_the_screen_working(browser):
+    with PageServer(role="host") as server:
+        page, _ = a_meeting_with_a_roster(browser, server, 2)
+        held = hold_requests(page, "**/api/meeting/control")
+        remove = row_button(page, "Priya", "Remove")
+        row_button(page, "Ann", "Mute").click()
+        wait_for_held(page, held)
+        assert held[0].request.post_data_json == {"name": "host.mute_one", "value": 16777217}
+        assert row_button(page, "Ann", "Mute").is_disabled() and row_button(page, "Priya", "Mute").is_disabled() and remove.is_enabled()     # the control waits for its answer; nothing else does
+        assert page.evaluate("window.croomPage.model.busy") is False
+        held[0].fulfill(json={"meeting": page.evaluate("window.croomPage.model.status.meeting")})
+        page.wait_for_function("!document.querySelector('#participant-list .button:disabled')", timeout=5000)
+        server.meeting.current_meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 9, "name": "Guest"}]}
+        poll_until(page, "document.querySelector('#waiting-list .button')")
+        page.locator("#waiting-list .button", has_text="Admit").click()          # Admit is a control of its own: inert until its answer, and the others work
+        wait_for_held(page, held, 2)
+        assert held[1].request.post_data_json == {"name": "host.admit", "value": 9}
+        assert page.locator("#waiting-list .button").is_disabled() and row_button(page, "Ann", "Mute").is_enabled()
+        held[1].fulfill(json={"meeting": page.evaluate("window.croomPage.model.status.meeting")})
+        page.wait_for_function("!document.querySelector('#waiting-list .button:disabled')", timeout=5000)
+        page.close()
+
+
+def test_a_refusal_is_said_on_the_screen_it_happened_on_and_does_not_follow_the_person_back(browser):
+    from croom.meeting.providers.base import MeetingControlError
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        open_sub_screen(page, "Host", "host")
+        server.meeting.fail_control = MeetingControlError("Zoom's mute all button is not on the screen yet; try again in a moment")
+        page.locator("#host-actions .button", has_text="Mute all").click()
+        page.wait_for_function("document.getElementById('host-message').textContent !== ''", timeout=5000)
+        assert page.locator("#host-message").inner_text() == "Zoom's mute all button is not on the screen yet; try again in a moment"
+        assert page.locator("#host-actions .button:disabled").count() == 0 and fits(page)
+        page.click("#back-from-host")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        assert page.locator("#meeting-message").is_hidden()
+        server.meeting.fail_control = MeetingControlError("Zoom's mute button is not on the screen yet; try again in a moment")
+        open_sub_screen(page, "Participants", "participants")
+        page.locator("#participant-list .participant:has-text('Ann') .button", has_text="Mute").click()
+        page.wait_for_function("document.getElementById('participants-message').textContent !== ''", timeout=5000)
+        assert page.locator("#participants-message").is_visible() and fits(page)
+        page.close()
+
+
+@pytest.mark.parametrize("words, view", [("Participants", "participants"), ("Chat", "chat"), ("Host", "host")])
+def test_meeting_sub_screens_return_on_their_own_after_two_idle_minutes(browser, words, view):
+    """Not ten, as the idle screens do: the meeting screen is the one a room needs. A tap anywhere starts the two minutes again."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        open_sub_screen(page, words, view)
+        page.clock.fast_forward(100_000)                                      # a minute and 40 seconds: still here
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.body.dataset.view") == view
+        page.locator(f".view[data-view='{view}'] .kicker").first.click()      # a tap that goes nowhere ...
+        page.clock.fast_forward(100_000)
+        page.wait_for_timeout(200)
+        assert page.evaluate("document.body.dataset.view") == view            # ... starts the two minutes again: 100 seconds in, since the tap
+        page.clock.fast_forward(30_000)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        page.close()
+
+
+def test_chat_and_participants_are_offered_only_when_the_platform_has_them(browser):
+    """Meet keeps no chat the agent reads (controls.chat.available is false) and reports a count with no roster: a count alone is not a screen,
+    and a button that opens nothing is not drawn. Zoom's model has no chat key, and keeps the button."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        assert texts(page, "#meeting-secondary") == ["Captions on", "Gallery view", "Hide self view", "Participants (3)", "Chat"]
+        meeting = server.meeting.current_meeting
+        meeting.controls["chat"] = {"available": False}
+        set_people(server, [], count=3)
+        page.wait_for_function("!document.getElementById('meeting-secondary').textContent.includes('Chat')", timeout=5000)
+        assert texts(page, "#meeting-secondary") == ["Captions on", "Gallery view", "Hide self view"]      # neither, and the rest as before
+        meeting.controls["chat"] = {"available": True}
+        set_people(server, a_roster(), count=3)
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Chat')", timeout=5000)
+        assert texts(page, "#meeting-secondary") == ["Captions on", "Gallery view", "Hide self view", "Participants (3)", "Chat"]
+        page.close()
+
+
+@pytest.mark.parametrize("opener, view", [("#meeting-secondary .button:has-text('Participants')", "participants"), ("#meeting-secondary .button:has-text('Chat')", "chat"),
+                                          ("#meeting-secondary .button:has-text('Host')", "host"), ("#open-camera-live", "camera"), ("#open-upcoming", "upcoming")])
+def test_a_dialog_that_comes_up_brings_the_page_back_to_the_meeting_screen_once(browser, opener, view):
+    """The card is on the meeting screen, and a person on one of the screens opened from it cannot see it. A dialog that arrives (or whose number
+    or buttons change) brings them back, once: one that goes on waiting does not trap them on the meeting screen (they may look at Participants
+    with one up), and one that goes by itself moves nobody. The return settles the screen as any view change does."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+
+        def go_to_the_sub_screen():
+            page.clock.run_for(600)                                           # the half second of the last view change is spent
+            page.locator(opener).click()
+            page.wait_for_function(f"document.body.dataset.view === '{view}'", timeout=5000)
+
+        go_to_the_sub_screen()
+        put_up(server, ZOOMS_DIALOG)
+        poll_until(page, "window.croomPage.model.status.meeting.dialog !== null")
+        assert page.evaluate("document.body.dataset.view") == "meeting" and page.locator("#meeting-dialog").is_visible()       # the edge: back to the card
+        assert page.evaluate("document.body.classList.contains('settling')")  # and a thumb aimed at the sub-screen lands on nothing
+        go_to_the_sub_screen()                                                # the person goes to look again, with the same dialog still waiting
+        for _ in range(3):
+            page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.body.dataset.view") == view            # and nothing takes them back
+        put_up(server, dict(ZOOMS_DIALOG, id=8))                              # another dialog: the edge again
+        poll_until(page, "window.croomPage.model.status.meeting.dialog.id === 8")
+        assert page.evaluate("document.body.dataset.view") == "meeting"
+        go_to_the_sub_screen()
+        put_up(server, dict(ZOOMS_DIALOG, id=8, buttons=["Stay", "Allow recording"]))    # the same number with other buttons is another dialog too
+        poll_until(page, "window.croomPage.model.status.meeting.dialog.buttons[0] === 'Stay'")
+        assert page.evaluate("document.body.dataset.view") == "meeting"
+        go_to_the_sub_screen()
+        server.meeting.current_meeting.dialog = None                          # one that goes by itself moves nobody
+        poll_until(page, "window.croomPage.model.status.meeting.dialog === null")
+        assert page.evaluate("document.body.dataset.view") == view and page.locator("#meeting-dialog").is_hidden()
+        page.close()
+
+
+def test_a_dialog_that_is_already_up_when_a_sub_screen_is_opened_does_not_take_it_away(browser):
+    """The person who opens Participants with a card waiting wants the list: only a dialog that comes up while they are there is an edge."""
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        put_up(server, ZOOMS_DIALOG)
+        poll_until(page, CARD)
+        page.clock.run_for(600)
+        open_sub_screen(page, "Participants", "participants")
+        for _ in range(3):
+            page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
+        assert page.evaluate("document.body.dataset.view") == "participants"
+        page.close()
+
+
+def test_the_screens_are_empty_while_the_meeting_is_not_connected_and_full_again_when_it_is(browser):
+    """The block's lists can outlive a state (a reconnect puts the room in the lobby): only a connected meeting draws any of it."""
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        server.meeting.current_meeting.chat = a_chat(2)
+        open_sub_screen(page, "Participants", "participants")
+        assert page.locator("#participant-list .participant").count() == 3
+        server.meeting.set_state(MeetingState.IN_LOBBY)
+        page.wait_for_function("document.querySelectorAll('#participant-list .participant').length === 0", timeout=5000)
+        assert page.evaluate("document.body.dataset.view") == "participants" and page.locator("#chat-list .chat-message").count() == 0
+        assert page.locator("#host-actions .button").count() == 0
+        server.meeting.set_state(MeetingState.CONNECTED)
+        page.wait_for_function("document.querySelectorAll('#participant-list .participant').length === 3", timeout=5000)
+        assert page.locator("#chat-list .chat-message").count() == 2 and page.locator("#host-actions .button").count() == 5
+        page.close()
+
+
+def test_a_participants_row_follows_the_model_in_place_and_the_others_keep_their_elements(browser):
+    """Rows are found by the person's id and patched: a hand goes up, a person is muted, a name changes, someone leaves and someone joins, and the
+    rows of the others are the same elements, so that a finger on one of their buttons is not lost to a poll."""
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 3)               # Room, Ann, Raj, Priya, Tom, Maria
+        page.evaluate("window.__rows = [...document.querySelectorAll('#participant-list .participant')]")
+        people[3].update(hand=True, name="Priya N.")
+        poll_until(page, "document.querySelectorAll('#participant-list .mark-hand').length === 2")
+        assert page.locator("#participant-list .participant").nth(3).locator(".name").inner_text() == "Priya N."
+        people[3]["muted"] = True                                                # muted by someone else: Mute is for those who are not
+        poll_until(page, "document.querySelectorAll('#participant-list .mark-muted').length === 2")
+        assert texts(page, "#participant-list li:nth-child(4)") == ["Remove"]
+        people = without(people, "Tom Becker") + [{"id": 16777300, "name": "Newcomer", "muted": False, "video": True, "hand": False, "host": False, "me": False}]
+        set_people(server, people)                                               # Tom leaves, and Newcomer comes in at the foot
+        poll_until(page, "[...document.querySelectorAll('#participant-list .name')].some((n) => n.textContent === 'Newcomer')")
+        assert page.locator("#participant-list .participant .name").all_inner_texts() == ["Room 1 (this room)", "Ann Lee", "Raj Patel", "Priya N.", "Maria Santos", "Newcomer"]
+        assert page.evaluate("""() => { const now = [...document.querySelectorAll('#participant-list .participant')];
+            return [0, 1, 2, 3, 5].every((was, i) => now[i] === window.__rows[was]) && !window.__rows.includes(now[5]); }""")
+        page.close()
+
+
+def test_a_finger_down_on_a_participants_button_is_lifted_on_it_when_another_person_leaves_below(browser):
+    """The finger is down on Maria's Mute as Chen's row, below hers, goes: nothing above him moved, and the lift is a tap on that button, for her."""
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 4)               # Room, Ann, Raj, Priya, Tom, Maria, Chen
+        x, y = centre(page, "#participant-list .participant:has-text('Maria') .button", "Mute")
+        page.evaluate("window.__row = [...document.querySelectorAll('.participant')].find((r) => r.textContent.includes('Maria')); window.__mute = window.__row.querySelector('.button')")
+        page.mouse.move(x, y)
+        page.mouse.down()
+        set_people(server, without(people, "Chen Wei"))
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 6")
+        assert page.evaluate("window.__mute.isConnected && window.__row.isConnected"), "the button under the finger was replaced"
+        page.mouse.up()
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("host.mute_one", 16777221)]
+        page.close()
+
+
+def test_a_row_that_moves_up_because_another_leaves_above_it_keeps_its_buttons_and_sends_its_own_person(browser):
+    """Rows are found by the person, not by their place: when Priya leaves, Maria's row moves up into the place of hers, it is the same element,
+    and its Mute is still Maria's."""
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 4)
+        page.evaluate("window.__row = [...document.querySelectorAll('.participant')].find((r) => r.textContent.includes('Maria')); window.__mute = window.__row.querySelector('.button')")
+        set_people(server, without(people, "Priya Nair"))
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 6")
+        assert page.evaluate("window.__mute.isConnected && document.querySelectorAll('#participant-list .participant')[4] === window.__row")     # in the place Tom had
+        page.evaluate("window.__mute.click()")                                   # a key on a keyboard: no pointer, so the settling screen does not stop it
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("host.mute_one", 16777221)]
+        page.close()
+
+
+@pytest.mark.parametrize("direction", ["into a sub-screen", "out of a sub-screen"])
+def test_a_tap_that_lands_as_the_view_changes_does_nothing(browser, direction):
+    """The Host screen is where the meeting screen's rows were: a thumb that was aimed at the one lands on the other as the view changes under
+    it (the second tap of a double tap on Host lands on Mute all, the second of one on Back lands on the meeting screen's Mute). The page ignores
+    taps for half a second after a view change into or out of a sub-screen. The clock is stopped: the half second is the test's to spend."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server, touchscreen=True)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        x, y = centre(page, "#meeting-secondary .button", "Host")
+        page.touchscreen.tap(x, y)
+        page.wait_for_function("document.body.dataset.view === 'host'", timeout=5000)
+        if direction == "into a sub-screen":
+            x, y = centre(page, "#host-actions .button", "Mute all")          # where the second tap lands
+            assert button_under(page, x, y) == "Mute all", "the thumb is not over Mute all: this test means nothing"
+        else:
+            page.clock.run_for(600)
+            back = page.locator("#back-from-host").bounding_box()
+            x, y = back["x"] + back["width"] / 2, back["y"] + back["height"] - 12      # the lower edge of Back: Mute's top is under it on the meeting screen
+            page.touchscreen.tap(x, y)
+            page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+            assert button_under(page, x, y) == "Mute", "the thumb is not over Mute: this test means nothing"
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)                                            # 150 ms after the view changed: the second tap of a double tap
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)                                            # 450 ms: a slow one
+        page.wait_for_timeout(300)                                            # (real time) long enough for a request to have gone out
+        assert server.meeting.controls_called == [] and server.meeting.muted is False
+        page.clock.run_for(200)
+        page.touchscreen.tap(x, y)                                            # 650 ms: a tap meant for what is there now works
+        if direction == "into a sub-screen":
+            wait_for_calls(page, server, 1)
+            assert server.meeting.controls_called == [("host.mute_all", None)]
+        else:
+            page.wait_for_function("document.querySelector('#meeting-actions .button').textContent.trim() === 'Unmute'", timeout=5000)
+            assert server.meeting.muted is True
+        page.close()
+
+
+def test_a_tap_aimed_at_a_participants_button_does_not_land_on_another_when_a_row_above_goes(browser):
+    """The rows below a person who leaves move up under the thumb that was aimed at one of them: Maria's Mute is where Tom's was a moment ago.
+    The screen ignores taps for half a second after the list moves under it (the clock is stopped)."""
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 3, touchscreen=True)      # Room, Ann, Raj, Priya, Tom, Maria
+        x, y = centre(page, "#participant-list .participant:has-text('Tom') .button", "Mute")         # where the thumb is going
+        set_people(server, without(people, "Priya Nair"))                         # Priya, above him, leaves: the rows below her move up
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 5")
+        assert person_under(page, x, y) == "Maria Santos" and button_under(page, x, y) == "Mute", "the thumb is not over Maria's Mute: this test means nothing"
+        assert page.evaluate("document.body.classList.contains('settling')")
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)
+        page.wait_for_timeout(300)
+        assert server.meeting.controls_called == []
+        page.clock.run_for(200)
+        page.touchscreen.tap(x, y)                                                # 650 ms: a tap on what is there now is a tap on it
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("host.mute_one", 16777221)]
+        page.close()
+
+
+def test_a_tap_aimed_at_admit_does_not_admit_the_next_person_when_the_list_above_it_moves(browser):
+    """The waiting room is below the meeting's people: when the last of them leaves, both Admit buttons move up under the thumb that was aimed
+    at the first, and the second is where it was. The waiting rows are watched as the others are (the clock is stopped)."""
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 1, touchscreen=True)      # Room, Ann, Raj, Priya
+        server.meeting.current_meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 90, "name": "Guest A"}, {"id": 91, "name": "Guest B"}]}
+        poll_until(page, "document.querySelectorAll('#waiting-list .participant').length === 2")
+        page.clock.run_for(600)
+        x, y = centre(page, "#waiting-list .participant:has-text('Guest A') .button", "Admit")      # where the thumb is going
+        set_people(server, without(people, "Priya Nair"))                         # Priya, the last of the meeting's people, leaves: the waiting room moves up
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 3")
+        assert person_under(page, x, y) == "Guest B" and button_under(page, x, y) == "Admit", "the thumb is not over Guest B's Admit: this test means nothing"
+        page.clock.run_for(150)
+        page.touchscreen.tap(x, y)
+        page.clock.run_for(300)
+        page.touchscreen.tap(x, y)
+        page.wait_for_timeout(300)
+        assert server.meeting.controls_called == []
+        page.clock.run_for(200)
+        page.touchscreen.tap(x, y)
+        wait_for_calls(page, server, 1)
+        assert server.meeting.controls_called == [("host.admit", 91)]             # what is there now, once the screen has settled
+        page.close()
+
+
+def test_the_participants_list_settles_when_a_row_moves_and_not_when_it_is_scrolled_or_grows_at_its_foot(browser):
+    with PageServer(role="host") as server:
+        page, people = a_meeting_with_a_roster(browser, server, 9)               # twelve: the list scrolls inside its box
+        settling = "document.body.classList.contains('settling')"
+        assert not page.evaluate(settling)
+        page.evaluate("document.querySelector('.view[data-view=participants] .list-scroll').scrollTop = 150")
+        page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
+        assert not page.evaluate(settling), "a scroll is not a move"
+        people = people + [{"id": 16777400, "name": "Newcomer", "muted": False, "video": True, "hand": False, "host": False, "me": False}]
+        set_people(server, people)
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 13")
+        assert not page.evaluate(settling), "a row that comes in below the rest moves none of them"
+        set_people(server, without(people, "Tom Becker"))
+        poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 12")
+        assert page.evaluate(settling), "a row that goes from among them moves those below it"
+        page.clock.run_for(600)
+        assert not page.evaluate(settling)
+        page.close()
+
+
+def test_a_message_that_comes_in_while_the_chat_is_open_is_marked_seen_too(browser):
+    """Otherwise the count would climb on the button under the reader's nose."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        meeting = server.meeting.current_meeting
+        meeting.chat = a_chat(2, unread=2)
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Chat (2)')", timeout=5000)
+        assert server.meeting.controls_called == []                              # not opened: nothing is marked seen
+        open_sub_screen(page, "Chat", "chat")
+        wait_for_calls(page, server, 1)
+        meeting.chat = a_chat(3, unread=1)                                       # one more comes in while it is up (the agent had cleared the count)
+        poll_until(page, "window.croomPage.model.status.meeting.chat.messages.length === 3")
+        wait_for_calls(page, server, 2)
+        for _ in range(3):
+            page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
+        assert server.meeting.controls_called == [("chat.seen", None)] * 2       # once for each rise, and not once for each poll
+        page.click("#back-from-chat")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        meeting.chat = a_chat(4, unread=1)                                       # and one while the screen is not up: the button counts it
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Chat (1)')", timeout=5000)
+        assert len(server.meeting.controls_called) == 2
+        open_sub_screen(page, "Chat", "chat")                                    # and opening the screen marks it
+        wait_for_calls(page, server, 3)
+        page.close()
+
+
+def test_an_unread_count_the_agent_does_not_clear_is_marked_seen_once_and_again_when_it_rises(browser):
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        server.meeting.on_control = lambda name, value: None                     # an agent that leaves the count as it is
+        meeting = server.meeting.current_meeting
+        meeting.chat = a_chat(2, unread=2)
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Chat (2)')", timeout=5000)
+        open_sub_screen(page, "Chat", "chat")
+        wait_for_calls(page, server, 1)
+        for _ in range(3):
+            page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_timeout(300)
+        assert server.meeting.controls_called == [("chat.seen", None)]           # asked once, though the count is still 2 at every poll
+        meeting.chat = a_chat(3, unread=3)
+        poll_until(page, "window.croomPage.model.status.meeting.chat.messages.length === 3")
+        wait_for_calls(page, server, 2)
+        page.click("#back-from-chat")                                            # and the person who comes back to it finds the count still there: opening marks it
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        open_sub_screen(page, "Chat", "chat")
+        wait_for_calls(page, server, 3)
+        assert server.meeting.controls_called == [("chat.seen", None)] * 3
+        page.close()
+
+
+def test_the_meetings_words_are_shown_as_text_never_as_markup(browser):
+    """Names and chat lines are other people's words: a name with markup in it is drawn as the characters it is made of. A 400-character line
+    with no break in it wraps inside the screen."""
+    unbroken = "x" * 400
+    with PageServer(role="host") as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        people = a_roster(1)
+        people[3]["name"] = NASTY
+        set_people(server, people)
+        meeting = server.meeting.current_meeting
+        meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 9, "name": NASTY}]}
+        meeting.chat = {"unread": 0, "messages": [{"from": NASTY, "text": NASTY, "at": ""}, {"from": "Ann", "text": unbroken, "at": "2026-10-13T20:00:00Z"}]}
+        page.wait_for_function("window.croomPage.model.status.meeting.chat.messages.length === 2", timeout=5000)
+        open_sub_screen(page, "Participants", "participants")
+        assert page.locator("#participant-list .participant .name").nth(3).inner_text() == NASTY
+        assert page.locator("#waiting-list .participant .name").inner_text() == NASTY
+        assert page.locator("#participant-list b, #participant-list img, #participant-list script, #waiting-list b, #waiting-list img, #waiting-list script").count() == 0
+        page.click("#back-from-participants")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        open_sub_screen(page, "Chat", "chat")
+        assert page.locator("#chat-list .chat-from").nth(0).inner_text() == NASTY      # no time to add: the message has none
+        assert page.locator("#chat-list .chat-text").nth(0).inner_text() == NASTY
+        assert page.locator("#chat-list b, #chat-list img, #chat-list script").count() == 0
+        assert page.locator("#chat-list .chat-text").nth(1).inner_text() == unbroken
+        shown = page.evaluate("""() => { const l = document.getElementById('chat-list'), t = l.querySelectorAll('.chat-text')[1].getBoundingClientRect();
+            return { fits: l.scrollWidth <= l.clientWidth, inside: t.right <= l.getBoundingClientRect().right }; }""")
+        assert shown == {"fits": True, "inside": True} and fits(page)
+        assert page.evaluate("window.__pwned") is None
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1200)])
+def test_the_sub_screens_fit_with_twelve_people_twenty_messages_and_every_host_action(browser, width, height):
+    """The fixed screen (spec 2026-10-12) holds each of them: the list box scrolls inside itself and not the page, and Back and the heading stay
+    where they are."""
+    with PageServer(role="host") as server:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        join_by_id(page)
+        meeting = server.meeting.current_meeting
+        people = a_roster(9)                                                     # twelve, with every mark somewhere
+        people[3].update(muted=True, video=False, hand=True)
+        people[4].update(host=True, hand=True)
+        people[5]["name"] = "A name of a person who has a very long name indeed and a surname to match, Esq."
+        set_people(server, people)
+        meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 90 + i, "name": f"Guest {i + 1}"} for i in range(3)]}
+        meeting.chat = a_chat(20, unread=3)
+        meeting.chat["messages"][19]["text"] = ("A long message that goes on and on to the end of the line and then some. " * 6)[:400]
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Participants (12)')", timeout=5000)
+
+        open_sub_screen(page, "Participants", "participants")
+        assert page.locator("#participant-list .participant").count() == 12 and page.locator("#waiting-list .participant").count() == 3
+        assert fits(page), "the participants screen scrolls with twelve people and a waiting room"
+        shown = page.evaluate("""() => { const s = document.querySelector('.view[data-view=participants] .list-scroll'), back = document.getElementById('back-from-participants'),
+            kicker = document.querySelector('.view[data-view=participants] .kicker'), top = () => [back.getBoundingClientRect().top, kicker.getBoundingClientRect().top];
+            const before = top(); s.scrollTop = s.scrollHeight; return { scrolls: s.scrollHeight > s.clientHeight, before, after: top(), page: document.documentElement.scrollTop + document.querySelector('main').scrollTop }; }""")
+        assert shown["before"] == shown["after"] and shown["page"] == 0, shown      # Back and the heading stay, and the page does not scroll
+        if width == 1280:
+            assert shown["scrolls"], "twelve people and a waiting room are more than 1280 by 800 has room for: the list should scroll inside its box"
+        page.click("#back-from-participants")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+
+        open_sub_screen(page, "Chat", "chat")
+        assert page.locator("#chat-list .chat-message").count() == 20 and fits(page), "the chat screen scrolls with twenty messages"
+        shown = page.evaluate("""() => { const l = document.getElementById('chat-list'); return { scrolls: l.scrollHeight > l.clientHeight, page: document.documentElement.scrollTop + document.querySelector('main').scrollTop }; }""")
+        assert shown["page"] == 0 and (shown["scrolls"] or width > 1280)
+        page.click("#back-from-chat")
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+
+        open_sub_screen(page, "Host", "host")
+        assert len(page.locator("#host-actions .button").all()) == 5 and fits(page)
+        page.locator("#host-actions .button", has_text="End meeting").click()
+        assert page.locator("#host-actions .button", has_text="Tap again to end").count() == 1 and fits(page), "the host screen scrolls with End asking for its second tap"
+        page.close()
+
+
+def test_the_sub_screens_on_a_phone_never_scroll_sideways(browser):
+    with PageServer(role="host") as server:
+        page = browser.new_page(viewport={"width": 390, "height": 844})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        join_by_id(page)
+        meeting = server.meeting.current_meeting
+        people = a_roster(9)
+        people[5]["name"] = "A name of a person who has a very long name indeed and a surname to match, Esq."
+        people[4].update(host=True, hand=True, video=False)                      # marks and both buttons: the widest row there is
+        set_people(server, people)
+        meeting.controls["host"]["waiting_room"] = {"available": True, "waiting": [{"id": 90, "name": "A guest in the waiting room with a name that goes on"}]}
+        meeting.chat = {"unread": 0, "messages": [{"from": "Ann", "text": "x" * 400, "at": "2026-10-13T20:00:00Z"}, {"from": "Raj", "text": "Yes", "at": ""}]}
+        page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Participants (12)')", timeout=5000)
+        wide = "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        for words, view in (("Participants", "participants"), ("Chat", "chat"), ("Host", "host")):
+            page.locator("#meeting-secondary .button", has_text=words).scroll_into_view_if_needed()
+            open_sub_screen(page, words, view)
+            assert page.evaluate(wide), view
+            if view == "host":
+                page.locator("#host-actions .button", has_text="End meeting").click()
+                assert page.evaluate(wide) and page.locator("#host-actions .button").last.is_visible()
+            page.click(f"#back-from-{view}")
+            page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
         page.close()

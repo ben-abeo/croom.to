@@ -432,6 +432,7 @@ body.keyboard-open .schedule { display: none; }
 }
 .tv-trackpad[hidden] { display: none; }
 .tv-trackpad.touching { background: var(--navy-800); box-shadow: inset 0 1px 2px rgba(0, 0, 0, 0.6); }   /* a darker fill and a 1 px inset, as every key has */
+.tv-trackpad.armed { border-color: var(--blue-600); }   /* the finger has rested: the next move drags (touchpad.js), in the blue of the mode that is on */
 .tv-lead { margin: 0; font-size: 1.15rem; color: #fff; }
 .tv-how { margin: 0; color: var(--periwinkle-300); font-size: 0.95rem; }
 
@@ -494,6 +495,7 @@ body.keyboard-open .schedule { display: none; }
   touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
 }
 .touchpad-surface.touching { background: var(--navy-800); }
+.touchpad-surface.armed { box-shadow: inset 0 0 0 2px var(--blue-600); }   /* as the trackpad's: the next move drags */
 .touchpad-how { margin: 0; padding: 0 24px; color: rgba(189, 206, 255, 0.45); text-align: center; line-height: 1.9; white-space: pre-line; pointer-events: none; }
 @media (max-width: 1023px) {
   .touchpad-strip { flex-wrap: wrap; gap: 10px; }

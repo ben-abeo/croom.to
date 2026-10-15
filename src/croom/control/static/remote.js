@@ -317,7 +317,7 @@
     tvView.words = words;
     render();
   });
-  T.link.watch(() => { if (pointer.target) render(); });   // the trackpad's how-line says when the socket is lost
+  T.link.watch(drawTrackpadWords);   // the how-line follows the socket at once: not through render(), which stops short while the page's own status poll fails
 
   // The modes row: under the cards (no TV to point at) it is Full-screen touchpad alone, for the room Pi's mouse.
   function renderTvPointer(card, t) {
@@ -332,14 +332,19 @@
       b.classList.toggle("filled", on);
       b.classList.toggle("quiet", !on);
     }
-    if (target) {
-      const [lead, how] = TRACKPAD_WORDS[target];
-      const line = T.link.state() === "down" ? TRACKPAD_LOST : how;
-      el("tv-trackpad").dataset.target = target;
-      if (el("tv-trackpad-lead").textContent !== lead) el("tv-trackpad-lead").textContent = lead;
-      if (el("tv-trackpad-how").textContent !== line) el("tv-trackpad-how").textContent = line;
-    }
+    drawTrackpadWords();
     T.surface.sync({ usable: card === "", name: t.name || "" });
+  }
+
+  // What the trackpad says: whom it moves and how, or that the socket is lost.
+  function drawTrackpadWords() {
+    const target = pointer.target;
+    if (!target) return;
+    const [lead, how] = TRACKPAD_WORDS[target];
+    const line = T.link.state() === "down" ? TRACKPAD_LOST : how;
+    el("tv-trackpad").dataset.target = target;
+    if (el("tv-trackpad-lead").textContent !== lead) el("tv-trackpad-lead").textContent = lead;
+    if (el("tv-trackpad-how").textContent !== line) el("tv-trackpad-how").textContent = line;
   }
 
   // The view is left: nothing of it waits for the next person. (A pairing or a Turn on that is with the agent goes on, and its state stays.)

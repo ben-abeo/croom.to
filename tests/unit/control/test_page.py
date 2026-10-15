@@ -5941,14 +5941,19 @@ SURFACE_PROBE = """() => { const vis = (e) => e.getClientRects().length, W = doc
 GAIN, ACCEL_PX, TAP_MS, HOLD_MS = 1.6, 40, 180, 350
 FRAME_MS = 16                       # one animation frame on the page's stopped clock
 PAD, SURFACE = "#tv-trackpad", "#touchpad-surface"
-TOUCH = """([selector, kind, id, x, y]) => document.querySelector(selector).dispatchEvent(new PointerEvent(kind === 'lostcapture' ? 'lostpointercapture' : 'pointer' + kind, {
-    pointerId: id, pointerType: 'touch', isPrimary: id === 1, clientX: x, clientY: y, bubbles: true, cancelable: true,
-    button: kind === 'move' ? -1 : 0, buttons: kind === 'up' || kind === 'cancel' || kind === 'lostcapture' ? 0 : 1 }))"""
+TOUCH = """([selector, kind, id, x, y, stamp]) => {
+    const e = new PointerEvent(kind === 'lostcapture' ? 'lostpointercapture' : 'pointer' + kind, {
+        pointerId: id, pointerType: 'touch', isPrimary: id === 1, clientX: x, clientY: y, bubbles: true, cancelable: true,
+        button: kind === 'move' ? -1 : 0, buttons: kind === 'up' || kind === 'cancel' || kind === 'lostcapture' ? 0 : 1 });
+    Object.defineProperty(e, 'timeStamp', { value: stamp === null ? performance.now() : stamp });   // the page's own clock, which the stamp of an event made by script does not follow when the test stops it
+    return document.querySelector(selector).dispatchEvent(e); }"""
 
 
-def touch_event(page, selector, kind, x, y, finger=1):
-    """A synthetic finger on `selector`: `kind` is down, move, up, cancel or lostcapture, and `finger` is the pointer's id (two fingers are two ids)."""
-    page.evaluate(TOUCH, [selector, kind, finger, x, y])
+def touch_event(page, selector, kind, x, y, finger=1, stamp=None):
+    """A synthetic finger on `selector`: `kind` is down, move, up, cancel or lostcapture, and `finger` is the pointer's id (two fingers are two ids). The
+    event is stamped with the page's clock, as a panel's are (the page times a touch by the stamps), or with `stamp`, when the test wants the stamps and the
+    clock to disagree, as they do when the page is slow to get to an event."""
+    page.evaluate(TOUCH, [selector, kind, finger, x, y, stamp])
 
 
 def frame(page, count=1):
@@ -7251,4 +7256,153 @@ def test_a_finger_that_rolls_a_little_while_it_rests_sends_nothing_however_long_
         page.clock.run_for(30)
         touch_event(page, PAD, "up", 100, 100)
         assert log.got() == []
+        page.close()
+
+
+# --- fix round 1: the hold shown, the touch timed by its events, the socket's words at once ---
+
+def edge(page, selector):
+    """Whether the pad shows a hold is armed, and the colours it draws it in: its border (the trackpad's) and its inset ring (the surface's)."""
+    return page.locator(selector).evaluate("n => { const s = getComputedStyle(n); return [n.classList.contains('armed'), s.borderTopColor, s.boxShadow]; }")
+
+
+@pytest.mark.parametrize("selector, open_surface", [(PAD, False), (SURFACE, True)], ids=["the trackpad", "the surface"])
+def test_the_pad_shows_a_hold_is_armed_once_the_finger_has_rested_long_enough_and_not_before(browser, selector, open_surface):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        if open_surface:
+            page.click("#tv-fullscreen")
+        blue = "rgb(27, 82, 229)"
+        resting = edge(page, selector)
+        assert resting[0] is False and blue not in resting[1] + resting[2]
+        touch_event(page, selector, "down", 300, 300)
+        page.clock.run_for(HOLD_MS - 50)
+        assert edge(page, selector)[0] is False                                                      # (a finger just down is a tap or a move in the making)
+        page.clock.run_for(100)
+        armed = edge(page, selector)
+        assert armed[0] is True and blue in armed[1] + armed[2], armed                               # the blue of the mode that is on
+        touch_event(page, selector, "move", 340, 300)                                                # the drag goes on, and the pad still says so
+        frame(page)
+        assert edge(page, selector)[0] is True
+        touch_event(page, selector, "up", 340, 300)
+        assert edge(page, selector) == resting                                                       # and it is as it was when the finger lifts
+        page.close()
+
+
+def test_a_touch_that_moved_in_time_or_that_became_two_fingers_is_never_shown_armed(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 300, 300)
+        page.clock.run_for(200)
+        touch_event(page, PAD, "move", 306, 300)                                                     # a mover, from 200 ms
+        frame(page)
+        page.clock.run_for(500)
+        assert edge(page, PAD)[0] is False
+        touch_event(page, PAD, "up", 306, 300)
+        touch_event(page, PAD, "down", 300, 300, 1)
+        page.clock.run_for(200)
+        touch_event(page, PAD, "down", 400, 300, 2)                                                  # a second finger: scrolling, not a hold
+        page.clock.run_for(500)
+        assert edge(page, PAD)[0] is False
+        touch_event(page, PAD, "up", 300, 300, 1)
+        touch_event(page, PAD, "up", 400, 300, 2)
+        touch_event(page, PAD, "down", 300, 300)                                                     # and a hold that the browser takes away is over
+        page.clock.run_for(HOLD_MS + 50)
+        assert edge(page, PAD)[0] is True
+        touch_event(page, PAD, "cancel", 300, 300)
+        assert edge(page, PAD)[0] is False
+        page.close()
+
+
+def test_the_pad_stops_showing_a_hold_when_a_second_finger_lands_and_when_the_pad_is_put_away(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        touch_event(page, PAD, "down", 300, 300, 1)
+        page.clock.run_for(HOLD_MS + 50)
+        assert edge(page, PAD)[0] is True
+        touch_event(page, PAD, "down", 400, 300, 2)                                                  # a second finger: it is a scroll now, and no hold is waiting
+        assert edge(page, PAD)[0] is False
+        touch_event(page, PAD, "up", 300, 300, 1)
+        touch_event(page, PAD, "up", 400, 300, 2)
+        touch_event(page, PAD, "down", 300, 300)                                                     # and the view is left with a hold armed: it is not armed when it is back
+        page.clock.run_for(HOLD_MS + 50)
+        assert edge(page, PAD)[0] is True
+        page.click("#back-from-tv")
+        assert edge(page, PAD)[0] is False
+        page.close()
+
+
+def test_a_tap_is_timed_by_the_events_and_not_by_when_the_page_gets_to_them(browser):
+    """The Pi's main thread may be away when a finger lifts. The stamp of the event is when the panel saw it: a lift 100 ms after the landing is a tap
+    though the page reaches it half a second later (here the page's clock runs on 500 ms between the two)."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pointer")
+        landed = page.evaluate("performance.now()")
+        touch_event(page, PAD, "down", 300, 300, stamp=landed)
+        page.clock.run_for(500)
+        touch_event(page, PAD, "up", 300, 300, stamp=landed + 100)
+        assert log.got() == [{"target": "tv", "type": "tap"}]
+        page.close()
+
+
+def test_a_hold_is_timed_by_the_events_too(browser):
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse")
+        landed = page.evaluate("performance.now()")
+        touch_event(page, PAD, "down", 300, 300, stamp=landed)
+        touch_event(page, PAD, "move", 340, 300, stamp=landed + HOLD_MS + 20)                        # the page's clock has not moved: the finger rested, by the stamps
+        frame(page)
+        assert edge(page, PAD)[0] is True                                                            # and the pad says so, though its own timer has not run out
+        touch_event(page, PAD, "up", 340, 300, stamp=landed + HOLD_MS + 40)
+        assert [f["type"] for f in log.got()] == ["down", "move", "up"]
+        touch_event(page, PAD, "down", 300, 300, stamp=landed + 1000)                                # and one that moved at once, by the stamps, is a mover however long the page took
+        page.clock.run_for(HOLD_MS + 200)
+        touch_event(page, PAD, "move", 340, 300, stamp=landed + 1040)
+        frame(page)
+        touch_event(page, PAD, "up", 340, 300, stamp=landed + 1060)
+        assert [f["type"] for f in log.got()][3:] == ["move"]
+        page.close()
+
+
+@pytest.mark.parametrize("roll", [0, 4], ids=["a finger that stays", "a finger that rolls 4 px"])
+def test_a_tap_survives_the_pages_main_thread_being_busy_when_the_finger_lifts(browser, roll):
+    """A busy page (the Pi's slow main thread) handles a lift late: a tap of 150 ms that is handled 220 ms after the landing is still a tap, and the roll of
+    its fingertip (past the slop, within the tap's 8 px) does not go out as a move just because the page got to the lift late. The events are made as the
+    panel made them, with their stamps, and the page is kept busy between the second and the third."""
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log, (x, y) = real_pad_page(browser, server, "#tv-pointer")
+        page.evaluate("""([selector, x, y, roll]) => {
+            const made = (kind, at, dx) => { const e = new PointerEvent(kind, { pointerId: 1, pointerType: 'touch', isPrimary: true, clientX: x + dx, clientY: y, bubbles: true,
+                cancelable: true, button: 0, buttons: kind === 'pointerup' ? 0 : 1 }); Object.defineProperty(e, 'timeStamp', { value: at }); return e; };
+            const node = document.querySelector(selector), t0 = performance.now();
+            node.dispatchEvent(made('pointerdown', t0, 0));
+            if (roll) node.dispatchEvent(made('pointermove', t0 + 60, roll));
+            const end = performance.now() + 220;
+            while (performance.now() < end) { /* the page is busy */ }
+            node.dispatchEvent(made('pointerup', t0 + 150, roll)); }""", [PAD, x, y, roll])
+        assert log.got() == [{"target": "tv", "type": "tap"}]
+        page.close()
+
+
+@pytest.mark.parametrize("where", ["the trackpad's how-line", "the surface's mark"])
+def test_the_reconnecting_words_follow_the_socket_at_once_even_while_the_pages_own_status_is_out(browser, where):
+    """The page draws the rest of itself from the status it polls, and stops short while that poll fails (the agent restarting is when that happens).
+    The words about the socket do not wait for it: they are gone within 100 ms of the socket opening again."""
+    disc = where.startswith("the trackpad")
+    with PageServer(tv=RemoteTv(), mouse=StubMouse()) as server:
+        page, log = pad_page(browser, server, "#tv-pi-mouse" if disc else None)
+        if not disc:
+            page.click("#tv-fullscreen")
+            the_socket(page)
+        words = page.locator("#tv-trackpad-how") if disc else page.locator("#touchpad-link")
+        page.route("**/api/status", lambda route: route.abort())                                     # the status does not come
+        page.clock.run_for(2500)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)           # (the page is offline: its render stops short)
+        log.drop()
+        the_socket(page, "down")
+        assert (words.inner_text() == "Reconnecting\u2026") if disc else words.is_visible()
+        page.clock.run_for(1001)
+        the_socket(page)
+        page.wait_for_timeout(100)
+        assert (words.inner_text() != "Reconnecting\u2026") if disc else words.is_hidden()
         page.close()

@@ -95,8 +95,14 @@
   // and the held travel after it. A click sends only the click, and a still finger moves nothing.
   function reader(node, target) {
     const fingers = new Map();   // pointerId -> { x0, y0: where it landed, x, y: where it is, lx, ly: where the last frame left it }
-    let g = null;                // the gesture: { at: when it began, two, far: how far a finger has been from where it landed, released, dragging, carry }
+    let g = null;                // the gesture: { at: when it began, two, far: how far a finger has been from where it landed, resting, released, dragging, carry }
     let frame = 0;
+    let armTimer = null;
+    const disarm = () => {       // the pad stops showing that a hold is ready
+      clearTimeout(armTimer);
+      armTimer = null;
+      node.classList.remove("armed");
+    };
 
     const send = (type, more) => link.send(Object.assign({ target: target(), type: type }, more));
     const whole = (carry) => {   // the whole numbers of the carry, which keeps what is left
@@ -135,9 +141,9 @@
       if (x || y) send("scroll", { dx: x, dy: y });
     }
 
-    function flush() {
+    function flush(t) {          // t is the time of the frame, or of the event that asks for the flush: the panel's clock, like the stamps of the events
       frame = 0;
-      if (g) (g.two ? scroll : travel)(performance.now());
+      if (g) (g.two ? scroll : travel)(t);
     }
     function cancelFrame() {
       if (frame) cancelAnimationFrame(frame);
@@ -149,10 +155,11 @@
       e.preventDefault();
       if (fingers.has(e.pointerId) || (g && g.two)) return;   // a third finger, or one that lands after a finger of two has lifted: a gesture with two stays that
       try { node.setPointerCapture(e.pointerId); } catch (err) { /* a synthetic event has no pointer to capture */ }
-      const t = performance.now();
+      const t = e.timeStamp;   // when the panel saw the finger land: a page that is slow to get to the event does not make a tap into something else
       if (g) {   // the second finger: the first one's travel so far was the cursor's, and the two begin together from here
+        disarm();
         cancelFrame();
-        flush();
+        flush(t);
         if (g.dragging) { send("up"); g.dragging = false; }
         g.two = true;
         g.at = t;
@@ -163,6 +170,7 @@
         for (const f of fingers.values()) { f.x0 = f.lx = f.x; f.y0 = f.ly = f.y; }
       } else {
         g = { at: t, two: false, far: 0, released: false, dragging: false, resting: null, carry: { x: 0, y: 0 } };
+        armTimer = setTimeout(() => node.classList.add("armed"), HOLD_MS);   // a finger that has rested: its next move drags, and the pad says so (a second finger, a mover's first travel, a lift or a cancel stop the timer)
       }
       fingers.set(e.pointerId, { x0: e.clientX, y0: e.clientY, x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY });
       node.classList.add("touching");
@@ -177,7 +185,10 @@
       if (away > g.far) {
         // What the touch is is decided once, when the finger first really moves: one that rested HOLD_MS before that is a press and hold, and
         // goes TAP_PX before it drags (the button goes down, then its travel); one that moved sooner is a mover and never a drag.
-        if (g.resting === null && away >= SLOP_PX) g.resting = !g.two && performance.now() - g.at >= HOLD_MS;
+        if (g.resting === null && away >= SLOP_PX) {
+          g.resting = !g.two && e.timeStamp - g.at >= HOLD_MS;
+          if (g.resting) node.classList.add("armed"); else disarm();
+        }
         if (g.resting && g.far < TAP_PX && away >= TAP_PX && send("down")) g.dragging = true;
         g.far = away;
       }
@@ -187,12 +198,13 @@
     function lift(e, cancelled) {
       if (!fingers.has(e.pointerId)) return;
       cancelFrame();
-      flush();                                  // the travel that is still waiting goes first
+      flush(e.timeStamp);                       // the travel that is still waiting goes first
       fingers.delete(e.pointerId);
       try { node.releasePointerCapture(e.pointerId); } catch (err) { /* gone already */ }
       if (fingers.size) return;                 // one finger of two: the gesture goes on until the last one is up
-      const done = g, t = performance.now();
+      const done = g, t = e.timeStamp;
       g = null;
+      disarm();
       node.classList.remove("touching");
       if (done.dragging) send("up");            // a drag ends where the finger lifted, or where the browser took the touch away
       else if (!cancelled && t - done.at < TAP_MS && done.far < TAP_PX && (!done.two || target() === "pi")) send(done.two ? "right" : "tap");
@@ -208,6 +220,7 @@
     // Everything stops, and nothing more is sent for what the fingers do from here: a held drag lets go first.
     function cancel() {
       cancelFrame();
+      disarm();
       if (g && g.dragging) send("up");
       for (const id of fingers.keys()) { try { node.releasePointerCapture(id); } catch (err) { /* gone already */ } }
       fingers.clear();

@@ -328,7 +328,7 @@ class StubTv:
     def status(self):
         if self.fail_status is not None:
             raise self.fail_status
-        return {"configured": self.configured, "paired": self.paired, "keep_on": True, "held_off": False, "refused": False,
+        return {"configured": self.configured, "paired": self.paired, "keep_on": True, "held_off": False, "refused": False, "prompting": False,
                 "host": self.host, "pi_input": self.pi_input,
                 "on": True, "reachable": True, "name": self.name, "volume": self.volume, "muted": False,
                 "input": "HDMI_1", "inputs": [{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}],
@@ -396,10 +396,11 @@ class StubCursor:
 
 
 class StubDevice:
-    """What evdev.UInput is to a real PiMouse: it notes the events written to it."""
+    """What evdev.UInput is to a real PiMouse: it notes the events written to it, and the times it was closed."""
 
     def __init__(self):
         self.writes = []
+        self.closed = 0
 
     def write(self, kind, code, value):
         self.writes.append((kind, code, value))
@@ -408,12 +409,14 @@ class StubDevice:
         self.writes.append("syn")
 
     def close(self):
-        pass
+        self.closed += 1
 
 
 class StubMouse:
     """Behaves like PiMouse: notes what it is told, in `calls`, and raises `fail` (an error) when it has one, as a mouse that cannot be
     made does. `closed` counts the times the service closed it."""
+
+    ready = True                  # its device is always there: an event goes straight to it (see PiMouse.ready)
 
     def __init__(self):
         self.calls = []
@@ -1957,6 +1960,39 @@ class TestTvStatus:
 class TestTvControl:
     """POST /api/tv/control answers like the meeting's controls: 200 with the state, 409 with words."""
 
+    async def test_a_control_the_tv_never_answers_is_refused_in_words_within_the_tv_services_bound_and_the_lock_is_free(
+            self, client_factory, tmp_path, monkeypatch):
+        """With the real TV service on a TV whose connection has died without the library noticing: the control that waited for it held the
+        one-at-a-time lock, and every key behind it, until the library's heartbeat ended the connection. It is refused in words at the
+        service's bound, and the next one has its turn."""
+        from croom.tv.service import TvService
+        from tests.unit.tv.fake_client import FakeTvClient
+        from tests.unit.tv.helpers import DoingTv, build_service as build_tv_service
+        never = asyncio.Event()
+
+        class Dead(DoingTv):
+            async def volume_up(self):
+                await never.wait()
+        FakeTvClient.instances.clear()
+        monkeypatch.setattr(TvService, "ASK_TIMEOUT_S", 0.2)
+        tv = build_tv_service(tmp_path, Dead)
+        await tv.start()
+        try:
+            service = make_service(tv=tv)
+            client = await client_factory(service)
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
+            response = await asyncio.wait_for(client.post("/api/tv/control", json={"name": "volume_up"}), 3.0)
+            assert response.status == 409 and loop.time() - t0 < 1.5
+            assert (await response.json()) == {"error": "The TV did not accept that: no answer in time"}
+            assert not service._tv_busy.locked()
+            response = await asyncio.wait_for(client.post("/api/tv/control", json={"name": "volume_down"}), 3.0)
+            assert response.status == 200 and (await response.json())["tv"]["volume"] == 23
+        finally:
+            never.set()
+            await tv.stop()
+            FakeTvClient.instances.clear()
+
     async def test_a_control_is_carried_out_and_answered_with_the_status_the_tv_shows_after_it(self, client_factory):
         tv = StubTv()
         client = await client_factory(make_service(tv=tv))
@@ -2334,6 +2370,7 @@ class TestPointerSocket:
             assert shape(StubCursor, name) == shape(TvClient, name)
         for name in ("open", "move", "press", "release", "click", "scroll", "close"):
             assert shape(StubMouse, name) == shape(PiMouse, name)
+        assert isinstance(PiMouse.ready, property) and StubMouse.ready is True              # (and what the relay asks of a mouse before an event)
         assert shape(StubTv, "pointer") == shape(TvService, "pointer")
 
     async def test_events_reach_the_tvs_cursor_and_the_room_pis_mouse(self, client_factory):
@@ -2504,18 +2541,22 @@ class TestPointerSocket:
             gate.set()
 
     async def test_a_mouse_that_cannot_be_made_when_a_socket_opens_leaves_every_event_answered_in_words(self, client_factory, caplog):
-        attempts = []
+        attempts, clock = [], Clock()
 
         def failing():
             attempts.append(1)
             raise PermissionError(13, "Permission denied", "/dev/uinput")
         tv = StubTv()
-        client = await client_factory(make_service(tv=tv, mouse=PiMouse(uinput_factory=failing)))
+        client = await client_factory(make_service(tv=tv, mouse=PiMouse(uinput_factory=failing, clock=clock)))
         async with client.ws_connect("/ws/pointer") as ws:
             await wait_until(lambda: attempts)                                      # (made when the socket opened, and could not be)
-            await ws.send_json({"target": "pi", "type": "tap"})
+            await ws.send_json({"target": "pi", "type": "tap"})                     # (a moment later: the floor between tries is not passed)
             answer = (await self.says(ws))["error"]
             assert "not allowed to use /dev/uinput" in answer and "sudo systemctl restart croom" in answer
+            assert len(attempts) == 1                                               # said again, in the same words, with no new try
+            clock.advance(PiMouse.RETRY_S)
+            await ws.send_json({"target": "pi", "type": "tap"})
+            assert (await self.says(ws))["error"] == answer
             assert len(attempts) == 2 and not ws.closed                             # the event tried again, and the socket is open
             await ws.send_json({"target": "tv", "type": "tap"})                     # and the TV's side does not care
             await wait_until(lambda: tv.cursor.calls == [("click",)])
@@ -2524,19 +2565,23 @@ class TestPointerSocket:
         assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []
 
     async def test_a_mouse_that_could_not_be_made_when_the_socket_opened_is_made_by_the_first_event_when_it_can_be(self, client_factory):
-        devices = []
+        devices, clock, threads = [], Clock(), []
 
         def factory():
+            threads.append(threading.get_ident())
             if not devices:
                 devices.append(None)
                 raise PermissionError(13, "Permission denied", "/dev/uinput")
             devices.append(StubDevice())
             return devices[-1]
-        client = await client_factory(make_service(mouse=PiMouse(uinput_factory=factory)))
+        mouse = PiMouse(uinput_factory=factory, clock=clock)
+        client = await client_factory(make_service(mouse=mouse))
         async with client.ws_connect("/ws/pointer") as ws:
-            await wait_until(lambda: devices)
+            await wait_until(lambda: mouse.unavailable is not None)                 # (the socket's own try, which failed)
+            clock.advance(PiMouse.RETRY_S)                                          # (the installer's group is there now)
             await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 0})
             await wait_until(lambda: len(devices) == 2 and devices[1].writes == [(CODES["EV_REL"], CODES["REL_X"], 1), "syn"])
+        assert threading.get_ident() not in threads                                 # (neither try was made on the loop's thread)
 
     async def test_a_mouse_that_blows_up_when_it_is_made_does_not_close_the_socket(self, client_factory, caplog):
         mouse = StubMouse()
@@ -2792,6 +2837,128 @@ class TestPointerSocket:
         await service.start()
         await service.stop()
         assert mouse.closed == 1
+
+    async def test_stopping_the_service_while_a_socket_waits_for_the_mouse_to_be_made_is_prompt_and_leaves_no_device(self):
+        """The device takes a moment to appear (evdev waits for it), and the service may be stopped in that moment: the socket is on the
+        books before it waits for the device, so stop() ends it (not a minute of the listener's waiting), and the device that comes is
+        closed and not left on the desktop."""
+        gate, started, device = threading.Event(), threading.Event(), StubDevice()
+
+        def slow_factory():
+            started.set()
+            gate.wait(3.0)
+            return device
+        mouse = PiMouse(uinput_factory=slow_factory)
+        service = make_service(mouse=mouse)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        threading.Timer(0.3, gate.set).start()                                  # (the device appears while the service stops)
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                reading = asyncio.ensure_future(ws.receive())                   # (a page answers the close, as a browser does)
+                await wait_until(started.is_set)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 1.5
+                reading.cancel()
+        finally:
+            gate.set()
+        assert device.closed == 1 and mouse.ready is False and service._pointers == {}
+
+    async def test_stopping_the_service_does_not_wait_for_a_mouse_that_hangs_while_it_is_made_and_it_is_closed_when_it_comes(self, monkeypatch):
+        """A creation that never ends held stop(): the socket's handler waited for the device (the listener waits for a handler for a
+        minute) and close() waited for the lock that the creation held. The handler that waits for the device is ended with the rest of
+        what is open, close() gives up after its bound, and the thread that makes the device closes it when it is made."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.5)
+        gate, started, device = threading.Event(), threading.Event(), StubDevice()
+
+        def hung_factory():
+            started.set()
+            gate.wait(10.0)
+            return device
+        mouse = PiMouse(uinput_factory=hung_factory)
+        mouse.CLOSE_WAIT_S = 0.2
+        service = make_service(mouse=mouse)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                reading = asyncio.ensure_future(ws.receive())
+                await wait_until(started.is_set)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 5.0)
+                assert loop.time() - t0 < 2.0
+                reading.cancel()
+            assert service._pointers == {} and device.closed == 0               # (it has not come)
+            gate.set()                                                          # now it does ...
+            await wait_until(lambda: device.closed == 1)                        # ... and the thread that made it closes it
+            assert mouse.ready is False
+        finally:
+            gate.set()
+
+    async def test_stopping_the_service_does_not_wait_for_an_event_that_waits_for_the_mouse_to_be_made_either(self, monkeypatch):
+        """The same for the device that is made by the first event, after the socket's own try failed: the handler that waits for it is
+        on the books as well."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.5)
+        attempts, clock = [], Clock()
+        gate, started, device = threading.Event(), threading.Event(), StubDevice()
+
+        def factory():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise PermissionError(13, "Permission denied", "/dev/uinput")      # the socket's try ...
+            started.set()
+            gate.wait(10.0)                                                         # ... and the event's, which hangs
+            return device
+        mouse = PiMouse(uinput_factory=factory, clock=clock)
+        mouse.CLOSE_WAIT_S = 0.2
+        service = make_service(mouse=mouse)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                reading = asyncio.ensure_future(ws.receive())
+                await wait_until(lambda: mouse.unavailable is not None)             # (the socket's own try, which failed)
+                clock.advance(PiMouse.RETRY_S)
+                await ws.send_json({"target": "pi", "type": "tap"})
+                await wait_until(started.is_set)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 5.0)
+                assert loop.time() - t0 < 2.0
+                reading.cancel()
+            assert service._pointers == {}
+            gate.set()
+            await wait_until(lambda: device.closed == 1)
+            assert device.writes == []                                              # (the tap was never made: nobody was left to hear of it)
+        finally:
+            gate.set()
+
+    async def test_a_close_that_is_left_after_the_bound_is_cut_unless_its_connection_has_gone_already(self, monkeypatch):
+        """On stop each socket is closed, and one that is still open at the bound has its connection cut. A connection that is gone already
+        (the request has no transport any more) has nothing to cut, and must not end the hook half way: the ones after it are cut."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.05)
+        service = make_service(mouse=StubMouse())
+        stuck = asyncio.Event()
+        cut = []
+
+        class Socket:
+            async def close(self, **kwargs):
+                await stuck.wait()                                                  # a page that does not answer the close
+
+        gone = SimpleNamespace(transport=None)
+        open_ = SimpleNamespace(transport=SimpleNamespace(abort=lambda: cut.append("open")))
+        also_open = SimpleNamespace(transport=SimpleNamespace(abort=lambda: cut.append("also open")))
+        for request in (gone, open_, also_open):
+            service._pointers[Socket()] = SimpleNamespace(request=request, relay=SimpleNamespace(sending=None))
+        try:
+            await service._end_what_is_open(None)                                   # raises nothing
+        finally:
+            stuck.set()
+            await asyncio.sleep(0)
+        assert sorted(cut) == ["also open", "open"]                                 # (in no order: the closes that are left are a set)
 
     async def test_a_frame_bigger_than_a_request_body_is_not_a_pointer_message_and_ends_the_connection(self, client_factory):
         client = await client_factory(make_service(mouse=StubMouse()))

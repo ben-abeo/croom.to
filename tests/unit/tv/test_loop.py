@@ -2,8 +2,9 @@
 import asyncio
 import logging
 
-from tests.unit.tv.fake_client import FakeTvClient
-from tests.unit.tv.helpers import build_service, connects, until, yielding_sleep
+from tests.unit.scores.schedules import Clock
+from tests.unit.tv.fake_client import FakeTvClient, PromptingTvClient, WebOsTvPairError
+from tests.unit.tv.helpers import build_service, connects, prompt_is_up, until, within, yielding_sleep
 
 
 async def test_a_tv_that_is_off_at_start_is_found_when_it_answers(tmp_path):
@@ -255,3 +256,127 @@ async def test_an_error_that_ends_the_loop_is_logged(tmp_path, caplog):
         assert "ended on an error" in caplog.text and "the sleep broke" in caplog.text
     finally:
         await service.stop()
+
+
+# A TV that has forgotten this table: the person at the table is told, not left with a TV that says only "Turn on"
+
+def at_its_prompt(clock, error=TimeoutError):
+    """A TV that shows its pairing prompt for the stored key and that nobody answers: the library waits for the person, and its connect
+    ends in `error` (its own timeout) after `waits` seconds of the service's clock (the library gives the person ten seconds; a TV that
+    does not answer at all is given two). The wait is time that the clock is moved by; `gate`, when there is one, is what the connect
+    waits for first."""
+    class AtItsPrompt(FakeTvClient):
+        waits = 10.0
+        gate = None
+
+        async def connect(self):
+            self.calls.append(("connect", self.client_key))
+            if self.gate is not None:
+                await self.gate.wait()
+            await asyncio.sleep(0)
+            clock.advance(self.waits)
+            raise error
+    return AtItsPrompt
+
+
+async def test_a_try_that_waited_at_the_tvs_prompt_is_asking_to_pair_and_one_that_got_no_answer_at_all_is_not(tmp_path):
+    """The library's connect times out when the TV does not answer (it gives it two seconds) and when its prompt is not answered (ten): the
+    time the try waited tells them apart, for a TV that is off is not asking anything of the table."""
+    clock = Clock()
+    service = build_service(tmp_path, at_its_prompt(clock), clock=clock)
+    assert service.status()["prompting"] is False                             # nothing has been tried
+    assert await service._connect_once() is False                             # the library gave the person ten seconds
+    status = service.status()
+    assert status["prompting"] is True and status["refused"] is False and status["on"] is False and status["paired"] is True
+    service._client.waits = 2.0                                               # now it does not answer at all: two seconds
+    assert await service._connect_once() is False
+    assert service.status()["prompting"] is False
+    service._client.waits = service.PROMPT_AFTER_S - 0.25                     # just short of the bound: still a TV that is not answering
+    assert await service._connect_once() is False
+    assert service.status()["prompting"] is False
+    service._client.waits = service.PROMPT_AFTER_S                            # the bound: the try has reached the TV
+    assert await service._connect_once() is False
+    assert service.status()["prompting"] is True
+    service._client.connect = FakeTvClient.connect.__get__(service._client)   # the TV answers
+    assert await service._connect_once() is True
+    assert service.status()["prompting"] is False and service.status()["reachable"] is True
+
+
+async def test_the_next_try_does_not_take_the_asking_back_while_it_waits_and_ends_it_when_it_fails_at_once(tmp_path):
+    """The loop tries again after its back-off, and a page that drew "asking" a moment ago must not draw "Turn on" for the first seconds
+    of every try."""
+    clock = Clock()
+    service = build_service(tmp_path, at_its_prompt(clock), clock=clock)
+    assert await service._connect_once() is False and service.status()["prompting"] is True
+    service._client.gate = asyncio.Event()
+    again = asyncio.ensure_future(service._connect_once())                     # the next try, at the prompt again
+    try:
+        await until(lambda: service._waiting_since is not None)
+        assert service.status()["prompting"] is True                           # (it has waited no time at all yet)
+    finally:
+        service._client.waits = 2.0                                            # and then the TV is off: two seconds
+        service._client.gate.set()
+        assert await within(again) is False
+    assert service.status()["prompting"] is False
+
+
+async def test_a_tv_that_is_off_or_that_refuses_is_not_asking_to_pair(tmp_path):
+    for reason in ("refuse", "prompt_timeout"):                                # (both end at once, as a TV that does not answer does)
+        service = build_service(tmp_path, FakeTvClient)
+        assert await service._connect_once() is True
+        service._client.connected = False
+        setattr(service._client, reason, True)
+        assert await service._connect_once() is False
+        assert service.status()["prompting"] is False and service.status()["on"] is False, reason
+
+
+async def test_a_loop_that_waits_at_the_prompt_says_so_when_it_has_waited_long_enough_and_stops_when_the_prompt_is_answered(tmp_path):
+    """With the stored key a TV that has forgotten the table shows its prompt, and the library goes on waiting for the person at the TV
+    (a wait ended by an answer, the TV going away, stop or Forget). Once the try has waited longer than a TV that does not answer takes,
+    the table's page says so."""
+    clock = Clock()
+    service = build_service(tmp_path, PromptingTvClient, clock=clock)
+    service.START_WAIT_S = 0.01
+    await service.start()
+    try:
+        await until(prompt_is_up)                                              # the try is waiting at the prompt
+        assert service.status()["prompting"] is False                          # (it has only begun)
+        clock.advance(service.PROMPT_AFTER_S - 0.25)
+        assert service.status()["prompting"] is False
+        clock.advance(0.25)
+        status = service.status()
+        assert status["prompting"] is True and status["paired"] is True and status["refused"] is False
+        assert status["reachable"] is False and status["on"] is False
+        FakeTvClient.instances[-1].accept()                                    # the person accepts it with the TV's own remote
+        await until(lambda: service.status()["reachable"])
+        assert service.status()["prompting"] is False
+    finally:
+        await service.stop()
+
+
+async def test_forget_ends_the_asking(tmp_path):
+    clock = Clock()
+    service = build_service(tmp_path, PromptingTvClient, clock=clock)
+    service.START_WAIT_S = 0.01
+    await service.start()
+    await until(prompt_is_up)
+    clock.advance(service.PROMPT_AFTER_S)
+    assert service.status()["prompting"] is True
+    await service.forget()                                                     # the pairing is let go of
+    assert service.status()["prompting"] is False and service.status()["paired"] is False
+    await service.stop()
+
+
+async def test_forget_ends_the_asking_of_a_try_that_had_ended_unanswered_too(tmp_path):
+    clock = Clock()
+    service = build_service(tmp_path, at_its_prompt(clock), clock=clock)
+    assert await service._connect_once() is False and service.status()["prompting"] is True
+    await service.forget()                                                     # (an unpaired table has nothing to be asked)
+    assert service.status()["prompting"] is False and service.status()["paired"] is False
+
+
+async def test_a_prompt_that_is_declined_is_the_refused_card_and_not_a_tv_that_is_asking(tmp_path):
+    clock = Clock()
+    service = build_service(tmp_path, at_its_prompt(clock, WebOsTvPairError("403 User denied access")), clock=clock)
+    assert await service._connect_once() is False                              # (it waited at the prompt ten seconds, and the person said no)
+    assert service.status()["refused"] is True and service.status()["prompting"] is False    # it has its own card

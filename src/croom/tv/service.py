@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -184,8 +185,20 @@ class TvService(Service):
     # A person's tap keeps its own command and grace beyond the wait, so a Turn on from the table takes at most 15 (the wait,
     # WAKE_TIMEOUT_S) + 3 (the command, ASK_TIMEOUT_S) + 3 (the grace, below) + 2 (the read-back, REREAD_TIMEOUT_S) = 23 s
     MANUAL_TURN_ON_GRACE_S = 3.0   # when a person at the table asked for it, this long: they are waiting to be told
-    ASK_TIMEOUT_S = 3.0       # a command that the service gives the TV on its own account (turn on, show the Pi) has this long
+    # A command that the service gives the TV (a control from the table, turn on, show the Pi) has this long. A connection that has died
+    # and that the library has not yet noticed answers nothing, and a control that waits for it holds the control service's lock, and
+    # every key behind it, until the library's heartbeat (it pings every five seconds) ends the connection.
+    ASK_TIMEOUT_S = 3.0
     REREAD_TIMEOUT_S = 2.0    # and each read-back after a control has this long
+    # Hanging up on a TV that is gone takes the library as long as aiohttp's close timeout (ten seconds), and the agent's stop does it for
+    # the wake that is waiting, for the loop and for the client in turn: each is given this long for the TV's goodbye, no longer.
+    DISCONNECT_WAIT_S = 2.0
+    # A try at the TV with the stored key that has waited this long for it is waiting at its pairing prompt. The library gives a TV that
+    # does not answer at all two seconds to connect, for each of the two addresses it tries (ws://, then wss:// when the first is refused),
+    # so four at most: a try that waits longer has reached the TV, which then did not say what the library waits for. That is a TV that
+    # does not know the key (it has forgotten this table) and asks the person at it. The library's own wait for that does not end by
+    # itself (see PAIR_WAIT_S).
+    PROMPT_AFTER_S = 5.0
     # A pairing waits this long for the person at the TV to accept the prompt. The library's own wait for it (ten seconds) does not
     # end: aiohttp restarts its receive timeout on every ping and pong of the connection, and the library pings every five seconds.
     PAIR_WAIT_S = 60.0
@@ -195,9 +208,10 @@ class TvService(Service):
     PAIR_FINISH_S = 5.0
 
     def __init__(self, config: TvConfig, keystore: KeyStore, client_factory: ClientFactory, waker: Waker,
-                 loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep):
+                 loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep, clock: Callable[[], float] = time.monotonic):
         super().__init__("tv")
         self._config, self._keys, self._factory, self._wake, self._sleep = config, keystore, client_factory, waker, loop_sleep
+        self._clock = clock                      # the time (seconds, steadily) that PROMPT_AFTER_S is counted on
         self._client: Optional[TvClient] = None
         # Not _state: the Service base keeps its lifecycle state there, and the manager sets it
         self._shown: Dict[str, Any] = _blank()
@@ -210,6 +224,8 @@ class TvService(Service):
         self._pairing = False                    # a pairing is waiting for the person at the TV
         self._refused = False                    # the TV declined the stored key: no more tries until it is paired again
         self._timed_out = False                  # the last try ended in a timeout
+        self._waiting_since: Optional[float] = None   # when the try that is waiting for the TV began to wait (the clock's), else None
+        self._asked = False                      # the last try ended unanswered after waiting PROMPT_AFTER_S: the TV was asking this table to pair again
         self._letting_go = 0                     # clients this service is hanging up on just now
         self._rewake: Optional[asyncio.Task] = None   # the wake that is waiting its turn: one at a time
         self._controls = {                       # what the table can ask of the TV, each by the name the control API gives it
@@ -240,14 +256,18 @@ class TvService(Service):
         which a TV that is only off or away is not: the page tells the two apart by it. (Read it with `paired`: it
         stays set after Forget TV, until the next pairing or start.) Host and pi_input are the config's, whatever the TV
         says: the pairing card names the TV this room is set up for (and tags it in the list Find TVs makes) before there
-        is a connection to ask, and the row of inputs marks the one the room Pi is on."""
+        is a connection to ask, and the row of inputs marks the one the room Pi is on. Prompting says that the TV shows its pairing prompt
+        for the key this table keeps (the table is paired, the TV has not refused it, and the try at the TV has waited at the prompt
+        for PROMPT_AFTER_S or more: it has forgotten this table, and is waiting for a person): Forget TV, then Pair, or the TV's own
+        remote at the prompt, puts it right."""
         shown = dict(self._shown)
         shown["inputs"] = list(shown["inputs"])
         shown["reachable"] = self._answering()
         shown["on"] = shown["on"] and shown["reachable"]
-        return dict(configured=self.configured, paired=self._keys.read() is not None, keep_on=self._config.keep_on,
-                    held_off=self._held_off, refused=self._refused, host=self._config.host, pi_input=self._config.pi_input,
-                    **shown)
+        paired = self._keys.read() is not None
+        return dict(configured=self.configured, paired=paired, keep_on=self._config.keep_on,
+                    held_off=self._held_off, refused=self._refused, prompting=paired and self._asking_to_pair(),
+                    host=self._config.host, pi_input=self._config.pi_input, **shown)
 
     async def start(self) -> None:
         self._started = True
@@ -404,7 +424,7 @@ class TvService(Service):
             raise TvError(f"The TV has no control called {name!r}")
         client = self._require_ready()
         try:
-            await action(client, value)
+            await asyncio.wait_for(action(client, value), self.ASK_TIMEOUT_S)
         except TvError:
             raise
         except Exception as e:  # noqa: BLE001 - the TV did not carry it out: refused, no answer in time, or the link is gone
@@ -434,8 +454,8 @@ class TvService(Service):
             # the table's doing, not a TV to wake again (_on_state)
             self._held_off = True
             try:
-                await client.power_off()
-            except Exception as e:  # noqa: BLE001 - not sent: the TV is still on, and nothing holds it off
+                await asyncio.wait_for(client.power_off(), self.ASK_TIMEOUT_S)
+            except Exception as e:  # noqa: BLE001 - not sent, or not answered: the TV is still on as far as the table knows, and nothing holds it off
                 self._held_off = False
                 logger.warning(f"The TV at {self._config.host} did not accept power off: {_why(e)}")
                 raise TvError(f"The TV did not accept that: {_reason(e)}") from e
@@ -854,7 +874,7 @@ class TvService(Service):
                     self._client = await self._open(key)
                 client = self._client
                 held = client.client_key         # what the client holds going in: only a change during the connect is the TV's
-                await self._connected(client)
+                await self._connect_noting_the_prompt(client)
                 self._keep_issued_key(client, held)
                 self._adopt(client)
             except asyncio.CancelledError:
@@ -879,6 +899,31 @@ class TvService(Service):
                 return False
             self._timed_out = False
             return True
+
+    async def _connect_noting_the_prompt(self, client: TvClient) -> None:
+        """Connect (see _connected), and note how long the TV was waited for: a try that waits PROMPT_AFTER_S is at the TV's pairing
+        prompt (status() says so while it waits), and one that ends unanswered after waiting that long went on being at it (the library's
+        timeout, or the TV closing the connection when its prompt ran out) until the next try is answered or fails at once. A try that is
+        cancelled (stop, Forget, a wake given up) says nothing of the TV. The wait is for a person at the TV, most of the time: a TV that is
+        slow to say hello reads the same way for as long as it is slow."""
+        began = self._clock()
+        self._waiting_since = began
+        try:
+            await self._connected(client)
+        except Exception:
+            self._asked = self._clock() - began >= self.PROMPT_AFTER_S
+            raise
+        finally:
+            self._waiting_since = None
+
+    def _asking_to_pair(self) -> bool:
+        """Whether the TV is asking this table to pair again (see status()): the try at the TV that is going on has waited PROMPT_AFTER_S,
+        or the last one ended unanswered after waiting that long, and the next try, which begins by waiting, does not take that back until
+        it ends (a try that is answered, _adopt, has no more to say). A TV that has refused the table has its own words."""
+        if self._refused:
+            return False
+        waiting = self._waiting_since
+        return self._asked or (waiting is not None and self._clock() - waiting >= self.PROMPT_AFTER_S)
 
     def _keep_issued_key(self, client: TvClient, held: Optional[str]) -> None:
         """A TV that did not know the stored key shows its pairing prompt, and when the person accepts it issues a new
@@ -936,8 +981,8 @@ class TvService(Service):
         """Hang up on a client. The goodbye it sends (see _on_state) is ours, and no news."""
         self._letting_go += 1
         try:
-            await client.disconnect()
-        except Exception:  # noqa: BLE001 - it is going away either way
+            await asyncio.wait_for(client.disconnect(), self.DISCONNECT_WAIT_S)
+        except Exception:  # noqa: BLE001 - it is going away either way (a goodbye that is not answered in time is no reason to wait)
             logger.debug("TV disconnect failed", exc_info=True)
         finally:
             self._letting_go -= 1
@@ -949,6 +994,7 @@ class TvService(Service):
             self._shown["name"] = name
         self._take_state(client.tv_state)
         self._shown["reachable"] = True
+        self._asked = False
         if self._last_failure is not None:
             logger.info(f"The TV at {self._config.host} is answering again")
         self._last_failure = None

@@ -5,9 +5,9 @@ import logging
 
 import pytest
 from croom.tv.errors import TvError
-from croom.tv.service import KEYS
+from croom.tv.service import KEYS, TvService
 from tests.unit.tv.fake_client import FakeTvClient
-from tests.unit.tv.helpers import DoingTv, StandbyTv, WebOsTvCommandError, build_service, forgetful_tv, running, silent_tv
+from tests.unit.tv.helpers import DoingTv, StandbyTv, WebOsTvCommandError, build_service, forgetful_tv, running, silent_tv, within
 
 READS = ("connect", "get_volume", "get_muted", "get_input", "get_current_app", "get_current_channel", "get_power_state")
 # ... what the service may ask of the TV besides the control itself: the reads that follow it (see below)
@@ -191,6 +191,40 @@ async def test_a_read_that_fails_or_hangs_leaves_what_is_shown_and_does_not_hold
         assert loop.time() - t0 < 1.5
         assert shown["volume"] == 24 and shown["muted"] is False and shown["input"] == "HDMI_1"      # as it was shown
         assert "The TV's muted could not be read back" in caplog.text and "The TV's app could not be read back" in caplog.text
+
+
+class Dead(DoingTv):
+    """A TV whose connection has died and that the library has not yet noticed: a command is written to it and is never answered
+    (the library's heartbeat, which pings every five seconds, ends such a connection in the end)."""
+    never = None
+
+    async def volume_up(self):
+        await self.never.wait()
+
+    async def button(self, *args, **kwargs):
+        await self.never.wait()
+
+    async def power_off(self, *args, **kwargs):
+        await self.never.wait()
+
+
+@pytest.mark.parametrize("control", [("volume_up", None), ("key", "HOME"), ("power", "off")])
+async def test_a_control_the_tv_never_answers_is_refused_in_words_within_the_bound_and_the_next_is_served(tmp_path, monkeypatch, control):
+    """A control that waits for a connection that is gone holds the control service's lock, and every key behind it, until the library
+    notices: it is given ASK_TIMEOUT_S, like every other command the service gives the TV, and is refused in words."""
+    Dead.never = asyncio.Event()
+    monkeypatch.setattr(TvService, "ASK_TIMEOUT_S", 0.1)
+    service = build_service(tmp_path, Dead)
+    async with running(service):
+        loop = asyncio.get_running_loop()
+        t0 = loop.time()
+        with pytest.raises(TvError) as failure:
+            await within(service.control(*control))
+        assert str(failure.value) == "The TV did not accept that: no answer in time"
+        assert loop.time() - t0 < 1.0
+        assert service.status()["held_off"] is False                                 # (a power off that was not sent holds nothing)
+        assert (await within(service.control("volume_down")))["volume"] == 23        # and the next control has its turn
+    Dead.never.set()
 
 
 async def test_the_reads_are_made_together_and_not_one_after_the_other(tmp_path):

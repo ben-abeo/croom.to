@@ -253,6 +253,7 @@ class ControlService(Service):
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
         self._mouse = mouse if mouse is not None else PiMouse()
         self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
+        self._mouse_waits: Set[asyncio.Task] = set()         # the sockets' handlers that wait for the room Pi's mouse to be made (stop() ends them)
         self._scores = scores
         self._scores_failure: Optional[str] = None
 
@@ -381,8 +382,9 @@ class ControlService(Service):
         requests in flight: so no request can arrive while the tasks that are ended here are let go of, and none is left for the wait
         to wait for. They are the join or the leave, the search for TVs, the requests that are with the TV (a Turn on, a pairing that
         waits for a person) or wait their turn behind them, and the pointer sockets, which are closed (going away) with the move that is
-        on its way to the TV. None of them is given time to finish: the pages that asked are going away with this service. It must not
-        raise: an error here would end the listener's shutdown half way.
+        on its way to the TV and the handler that waits for the room Pi's mouse to be made (a device that never appears would hold the
+        listener's wait for a handler up for a minute). None of them is given time to finish: the pages that asked are going away with
+        this service. It must not raise: an error here would end the listener's shutdown half way.
 
         All of it is bounded by CANCEL_WAIT_S, the pointer sockets' closes included: a page that does not answer a close, or that sends
         frames and reads no answer (the socket's handler is then blocked in a send, and the close frame cannot be written either), would
@@ -392,7 +394,7 @@ class ControlService(Service):
         closing = {asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping")): pointer.request
                    for ws, pointer in self._pointers.items()}
         moves = [pointer.relay.sending for pointer in self._pointers.values()]
-        await self._cancel(self._task, self._search, *self._tv_requests, *moves)
+        await self._cancel(self._task, self._search, *self._tv_requests, *moves, *self._mouse_waits)
         if closing:
             _, left = await asyncio.wait(list(closing), timeout=max(0.0, deadline - loop.time()))
             for task in left:
@@ -906,8 +908,10 @@ class ControlService(Service):
 
         One at a time: the TV service does not hold its controls apart (a second tap on Turn on during a wake would start a
         second wake, and a key sent during one goes down the socket the wake is using), so a control that comes while another
-        is with the TV waits for it. There is no time limit of its own here: Turn on from the table waits for the TV to come
-        on, up to 23 seconds, and the page's request is made to wait for that. The body is looked at before the wait, so that one
+        is with the TV waits for it. There is no time limit of its own here, because the TV service bounds what it does: a command
+        is given ASK_TIMEOUT_S (a connection that has died without the library noticing frees the lock at that, not at the library's
+        heartbeat), and Turn on from the table waits for the TV to come on, up to 23 seconds, which the page's request is made to wait
+        for. The body is looked at before the wait, so that one
         that is no use is refused at once; and a control whose page has hung up by the time it has its turn is dropped (the
         listener does not end a handler for that, and a tap that waited behind a Turn on would be made for nobody)."""
         async def action(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -982,7 +986,7 @@ class ControlService(Service):
             return self._error_response("The pointer is for the room's own page", 403)
         ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
         await ws.prepare(request)
-        relay = PointerRelay(self._tv, self._mouse)
+        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop)
         self._pointers[ws] = _Pointer(request, relay)
         try:
             await self._make_the_mouse()
@@ -1009,11 +1013,22 @@ class ControlService(Service):
         the event loop goes on. It is kept until the service stops. One that cannot be made is no reason to refuse the socket (the TV's
         cursor does not need it): every Pi event says why not, in words (PiMouse.unavailable), and tries again."""
         try:
-            await asyncio.to_thread(self._mouse.open)
+            await self._off_the_loop(self._mouse.open)
         except TvError:
             pass
         except Exception:  # noqa: BLE001 - a bug in making it: the first Pi event makes it, or says why not
             logger.warning("The room Pi's mouse could not be made as the pointer socket opened", exc_info=True)
+
+    async def _off_the_loop(self, call: Callable[..., Any], *args: Any) -> Any:
+        """Run a call that waits for the room Pi's mouse (making the device: evdev waits for it to appear) in a thread, and wait for it
+        without holding the loop up. The task that waits is on the books while it does, which is how stop() finds it: a device that never
+        appears must not keep a socket's handler, and with it the listener's shutdown, waiting."""
+        task = asyncio.current_task()
+        self._mouse_waits.add(task)
+        try:
+            return await asyncio.to_thread(call, *args)
+        finally:
+            self._mouse_waits.discard(task)
 
     async def _pointer_message(self, relay: PointerRelay, text: str) -> Optional[str]:
         """Hand one frame to the relay: None when it was carried out, else the words to answer it with. Whatever goes wrong is words

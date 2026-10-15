@@ -36,7 +36,7 @@ async def test_start_connects_with_the_stored_key_and_reads_the_state(tmp_path):
         assert s == {"configured": True, "paired": True, "on": True, "reachable": True, "name": "Boardroom TV", "volume": 24, "muted": False,
                      "input": "HDMI_1", "inputs": [{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}],
                      "app": "com.webos.app.hdmi1", "channel": "7", "keep_on": True, "held_off": False,
-                     "refused": False, "host": "10.0.0.41", "pi_input": "HDMI_1"}
+                     "refused": False, "prompting": False, "host": "10.0.0.41", "pi_input": "HDMI_1"}
         await client.update(volume=30, muted=True)
         assert service.status()["volume"] == 30 and service.status()["muted"] is True
     finally:
@@ -194,6 +194,27 @@ async def test_a_client_that_fails_to_hang_up_does_not_keep_the_service_from_sto
     assert service.status()["reachable"] is False and service._client is None
 
 
+@pytest.mark.parametrize("how", ["stop", "forget"])
+async def test_a_hang_up_that_never_ends_is_cut_off_at_its_bound_and_the_service_goes_on(tmp_path, monkeypatch, how):
+    """The library waits for aiohttp's close timeout when it hangs up on a TV that is gone, and the agent's stop did that for the wake
+    that was waiting, the loop and the client in turn (about half a minute behind a dead TV): each hang-up is given DISCONNECT_WAIT_S."""
+    class Deaf(FakeTvClient):
+        async def disconnect(self):
+            self.calls.append(("disconnect",))
+            await asyncio.Event().wait()
+    monkeypatch.setattr(TvService, "DISCONNECT_WAIT_S", 0.1)
+    service = service_for(tmp_path, Deaf, key="key-9")
+    await service.start()
+    assert service.status()["reachable"] is True
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await asyncio.wait_for(getattr(service, how)(), 3.0)
+    assert loop.time() - t0 < 1.0
+    assert ("disconnect",) in FakeTvClient.instances[-1].calls and service._client is None and service._letting_go == 0
+    assert service.status()["reachable"] is False
+    await service.stop()
+
+
 def test_the_waits_are_the_ones_the_spec_and_the_review_settled():
     assert TvService.WAKE_TIMEOUT_S == 15.0               # a wake, and so a join, waits this long for the TV to answer
     assert TvService.REWAKE_AFTER_S == 5.0                # a TV that went off by itself is woken after this
@@ -202,7 +223,9 @@ def test_the_waits_are_the_ones_the_spec_and_the_review_settled():
     assert TvService.TURN_ON_GRACE_S == 0.5               # a TV in standby has this long to say that it was told to turn on
     assert TvService.MANUAL_TURN_ON_GRACE_S == 3.0        # and, when a person at the table asked for it, this long
     assert TvService.START_WAIT_S == 0.5                  # starting waits this long for the first look at the TV
-    assert TvService.ASK_TIMEOUT_S == 3.0                 # a command the service gives the TV on its own account (turn on, show the Pi)
+    assert TvService.ASK_TIMEOUT_S == 3.0                 # a command the service gives the TV (a control from the table, turn on, show the Pi)
+    assert TvService.DISCONNECT_WAIT_S == 2.0             # hanging up on a TV waits no longer than this for its goodbye
+    assert TvService.PROMPT_AFTER_S == 5.0                # a try that has waited for the TV this long is waiting at its pairing prompt
     assert TvService.REREAD_TIMEOUT_S == 2.0              # and each read-back after a control has this long
     assert TvService.PAIR_WAIT_S == 60.0                  # a pairing waits this long for the person at the TV to accept the prompt
     # a person's tap keeps its own command and grace beyond the wait: the longest a Turn on from the table can take, which the

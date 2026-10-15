@@ -5,6 +5,7 @@ import asyncio
 import concurrent.futures
 import re
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -13,6 +14,7 @@ import pytest
 from croom.tv.errors import TvError
 from croom.tv.keystore import KeyStore
 from croom.tv.pointer import CODES, PiMouse, PointerRelay
+from tests.unit.scores.schedules import Clock
 from tests.unit.tv.fake_client import FakeTvClient
 from tests.unit.tv.helpers import WebOsTvCommandError, build_service, forgetful_tv, running, silent_tv, until, within
 
@@ -157,6 +159,71 @@ async def test_a_dropped_socket_whose_mouse_has_gone_says_nothing():
     await relay.release_all()                                    # there is nobody to tell: it raises nothing
 
 
+async def test_an_event_that_has_to_make_the_device_does_not_hold_the_loop_up():
+    """The device is made ahead of the first event when a socket opens, in a thread. When that did not happen or did not work (or the device
+    was lost), the event that finds none makes it, and that is in a thread too: evdev waits about a second for the device to appear, and
+    for that second the loop (every socket, the status, the TV) would stand still."""
+    gate, started, device = threading.Event(), threading.Event(), FakeUInput()
+
+    def slow_factory():
+        started.set()
+        gate.wait(1.0)                                           # (a thread's wait: the loop must be free, or nobody opens the gate)
+        return device
+    relay = PointerRelay(None, PiMouse(uinput_factory=slow_factory))
+    event = asyncio.ensure_future(relay.handle({"target": "pi", "type": "move", "dx": 3, "dy": 0}))
+    try:
+        await until(started.is_set)                              # (polls with the loop: it only gets here when the loop is free)
+        assert not event.done()
+        gate.set()
+        await within(event)
+    finally:
+        gate.set()
+    assert device.writes == [(EV_REL, REL_X, 3), "syn"]
+
+
+async def test_the_events_that_wait_for_the_device_keep_their_order():
+    gate, started, device = threading.Event(), threading.Event(), FakeUInput()
+
+    def slow_factory():
+        started.set()
+        gate.wait(2.0)
+        return device
+    relay = PointerRelay(None, PiMouse(uinput_factory=slow_factory))
+    first = asyncio.ensure_future(relay.handle({"target": "pi", "type": "down"}))
+    try:
+        await until(started.is_set)
+        gate.set()
+        await within(first)
+    finally:
+        gate.set()
+    await relay.handle({"target": "pi", "type": "move", "dx": 4, "dy": 0})
+    await relay.handle({"target": "pi", "type": "up"})
+    assert device.writes == [(EV_KEY, BTN_LEFT, 1), "syn", (EV_REL, REL_X, 4), "syn", (EV_KEY, BTN_LEFT, 0), "syn"]
+
+
+async def test_a_button_that_was_down_on_a_device_that_is_gone_is_not_let_go_of_by_making_another():
+    """A device that is lost takes the button with it (the kernel lets go of what was down on a device that is removed): a new device
+    made for the release would be a creation for nothing, on the loop's thread, as the socket ends."""
+    devices = []
+
+    def factory():
+        devices.append(FakeUInput())
+        return devices[-1]
+    relay = PointerRelay(None, PiMouse(uinput_factory=factory))
+    await relay.handle({"target": "pi", "type": "down"})
+    devices[0].fail = OSError(19, "No such device")
+    with pytest.raises(TvError):
+        await relay.handle({"target": "pi", "type": "move", "dx": 1, "dy": 0})          # the device is lost here
+    await relay.handle({"target": "pi", "type": "up"})                                   # the release finds none, and makes none
+    await relay.handle({"target": "pi", "type": "down"})                                 # (a new press makes one)
+    assert len(devices) == 2
+    devices[1].fail = OSError(19, "No such device")
+    with pytest.raises(TvError):
+        await relay.handle({"target": "pi", "type": "move", "dx": 1, "dy": 0})
+    await relay.release_all()                                                            # nor does the end of the socket
+    assert len(devices) == 2
+
+
 def test_the_device_can_be_made_ahead_of_the_first_event_and_only_once():
     """A socket that opens makes the mouse (PiMouse.open), so that the desktop has taken it up by the time a finger is on the pad;
     every socket that opens asks, and one device is made."""
@@ -172,17 +239,18 @@ def test_the_device_can_be_made_ahead_of_the_first_event_and_only_once():
 
 
 def test_opening_the_mouse_says_in_words_when_it_cannot_be_made_and_the_next_try_is_not_refused():
-    attempts = []
+    attempts, clock = [], Clock()
 
     def factory():
         attempts.append(1)
         if len(attempts) == 1:
             raise PermissionError(13, "Permission denied", "/dev/uinput")
         return FakeUInput()
-    mouse = PiMouse(uinput_factory=factory)
+    mouse = PiMouse(uinput_factory=factory, clock=clock)
     with pytest.raises(TvError) as failure:
         mouse.open()
     assert "not allowed to use /dev/uinput" in str(failure.value) and mouse.unavailable == str(failure.value)
+    clock.advance(PiMouse.RETRY_S)                               # (a moment later: see the floor, below)
     mouse.open()                                                 # the installer's group is there now
     assert len(attempts) == 2 and mouse.unavailable is None
 
@@ -236,6 +304,102 @@ def test_closing_the_mouse_waits_for_a_device_that_is_being_made_and_closes_it()
     assert len(made) == 1 and made[0].closed == 1
 
 
+def test_closing_the_mouse_does_not_wait_for_a_device_that_hangs_and_the_device_is_closed_by_its_maker_when_it_comes():
+    """close() is called on the event loop's thread, and a creation that hangs must not hold it (or the agent's stop) for ever: it waits
+    CLOSE_WAIT_S for the device that is being made, and then leaves it to the thread that makes it, which closes it when it comes."""
+    gate, started, made = threading.Event(), threading.Event(), []
+
+    def hung_factory():
+        started.set()
+        gate.wait(5.0)
+        made.append(FakeUInput())
+        return made[-1]
+    mouse = PiMouse(uinput_factory=hung_factory)
+    mouse.CLOSE_WAIT_S = 0.1
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        opening = pool.submit(mouse.open)
+        try:
+            assert started.wait(2.0)
+            t0 = time.monotonic()
+            mouse.close()
+            assert time.monotonic() - t0 < 1.0                   # not the 5 s that the creation takes
+            gate.set()                                           # the device comes at last ...
+            with pytest.raises(TvError) as failure:
+                opening.result(timeout=2.0)
+            assert "closed while it was being made" in str(failure.value)
+        finally:
+            gate.set()
+    assert len(made) == 1 and made[0].closed == 1                # ... and its maker closes it: none is left on the desktop
+    assert mouse.ready is False and mouse.unavailable is None
+
+
+def test_a_mouse_that_is_used_after_it_was_closed_is_made_again_and_a_close_that_was_waited_out_does_not_unmake_it():
+    """The generation that close() ends is the one of the creation that was going on: a device that is made after it is kept."""
+    gate, started, made = threading.Event(), threading.Event(), []
+
+    def factory():
+        started.set()
+        gate.wait(5.0)
+        made.append(FakeUInput())
+        return made[-1]
+    mouse = PiMouse(uinput_factory=factory)
+    mouse.CLOSE_WAIT_S = 0.05
+    with concurrent.futures.ThreadPoolExecutor(1) as pool:
+        first = pool.submit(mouse.open)
+        try:
+            assert started.wait(2.0)
+            mouse.close()                                        # waited out: the first creation is not wanted any more
+            gate.set()
+            with pytest.raises(TvError):
+                first.result(timeout=2.0)
+        finally:
+            gate.set()
+    mouse.open()                                                 # a new use after the close: a new device, kept
+    assert len(made) == 2 and made[0].closed == 1 and made[1].closed == 0 and mouse.ready is True
+    mouse.close()
+    assert made[1].closed == 1
+
+
+def test_the_device_is_not_there_until_it_is_made():
+    mouse, device = a_mouse()
+    assert mouse.ready is False
+    mouse.open()
+    assert mouse.ready is True
+    mouse.close()
+    assert mouse.ready is False and device.closed == 1
+
+
+def test_a_mouse_that_could_not_be_made_is_not_tried_again_for_a_second_and_the_words_are_the_same():
+    """A finger on the pad makes an event for every frame, and each of them would make a try at /dev/uinput: a failed try is quick
+    (evdev looks before it opens), but it is a try. Within RETRY_S of one that failed the same words are given with no new try; after it,
+    the next event tries again, in case the installer's group is there now."""
+    attempts, clock = [], Clock()
+
+    def failing():
+        attempts.append(1)
+        raise PermissionError(13, "Permission denied", "/dev/uinput")
+    mouse = PiMouse(uinput_factory=failing, clock=clock)
+    assert PiMouse.RETRY_S == 1.0
+    with pytest.raises(TvError) as first:
+        mouse.move(1, 1)
+    for _ in range(5):
+        clock.advance(0.1)
+        with pytest.raises(TvError) as again:
+            mouse.move(1, 1)
+        assert str(again.value) == str(first.value) and mouse.unavailable == str(first.value)
+    with pytest.raises(TvError):
+        mouse.open()                                             # (open() is a try like any other)
+    assert len(attempts) == 1
+    clock.advance(0.5)                                           # a second after the failed try
+    with pytest.raises(TvError):
+        mouse.move(1, 1)
+    assert len(attempts) == 2
+    clock.advance(PiMouse.RETRY_S - 0.01)
+    with pytest.raises(TvError):
+        mouse.move(1, 1)
+    assert len(attempts) == 2                                    # the floor is counted from the try that failed last
+
+
 def test_the_device_is_made_when_it_is_first_needed_and_closed_at_the_end():
     made = []
 
@@ -277,20 +441,24 @@ NOT_THERE = ["/dev/uinput", "is not there", "uinput kernel module is not loaded"
     (Numbered(2), NOT_THERE),
     (Exception("[Errno 13] Permission denied: '/dev/uinput'"), NOT_ALLOWED),
     (Exception("[Errno 2] No such file or directory: '/dev/uinput'"), NOT_THERE),
+    # each of the words that tell the module is missing is enough on its own (evdev's sentence has both)
+    (Exception("/dev/uinput does not exist"), NOT_THERE),
+    (Exception("verify that the uinput module is loaded"), NOT_THERE),
     # and what is none of them says what it is, and where to look
     (OSError(5, "Input/output error"), ["could not be made", "Input/output error", "uinput kernel module", "input group"]),
     (Exception(""), ["could not be made", "Exception", "uinput kernel module", "input group"]),
 ])
 async def test_a_mouse_that_cannot_be_made_says_what_to_do_to_every_event(caplog, error, words):
-    attempts = []
+    attempts, clock = [], Clock()
 
     def failing():
         attempts.append(1)
         raise error
-    mouse = PiMouse(uinput_factory=failing)
+    mouse = PiMouse(uinput_factory=failing, clock=clock)
     relay = PointerRelay(None, mouse)
     assert mouse.unavailable is None                             # not known until it is tried
     for _ in range(3):
+        clock.advance(PiMouse.RETRY_S)                           # (each event is a try of its own, once the floor is passed)
         with pytest.raises(TvError) as failure:
             await relay.handle({"target": "pi", "type": "move", "dx": 1, "dy": 1})
         for word in words:
@@ -312,7 +480,7 @@ async def test_the_words_a_factory_gives_are_the_words_the_event_answers_with():
 
 
 async def test_a_mouse_that_could_not_be_made_is_tried_again_when_it_has_been_put_right():
-    devices = []
+    devices, clock = [], Clock()
 
     def factory():
         if not devices:
@@ -320,11 +488,12 @@ async def test_a_mouse_that_could_not_be_made_is_tried_again_when_it_has_been_pu
             raise PermissionError(13, "Permission denied")
         devices.append(FakeUInput())
         return devices[-1]
-    mouse = PiMouse(uinput_factory=factory)
+    mouse = PiMouse(uinput_factory=factory, clock=clock)
     relay = PointerRelay(None, mouse)
     with pytest.raises(TvError):
         await relay.handle({"target": "pi", "type": "tap"})
     assert mouse.unavailable is not None
+    clock.advance(PiMouse.RETRY_S)
     await relay.handle({"target": "pi", "type": "tap"})          # the installer's group is there now, and the agent has been restarted
     assert mouse.unavailable is None and devices[1].writes[:2] == [(EV_KEY, BTN_LEFT, 1), "syn"]
 
@@ -572,6 +741,8 @@ async def test_a_dropped_socket_ends_a_drag_it_was_in_and_sends_nothing_for_a_pr
 async def test_a_dropped_socket_raises_nothing_whatever_the_mouse_does():
     class Broken:
         """A mouse that raises what is not even words."""
+        ready = True
+
         def press(self, button):
             pass
 
@@ -836,6 +1007,25 @@ async def test_an_up_that_cannot_be_sent_still_ends_the_press(tmp_path):
         await relay.drain()
         await relay.release_all()
         assert sent(tv) == [("move", 3, 4, 1), ("move", 5, 5)]
+
+
+async def test_an_up_straight_after_a_drag_move_that_just_failed_is_not_refused_for_the_move_and_ends_the_drag(tmp_path):
+    """A move that failed on its way is said by the next MOVE, and only while it is news. The up of the drag is not a move: it makes its own
+    call, which says if the TV is still not taking them, even when the failure is a moment old (the older failures, and the up whose own
+    call fails, are the tests above)."""
+    service = build_service(tmp_path, PointerTv)
+    async with running(service) as tv:
+        relay = PointerRelay(service, a_mouse()[0])
+        await relay.handle({"target": "tv", "type": "down"})
+        tv.fail = ConnectionResetError("Cannot write to closing transport")
+        await relay.handle({"target": "tv", "type": "move", "dx": 3, "dy": 4})
+        await relay.drain()                                                           # the move failed in the background, just now
+        tv.fail = None                                                                # and the TV is taking things again
+        await relay.handle({"target": "tv", "type": "up"})                            # not refused for the move
+        assert sent(tv) == [("move", 3, 4, 1), ("move", 0, 0)]                        # the drag is ended on the TV
+        await relay.handle({"target": "tv", "type": "move", "dx": 1, "dy": 0})        # and nothing is left to be said to the next move
+        await relay.drain()
+        assert sent(tv)[-1] == ("move", 1, 0)
 
 
 async def test_an_up_that_is_cancelled_while_it_waits_for_the_moves_of_the_drag_still_ends_the_press(tmp_path):

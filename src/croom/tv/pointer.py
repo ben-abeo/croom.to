@@ -9,7 +9,8 @@ import asyncio
 import errno
 import logging
 import threading
-from typing import Any, Callable, Dict, List, Optional, Tuple
+import time
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
@@ -27,6 +28,7 @@ BAD_TARGET = 'The target of a pointer message is "tv" or "pi"'
 BAD_TYPE = "The type of a pointer message is one of " + ", ".join(TYPES)
 KEYS_LATER = "Typing into the room Pi comes in a later version"
 NO_RIGHT_BUTTON = "The TV's cursor has no right button"
+CLOSED_WHILE_MADE = "The room Pi's mouse was closed while it was being made"
 
 # The kernel's input codes that the virtual mouse uses (linux/input-event-codes.h), by the names evdev.ecodes has for them: here, so
 # that this module and its tests need neither evdev nor /dev/uinput.
@@ -81,17 +83,32 @@ class PiMouse:
     opens, in a thread: it takes a moment to appear, and the desktop takes it up a moment after) or, failing that, the first time
     something is sent to it; it is made again after it was lost, and removed by close(). A room that never uses the touchpad has no
     mouse on its desktop. `unavailable` is the reason, in words, when it cannot be made (permission, the module, the library): every
-    event then raises TvError with it, and the next one tries again, in case it has been put right.
+    event then raises TvError with it, and the next one tries again, in case it has been put right, though not sooner than RETRY_S
+    after the try that failed.
 
     uinput_factory makes the device: an object with write(type, code, value) and syn() (and close()), as evdev.UInput has them. The
-    default makes the real one.
+    default makes the real one. clock is the time (seconds, steadily) that RETRY_S is counted on.
     """
 
-    def __init__(self, uinput_factory: Optional[Callable[[], Any]] = None):
+    # close() is called on the event loop's thread (by the agent's stop): it waits this long for a device that is being made, which evdev
+    # does in about a second, and then gives up on it. The thread that is making it closes the device when it is made.
+    CLOSE_WAIT_S = 2.0
+    RETRY_S = 1.0        # a try that failed is not made again within this long: a finger on the pad is an event for every frame
+
+    def __init__(self, uinput_factory: Optional[Callable[[], Any]] = None, clock: Callable[[], float] = time.monotonic):
         self._factory = uinput_factory or _uinput
+        self._clock = clock
         self._device: Any = None
         self._making = threading.Lock()     # one thread makes the device: open() is called from the sockets' threads
+        self._state = threading.Lock()      # the device and the count below, which close() and a creation that ends must agree on (never held while the device is made)
+        self._given_up = 0                  # how many creations close() has given up waiting for: one that began before it closes its own device when it ends
+        self._retry_at = 0.0                # the time before which the device is not tried for again (the last try failed)
         self.unavailable: Optional[str] = None
+
+    @property
+    def ready(self) -> bool:
+        """Whether the device is there: an event is then written to it at once, with nothing to wait for."""
+        return self._device is not None
 
     def open(self) -> None:
         """Make the device now, if it is not there. It takes a moment to appear (evdev waits for it, and looks through /dev/input):
@@ -122,9 +139,16 @@ class PiMouse:
             self._emit(("EV_REL", "REL_WHEEL", dy))
 
     def close(self) -> None:
-        """Remove the device (the kernel lets go of a button that was down on it); one that is being made is waited for."""
-        with self._making:
+        """Remove the device (the kernel lets go of a button that was down on it). One that is being made is waited for, for CLOSE_WAIT_S,
+        and removed when it is there; if it is not there by then it is given up on, and the thread that is making it closes it when it
+        is made (a creation that begins after this call is a use of the mouse again, and is kept)."""
+        got = self._making.acquire(timeout=self.CLOSE_WAIT_S)
+        with self._state:
+            if not got:
+                self._given_up += 1
             device, self._device = self._device, None
+        if got:
+            self._making.release()
         if device is not None:
             self._let_go(device)
 
@@ -133,18 +157,30 @@ class PiMouse:
         if device is not None:
             return device
         with self._making:                             # (the thread that gets here second finds the device made)
-            if self._device is None:
-                try:
-                    self._device = self._factory()
-                except Exception as e:  # noqa: BLE001 - /dev/uinput cannot be opened, or the library is not there
-                    reason = _why_not(e)
-                    if reason != self.unavailable:     # (said once: a page that sends many events a second would say it as often)
-                        logger.warning(reason)
-                    self.unavailable = reason
-                    raise TvError(reason) from e
-                self.unavailable = None
-                logger.info(f"The room Pi's virtual mouse is ready ({MOUSE_NAME})")
-            return self._device
+            if self._device is not None:
+                return self._device
+            if self.unavailable is not None and self._clock() < self._retry_at:
+                raise TvError(self.unavailable)        # (not tried for again so soon: the same words, and no new try)
+            given_up = self._given_up
+            try:
+                device = self._factory()
+            except Exception as e:  # noqa: BLE001 - /dev/uinput cannot be opened, or the library is not there
+                reason = _why_not(e)
+                if reason != self.unavailable:         # (said once: a page that sends many events a second would say it as often)
+                    logger.warning(reason)
+                self.unavailable = reason
+                self._retry_at = self._clock() + self.RETRY_S
+                raise TvError(reason) from e
+            with self._state:
+                wanted = given_up == self._given_up
+                if wanted:
+                    self._device = device
+            if not wanted:                             # close() did not wait for this one: nobody wants it any more
+                self._let_go(device)
+                raise TvError(CLOSED_WHILE_MADE)
+            self.unavailable = None
+            logger.info(f"The room Pi's virtual mouse is ready ({MOUSE_NAME})")
+            return device
 
     def _emit(self, *events: Tuple[str, str, int]) -> None:
         """Write events, by the names of their type and code, and report them as one."""
@@ -200,14 +236,20 @@ class PointerRelay:
 
     The TV is asked for through TvService.pointer(), not through control(): the cursor is not a control (it sends many messages a second,
     it does not wait behind the controls and it reads nothing back). Each message asks once, and uses the client it was given.
+
+    The room Pi's events are applied at once while its device is there. An event that finds none (the socket's own attempt to make it did
+    not work, or it was lost) makes it in a thread, off_the_loop(call, *args) being how a thread is waited for (asyncio.to_thread unless the
+    socket's owner, which has to be able to end the wait when the service stops, gives its own): the device takes a moment to appear, and
+    nothing else on the loop may wait for it.
     """
 
     CALL_TIMEOUT_S = 2.0      # a message to the TV is only written to its socket: one that takes longer is not being answered
     STALE_FAILURE_S = 1.0     # a move that failed on its way is said by the next move if it comes this soon; after that it is old news
 
-    def __init__(self, tv_service: Any, pi_mouse: PiMouse):
+    def __init__(self, tv_service: Any, pi_mouse: PiMouse, off_the_loop: Optional[Callable[..., Awaitable[Any]]] = None):
         self._tv = tv_service
         self._mouse = pi_mouse
+        self._off_the_loop = off_the_loop or asyncio.to_thread
         self._pending: Optional[List[int]] = None      # the moves that came in while one was in flight, added up: [dx, dy]
         self._sender: Optional[asyncio.Task] = None    # sends the TV's moves, for as long as there are any to send
         self._failure: Optional[TvError] = None        # what a move that was sent in the background ran into: the next move says it
@@ -233,7 +275,7 @@ class PointerRelay:
         if kind == "keys":
             raise TvError(KEYS_LATER)
         if target == "pi":
-            self._pi(kind, dx, dy)
+            await self._pi(kind, dx, dy)
         else:
             await self._tv_event(kind, dx, dy)
 
@@ -251,7 +293,8 @@ class PointerRelay:
         if self._pressed["pi"]:
             self._pressed["pi"] = False
             try:
-                self._mouse.release("left")
+                if self._mouse.ready:                  # (a device that is gone took the button with it: none is made to let go of it)
+                    self._mouse.release("left")
             except Exception:  # noqa: BLE001 - the device is gone, and takes the button with it
                 logger.debug("The room Pi's mouse did not take the release of a held button", exc_info=True)
         await self.drain()
@@ -276,7 +319,20 @@ class PointerRelay:
             return target, kind, _delta(message, "dx"), _delta(message, "dy")
         return target, kind, 0, 0
 
-    def _pi(self, kind: str, dx: int, dy: int) -> None:
+    async def _pi(self, kind: str, dx: int, dy: int) -> None:
+        """An event for the room Pi's mouse: at once, on the loop's thread, when the device is there; when it is not, in a thread, which
+        makes it (PiMouse makes the device the first time it is used). An up that finds no device is nothing: the device that is gone
+        took the button with it, and a new one is not made for that."""
+        if kind == "up":
+            held, self._pressed["pi"] = self._pressed["pi"], False
+            if held and self._mouse.ready:
+                self._mouse.release("left")
+        elif self._mouse.ready:
+            self._pi_event(kind, dx, dy)
+        else:
+            await self._off_the_loop(self._pi_event, kind, dx, dy)
+
+    def _pi_event(self, kind: str, dx: int, dy: int) -> None:
         mouse = self._mouse
         if kind == "move":
             mouse.move(dx, dy)
@@ -289,10 +345,6 @@ class PointerRelay:
         elif kind == "down":
             mouse.press("left")
             self._pressed["pi"] = True
-        elif kind == "up":
-            held, self._pressed["pi"] = self._pressed["pi"], False
-            if held:
-                mouse.release("left")
 
     async def _tv_event(self, kind: str, dx: int, dy: int) -> None:
         if kind == "right":

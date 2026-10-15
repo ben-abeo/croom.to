@@ -12,7 +12,13 @@ import time
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-from croom.meeting.providers.base import MeetingProvider, MeetingInfo, MeetingState
+from croom.meeting.providers.base import (
+    MeetingControlError,
+    MeetingInfo,
+    MeetingProvider,
+    MeetingState,
+    controls_from,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +28,48 @@ try:
     PLAYWRIGHT_AVAILABLE = True
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
+
+# One reading of Meet's call page (spec 2026-10-13, section 4.5). Each control's button is found by a label that names what pressing it does, and
+# its state is what that label says: "Turn off camera" means the camera is on, "Lower hand" means the hand is up. A button the page does not have,
+# or whose label names no such action, reads as null. `people` is the people button with the number in its label or its text; `taken` is whether
+# something other than the page itself or a button has the keyboard (a text field, the chat box, say).
+READ_CALL = r"""() => {
+  const labelled = [...document.querySelectorAll("[aria-label]")];
+  const find = (pattern) => labelled.find((el) => pattern.test(el.getAttribute("aria-label")));
+  const state = (pattern, said) => {
+    const el = find(pattern);
+    return el ? { on: el.getAttribute("aria-label").match(pattern)[1].toLowerCase() === said } : null;
+  };
+  const people = find(/show everyone|participants|^people\b/i);
+  const count = people && (people.getAttribute("aria-label").match(/\d+/) || people.textContent.match(/\d+/));
+  const held = document.activeElement;
+  const role = (held && held.getAttribute && held.getAttribute("role")) || "";
+  return {
+    mute: state(/turn (on|off) microphone/i, "off"),
+    camera: state(/turn (on|off) camera/i, "off"),
+    raise_hand: state(/(raise|lower) hand/i, "lower"),
+    captions: state(/turn (on|off) captions?/i, "off"),
+    people: people ? { count: count ? Number(count[0]) : null } : null,
+    taken: Boolean(held && held !== document.body && held.tagName !== "BUTTON" && role !== "button"),
+  };
+}"""
+# What the table is told when the bare C key cannot go to the page: it would be typed into whatever has the keyboard (the chat box).
+KEYBOARD_TAKEN_WORDS = "Meet's chat box has the keyboard; close it on the TV first"
+
+
+def meet_controls(buttons: Dict[str, Dict[str, Any]], muted: bool) -> Dict[str, Any]:
+    """The table's control model (spec 2026-10-13, section 3) for what Meet's page offers a participant: the buttons it has (camera, raise_hand,
+    captions, each with its state), the microphone's state, and nothing else. The room is never a host here, Meet's reactions, views and pinning are
+    not driven, and the agent does not read Meet's chat: the table draws only what is available."""
+    model = controls_from({"me": {"muted": muted}, "role": "participant", "buttons": buttons, "participants": [], "recording": False}, [])
+    model["reactions"] = {"available": False}
+    model["chat"] = {"available": False}
+    return model
+
+
+def _first_line(error: BaseException) -> str:
+    """The first line of an error's words (Playwright's carry a call log after it)."""
+    return next((line.strip() for line in str(error).splitlines() if line.strip()), "") or type(error).__name__
 
 
 class GoogleMeetProvider(MeetingProvider):
@@ -53,6 +101,16 @@ class GoogleMeetProvider(MeetingProvider):
     LOBBY_PHRASES = ("waiting for", "asking to join", "someone lets you in", "let you in")
     SIGN_IN_MESSAGE = ("The room's Google sign-in has expired or was never done; "
                        "stop the service and run croom --sign-in-meet on the device")
+
+    # The call's controls (spec 2026-10-13, section 4.5): each button is pressed with Meet's own keyboard shortcut and its state is read back
+    # from its label (READ_CALL), never assumed. The labels are Meet's English as the controls plan words them, not yet confirmed on a room
+    # Pi; a button whose label does not say its state is not offered.
+    SHORTCUTS = {"mute": "Control+d", "camera": "Control+e", "raise_hand": "Control+Alt+h", "captions": "c"}
+    CONTROL_WORDS = {"mute": "microphone", "camera": "camera", "raise_hand": "raise hand", "captions": "captions"}
+    READ_INTERVAL_S = 5   # while connected the buttons are read again this often: the host may mute the room, captions may be turned on at the TV
+    PRESS_WAIT_S = 2      # a press waits this long for its button's label to change ...
+    PRESS_POLL_S = 0.05   # ... looking this often
+
     def __init__(self, display=None, room_name: str = "Conference Room"):
         super().__init__()
         # The TV display (spec 2026-10-07 TV, section 4.3) owns the browser and, when configured, the
@@ -62,6 +120,10 @@ class GoogleMeetProvider(MeetingProvider):
         # Where a screenshot goes when a join fails, so the TV need not be watched.
         self.failure_screenshot: Path = Path(tempfile.gettempdir()) / "croom-meet-failure.png"
         self._page: Optional["Page"] = None
+        # What the provider starts on its own, kept so that the end of the call stops it: the regular reading of Meet's buttons.
+        self._reader: Optional[asyncio.Task] = None
+        self._read_warned = False         # a read that fails is said once for a call
+        self._pressing = asyncio.Lock()   # one press at a time: two shortcuts sent at once could meet in the middle (Ctrl still down for the C)
 
     @classmethod
     def from_config(cls, config, display=None) -> "GoogleMeetProvider":
@@ -120,6 +182,7 @@ class GoogleMeetProvider(MeetingProvider):
 
     async def shutdown(self) -> None:
         """Leave the meeting if still in one; the display owns the browser."""
+        await self._stop_reading()
         if self._state == MeetingState.CONNECTED:
             await self.leave_meeting()
         self._page = None
@@ -153,6 +216,8 @@ class GoogleMeetProvider(MeetingProvider):
         # Construct full URL
         full_url = f"https://meet.google.com/{meeting_id}"
 
+        await self._stop_reading()   # never two readers: a join over a call still going stops that call's first
+        self._read_warned = False
         self._current_meeting = MeetingInfo(
             platform=self.name,
             meeting_id=meeting_id,
@@ -180,7 +245,10 @@ class GoogleMeetProvider(MeetingProvider):
             # Wait for connection
             await self._wait_for_connection()
 
+            # The table's model is in place before the call is announced, then kept up to date for as long as the call lasts.
+            await self._read_controls()
             self._set_state(MeetingState.CONNECTED)
+            self._reader = asyncio.create_task(self._read_regularly())
             logger.info(f"Connected to Google Meet: {meeting_id}")
 
             return self._current_meeting
@@ -321,6 +389,7 @@ class GoogleMeetProvider(MeetingProvider):
         if not self._page or self._state == MeetingState.IDLE:
             return
 
+        await self._stop_reading()
         self._set_state(MeetingState.LEAVING)
         logger.info("Leaving Google Meet...")
 
@@ -342,41 +411,126 @@ class GoogleMeetProvider(MeetingProvider):
         logger.info("Left Google Meet")
 
     async def toggle_camera(self) -> bool:
-        """Toggle camera on/off."""
+        """Toggle the camera with Meet's shortcut (Ctrl+E). Returns what the button's label says afterwards (True = on); a press Meet
+        did not take is a MeetingControlError in words, not a success."""
         if not self._page or self._state != MeetingState.CONNECTED:
             return False
-
-        try:
-            # Keyboard shortcut: Ctrl+E
-            await self._page.keyboard.press("Control+e")
-            await asyncio.sleep(0.5)
-
-            # Update state
-            if self._current_meeting:
-                self._current_meeting.is_camera_on = not self._current_meeting.is_camera_on
-
-            return self._current_meeting.is_camera_on if self._current_meeting else False
-
-        except Exception as e:
-            logger.error(f"Failed to toggle camera: {e}")
-            return False
+        on = await self._press("camera")
+        await self._read_controls()
+        return on
 
     async def toggle_mute(self) -> bool:
-        """Toggle microphone mute."""
+        """Toggle the microphone with Meet's shortcut (Ctrl+D). Returns what the button's label says afterwards (True = muted); a press
+        Meet did not take is a MeetingControlError in words, not a success."""
         if not self._page or self._state != MeetingState.CONNECTED:
             return True
+        live = await self._press("mute")
+        await self._read_controls()
+        return not live
 
+    # ------------------------------------------------------------------
+    # Controls from the table (spec 2026-10-13, sections 3 and 4.5)
+    # ------------------------------------------------------------------
+
+    async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
+        """A control from the table, carried out with Meet's own keyboard shortcut (see MeetingProvider.control): the microphone, the
+        camera, the raised hand and the captions. Everything else Meet's page does not offer here is refused in words. The answer is the
+        control model as it is afterwards."""
+        if self._page is None or self._state != MeetingState.CONNECTED:
+            raise MeetingControlError("Not in a meeting")
+        if name == "mute":
+            await self.toggle_mute()
+        elif name in self.SHORTCUTS:
+            await self._press(name)
+        elif name == "chat.seen":
+            return {"chat": self._current_meeting.chat}   # the agent reads no chat from Meet: nothing to mark
+        else:
+            raise MeetingControlError("Not available in a Meet call")
+        return await self._read_controls()
+
+    async def _press(self, name: str) -> bool:
+        """Press a control's shortcut and wait for the change to show in its button's label (for PRESS_WAIT_S at most), one press at a
+        time; the answer is the state the label shows then (True is on: the microphone live, the camera on, the hand up, the captions on).
+        A control whose button is not on the page is refused before anything is pressed, and so is the bare C key while anything but the
+        page or a button has the keyboard (it would be typed into the chat box). A press that changes no label is a refusal in words,
+        never a success."""
+        words = self.CONTROL_WORDS[name]
+        async with self._pressing:
+            try:
+                reading = await self._look()
+                before = reading.get(name)
+                if before is None:
+                    raise MeetingControlError(f"Meet shows no {words} button right now")
+                if name == "captions" and reading.get("taken"):
+                    raise MeetingControlError(KEYBOARD_TAKEN_WORDS)
+                await self._page.keyboard.press(self.SHORTCUTS[name])
+                deadline = time.monotonic() + self.PRESS_WAIT_S
+                while True:
+                    after = (await self._look()).get(name)
+                    if after is not None and after["on"] != before["on"]:
+                        return bool(after["on"])
+                    if time.monotonic() >= deadline:
+                        raise MeetingControlError(f"Meet did not change the {words}; try again")
+                    await asyncio.sleep(self.PRESS_POLL_S)
+            except MeetingControlError:
+                raise
+            except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
+                raise MeetingControlError(f"Could not change the {words}: {_first_line(e)}") from e
+
+    # ------------------------------------------------------------------
+    # The model, as Meet's page has it
+    # ------------------------------------------------------------------
+
+    async def _look(self) -> Dict[str, Any]:
+        """One reading of Meet's call page (READ_CALL)."""
+        return await self._page.evaluate(READ_CALL)
+
+    async def _read_controls(self) -> Dict[str, Any]:
+        """Read Meet's buttons into the model the table draws from (the meeting's controls, people, microphone and camera) and return the
+        controls. A read that fails (the page gone, in the middle of a navigation) leaves the model as it was and is said once for the call;
+        it never raises."""
+        info = self._current_meeting
+        if info is None or self._page is None:
+            return {}
         try:
-            # Keyboard shortcut: Ctrl+D
-            await self._page.keyboard.press("Control+d")
-            await asyncio.sleep(0.5)
+            self._take(await self._look())
+        except Exception as e:  # noqa: BLE001 - see above
+            words = _first_line(e)
+            if self._read_warned:
+                logger.debug(f"Could not read Meet's buttons again ({words})")
+            else:
+                self._read_warned = True
+                logger.warning(f"Could not read Meet's buttons ({words}); the table keeps what it last had")
+        return info.controls
 
-            # Update state
-            if self._current_meeting:
-                self._current_meeting.is_muted = not self._current_meeting.is_muted
+    def _take(self, reading: Dict[str, Any]) -> None:
+        """Take a reading of the page into the meeting. A button the page does not show, or whose label says no state, leaves the
+        microphone and camera as they last were (the model offers the control only when its button reads); the people count is the number the
+        people button shows, and 0 without one: Meet's roster is not read."""
+        info = self._current_meeting
+        if info is None:
+            return
+        if reading["mute"] is not None:
+            info.is_muted = not reading["mute"]["on"]
+        if reading["camera"] is not None:
+            info.is_camera_on = reading["camera"]["on"]
+        buttons = {name: {"on": reading[name]["on"]} for name in ("camera", "raise_hand", "captions") if reading[name] is not None}
+        info.controls = meet_controls(buttons, info.is_muted)
+        people = reading["people"]
+        info.people = {"count": int(people["count"] or 0) if people is not None else 0, "list": []}
 
-            return self._current_meeting.is_muted if self._current_meeting else True
+    async def _read_regularly(self) -> None:
+        """For as long as the call lasts, read Meet's buttons again every READ_INTERVAL_S."""
+        while True:
+            await asyncio.sleep(self.READ_INTERVAL_S)
+            if self._state != MeetingState.CONNECTED:
+                return
+            await self._read_controls()
 
-        except Exception as e:
-            logger.error(f"Failed to toggle mute: {e}")
-            return True
+    async def _stop_reading(self) -> None:
+        """Stop the regular reading and wait for it to be over: what the provider starts on its own never outlives the call."""
+        reader, self._reader = self._reader, None
+        if reader is None or reader is asyncio.current_task():
+            return
+        reader.cancel()
+        await asyncio.gather(reader, return_exceptions=True)

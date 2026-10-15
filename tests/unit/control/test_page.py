@@ -249,9 +249,7 @@ def sign_colors(page):
 def test_door_sign_follows_the_room_state(browser):
     skip_if_day_ends_within(1)   # the booking is 25 minutes out, and the service lists today's only
     with PageServer(calendar_events=[event("e1", "Design review", 25)], room_name="Room 1") as server:
-        page = browser.new_page(viewport={"width": 1024, "height": 600})
-        page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
-        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page = sign_on_a_stopped_clock(browser, server, 1024, 600)          # its polls are the test's to bring: nothing waits for a real five seconds
         assert page.locator("#chip-text").inner_text().startswith("Free until")
         assert sign_colors(page) == (SIGN_GREEN, SIGN_GREEN, SIGN_NAVY)   # a green rail and chip on navy, never a green wall
         assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == SIGN_NAVY   # navy words on green
@@ -259,13 +257,17 @@ def test_door_sign_follows_the_room_state(browser):
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
                           data='{"url": "https://zoom.us/j/98765432100"}',
                           headers={"Content-Type": "application/json"})
-        page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=8000)
+        wait_for("the meeting to be joined", lambda: status_of(server)["meeting"]["state"] == "connected")
+        poll(page)
+        assert page.evaluate("document.body.dataset.state") == "occupied"
         assert page.locator("#chip-text").inner_text() == "In use"
         assert sign_colors(page) == (SIGN_RED, SIGN_RED, SIGN_NAVY)
         assert page.locator(".chip").evaluate("e => getComputedStyle(e).color") == "rgb(255, 255, 255)"   # white words on red
         page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/leave",
                           data="{}", headers={"Content-Type": "application/json"})
-        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        wait_for("the meeting to be left", lambda: status_of(server)["meeting"]["state"] == "idle")
+        poll(page)
+        assert page.evaluate("document.body.dataset.state") == "free"
         page.close()
 
 
@@ -1477,12 +1479,14 @@ def test_the_week_view_gives_way_to_the_scoreboard_strip_when_it_comes_up(browse
     runs under it, while the status, the head and the tops of the days stay exactly where they were."""
     skip_if_day_ends_within(3)
     with PageServer(calendar_events=a_full_week(), room_name="Boardroom", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
-        page = open_sign(browser, server, width, height)
+        page = sign_on_a_stopped_clock(browser, server, width, height)      # the poll that brings the strip is the test's to bring
         open_the_week(page)
         before, kept = week_fit(page), boxes(page, ".top", ".status", ".week-head")
         tops = page.locator("#week .day").evaluate_all("days => days.map((d) => d.getBoundingClientRect().top)")
         choose(server, sign_scores=["texas"])
-        page.wait_for_function("!document.getElementById('score').hidden", timeout=8000)
+        scoreboard_has(server, ["texas"])
+        poll(page)
+        assert page.evaluate("!document.getElementById('score').hidden")
         for _ in range(50):                                                  # the box shrinks at once; the days are fitted to it a moment later
             after = week_fit(page)
             if after != before and not any(clipped for _, _, _, clipped in after):
@@ -2112,18 +2116,18 @@ def test_a_school_with_only_a_last_game_or_only_a_next_one_shows_that_one(browse
     with PageServer(schedules=schedules) as server:
         choose(server, sign_scores=["texas"])
         scoreboard_has(server, ["texas"])
-        page = open_sign(browser, server)
+        page = sign_on_a_stopped_clock(browser, server)                     # the polls that change the strip are the test's to bring
         strip_is_up(page)
         assert strip_text(page) == [TEXAS_LAST, ""] and page.locator("#score-next").evaluate("e => getComputedStyle(e).display") == "none"      # a half with nothing in it takes no room
         choose(server, sign_scores=["michigan"])
         scoreboard_has(server, ["michigan"])
-        page.wait_for_function("document.getElementById('score-last').innerText === ''", timeout=8000)
+        poll(page)
         assert strip_text(page) == ["", MICHIGAN_NEXT] and page.locator("#score-last").evaluate("e => getComputedStyle(e).display") == "none"
         box, nxt = page.locator("#score").bounding_box(), page.locator("#score-next").bounding_box()
         assert nxt["x"] + nxt["width"] > box["x"] + box["width"] * 0.6      # the next game stays on the right when it is alone
         choose(server, sign_scores=["texas", "michigan"])                    # with two on, the name leads a school that has only a next game to give
         scoreboard_has(server, ["texas", "michigan"])
-        page.wait_for_function("document.getElementById('score-last').innerText === 'Michigan'", timeout=8000)    # Michigan stays up: a poll does not move the strip on
+        poll(page)                                                           # Michigan stays up: a poll does not move the strip on (the turn is eight seconds of the page's time)
         assert strip_text(page) == ["Michigan", MICHIGAN_NEXT]
         page.close()
 
@@ -2199,20 +2203,23 @@ def test_the_strip_coming_up_moves_nothing_on_the_today_list_and_the_sign_still_
     skip_if_day_ends_within(3)
     bookings = [event("e1", "Customer call with Lone Star Eye Care", 40), event("e2", "Design review", 100), event("e3", "Sales pipeline", 160)]
     with PageServer(calendar_events=bookings, room_name="Conference Room Twelve", room_location="2nd floor, by the kitchen", schedules=every_school()) as server:
-        page = open_sign(browser, server, width, height)
+        page = sign_on_a_stopped_clock(browser, server, width, height)      # the polls that bring and take the strip are the test's to bring
         page.wait_for_selector("#events .event", timeout=5000)
         page.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=5000)
         parts = (".top", ".brand", ".when", ".status", ".chip", "#detail", "#today", ".today-head", "#events .event")
         before = boxes(page, *parts)
         assert fits(page)
         choose(server, sign_scores=["texas"])
-        strip_is_up(page)
+        scoreboard_has(server, ["texas"])
+        poll(page)
+        assert page.evaluate("!document.getElementById('score').hidden")
         assert boxes(page, *parts) == before                                  # every box of the sign above the strip is where it was
         strip, today = page.locator("#score").bounding_box(), page.locator("#today").bounding_box()
         assert today["y"] + today["height"] <= strip["y"]                    # the strip takes room of its own and covers nothing
         assert abs(strip["y"] + strip["height"] - height) <= 0.5 and fits(page)
         choose(server, sign_scores=[])                                       # and its going moves nothing either
-        page.wait_for_function("document.getElementById('score').hidden", timeout=8000)
+        poll(page)
+        assert page.evaluate("document.getElementById('score').hidden")
         assert boxes(page, *parts) == before and fits(page)
         page.close()
 
@@ -2577,6 +2584,19 @@ def test_on_a_short_sign_a_long_booking_title_is_clamped_in_today_so_that_the_si
             page.close()
 
 
+@pytest.mark.parametrize("height, lines", [(560, 1), (561, 2)])
+def test_a_long_booking_title_in_today_is_one_line_at_560_px_high_and_two_lines_at_561(browser, height, lines, central_time):
+    """The edge of the short sign's rule for the Today list, pinned to the pixel: the title is cut after one line on a sign 560 px high or less and after two on a
+    sign one pixel taller, with every character in the page either way."""
+    skip_if_day_ends_within(3)
+    title = BOOKING_TITLES[1]
+    with PageServer(calendar_events=[event(f"t{n}", title, 40 + 60 * n) for n in range(3)], room_name="Boardroom") as server:
+        page = open_sign(browser, server, 1280, height)
+        assert page.locator("#events .title").all_text_contents() == [title] * 3
+        assert lines_of(page, "#events .title") == [lines] * 3, (height, lines_of(page, "#events .title"))
+        page.close()
+
+
 def test_a_long_booking_title_is_two_lines_and_an_ellipsis_in_today_and_in_the_week_and_one_line_in_the_portrait_week(browser, central_time):
     skip_if_day_ends_within(3)
     title = "Quarterly planning review with the regional leadership team and the partners, the board and the finance group"   # long enough to be cut
@@ -2691,35 +2711,43 @@ def test_the_room_names_type_is_fitted_again_when_the_strip_goes_while_the_week_
         page.close()
 
 
+def a_narrow_fallback_font():
+    """An init script that puts a font in the sign's font stack after Lexend, for the time Lexend takes to arrive: Lexend's own file under another name, set at 60 % of its
+    size (size-adjust), so that the fallback is narrower than Lexend by construction and is the same on every machine, whatever fonts it has."""
+    data = base64.b64encode((STATIC_DIR / "fonts" / "lexend-400.woff2").read_bytes()).decode()
+    css = ('@font-face { font-family: "Narrow Fallback"; src: url("data:font/woff2;base64,' + data + '") format("woff2"); size-adjust: 60%; } '
+           ':root { --font: "Lexend", "Narrow Fallback", sans-serif !important; }')
+    return ("(() => { const css = " + json.dumps(css) + "; const add = () => { const style = document.createElement('style'); style.textContent = css; document.documentElement.append(style); };"
+            " if (document.documentElement) add(); else new MutationObserver((records, observer) => { if (document.documentElement) { observer.disconnect(); add(); } }).observe(document, { childList: true }); })();")
+
+
 def test_a_room_names_type_is_fitted_again_when_the_signs_font_arrives(browser):
-    """Until Lexend arrives the name is set in a fallback font, whose lines are not Lexend's: a name that takes three lines in one and two in the other
-    must end with the type its lines in Lexend need. The font's files are held back, here, until the test lets them go. Which names wrap differently
-    depends on the fallback the machine has, so the first of a few that do on this one is used."""
-    for name in ("North Training Room", "Customer Success Room", "Project Review Room", "Client Meeting Room", "Small Meeting Room", "Partner Meeting Room",
-                 "Design Studio Room", "Conference Room Twelve", "Second Floor Conf Room 2", "Sales Conference Room", "Strategy Planning Room"):
-        with PageServer(room_name=name, room_location="") as server:
-            held = []
-            page = browser.new_page(viewport={"width": 1280, "height": 800})
-            try:
-                page.route("**/static/fonts/*.woff2", lambda route: held.append(route))
-                page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="domcontentloaded")
-                page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
-                assert page.evaluate("document.fonts.status") == "loading" and held
-                in_fallback = room_name_is_long(page)
-                assert in_fallback == room_name_needs_the_smaller_type(page)           # fitted to what is on the screen now
-                while held:
-                    held.pop().continue_()
-                page.wait_for_function("document.fonts.status === 'loaded'", timeout=5000)
-                in_lexend = room_name_needs_the_smaller_type(page)
-                if in_lexend == in_fallback:
-                    continue                                                           # wraps alike in both on this machine: try another
-                page.wait_for_function(f"document.getElementById('room-name').classList.contains('long') === {str(in_lexend).lower()}", timeout=3000)
-                return
-            finally:
-                while held:                                                            # a failure before the files were let go leaves no request hanging
-                    held.pop().continue_()
-                page.close()
-    pytest.skip("no candidate wraps differently in this machine's fallback font and in Lexend")
+    """Until Lexend arrives the name is set in a fallback font, whose lines are not Lexend's: "Sales Conference Room" takes three lines of Lexend at the large size
+    on a 1280 px sign and one of the fallback here (a narrow one, the same on every machine), so it needs the smaller type in Lexend and not before. The font's
+    files are held back until the test lets them go: the name must end with the type its lines in Lexend need."""
+    held = []
+    with PageServer(room_name="Sales Conference Room", room_location="") as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.add_init_script(a_narrow_fallback_font())
+        try:
+            page.route("**/static/fonts/*.woff2", lambda route: held.append(route))
+            page.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="domcontentloaded")
+            page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+            assert page.evaluate("document.fonts.status") == "loading" and held                  # Lexend is on its way, held
+            page.wait_for_function("[...document.fonts].some((f) => f.family.includes('Narrow Fallback') && f.status === 'loaded')", timeout=5000)
+            page.set_viewport_size({"width": 1281, "height": 800})                                # fitted again, now that the fallback is on the screen (while Lexend is held
+            page.wait_for_function("!document.getElementById('room-name').classList.contains('long')", timeout=3000)          # no font event comes: the first fit may have been before it)
+            assert not room_name_needs_the_smaller_type(page) and lines_of(page, "#room-name") == [1]
+            while held:
+                held.pop().continue_()
+            page.wait_for_function("document.fonts.status === 'loaded'", timeout=5000)
+            assert room_name_needs_the_smaller_type(page)                                       # in Lexend it takes three lines at the large size
+            page.wait_for_function("document.getElementById('room-name').classList.contains('long')", timeout=3000)           # and has the type for them
+            assert lines_of(page, "#room-name") == [2]
+        finally:
+            while held:                                                                         # a failure before the files were let go leaves no request hanging
+                held.pop().continue_()
+            page.close()
 
 
 def test_a_poll_that_changes_nothing_rewrites_nothing_on_the_signs_room_name(browser):
@@ -2779,10 +2807,11 @@ def test_the_chip_says_the_same_words_on_every_sign_when_the_room_is_free_booked
         assert page.locator("#chip-text").inner_text() == "Free for the rest of the day"
         page.close()
     with PageServer(calendar_events=[event("now", title, -10, duration=50)], room_name="Boardroom") as server:
-        page = open_sign(browser, server, width, height, state="occupied")
+        page = sign_on_a_stopped_clock(browser, server, width, height, state="occupied")     # the poll that says "In use" is the test's to bring
         assert re.fullmatch(r"Booked until \d+:\d\d.[AP]M", page.locator("#chip-text").inner_text())
         join_the_booking(server, "now")
-        page.wait_for_function("document.getElementById('chip-text').textContent.startsWith('In use')", timeout=8000)
+        wait_for("the meeting to be joined", lambda: status_of(server)["meeting"]["state"] == "connected")
+        poll(page)
         assert re.fullmatch(r"In use until \d+:\d\d.[AP]M", page.locator("#chip-text").inner_text())
         page.close()
 
@@ -2980,6 +3009,31 @@ def test_a_stepped_name_goes_back_to_the_stylesheets_size_when_the_sign_grows_pa
         page.close()
 
 
+@pytest.mark.parametrize("length", [45, 55, 67])
+def test_a_stepped_name_resized_from_one_short_sign_to_another_ends_where_a_fresh_load_at_the_new_size_puts_it(browser, length, central_time):
+    """The steps begin from the stylesheet's size every time, so a name stepped for 800 by 480 and then resized to 1280 by 480 (and on to 1024 by 500, and round the
+    four short sizes and back) has the size and the lines of a sign loaded at the new size. The page's polls are stopped here and its font events off."""
+    name = {45: STEPPED_NAMES[45], 55: STEPPED_NAMES[55], 67: FLOOR_NAMES[67]}[length]
+    assert len(name) == length
+    walk = ((800, 480), (1280, 480), (1024, 500), (1366, 500), (800, 480), (1366, 500), (1024, 500), (1280, 480))
+    with PageServer(room_name=name, room_location="2nd floor") as server:
+        fresh = {}
+        for size in STEPPED_SIZES:
+            page = open_sign(browser, server, *size)
+            page.wait_for_function("document.fonts.status === 'loaded'", timeout=5000)
+            page.wait_for_timeout(100)                                                          # the font's arrival is fitted a moment later
+            size_in_rem, stepped, lines = room_name_type(page)
+            fresh[size] = (round(size_in_rem, 2), lines)
+            page.close()
+        page = sign_on_a_stopped_clock(browser, server, *walk[0], init_script="document.fonts.addEventListener = () => {};")
+        for width, height in walk[1:]:
+            page.set_viewport_size({"width": width, "height": height})
+            page.wait_for_timeout(150)                                                          # the page's own timers are stopped: this is the test's time
+            size_in_rem, stepped, lines = room_name_type(page)
+            assert (round(size_in_rem, 2), lines) == fresh[(width, height)], (width, height, size_in_rem, stepped, lines)
+        page.close()
+
+
 @pytest.mark.parametrize("width, height, sizes", [(800, 480, {36: 2.3, 45: 1.9, 55: 1.5, 67: 1.3}), (1280, 480, {36: 3.6, 45: 3.1, 55: 2.4, 67: 2.1})])
 def test_a_name_goes_down_to_the_largest_tenth_of_a_rem_at_which_it_takes_two_lines_on_a_short_sign(browser, width, height, sizes):
     """From the smaller type (2.4 rem at 800 px wide, 3.6 rem at 1280) in steps of 0.1 rem, and it stops at the first size at which it takes two lines, so
@@ -3054,22 +3108,20 @@ FLOOR_NAMES = {67: "The Executive Conference Room, North Wing, Second Floor, Eas
 def test_the_limit_the_docs_state_for_a_name_at_the_floor_is_the_one_the_sign_has(browser, central_time):
     """What the guide and the README say is left on a screen 480 to 500 px high: a name goes down to 1.3 rem and no further. A name of up to 67 characters takes
     two lines at that size and one of 87 to 147 characters three to five (at 800 by 480), and the sign is whole at the six sizes, in every status, with a location
-    of two lines and the strip up or down. A name of 184 characters, seven lines at 800 by 480, runs past the bottom by 6 px with the strip up, and by 39 px when
-    the room is free for the rest of the day (its label is two lines there). When one of these stops being so, the docs change."""
+    of two lines and the strip up or down. A room name over about 150 characters runs off the sign (the docs say to use a shorter one, and no number of pixels). When
+    one of these stops being so, the docs change."""
     assert {length: len(name) for length, name in FLOOR_NAMES.items()} == {length: length for length in FLOOR_NAMES}
     for length in (67, 87, 110, 147):
         found = how_far_past_the_bottom(browser, FLOOR_NAMES[length], TWO_LINE_LOCATION, "free all day", SHORT_SIGNS)
         assert set(found.values()) == {0}, (length, found)
-    for length, lines in ((67, 2), (87, 3), (147, 5), (184, 7)):
+    for length, lines in ((67, 2), (87, 3), (147, 5)):
         with PageServer(room_name=FLOOR_NAMES[length], room_location=TWO_LINE_LOCATION) as server:
             page = open_sign(browser, server, 800, 480)
             size, stepped, taken = room_name_type(page)
             assert (round(size, 2), taken) == (FLOOR_REM if length > 67 else size, lines), (length, size, stepped, taken)
             page.close()
-    seven = how_far_past_the_bottom(browser, FLOOR_NAMES[184], TWO_LINE_LOCATION, "free all day", ((800, 480),))
-    assert abs(seven[(True, 800, 480)] - 39) <= 4 and seven[(False, 800, 480)] == 0, seven
-    booked = how_far_past_the_bottom(browser, FLOOR_NAMES[184], TWO_LINE_LOCATION, "booked", ((800, 480),))
-    assert abs(booked[(True, 800, 480)] - 6) <= 3, booked
+    too_long = how_far_past_the_bottom(browser, FLOOR_NAMES[184], TWO_LINE_LOCATION, "free all day", ((800, 480),))
+    assert max(too_long.values()) > 0, too_long                                  # a name of 184 characters (seven lines at the floor) runs off the sign
 
 
 # --- a long name steps down at any height when the status would not fit (the whole-branch review) ---

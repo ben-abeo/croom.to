@@ -25,7 +25,7 @@ Zoom's reference ([ZoomMtg](https://marketplacefront.zoom.us/sdk/meeting/web/Zoo
 
 Zoom documents the event names but not every payload; the guide says to treat an event as a signal to re-read the state through `getAttendeeslist`/`getCurrentUser`. The design follows that: every event re-reads, and the table shows what was read.
 
-Google Meet has no SDK: the Meet provider presses Meet's own buttons (mute, camera, leave, raise hand, reactions, captions, layout, pin, chat) and reads its own state from them. Meet has no host controls in this sense; the provider reports those as unavailable.
+Google Meet has no SDK: the Meet provider presses four of Meet's own controls with its keyboard shortcuts (mute, camera, raise hand, captions) and Leave with its button, and reads their state back from the buttons' labels. Reactions, layout, pin, self view and chat are reported as unavailable in this version, and so are the host controls.
 
 ## 3. The control model
 
@@ -38,11 +38,11 @@ The agent describes what the table may do right now, and the table draws from th
   "mute":         {"available": true,  "on": false},
   "camera":       {"available": true,  "on": true},
   "raise_hand":   {"available": true,  "on": false},
-  "reactions":    {"available": true,  "choices": ["👍", "👏", "❤️", "😂", "😮", "🎉"]},
+  "reactions":    {"available": true,  "choices": ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]},
   "captions":     {"available": true,  "on": false},
   "layout":       {"available": true,  "value": "speaker", "choices": ["speaker", "gallery"]},
   "hide_self":    {"available": true,  "on": false},
-  "pin":          {"available": true},
+  "pin":          {"available": false},
   "leave":        {"available": true},
   "host": {
     "role":        "participant",
@@ -56,15 +56,15 @@ The agent describes what the table may do right now, and the table draws from th
     "end":         {"available": false}
   }
 },
-"participants": {"count": 4, "list": [{"id": 16777216, "name": "Room 1", "muted": false, "video": true, "hand": false, "host": false, "me": true}, ...]},
+"participants": {"count": 4, "list": [{"id": 16777216, "name": "Room 1", "muted": false, "video": true, "hand": false, "host": false, "waiting": false, "me": true}, ...]},
 "chat":   {"unread": 2, "messages": [{"from": "Ann", "text": "Can you hear us?", "at": "2026-10-13T20:01:00Z"}]},
 "notice": "This meeting is being recorded and transcribed.",
-"dialog": {"id": 7, "title": "Recording consent", "text": "This meeting is being recorded…", "buttons": ["Got it", "Leave meeting"]}
+"dialog": {"id": 7, "title": "Recording consent", "text": "This meeting is being recorded…", "buttons": ["Leave Meeting", "Got it"]}
 ```
 
 - `available` is false when the client has no such button on screen or the role does not allow it; the table hides what is unavailable and never guesses.
 - `on`/`value` are what the platform has, re-read after every action and on every event, never the last thing the table pressed (the view and self view on Zoom are the exception: the client's buttons do not say them, so they are the last seen in its open menu or the last picked).
-- `reactions.choices` are emoji, the table's own words. Zoom's client shows no emoji, only icons named Clap, Thumbs Up, Joy, Open Mouth, Heart and Tada, so the bridge maps each emoji to its name (the config may also hold the names).
+- `reactions.choices` are Zoom's names (`Thumbs Up`, `Clap`, `Heart`, `Joy`, `Open Mouth`, `Tada`): Zoom's client shows no emoji, only icons named so, and the table words each in plain terms with a Lucide symbol and sends the name back as it came (the bridge still reads an emoji as the name it stands for).
 - `host.role` is `participant`, `co-host` or `host`; the host block's items are available only for a role that allows them (Zoom refuses otherwise, and the refusal would be the table's error line).
 - `participants.list` is capped at 50 entries on the wire (the count is always exact); the table shows the list on its own sub-screen.
 - `chat.messages` holds the last 20 incoming messages of this meeting; `unread` counts those since the table last opened the chat sub-screen (the table tells the agent with `POST /api/meeting/chat/seen`).
@@ -79,7 +79,7 @@ async def control(self, name: str, value: Any = None) -> Dict[str, Any]
 
 `name` is a key of the model above (`raise_hand`, `reactions`, `captions`, `layout`, `hide_self`, `pin`, `host.mute_all`, `host.ask_unmute`, `host.record`, `host.lock`, `host.admit`, `host.hold`, `host.remove`, `host.mute_one`, `host.end`, `dialog`, `chat.seen`); `value` is the choice (a reaction, a layout, a participant id, a dialog button). It returns the control's new state, or raises `MeetingControlError` with words for the table. A provider that lacks a control raises `MeetingControlError("Not available in this meeting")`; the table never shows such a button in the first place because `available` was false.
 
-Two routes carry it: `POST /api/meeting/control {"name": "...", "value": ...}` → 200 with the new state, 409 with words on a `MeetingControlError` or any other failure (as the mute and camera routes answer today; an unknown name is one too, in the bridge's own words, "Unknown control wave": the control service keeps no list of names), 400 for a bad body; and `POST /api/meeting/dialog {"id": 7, "button": "Got it"}` (section 5). `toggle_mute`/`toggle_camera` and their routes stay for the existing page tests and the Meet provider.
+Three routes carry it: `POST /api/meeting/control {"name": "...", "value": ...}` → 200 with the new state, 409 with words on a `MeetingControlError` or any other failure (as the mute and camera routes answer today; an unknown name is one too, in the bridge's own words, "Unknown control wave": the control service keeps no list of names), 400 for a bad body; and `POST /api/meeting/dialog {"id": 7, "button": "Got it"}` (section 5), and `POST /api/meeting/chat/seen` (no body: the table has read the chat). `toggle_mute`/`toggle_camera` and their routes stay for the existing page tests and the Meet provider.
 
 ## 4. Zoom: the bridge and the provider
 
@@ -115,7 +115,7 @@ The patterns are confirmed before they are pinned: the diagnostics inventory (se
 
 ### 4.5 Google Meet
 
-The Meet provider implements `control()` for `camera`, `raise_hand`, `reactions`, `captions`, `layout`, `pin`, `hide_self` by pressing Meet's buttons through the same pattern table idea (Meet's labels, confirmed by a Meet diagnostics run), reads participants from Meet's people panel count (names only when the panel is open; the count is enough for the table), and reports `host.*` as unavailable and chat from Meet's chat panel as unavailable in this version. Everything in section 3 that Meet cannot report is `available: false`, and the table shows the smaller set.
+The Meet provider implements `control()` for `mute`, `camera`, `raise_hand` and `captions` by pressing Meet's own keyboard shortcuts (Ctrl+D, Ctrl+E, Ctrl+Alt+H and C) and reading the change back from the button's label, which names what a press does (Meet's labels are the plan's English until a Meet diagnostics run confirms them), and for `leave` as the table's own Leave does; it reads the people count from the people button's label or text (no roster), and reports `reactions`, `layout`, `pin`, `hide_self`, chat and `host.*` as unavailable in this version. Everything in section 3 that Meet cannot report is `available: false`, and the table shows the smaller set.
 
 ## 5. Dialogs
 
@@ -161,7 +161,7 @@ meeting:
     acknowledge: ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on", "has been muted", "has been unmuted", "recording has started", "recording has stopped"]
     ask_everything: false
   controls:
-    reactions: ["👍", "👏", "❤️", "😂", "😮", "🎉"]
+    reactions: ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
 ```
 
 Nothing else is configurable: host controls appear by role, and every control appears by availability.
@@ -171,7 +171,7 @@ Nothing else is configurable: host controls appear by role, and every control ap
 - **Stub SDK** (`tests/unit/meeting/zoom_stub.py`) learns: an attendee list with mute, video, hand, host, waiting flags; `_behaviour.role` (participant, co-host, host); the client's buttons as Zoom 6.5.0 draws them (the Reactions slot with its toggling picker and the hand row, captions, the View widget with its toggling dropdown of the views and self view), with Zoom's label style; `muteAll`, `record`, `lockMeeting`, `putOnHold`, `expel`, `endMeeting`, `rename` recorded in `__zoomCalls` and refused when the role does not allow; `_showDialog(title, text, buttons)` that draws a modal and records which button was pressed; `_chat(from, text)` firing `onReceiveChatMsg`; `_recording(on)` firing `onRecordingChange`.
 - **Page tests**: `readMeeting()` reports every field; each `control()` presses the right button or makes the right call and settles on the new state; menus open and close within a call; a dialog is reported with its buttons and answered by label; no dialog is pressed by the page on its own.
 - **Provider tests**: the model in the status; every `control()` through the provider; the acknowledge policy (list, one-button rule, `ask_everything`), the waiting dialog in the status, `dialog-closed`, the notice line; host items available only by role; a Zoom refusal in words; chat and unread counting; state re-read after each action and each event.
-- **Control service tests**: the routes, their 400/404/409 answers, the status shape, chat seen.
+- **Control service tests**: the routes, their 400/409 answers, the status shape, chat seen.
 - **Room page tests** (Playwright): every button drawn from `controls`, hidden when unavailable, icon present; the dialog card and its tap; the notice line; the Participants, Chat and Host sub-screens and their 2-minute return; the second tap on End; the screen still fits 1280 by 800 with everything shown (`fits()`), and on a phone it scrolls.
 - **Meet provider tests**: `control()` against the Meet page fixtures, `available` false for host items.
 - **Pi acceptance** (Ben, a real meeting): the inventory run (section 7); each control from the table; a recording notice acknowledged with the disclosure on the table; the consent dialog waiting for a tap; `ask_everything` making the transcription notice wait; a host meeting with Mute all, admit from the waiting room and End for everyone; captions on the TV; the host muting the room shows within seconds.

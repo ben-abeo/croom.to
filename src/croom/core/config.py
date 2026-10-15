@@ -64,6 +64,8 @@ DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companio
                        "has been muted", "has been unmuted", "recording has started", "recording has stopped"]
 # Zoom 6.5.0's reaction picker has no emoji: its items are named, and the table offers them by those names.
 DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
+# The platforms a room joins when its config does not say.
+DEFAULT_PLATFORMS = ["google_meet", "teams", "zoom"]
 
 
 def _listed(value: Any, defaults: List[str], where: str = "a list setting") -> Any:
@@ -139,7 +141,7 @@ def _section(cls, value: Any, where: str):
 @dataclass
 class MeetingConfig:
     """Meeting service configuration."""
-    platforms: List[str] = field(default_factory=lambda: ["google_meet", "teams", "zoom"])
+    platforms: List[str] = field(default_factory=lambda: list(DEFAULT_PLATFORMS))
     default_platform: str = "auto"
     join_early_minutes: int = 1
     auto_leave: bool = True
@@ -152,6 +154,9 @@ class MeetingConfig:
     controls: ControlsConfig = field(default_factory=ControlsConfig)
 
     def __post_init__(self):
+        # Read as the dialog settings are: a bare word is one platform (not its letters), and `platforms: no`, which YAML reads as False, is the defaults
+        # with a warning and not a TypeError that stops the meeting service, and with it the agent.
+        self.platforms = _listed(self.platforms, DEFAULT_PLATFORMS, "meeting.platforms")
         self.dialogs = _section(DialogsConfig, self.dialogs, "meeting.dialogs")
         self.controls = _section(ControlsConfig, self.controls, "meeting.controls")
 
@@ -299,40 +304,13 @@ class Config:
         if "data_dir" in data:
             config.data_dir = data["data_dir"]
 
-        if "room" in data:
-            config.room = RoomConfig(**data["room"])
-
-        if "meeting" in data:
-            config.meeting = MeetingConfig(**data["meeting"])
-
-        if "calendar" in data:
-            config.calendar = CalendarConfig(**data["calendar"])
-
-        if "ai" in data:
-            config.ai = AIConfig(**data["ai"])
-
-        if "audio" in data:
-            config.audio = AudioConfig(**data["audio"])
-
-        if "video" in data:
-            config.video = VideoConfig(**data["video"])
-
-        if "display" in data:
-            config.display = DisplayConfig(**data["display"])
-
-        if "tv" in data:
-            config.tv = TvConfig(**data["tv"])
-
-        if "dashboard" in data:
-            config.dashboard = DashboardConfig(**data["dashboard"])
-        if "control" in data:
-            config.control = ControlConfig(**data["control"])
-
-        if "updates" in data:
-            config.updates = UpdateConfig(**data["updates"])
-
-        if "security" in data:
-            config.security = SecurityConfig(**data["security"])
+        # A section with nothing under it (`meeting:` with its lines deleted loads as None) is that section's defaults, with nothing said about it: it
+        # used to be a TypeError, which load_config answers by setting the whole file aside. A section with a key it does not know still is one.
+        for name, section in (("room", RoomConfig), ("meeting", MeetingConfig), ("calendar", CalendarConfig), ("ai", AIConfig), ("audio", AudioConfig),
+                              ("video", VideoConfig), ("display", DisplayConfig), ("tv", TvConfig), ("dashboard", DashboardConfig),
+                              ("control", ControlConfig), ("updates", UpdateConfig), ("security", SecurityConfig)):
+            if data.get(name) is not None:
+                setattr(config, name, section(**data[name]))
 
         return config
 

@@ -10904,17 +10904,21 @@ def test_the_roomy_sizes_of_the_meeting_screen_are_for_wide_tall_screens_only_an
         page.close()
 
 
-def test_a_status_without_controls_keeps_the_three_buttons(browser):
+def test_a_status_without_controls_keeps_the_three_buttons_and_the_tv_button(browser):
+    """A platform that reports no model (the public Zoom web client, Teams, Webex) draws nothing on a guess, but the TV is the room's, not the
+    platform's: its button is there in every meeting, the second row holding it alone, and it opens the remote as it does anywhere."""
     with PageServer(controls=False) as server:
         page = open_page(browser, server)
         join_by_id(page)
         assert texts(page, "#meeting-actions") == ["Mute", "Turn camera off", "Leave"]
         assert drawn_icons(page, "#meeting-actions") == ["Mute: #icon-mic", "Turn camera off: #icon-video", "Leave: #icon-phone-off"]
-        assert page.locator("#meeting-secondary .button").count() == 0       # no model: no Participants, no Chat, nothing drawn on a guess
-        assert page.locator("#meeting-secondary").is_hidden()                  # and no empty row's room between the buttons and the Sound strip
-        assert meeting_tv_button(page).count() == 0                            # the TV's button is the row's, so it is not drawn without the row
+        assert texts(page, "#meeting-secondary") == ["TV"]                      # no model: no Participants, no Chat, nothing drawn on a guess; the TV's button alone
+        assert page.locator("#meeting-secondary").is_visible()
+        assert meeting_tv_button(page).count() == 1 and meeting_tv_button(page).locator("svg use").get_attribute("href") == "#icon-tv"
         assert texts(page, ".view[data-view=meeting] .menu") == ["Camera", "Upcoming meetings"]
         assert fits(page)
+        meeting_tv_button(page).click()
+        page.wait_for_function("document.body.dataset.view === 'tv'", timeout=5000)
         page.close()
 
 

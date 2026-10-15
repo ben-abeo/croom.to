@@ -504,11 +504,12 @@
   }
 
   // The secondary row: Captions, View, Self view, Participants (with the count), Chat (with the unread count), Host (for a host or
-  // co-host), and the TV's remote, the table's own button and the last of them. Without a model there is nothing to draw it from, so none
-  // of it is drawn.
+  // co-host), and the TV's remote, the table's own button and the last of them. Without a model there is nothing to draw the platform's
+  // controls from, so none of them is drawn (a platform that has none keeps the three buttons the screen began with); the TV is the room's,
+  // not the platform's, and the row holds it alone.
   function meetingSecondary(m) {
     const c = m.controls || {};
-    if (!Object.keys(c).length) return [];
+    const modelled = Object.keys(c).length > 0;
     const has = (name) => Boolean(c[name] && c[name].available);
     const specs = [];
     if (has("captions")) specs.push(controlSpec("captions", c.captions.on ? "Captions off" : "Captions on", "captions", "quiet"));
@@ -520,8 +521,8 @@
     // A platform that reports a count and no roster (Meet) has no Participants screen to open, and one whose chat the agent does not read says so
     // (controls.chat.available is false): a button that opens nothing is not drawn. Zoom's model has no chat key, and keeps its button.
     const people = m.participants && Array.isArray(m.participants.list) ? m.participants.list : [];
-    if (people.length) specs.push({ id: "participants", label: "Participants (" + (m.participants.count || people.length) + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
-    if (m.chat && !(c.chat && c.chat.available === false)) specs.push({ id: "chat", label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
+    if (modelled && people.length) specs.push({ id: "participants", label: "Participants (" + (m.participants.count || people.length) + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
+    if (modelled && m.chat && !(c.chat && c.chat.available === false)) specs.push({ id: "chat", label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
     if (c.host && c.host.role && c.host.role !== "participant") specs.push({ id: "host", label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
     // The TV is the room's, not the platform's: it is drawn with the row, after Host, whatever the TV's state (a room with no TV set up, or a TV not
     // yet paired, finds its cards in the view that this opens).

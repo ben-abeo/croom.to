@@ -106,6 +106,27 @@ class TestMeetingServiceBasic:
         assert isinstance(service._providers, dict)
 
 
+class TestMeetingServiceStart:
+    """What start does with the platforms a config names (the whole-branch review): a mistake in the setting costs the setting, never the agent."""
+
+    @pytest.mark.parametrize("platforms, asked", [
+        (False, ["google_meet", "teams", "zoom"]),        # `platforms: no`: the defaults (it was a TypeError here, which stopped every service, and the agent with them)
+        ("zoom", ["zoom"]),                               # `platforms: zoom`: the one platform (it iterated z, o, o, m)
+        (["zoom", "google_meet"], ["zoom", "google_meet"]),
+        ([], []),                                         # none is a choice
+        (None, ["google_meet", "teams", "zoom"]),         # `platforms:` with nothing after it
+    ])
+    async def test_start_builds_a_provider_for_each_platform_the_setting_names(self, monkeypatch, caplog, platforms, asked):
+        import croom.meeting.service as service_module
+
+        built = []
+        monkeypatch.setattr(service_module, "build_provider", lambda platform, config, display=None: built.append(platform))   # builds none: the service says so and goes on
+        service = MeetingService(Config.from_dict({"meeting": {"platforms": platforms}}), display=MagicMock())
+        await service.start()
+        assert built == asked and service.get_available_platforms() == []
+        assert [r for r in caplog.records if "No meeting providers available" in r.getMessage()]
+
+
 class TestMeetingPlatformDetection:
     """Tests for meeting platform detection."""
 

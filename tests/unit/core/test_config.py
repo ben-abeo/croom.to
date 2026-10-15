@@ -2,6 +2,7 @@
 Tests for croom.core.config module.
 """
 
+import dataclasses
 import logging
 import os
 import tempfile
@@ -30,6 +31,7 @@ from croom.core.config import (
     ControlsConfig,
     DialogsConfig,
     DEFAULT_ACKNOWLEDGE,
+    DEFAULT_PLATFORMS,
     DEFAULT_REACTIONS,
 )
 
@@ -559,3 +561,83 @@ class TestDialogAndControlConfig:
         config = Config.from_dict({"meeting": {"dialogs": section, "controls": section}})
         assert config.meeting.dialogs == DialogsConfig() and config.meeting.controls == ControlsConfig()
         assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+
+
+class TestMeetingPlatformsAndEmptySections:
+    """What the meeting's platforms and a section with nothing under it make of a config file (the whole-branch review): a mistake costs its own
+    setting, as under `dialogs:` and `controls:`, and never the agent."""
+
+    def test_the_default_platforms_are_the_ones_the_room_files_start_from_and_are_copies(self):
+        assert DEFAULT_PLATFORMS == ["google_meet", "teams", "zoom"] == MeetingConfig().platforms
+        first, second = MeetingConfig(), MeetingConfig()
+        first.platforms.append("webex")
+        assert second.platforms == DEFAULT_PLATFORMS and DEFAULT_PLATFORMS == ["google_meet", "teams", "zoom"]     # a config edits its own list, not the module's
+
+    @pytest.mark.parametrize("value", [False, True, 0, 7, 1.5, {"a": "b"}])
+    def test_platforms_that_are_not_a_list_are_the_defaults_with_a_warning_naming_the_key(self, value, caplog):
+        """YAML reads `platforms: no` as False, and `for platform in False` raised a TypeError in MeetingService.start that stopped every service: the
+        agent exited on "Failed to start all services". The file loads, the config writes out, and the journal says which key was not a list."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"platforms": value}})
+        assert config.meeting.platforms == DEFAULT_PLATFORMS and config.meeting.platforms is not DEFAULT_PLATFORMS
+        assert config.to_dict()["meeting"]["platforms"] == DEFAULT_PLATFORMS
+        warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warned) == 1 and "meeting.platforms" in warned[0] and repr(value) in warned[0] and "defaults" in warned[0]
+
+    def test_a_bare_word_is_one_platform_not_its_letters(self, caplog):
+        """`platforms: zoom` iterated its letters and left the room with no platform: "No meeting providers available"."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        config = Config.from_dict({"meeting": {"platforms": "zoom"}})
+        assert config.meeting.platforms == ["zoom"] and config.to_dict()["meeting"]["platforms"] == ["zoom"]
+        assert not caplog.records
+
+    def test_platforms_left_blank_in_the_file_are_the_defaults_without_a_word(self, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        assert Config.from_dict({"meeting": {"platforms": None}}).meeting.platforms == DEFAULT_PLATFORMS
+        assert MeetingConfig(platforms=None).platforms == DEFAULT_PLATFORMS
+        assert not caplog.records
+
+    def test_a_list_of_platforms_is_kept_as_it_is_empty_included(self, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        assert Config.from_dict({"meeting": {"platforms": ["zoom", "google_meet"]}}).meeting.platforms == ["zoom", "google_meet"]
+        assert Config.from_dict({"meeting": {"platforms": []}}).meeting.platforms == []                  # no platforms is a choice
+        assert MeetingConfig(platforms=("zoom",)).platforms == ("zoom",)
+        assert not caplog.records
+
+    def test_the_loader_reads_a_platforms_mistake_through_the_file_and_the_rest_of_the_file_still_counts(self, temp_dir, caplog):
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        path = temp_dir / "config.yaml"
+        path.write_text("room:\n  name: Lab\nmeeting:\n  platforms: no\n  mic_default_on: false\n")
+        loaded = load_config(str(path))
+        assert loaded.room.name == "Lab" and loaded.meeting.platforms == DEFAULT_PLATFORMS and loaded.meeting.mic_default_on is False
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING and "meeting.platforms" in r.getMessage()]) == 1
+        path.write_text("meeting:\n  platforms: zoom\n")
+        assert load_config(str(path)).meeting.platforms == ["zoom"]
+
+    @pytest.mark.parametrize("section", [f.name for f in dataclasses.fields(Config) if dataclasses.is_dataclass(getattr(Config(), f.name))])
+    def test_a_section_with_nothing_under_it_is_that_sections_defaults_without_a_word(self, section, temp_dir, caplog, capsys):
+        """`meeting:` with its lines deleted loads as None, and `MeetingConfig(**None)` was a TypeError that set the whole file aside (every other
+        setting in it too): an empty section is a plausible "use the defaults", and means that."""
+        caplog.set_level(logging.WARNING, logger="croom.core.config")
+        path = temp_dir / "config.yaml"
+        path.write_text(f"data_dir: /marker\n{section}:\n")
+        loaded = load_config(str(path))
+        assert loaded.data_dir == "/marker"                                                              # the file was not set aside
+        assert getattr(loaded, section) == getattr(Config(), section)
+        assert not caplog.records and capsys.readouterr().out == ""
+
+    def test_an_empty_section_beside_sections_that_have_settings_leaves_those_in_force(self, temp_dir, capsys):
+        path = temp_dir / "config.yaml"
+        path.write_text("room:\nmeeting:\n  platforms: [zoom]\ncalendar:\n  google_calendar_id: c_1@resource.calendar.google.com\ntv:\n")
+        loaded = load_config(str(path))
+        assert loaded.room == RoomConfig() and loaded.tv == TvConfig()
+        assert loaded.meeting.platforms == ["zoom"] and loaded.calendar.google_calendar_id == "c_1@resource.calendar.google.com"
+        assert capsys.readouterr().out == ""
+
+    def test_an_unknown_key_in_a_section_still_sets_the_file_aside_as_the_readme_says(self, temp_dir, capsys):
+        """The leniency is for a section with nothing in it: a mistyped key in one is still an error that costs the file (its one line is printed)."""
+        path = temp_dir / "config.yaml"
+        path.write_text("data_dir: /marker\nroom:\n  nme: Lab\n")
+        loaded = load_config(str(path))
+        assert loaded.data_dir == "" and loaded.room.name == "Conference Room"
+        assert "Warning: Failed to load config from" in capsys.readouterr().out

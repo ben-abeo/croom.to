@@ -146,6 +146,7 @@ def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps()
         "a second row of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat**, **Host** (only while the room is host or co-host) and **TV**, "
         "then the room's volume, **Camera** for presets and nudges and **Upcoming meetings**",
         "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more (Leave, **TV** and the rest of the screen are as ever)",
+        "A call on a platform that reports no controls at all keeps Mute, Turn camera off and Leave, and **TV**, which is the room's own and never depends on the platform",
         "a Zoom dialog that waits for a tap shows as a card above the controls with Zoom's own buttons",
         "**Participants**, **Chat** (read only) and **Host** are screens of their own, each with **Back**, and each returns to the meeting screen after two idle minutes",
         "Leave, Remove and End meeting for everyone ask for a second tap",
@@ -229,6 +230,32 @@ def test_readme_says_exactly_what_the_config_loader_does_with_a_mistake_and_the_
     capsys.readouterr()
     config, said = loaded("not_a_section: 1\nroom:\n  name: Lab\n")
     assert config.room.name == "Lab" and said == [] and capsys.readouterr().out == ""
+
+
+def test_readme_says_what_the_loader_does_with_the_platforms_and_with_a_section_with_nothing_under_it(tmp_path, caplog, capsys):
+    """The two sentences of the config table, against `load_config` itself: the platforms setting is read as the dialog settings are, and an empty section is its
+    defaults without a word (it used to set the whole file aside)."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "`platforms` is a list: a bare word (`platforms: zoom`) is that one platform, and a value that is not a list (`platforms: no`, which YAML reads as false) is replaced by the default list, "
+        "`google_meet`, `teams` and `zoom`, with a warning in the journal",
+        "A section with nothing under it (`meeting:` with its lines deleted) is that section's defaults, in every section of the file, with no warning and the rest of the file in force",
+    ):
+        assert needle in text, needle
+    caplog.set_level(logging.WARNING, logger="croom.core.config")
+
+    def loaded(body):
+        caplog.clear()
+        (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+        return load_config(str(tmp_path / "config.yaml")), [r.getMessage() for r in caplog.records]
+
+    config, said = loaded("meeting:\n  platforms: no\n")
+    assert config.meeting.platforms == ["google_meet", "teams", "zoom"] and len(said) == 1 and "meeting.platforms should be a list, not False" in said[0]
+    config, said = loaded("meeting:\n  platforms: zoom\n")
+    assert config.meeting.platforms == ["zoom"] and said == []
+    capsys.readouterr()
+    config, said = loaded("data_dir: /marker\nroom:\nmeeting:\ncalendar:\n")
+    assert config.data_dir == "/marker" and config.meeting == Config().meeting and said == [] and capsys.readouterr().out == ""
 
 
 def test_the_notices_the_readme_says_disclose_nothing_are_the_ones_the_policy_treats_so():

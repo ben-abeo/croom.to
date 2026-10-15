@@ -156,6 +156,8 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
         "A notice whose button the room cannot press is not left on the TV with nobody to answer it: it waits on the table like any other dialog",
         "A mistake under dialogs: or controls: costs only its own setting, with a warning in the journal: a value that is not a list (acknowledge: no, which YAML reads as false) is replaced by its default; an ask_everything that is not true or false is read as false (the words yes, no, on and off, in quotes, are read as they say); an unknown key is ignored; a section that is not a set of settings gives the defaults.",
         "Without a warning: a bare word is a one-item list, a setting with nothing after it takes its default, and acknowledge: [] acknowledges nothing, so every dialog waits.",
+        "A section with nothing under it (meeting: with its lines deleted) is that section's defaults, in every section of the file, with no warning and the rest of the file in force.",
+        "The list under platforms is read the same way: a bare word is that one platform, and a value that is not a list (platforms: no) is the default list, with a warning.",
         "Inside any other section an unknown key makes the agent set the whole file aside: none of the file's settings take effect and the agent runs on its built-in defaults (the one line it prints about it is block-buffered and reaches the journal only when the service stops); an unknown key at the top of the file, outside every section, is ignored without a word.",
         "A room installed before this release has no such lines and runs the defaults",
     ):

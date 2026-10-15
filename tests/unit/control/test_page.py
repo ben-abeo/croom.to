@@ -2926,6 +2926,13 @@ def test_nothing_runs_off_a_sign_480_to_500_px_high_in_any_status(browser, statu
 
 # --- the status column's free text takes two lines at most (the whole-branch review) ---
 
+def skip_if_the_day_began_within(minutes):
+    """A booking that began `minutes` ago is yesterday's, and not on today's list, until the local day is that old: what needs it there skips till then."""
+    now = datetime.now().astimezone()
+    if now - now.replace(hour=0, minute=0, second=0, microsecond=0) < timedelta(minutes=minutes):
+        pytest.skip(f"less than {minutes} minutes have passed in the local day")
+
+
 LONG_TITLE = ("Quarterly planning review with the regional leadership teams and the partners, " * 3)[:230]
 LONG_LOCATION = ("2nd floor, by the kitchen, past the elevators and through the double doors, " * 4)[:230]
 
@@ -2936,6 +2943,8 @@ def test_a_booking_title_and_a_location_of_230_characters_take_two_lines_in_the_
     1366 by 500 one, and in "starting soon" the chip pushed the strip 36 to 68 px off at 1280 by 561 and 1024 by 600. Each is two lines and an ellipsis; every
     character is still in the page, and the sign is whole at the four sizes, with the strip up or down."""
     skip_if_day_ends_within(3)
+    if status in ("booked", "in use"):
+        skip_if_the_day_began_within(15)                                      # the booking in progress began 10 minutes ago: today's list has it only if that was today
     assert len(LONG_TITLE) == len(LONG_LOCATION) == 230
     bookings, reached = a_room_in_a_status(status, title=LONG_TITLE)
     with PageServer(calendar_events=bookings, room_name="Boardroom", room_location=LONG_LOCATION, schedules=every_school()) as server:

@@ -96,8 +96,11 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
    Participants, Chat, Host and the TV's) sit in one row, and no room when there is nothing in the row or the reaction row has it. */
 .meeting-secondary .button { min-height: 52px; padding: 0 18px; }
 .meeting-secondary:empty, .meeting-secondary[hidden] { display: none; }
-/* The notice line under the title: what the meeting says of itself (recorded, transcribed), in the detail's style. */
-.notice { margin: -8px 0 0; color: var(--periwinkle-300); max-width: 60ch; overflow-wrap: anywhere; }   /* pulled up under the line it belongs to */
+/* The notice line under the title: what the meeting says of itself (recorded, transcribed), in the detail's style. It is two lines at the most (the screen
+   at 1280 by 800 has 16 px to spare with two): a sentence of the bridge's 400 characters is cut short with an ellipsis, and the whole of it is the line's tooltip.
+   The overflow is clipped, not hidden: hidden makes the line a scroll container, whose minimum size in the screen's grid is nothing, and in the shortest window that
+   still gets the fixed screen (1280 by 700) the grid squeezed the line to 8 px under the title. A browser that does not know clip falls back to hidden. */
+.notice { margin: -8px 0 0; color: var(--periwinkle-300); max-width: 60ch; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; overflow: clip; }   /* pulled up under the line it belongs to */
 .notice:empty { display: none; }
 /* A dialog Zoom left waiting, as a card above the buttons: one row, so that it costs the fixed screen 84 px with a line of text and 126 with
    three. The client's words are on the left (the title, the text cut to three lines, and a refusal's words when there is one) and its buttons

@@ -140,9 +140,13 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
         assert f'<span class="chip">{phrase}</span>' in html, phrase                       # the code's own lists, so the guide cannot drift from them
     for phrase in ("has been muted", "has been unmuted", "recording has stopped", "transcription has stopped"):
         assert phrase in DialogPolicy.STATE_ONLY, phrase                                    # the notices the guide says add nothing to the line are the policy's own
+    for word in DialogPolicy.NEVER_PRESSED:
+        assert f'<span class="chip">{word.capitalize()}</span>' in html, word                # and the buttons it says are never pressed are the policy's own
     for needle in (
         "A dialog with exactly one button whose title or words contain one of the phrases under dialogs › acknowledge in the room's config (in any case) is pressed at once",
-        "Every other dialog (more than one button, or words that are not on the list, such as the host asking the room to unmute) shows on the table as a card above the controls",
+        "A dialog whose one button leaves or ends the meeting (a label with the whole word Leave, End, Exit or Quit, in any case) is never pressed this way, whatever its words say: it waits for a tap like any other",
+        "Every other dialog (more than one button, a single button that leaves or ends the meeting, or words that are not on the list, such as the host asking the room to unmute) shows on the table as a card above the controls",
+        "a sentence ends at a full stop, an exclamation mark or a question mark, and the line shows two lines at most, cut short with an ellipsis",
         "Zoom puts the cancelling button first, so recording consent reads Leave Meeting, Got it",
         "Nothing is pressed until someone taps one, which presses it on the TV",
         "ask_everything: true under dialogs (default false) makes every dialog wait for a tap, the notices on the list too",

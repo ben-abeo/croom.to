@@ -10795,6 +10795,83 @@ def test_the_meeting_screen_with_everything_still_fits_and_hides_the_unavailable
         page.close()
 
 
+LONGEST_NOTICE = ("Zoom AI is on and the host has turned on AI Companion for this meeting and anyone who stays agrees to it " * 4)[:399] + "!"   # one sentence of the 400 characters the bridge sends at most
+
+
+def test_a_notice_of_the_longest_sentence_is_two_lines_with_the_whole_of_it_in_its_tooltip(browser):
+    """A one-sentence description, or one ended with a ! or a ?, is up to 400 characters under the title, where the 1280 by 800 screen has room for
+    two lines (it has 16 px to spare with them): the line is cut at two with an ellipsis, and the whole of it is the line's tooltip."""
+    assert len(LONGEST_NOTICE) == 400
+    with PageServer() as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        notice = page.locator("#meeting-notice")
+        height = "document.getElementById('meeting-notice').getBoundingClientRect().height"
+        server.meeting.current_meeting.notice = "This meeting is being recorded."
+        poll_until(page, "document.getElementById('meeting-notice').textContent !== ''")
+        one_line = page.evaluate(height)
+        assert one_line > 0 and notice.get_attribute("title") == "This meeting is being recorded."
+        server.meeting.current_meeting.notice = LONGEST_NOTICE
+        poll_until(page, "document.getElementById('meeting-notice').textContent.length === 400")
+        assert 1.8 * one_line < page.evaluate(height) < 2.2 * one_line                          # two lines, not the seven the sentence needs at this width
+        assert page.evaluate("(() => { const n = document.getElementById('meeting-notice'); return n.scrollHeight > n.clientHeight; })()")      # and the rest is cut
+        assert notice.get_attribute("title") == LONGEST_NOTICE and page.evaluate("document.getElementById('meeting-notice').textContent") == LONGEST_NOTICE
+        assert fits(page)
+        server.meeting.current_meeting.notice = ""
+        poll_until(page, "document.getElementById('meeting-notice').textContent === ''")
+        assert notice.is_hidden() and notice.get_attribute("title") == ""                         # no line, no tooltip
+        page.close()
+
+
+@pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1080), (1920, 1200)])
+def test_the_busiest_meeting_screen_with_the_longest_notice_still_fits(browser, width, height):
+    """The host's whole screen with the notice at its longest, the longest card text, a two-line refusal and Leave asking for its second tap: the
+    state that ends 16 px above the bottom at the table's 1280 by 800 when the notice is two lines, and so when it is a sentence of 400 characters."""
+    refusal = "Zoom's captions button is not on the screen yet; try again in a moment, and if it still does not work ask the host whether captions are allowed in this meeting."
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server, width, height)
+        join_by_id(page)
+        meeting = server.meeting.current_meeting
+        meeting.is_muted = True
+        meeting.controls["captions"]["on"] = True
+        set_people(server, a_roster(9), count=120)
+        meeting.chat = {"unread": 12, "messages": []}
+        meeting.notice = LONGEST_NOTICE
+        put_up(server, dict(ZOOMS_DIALOG, text=LONGEST_TEXT))
+        poll_until(page, CARD)
+        page.evaluate("(words) => { window.croomPage.model.error = words; window.croomPage.model.errorOn = 'meeting'; window.croomPage.render(); }", refusal)
+        page.clock.run_for(700)                                                                  # the settling guard lapses
+        page.locator("#meeting-actions .button", has_text="Leave").click()
+        page.clock.run_for(700)
+        assert page.locator("#meeting-actions .button.danger").inner_text() == "Tap again to leave"
+        assert fits(page), "the meeting screen scrolls with the longest notice"
+        assert in_one_row(page, "#meeting-actions") and in_one_row(page, "#meeting-secondary") and in_one_row(page, "#dialog-actions")
+        page.close()
+
+
+def test_in_the_shortest_window_that_still_gets_the_fixed_screen_the_notice_keeps_its_two_lines_and_main_scrolls_instead(browser):
+    """1280 by 700 cannot hold the host's busiest screen, and the page scrolls inside main (nothing is squeezed to make it fit): the notice line, an item of
+    the screen's grid, must not be what gives way. As a scroll container (overflow hidden) its minimum size in the grid is nothing, and the grid squeezed it to
+    8 px, a sliver of the first line under the title with the card over the rest; clipped, it keeps its two lines."""
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server, 1280, 700)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        server.meeting.current_meeting.notice = "This meeting is being recorded."
+        poll_until(page, "document.getElementById('meeting-notice').textContent !== ''")
+        one_line = page.evaluate("document.getElementById('meeting-notice').getBoundingClientRect().height")
+        server.meeting.current_meeting.notice = LONGEST_NOTICE
+        put_up(server, dict(ZOOMS_DIALOG, text=LONGEST_TEXT))
+        poll_until(page, CARD)
+        page.clock.run_for(600)
+        placed = page.evaluate("""() => { const n = document.getElementById('meeting-notice').getBoundingClientRect(), c = document.getElementById('meeting-dialog').getBoundingClientRect(),
+                                           m = document.querySelector('main'); return { height: n.height, bottom: n.bottom, cardTop: c.top, scrolls: m.scrollHeight > m.clientHeight }; }""")
+        assert 1.8 * one_line < placed["height"] < 2.2 * one_line, placed          # two lines, not a sliver
+        assert placed["bottom"] <= placed["cardTop"] + 1, placed                     # and not under the card
+        assert placed["scrolls"], placed                                              # the screen scrolls inside main instead, as it does with a two-line notice
+        page.close()
+
+
 @pytest.mark.parametrize("width, height, roomy", [
     (1280, 800, False),      # the room's table: the 1920 by 1200 panel lays out at 1280 by 800, the kiosk launches Chromium at 1.5x (installer/install-kiosk.sh)
     (1280, 1000, False),     # tall enough for the roomy stack to fit the host's screen, with nothing left for a dialog's card: the compact one has

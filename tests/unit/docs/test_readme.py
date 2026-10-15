@@ -5,6 +5,7 @@ guides, and links every design spec and implementation plan.
 
 import dataclasses
 import logging
+import re
 from pathlib import Path
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config, load_config
@@ -240,6 +241,16 @@ def test_the_notices_the_readme_says_disclose_nothing_are_the_ones_the_policy_tr
         assert phrase in DEFAULT_ACKNOWLEDGE and phrase in DialogPolicy.STATE_ONLY, phrase
         assert policy.disclosure({"text": f"Your microphone {phrase}.", "buttons": ["OK"]}) == "", phrase
     assert policy.disclosure({"text": "This meeting is being recorded.", "buttons": ["OK"]}) == "This meeting is being recorded."
+
+
+def test_readme_says_a_button_that_leaves_or_ends_the_meeting_is_never_pressed_for_the_room_and_the_notice_line_is_two_lines():
+    """The names are the policy's own (NEVER_PRESSED), and the page's line is clamped to the two lines the README says."""
+    text = README.read_text(encoding="utf-8")
+    assert "and that a dialog whose one button leaves or ends the meeting (the whole word `Leave`, `End`, `Exit` or `Quit` in its label, in any case) is never pressed for the room, whatever its words say" in text
+    assert DialogPolicy.NEVER_PRESSED == ("leave", "end", "exit", "quit")
+    assert "(recorded, transcribed; two lines at most, cut short with an ellipsis)" in text
+    style = (REPO / "src" / "croom" / "control" / "static" / "style.css").read_text(encoding="utf-8")
+    assert re.search(r"\.notice \{[^}]*-webkit-line-clamp: 2;", style)
 
 
 def test_readme_says_the_dialog_cards_buttons_are_the_one_exception_to_an_icon_on_every_button():

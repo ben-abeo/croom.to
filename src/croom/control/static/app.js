@@ -609,7 +609,9 @@
   // secondary row, and the reaction row in its place while it is open. Only a connected meeting has any of it; m is null offline.
   function renderMeetingScreen(m) {
     const live = Boolean(m) && m.state === "connected";
-    el("meeting-notice").textContent = live ? m.notice || "" : "";
+    const notice = live ? m.notice || "" : "";
+    el("meeting-notice").textContent = notice;
+    el("meeting-notice").title = notice;   // the whole of it, for when the line cuts it short at two lines (read by nobody on a kiosk, and harmless)
     renderDialog(live ? m.dialog : null);
     const choices = live ? reactionChoices(m.controls || {}) : [];
     const picking = choices.length > 0 && reactionsOpen();

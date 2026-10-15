@@ -1066,6 +1066,34 @@ def test_the_consent_dialog_waits_for_a_tap_though_the_default_list_names_it():
     assert policy.decide(dict(consent, buttons=[])) == "ask"
 
 
+@pytest.mark.parametrize("label", [
+    "Leave Meeting", "Leave", "leave meeting", "LEAVE", "End", "End Meeting", "end meeting for all", "Exit", "Quit", "Quit Meeting",
+    "  Leave Meeting  ", "Leave the meeting", "Exit.",
+])
+def test_a_single_button_that_leaves_or_ends_the_meeting_is_never_pressed_for_the_room_whatever_the_words_say(label):
+    """The whole-branch review's hole: a one-button dialog whose words are on the list was pressed whatever its button said, and a ["Leave Meeting"]
+    consent with "is being recorded" in it would have walked the room out of its own meeting by policy, with the notice line saying all was well. It
+    goes to the table instead, where a person taps it or not."""
+    consent = {"title": "Recording consent", "text": "This meeting is being recorded. By staying you agree to it.", "buttons": [label]}
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(consent) == "ask"
+    assert DialogPolicy(["is being recorded"]).decide(consent) == "ask"
+
+
+@pytest.mark.parametrize("label", ["OK", "Got it", "Okay", "Continue", "Dismiss", "Close", "I understand", "Weekend", "Prevent", "Endpoint", "Quite", "Leaves", "Extension"])
+def test_a_single_button_that_does_not_leave_or_end_is_acknowledged_as_before(label):
+    """Only whole words are looked for: "Weekend" holds "end", and "Quite" holds "quit", and neither leaves anything."""
+    notice = {"title": "Recording in progress", "text": "This meeting is being recorded.", "buttons": [label]}
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(notice) == "acknowledge"
+
+
+def test_the_buttons_never_pressed_are_named_with_their_why_and_a_dialog_with_a_choice_in_it_is_asked_as_ever():
+    assert DialogPolicy.NEVER_PRESSED == ("leave", "end", "exit", "quit")
+    consent = {"text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]}
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(consent) == "ask"                                        # two buttons: the table is asked, as before
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(dict(consent, buttons=["Leave Meeting"])) == "ask"      # and so is one that leaves
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(dict(consent, buttons=["Got it"])) == "acknowledge"
+
+
 def test_the_list_is_matched_in_the_title_or_the_text_whatever_the_case():
     policy = DialogPolicy(["Is Being Recorded", "ai companion"])
     assert policy.decide({"title": "THIS MEETING IS BEING RECORDED", "text": "", "buttons": ["OK"]}) == "acknowledge"
@@ -1103,6 +1131,31 @@ def test_the_disclosure_is_the_first_sentence_that_holds_a_phrase_of_the_list_el
     assert policy.disclosure({"title": "This meeting is being recorded", "text": "", "buttons": ["OK"]}) == "This meeting is being recorded."
     assert policy.disclosure({"title": "", "text": "  ", "buttons": ["OK"]}) == ""
     assert policy.disclosure({}) == ""
+
+
+def test_the_disclosure_splits_sentences_at_a_question_mark_or_an_exclamation_mark_as_at_a_full_stop():
+    """The whole-branch review: "Zoom AI is on! The host has turned on AI Companion." stayed one sentence, so the line under the title took all of it."""
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    assert policy.disclosure({"text": "Zoom AI is on! The host has turned on AI Companion for this meeting.", "buttons": ["OK"]}) == "Zoom AI is on!"
+    assert policy.disclosure({"text": "Anyone with access may share it. AI Companion is on! Zoom does not train on it.", "buttons": ["OK"]}) == "AI Companion is on!"
+    assert policy.disclosure({"text": "Did you know this meeting is being recorded? Stay to agree to it.", "buttons": ["OK"]}) == "Did you know this meeting is being recorded?"
+    assert policy.disclosure({"text": "Welcome to the call? This meeting is being transcribed! Enjoy.", "buttons": ["OK"]}) == "This meeting is being transcribed!"
+    # a full stop still ends a sentence as it did, with its own full stop; one with no mark at the end gets one
+    assert policy.disclosure({"text": "This meeting is being recorded. Your host may share it.", "buttons": ["OK"]}) == "This meeting is being recorded."
+    assert policy.disclosure({"text": "AI Companion is on", "buttons": ["OK"]}) == "AI Companion is on."
+    # a mark inside a word or a number is not the end of a sentence: it needs a space after it
+    assert policy.disclosure({"text": "Zoom AI is on at v1.5 and e.g.in 3.5 hours", "buttons": ["OK"]}) == "Zoom AI is on at v1.5 and e.g.in 3.5 hours."
+    # a stop is still judged by its own sentence, whichever mark ends it
+    assert policy.disclosure({"text": "Recording has stopped! This meeting is being recorded again?", "buttons": ["OK"]}) == "This meeting is being recorded again?"
+    assert policy.disclosure({"text": "The recording has stopped! Anyone may view it.", "buttons": ["OK"]}) == ""
+
+
+def test_a_sentence_of_the_bridges_longest_text_is_kept_whole_for_the_table_to_cut_short():
+    """The bridge sends 400 characters at most. One sentence of them (a "!" is no stop) is the line: the page clamps it to two lines and keeps the
+    whole of it as the line's tooltip."""
+    sentence = ("Zoom AI is on and the host has turned on AI Companion for this meeting and anyone who stays agrees to it " * 4)[:399] + "!"
+    assert len(sentence) == 400
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).disclosure({"text": sentence, "buttons": ["OK"]}) == sentence
 
 
 @pytest.mark.parametrize("words", [
@@ -1435,6 +1488,23 @@ class TestControlsAndDialogs:
             assert ["dialog", "Recording consent", "Got it"] in await provider._page.evaluate("window.__zoomCalls")
             assert await eventually(lambda: not provider._dialogs and not provider._on_screen)      # the page's own word that it closed changes nothing more
             assert info.dialog is None
+        finally:
+            await shutdown(provider)
+
+    async def test_a_notice_whose_one_button_leaves_the_meeting_waits_on_the_table_and_is_never_pressed_by_the_room(self):
+        """The whole-branch review's hole, through the provider and the stub's page: the words are on the default list and the notice has one button, which
+        is Leave Meeting. It is not pressed (the room would walk out of its own meeting by policy), no line says all is well, and a tap on the table, which
+        is a person's own, presses it."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded. By staying you agree to it.', ['Leave Meeting'])")
+            assert await eventually(lambda: info.dialog)
+            assert info.dialog["buttons"] == ["Leave Meeting"] and info.notice == ""
+            await asyncio.sleep(1.5)                                                     # longer than the second the provider keeps between its own presses
+            assert await dialog_presses(provider) == [] and provider.state == MeetingState.CONNECTED
+            assert await provider.control("dialog", {"id": info.dialog["id"], "button": "Leave Meeting"}) == {"dialog": None}
+            assert ["dialog", "Recording consent", "Leave Meeting"] in await provider._page.evaluate("window.__zoomCalls")
         finally:
             await shutdown(provider)
 

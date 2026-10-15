@@ -326,6 +326,7 @@ def test_guide_describes_the_meeting_screen_its_rows_sub_screens_dialog_card_and
         "Mute all", "Ask all to unmute", "Start recording", "Lock meeting", "End meeting for everyone",
         "each goes back to the meeting screen on its own after two idle minutes; Camera and Upcoming meetings stay where you leave them",
         "A line under the meeting's title says what the meeting has disclosed of itself",
+        "It is two lines at most, and a longer one is cut short with an ellipsis",
         "A Zoom dialog that waits for a tap is a card above the controls, with Zoom's own words and buttons in Zoom's order, the last one highlighted",
         "The card's buttons carry no icons",
         "Leave, Remove and End meeting for everyone ask for a second tap: Tap again to leave, Tap again to remove, Tap again to end",

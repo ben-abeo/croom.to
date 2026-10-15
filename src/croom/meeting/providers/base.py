@@ -132,13 +132,21 @@ def controls_from(reading: Dict[str, Any], reactions: List[str]) -> Dict[str, An
 
 class DialogPolicy:
     """What the agent does with a dialog Zoom draws over the TV (spec 2026-10-13, section 5), in one place: a notice with a single button
-    whose words are on the list is pressed at once and kept on the table as a line; any other dialog, and every dialog when
-    ask_everything is set, waits for a tap on the table."""
+    whose words are on the list is pressed at once and kept on the table as a line, unless that button leaves or ends the meeting
+    (NEVER_PRESSED); any other dialog, and every dialog when ask_everything is set, waits for a tap on the table."""
 
     # Notices that say a state changed, which is read from Zoom again once the notice is gone: the room's own mute (the Mute button shows
     # it), and a recording or a transcript that stopped (what the meeting disclosed stays as it was). They add no line under the title.
     STATE_ONLY = ("has been muted", "has been unmuted", "have been muted", "have been unmuted",
                   "recording has stopped", "transcription has stopped")
+
+    # Buttons that are never pressed for the room, whatever the notice around them says: one that leaves or ends the meeting (Leave, Leave Meeting, End,
+    # End Meeting, Exit, Quit), found as a whole word of its label, in any case. A notice whose only button is one of them would walk the room out of its
+    # own meeting by policy, and the line under the title would say all was well. It waits on the table instead, where a person taps it or not.
+    NEVER_PRESSED = ("leave", "end", "exit", "quit")
+
+    # Where a sentence of a notice ends: a full stop, an exclamation mark or a question mark, and the space after it.
+    SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
 
     def __init__(self, acknowledge: List[str], ask_everything: bool = False):
         # A blank phrase is in every text, and a bare word is one phrase, not the letters it is spelt with.
@@ -150,11 +158,18 @@ class DialogPolicy:
     def _words(dialog: Dict[str, Any]) -> str:
         return f"{dialog.get('title') or ''} {dialog.get('text') or ''}".lower()
 
+    @classmethod
+    def _never_pressed(cls, label: Any) -> bool:
+        """The button leaves or ends the meeting: one of NEVER_PRESSED is a whole word of its label ("Weekend" holds "end", and is not one)."""
+        return any(word in cls.NEVER_PRESSED for word in re.findall(r"[a-z0-9]+", str(label).lower()))
+
     def decide(self, dialog: Dict[str, Any]) -> str:
         """'acknowledge' or 'ask'."""
         buttons = dialog.get("buttons") or []
         if self.ask_everything or len(buttons) != 1:
             return "ask"    # a dialog with a choice in it is never answered for the room
+        if self._never_pressed(buttons[0]):
+            return "ask"    # nor is a notice whose one button leaves or ends the meeting
         words = self._words(dialog)
         return "acknowledge" if any(p in words for p in self.acknowledge) else "ask"
 
@@ -173,9 +188,10 @@ class DialogPolicy:
         """The sentence the table keeps for an acknowledged notice: the first that holds a phrase of the list (what the notice is about:
         recorded, transcribed, AI Companion) without only saying that a state changed, else the first; empty when the one chosen only says
         a state changed. A stop is judged by its own sentence: the one beside it ("This meeting is being recorded again") may be what the
-        meeting discloses, and the stop must not take it away."""
+        meeting discloses, and the stop must not take it away. A sentence ends at a full stop, an exclamation mark or a question mark and the
+        space after it, and the line keeps the mark it ended with (a sentence with none, or a full stop, ends the line with a full stop)."""
         text = (dialog.get("text") or dialog.get("title") or "").strip()
-        sentences = [part.strip().rstrip(".") for part in text.split(". ")]
+        sentences = [part.strip().rstrip(".") for part in self.SENTENCE_END.split(text)]
         sentences = [sentence for sentence in sentences if sentence]
         if not sentences:
             return ""
@@ -185,7 +201,9 @@ class DialogPolicy:
             # No sentence names the notice but a state that changed (a stop, a mute, in whatever order): no line. When none names it at
             # all (the phrase was in the title), the first sentence, unless that only says a state changed.
             about = "" if named else sentences[0]
-        return "" if not about or self._only_a_state(about) else about + "."
+        if not about or self._only_a_state(about):
+            return ""
+        return about if about[-1] in "!?" else about + "."    # a sentence keeps the mark it ended with; one with none, or a full stop, ends with one
 
 
 class MeetingProvider(ABC):

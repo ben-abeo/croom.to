@@ -348,6 +348,8 @@ body.keyboard-open .schedule { display: none; }
 .button.tv-turn-on { flex: 0 0 auto; min-height: 40px; padding: 0 16px; font-size: 0.95rem; }
 .tv-words { margin: 0; line-height: 1.3; color: #FFD7D5; overflow-wrap: anywhere; }   /* wrapped, never cut: a refusal is what the person needs to read. Two lines of it and the line above fit the 64 px of Back, so the keys below do not move */
 .tv-words[hidden] { display: none; }
+.button.tv-forget-head { flex: 0 0 136px; min-height: 40px; padding: 0 12px; font-size: 0.95rem; text-align: center; }   /* the width of "Forget TV" with its picture; "Tap again to forget the TV" wraps onto two lines in it */
+.button.tv-forget-head.danger { padding: 0 8px; line-height: 1.15; }
 
 /* The remote: the top keys, the d-pad with the numbers, and the row the pointer modes will have. A press is never a selection or a callout. */
 .tv-remote { display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr) auto; gap: 16px; min-height: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
@@ -363,6 +365,7 @@ body.keyboard-open .schedule { display: none; }
 #tv-power.danger { font-size: 0.95rem; line-height: 1.15; padding: 0 8px; }   /* the longer line, "Tap again to", is 97 px of the 109 that are left */
 .tv-group { display: flex; align-items: center; gap: 10px; }
 .tv-group + .tv-group { margin-left: 14px; }
+.tv-group #tv-mute { flex: 0 0 143px; }   /* the width of "Unmute" with its picture: the volume keys beside it do not move when the sound is switched */
 .tv-label { color: var(--periwinkle-300); font-size: 0.95rem; margin-right: 2px; }
 .tv-level { min-width: 58px; text-align: center; font-size: 1.35rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .tv-level.muted { opacity: 0.5; }   /* the level is there, and the sound is not */
@@ -380,7 +383,7 @@ body.keyboard-open .schedule { display: none; }
 /* The middle: the d-pad on the left, the numbers on the right; the columns start and end together. */
 .tv-middle { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; min-height: 0; }
 .tv-left, .tv-right { display: flex; flex-direction: column; align-items: center; justify-content: space-between; gap: 18px; min-height: 0; padding: 4px 0; }
-.tv-dpad { position: relative; width: 300px; height: 300px; flex: 0 0 auto; touch-action: manipulation; }
+.tv-dpad { position: relative; flex: 0 1 300px; aspect-ratio: 1; min-height: 180px; touch-action: manipulation; }   /* 300 px at 1280 by 800; a shorter column makes it smaller, and the nav row stays under it instead of running into the row below */
 .tv-disc { display: block; width: 100%; height: 100%; overflow: visible; }
 .tv-sector { fill: var(--tray); stroke: var(--line); stroke-width: 2; cursor: pointer; outline: none; }
 .tv-sector:active { fill: var(--navy-800); }   /* the sector lights while it is pressed */
@@ -402,13 +405,15 @@ body.keyboard-open .schedule { display: none; }
 .tv-ok:focus-visible { outline: 3px solid var(--periwinkle-300); outline-offset: 2px; }
 .tv-ok.refused { border-color: var(--warn-bar); }
 .tv-nav { display: flex; gap: 10px; }
+.tv-nav .button { padding: 0 clamp(14px, calc(5.8vw - 43px), 26px); }   /* 543 px of row at 26 px of padding; the column is 480 px at 1024 wide and 559 at 1190 */
 
-.tv-numbers { display: grid; grid-template-columns: repeat(3, 84px); gap: 10px; }
-.view[data-view="tv"] .tv-numbers .button { min-height: 56px; padding: 0; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
+.tv-numbers { display: grid; grid-template-columns: repeat(3, 84px); grid-template-rows: repeat(4, minmax(0, 1fr)); gap: 10px; flex: 0 1 254px; min-height: 190px; }
+.view[data-view="tv"] .tv-numbers .button { min-height: 0; padding: 0; font-size: 1.25rem; font-variant-numeric: tabular-nums; }
 .view[data-view="tv"] .tv-numbers .tv-go { font-size: 1.05rem; }
-.tv-play { display: flex; align-items: center; gap: 34px; }
-.tv-transport, .tv-colours { display: flex; align-items: center; gap: 10px; }
-.view[data-view="tv"] .button.tv-colour { width: 52px; min-height: 52px; padding: 0; }
+.tv-play { display: flex; align-items: center; justify-content: center; gap: 34px; width: 100%; }   /* the whole column, so that the keys are 57 and 52 px wide when it has room, and fewer when it has not */
+.tv-transport, .tv-colours { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.tv-transport .button.tv-key { flex: 0 1 57px; min-width: 40px; padding: 0; }
+.view[data-view="tv"] .button.tv-colour { flex: 0 1 52px; min-width: 40px; min-height: 52px; padding: 0; }
 .tv-colour i { display: block; width: 16px; height: 16px; border-radius: 50%; }
 .tv-colour.red i { background: #E5484D; }
 .tv-colour.green i { background: #1FA971; }
@@ -442,7 +447,9 @@ body.keyboard-open .schedule { display: none; }
   .tv-inputs { flex-wrap: wrap; }
   .tv-inputs .tv-spacer { display: none; }
   .tv-middle { grid-template-columns: 1fr; gap: 24px; }
-  .tv-dpad { width: min(300px, 100%); height: auto; aspect-ratio: 1; }
+  .tv-dpad { flex: none; width: min(300px, 100%); height: auto; aspect-ratio: 1; min-height: 0; }
+  .tv-numbers { flex: none; min-height: 0; }
+  .view[data-view="tv"] .tv-numbers .button { min-height: 56px; }
   .tv-nav, .tv-play { flex-wrap: wrap; justify-content: center; }
   .tv-play { gap: 12px 24px; }
   .tv-modes { min-height: 0; }

@@ -164,6 +164,7 @@
         <p class="tv-line"><span id="tv-facts" class="tv-facts"></span><button type="button" id="tv-turn-on" class="button quiet tv-turn-on" data-icon="power" hidden>Turn on</button></p>
         <p id="tv-words" class="tv-words" role="status" hidden></p>
       </div>
+      <button type="button" id="tv-forget-head" class="button quiet tv-forget-head" data-icon="x-circle" hidden>Forget TV</button>
     </div>
 
     <div id="tv-remote" class="tv-remote" hidden>
@@ -178,7 +179,7 @@
           <button type="button" class="button quiet tv-key" data-tv="volume_down" aria-label="Volume down"><span class="tv-sign">&minus;</span></button>
           <span id="tv-level" class="tv-level" aria-live="polite">&ndash;</span>
           <button type="button" class="button quiet tv-key" data-tv="volume_up" aria-label="Volume up"><span class="tv-sign">+</span></button>
-          <button type="button" id="tv-mute" class="button quiet" data-tv="mute" data-icon="volume-x" aria-pressed="false">Mute</button>
+          <button type="button" id="tv-mute" class="button quiet" data-tv="mute" data-icon="volume" aria-pressed="false">Mute</button>
         </div>
         <div class="tv-group" role="group" aria-label="Channel">
           <span class="tv-label">Channel</span>
@@ -241,6 +242,7 @@
               <button type="button" class="button quiet tv-key" data-tv="key:REWIND" data-icon="rewind" aria-label="Rewind"></button>
               <button type="button" class="button quiet tv-key" data-tv="key:PLAY" data-icon="play" aria-label="Play"></button>
               <button type="button" class="button quiet tv-key" data-tv="key:PAUSE" data-icon="pause" aria-label="Pause"></button>
+              <button type="button" class="button quiet tv-key" data-tv="key:STOP" data-icon="stop" aria-label="Stop"></button>
               <button type="button" class="button quiet tv-key" data-tv="key:FASTFORWARD" data-icon="fast-forward" aria-label="Fast forward"></button>
             </div>
             <div class="tv-colours" role="group" aria-label="Colour keys">
@@ -266,7 +268,7 @@
         <p class="tv-found-label"></p>
         <ul class="tv-found-list"></ul>
       </div>
-      <p class="tv-hint">To set one up, put its address in <code>tv.host</code> (and its MAC address in <code>tv.mac</code>, so that the table can turn it on) in <code>/etc/croom/config.yaml</code>, set <code>tv.enabled</code> to <code>true</code>, then restart the agent.</p>
+      <p class="tv-hint">To set one up, put its address in <code>tv.host</code> (and its MAC address in <code>tv.mac</code>, so that the table can turn it on) in <code>/etc/croom/config.yaml</code> on the room's Pi, set <code>tv.enabled</code> to <code>true</code>, then restart the agent.</p>
     </section>
 
     <section id="tv-pairing" class="tv-card" hidden>
@@ -281,16 +283,17 @@
         <p class="tv-found-label"></p>
         <ul class="tv-found-list"></ul>
       </div>
-      <p class="tv-hint">To use a different TV, put its address in <code>tv.host</code> in <code>/etc/croom/config.yaml</code>, then restart the agent.</p>
+      <p class="tv-hint">To use a different TV, put its address in <code>tv.host</code> in <code>/etc/croom/config.yaml</code> on the room's Pi, then restart the agent.</p>
     </section>
 
     <section id="tv-refused" class="tv-card" hidden>
       <h2>Pair the TV again</h2>
-      <p>The TV no longer accepts this table: Forget TV, then Pair.</p>
-      <p>The TV shows a new request when you tap Pair. Accept it with the TV's own remote.</p>
+      <p id="tv-refused-text">The TV no longer accepts this table: Forget TV, then Pair.</p>
+      <p id="tv-refused-more">The TV shows a new request when you tap Pair. Accept it with the TV's own remote.</p>
       <div class="tv-card-actions">
         <button type="button" id="tv-forget" class="button quiet" data-icon="x-circle">Forget TV</button>
         <button type="button" id="tv-refused-pair" class="button primary" data-icon="tv">Pair</button>
+        <button type="button" id="tv-refused-cancel" class="button quiet" data-icon="x-circle" hidden>Cancel</button>
       </div>
     </section>
   </section>

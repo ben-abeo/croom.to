@@ -3,9 +3,11 @@ The README explains how to set up and develop Crystal Meet, points at both
 guides, and links every design spec and implementation plan.
 """
 
+import logging
 from pathlib import Path
 
-from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, load_config
+from croom.meeting.providers.base import DialogPolicy, controls_from
 
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "README.md"
@@ -157,11 +159,76 @@ def test_readme_names_the_dialog_policys_and_the_reactions_defaults_as_the_code_
     for needle in (
         "| `meeting.dialogs` | `acknowledge`, `ask_everything` |",
         "`ask_everything: true` (default `false`) makes every dialog wait for a tap",
-        "A value that is not a list (or an `ask_everything` that is not true or false) is replaced by its default, and an unknown key under `dialogs:` or `controls:` is ignored, each with a warning in the journal; nothing outside those two sections is read so gently",
         "| `meeting.controls` | `reactions` |",
-        "(shown on the table as Thumbs up, Clap, Heart, Laugh, Wow and Celebrate)",
+        "(shown on the table as Thumbs up, Clap, Heart, Laugh, Wow and Celebrate); `reactions: []` offers none, and the **Reactions** button is not drawn",
     ):
         assert needle in text, needle
+
+
+def test_readme_says_exactly_what_the_config_loader_does_with_a_mistake_and_the_sentences_are_what_it_does(tmp_path, caplog, capsys):
+    """The config row's leniency sentences, one claim at a time, against `load_config` itself: which mistakes are answered with a warning and which are
+    not, what each gives, and what an unknown key anywhere else costs."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "A mistake under `dialogs:` or `controls:` costs only its own setting, with a warning in the journal: a value that is not a list (`acknowledge: no`, which YAML reads as false) is replaced by its default; an `ask_everything` that is not true or false is read as false (the words yes, no, on and off, in quotes, are read as they say); an unknown key is ignored; a section that is not a set of settings gives the defaults.",
+        "Without a warning: a bare word is a one-item list, a setting with nothing after it takes its default, and `acknowledge: []` acknowledges nothing, so every dialog waits.",
+        "Anywhere else in the file an unknown key makes the agent set the whole file aside (it prints `Warning: Failed to load config from ...`) and start on its built-in defaults.",
+    ):
+        assert needle in text, needle
+    caplog.set_level(logging.WARNING, logger="croom.core.config")
+
+    def loaded(body):
+        caplog.clear()
+        (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+        return load_config(str(tmp_path / "config.yaml")), [r.getMessage() for r in caplog.records]
+
+    # each answered with a warning, and with what the sentence says it gives
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge: no\n")
+    assert config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE and len(said) == 1 and "should be a list, not False" in said[0]
+    config, said = loaded("meeting:\n  dialogs:\n    ask_everything: maybe\n")
+    assert config.meeting.dialogs.ask_everything is False and len(said) == 1 and "should be true or false" in said[0]
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledg: [x]\n    ask_everything: true\n")
+    assert config.meeting.dialogs.ask_everything is True and config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE      # the key is ignored, the rest is read
+    assert len(said) == 1 and "ignoring acknowledg" in said[0]
+    config, said = loaded("meeting:\n  controls: reactions\n")
+    assert config.meeting.controls.reactions == DEFAULT_REACTIONS and len(said) == 1 and "should be a mapping of settings" in said[0]
+    for word, value in (("yes", True), ("no", False), ("on", True), ("off", False)):                 # the quoted words are read as they say, and without a warning
+        config, said = loaded(f"meeting:\n  dialogs:\n    ask_everything: '{word}'\n")
+        assert config.meeting.dialogs.ask_everything is value and said == [], word
+    # each answered without one
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge: recording\n")
+    assert config.meeting.dialogs.acknowledge == ["recording"] and said == []
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge:\n  controls:\n    reactions:\n")
+    assert config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE and config.meeting.controls.reactions == DEFAULT_REACTIONS and said == []
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge: []\n    ask_everything:\n  controls:\n    reactions: []\n")
+    assert config.meeting.dialogs.acknowledge == [] and config.meeting.dialogs.ask_everything is False and config.meeting.controls.reactions == [] and said == []
+    notice = {"title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]}
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(notice) == "acknowledge" and DialogPolicy(config.meeting.dialogs.acknowledge).decide(notice) == "ask"   # [] acknowledges nothing
+    reading = {"buttons": {"reactions": {}}}                                                           # `reactions: []` offers none, so the Reactions button has nothing to open
+    assert controls_from(reading, DEFAULT_REACTIONS)["reactions"]["available"] is True and controls_from(reading, config.meeting.controls.reactions)["reactions"]["available"] is False
+    # anywhere else an unknown key costs the whole file: the loader says so on its output, and the file's other settings are lost with it
+    capsys.readouterr()
+    config, said = loaded("meeting:\n  platfroms: [zoom]\n  dialogs:\n    ask_everything: true\n")
+    assert "Warning: Failed to load config from" in capsys.readouterr().out
+    assert config.meeting.dialogs.ask_everything is False and config.room.name == "Conference Room"
+
+
+def test_the_notices_the_readme_says_disclose_nothing_are_the_ones_the_policy_treats_so():
+    """"Except that a notice which only says a state changed ... discloses nothing": the three phrases it names are the policy's own state-only ones, and
+    a notice with one of them as its only sentence has no line, where one that says what the meeting is doing has its sentence."""
+    text = README.read_text(encoding="utf-8")
+    assert "except that a notice which only says a state changed (`has been muted`, `has been unmuted`, `recording has stopped`) refreshes the state and discloses nothing" in text
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    for phrase in ("has been muted", "has been unmuted", "recording has stopped"):
+        assert phrase in DEFAULT_ACKNOWLEDGE and phrase in DialogPolicy.STATE_ONLY, phrase
+        assert policy.disclosure({"text": f"Your microphone {phrase}.", "buttons": ["OK"]}) == "", phrase
+    assert policy.disclosure({"text": "This meeting is being recorded.", "buttons": ["OK"]}) == "This meeting is being recorded."
+
+
+def test_readme_says_the_dialog_cards_buttons_are_the_one_exception_to_an_icon_on_every_button():
+    text = README.read_text(encoding="utf-8")
+    assert "a Lucide icon before the label of every button but the dialog card's (whose labels are Zoom's own words)" in text
+    assert "a Lucide icon on every button," not in text
 
 
 def test_readme_lists_the_meeting_routes_and_says_who_can_read_the_status():

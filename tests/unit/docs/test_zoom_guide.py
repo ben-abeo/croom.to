@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
+from croom.meeting.providers.base import DialogPolicy
 
 REPO = Path(__file__).resolve().parents[3]
 GUIDES = REPO / "docs" / "guides"
@@ -136,6 +137,8 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
     text = visible_text(html)
     for phrase in DEFAULT_ACKNOWLEDGE + DEFAULT_REACTIONS:
         assert f'<span class="chip">{phrase}</span>' in html, phrase                       # the code's own lists, so the guide cannot drift from them
+    for phrase in ("has been muted", "has been unmuted", "recording has stopped", "transcription has stopped"):
+        assert phrase in DialogPolicy.STATE_ONLY, phrase                                    # the notices the guide says add nothing to the line are the policy's own
     for needle in (
         "A dialog with exactly one button whose title or words contain one of the phrases under dialogs › acknowledge in the room's config (in any case) is pressed at once",
         "Every other dialog (more than one button, or words that are not on the list, such as the host asking the room to unmute) shows on the table as a card above the controls",
@@ -146,17 +149,62 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
         "a notice that only says a state changed (has been muted, has been unmuted, recording has stopped, transcription has stopped) adds nothing to the line",
         "transcription has stopped is not on the default list, so it waits on the table until someone taps it; add it to the list to have it pressed at once",
         "A notice whose button the room cannot press is not left on the TV with nobody to answer it: it waits on the table like any other dialog",
-        "a value under dialogs: or controls: that is not a list (for example reactions: no, which YAML reads as false) is replaced by the default",
-        "nothing outside dialogs: and controls: is treated so gently",
+        "A mistake under dialogs: or controls: costs only its own setting, with a warning in the journal: a value that is not a list (acknowledge: no, which YAML reads as false) is replaced by its default; an ask_everything that is not true or false is read as false (the words yes, no, on and off, in quotes, are read as they say); an unknown key is ignored; a section that is not a set of settings gives the defaults.",
+        "Without a warning: a bare word is a one-item list, a setting with nothing after it takes its default, and acknowledge: [] acknowledges nothing, so every dialog waits.",
+        "Anywhere else in the file an unknown key makes the agent set the whole file aside (it prints Warning: Failed to load config from ...) and start on its built-in defaults.",
         "A room installed before this release has no such lines and runs the defaults",
     ):
         assert needle in text, needle
 
 
+# What a meeting meets, in the order it meets it: the leads of the inventory's numbered checks.
+INVENTORY = [
+    "The join.", "The footer.", "The Reactions picker.", "The View menu.", "A recording banner.", "The consent dialog.", "The host's request to unmute.",
+    "A raised hand.", "A person in the waiting room.", "The AI Companion notice.", "A breakout invitation.", "A modal with no words.", "Chat and its clock.",
+    "Recording from the Host screen.", "A rename.", "The host's calls and the SDK's own words.", "The room's own record.", "Leave.",
+]
+
+
+def test_zoom_guide_numbers_the_inventory_checks_in_the_order_a_meeting_meets_them_on_a_page_of_their_own():
+    """The inventory starts on a fresh page, says at its head that it is for the first real meeting and comes out once the labels are pinned, numbers its
+    checks in meeting order (the join, the client's labels and menus, the notices and dialogs, the roster, chat, the host's calls, the room's own record,
+    Leave), and ends with what to send back."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    head = html.index('<h3 class="sub lead">The inventory run for the first real meeting</h3>')
+    assert html[:head].rstrip().endswith('<div class="page-break"></div>')                    # a page of its own
+    assert re.search(r"ol\.checks > li::before \{[^}]*content: counter\(check\)", html)         # numbered
+    checks = html[head:html.index("</ol>", head)]
+    assert re.findall(r"<li><strong>(.*?)</strong>", checks) == INVENTORY
+    assert html.index("<strong>What to send back.</strong>") > html.index("</ol>", head)       # and it comes last, out of the numbering
+    text = visible_text(html[head:])
+    for needle in (
+        "This checklist is for the first real meeting a room joins on a device, and it comes out of this guide once the labels and wordings it collects are pinned in the code",
+        "The checks are numbered in the order a meeting meets them",
+    ):
+        assert needle in text, needle
+
+
+def test_zoom_guide_inventory_asks_for_what_spec_section_7_asks_for_and_what_the_code_does_not_yet_know():
+    """Spec section 7's five: a recording, AI Companion, the host asking the room to unmute, a hand raised by another participant, a breakout room; and the
+    hand's field name, which is unconfirmed."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    checks = visible_text(html[html.index('<ol class="checks">'):html.index("</ol>", html.index('<ol class="checks">'))])
+    for needle in (
+        "Have the second person start a recording: its real title and words appear in dialogs_seen",
+        "Have the host turn on AI Companion: the notice's real title and words appear in dialogs_seen",
+        "The default list holds AI Companion and Zoom AI is on: with one button it should be pressed at once and its sentence should stay under the meeting's title; with two buttons, or words the list does not hold, it waits on the table as a card",
+        "Have the host ask the room to unmute. Zoom draws a dialog with a choice, whose words are not on the acknowledge list, so it should wait on the table as a card with Zoom's own buttons",
+        "Have the second person raise a hand: in meeting › participants the person shows hand: true and the Participants screen marks them Hand raised",
+        "The device reads an attendee's hand from raiseHand, bRaiseHand or bHandRaised, and which of them Zoom really uses is not confirmed: attendee_keys shows it",
+        "Have the host open breakout rooms and invite the room: the invitation has a choice in it, so it should wait on the table as a card with Zoom's own buttons",
+    ):
+        assert needle in checks, needle
+
+
 def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_what_to_send_back():
     text = visible_text((GUIDE / "index.html").read_text(encoding="utf-8"))
     for needle in (
-        "were read from Zoom's 6.5.0 web client, not from a live meeting, so the first real meeting on a device is also an inventory",
+        "were read from Zoom's 6.5.0 web client, not from a live meeting, so that meeting is also an inventory",
         "Check that Chat and CC (closed captions) are among them",
         "a label with caption and show or hide (or closed caption)",
         "Speaker View, Gallery View and Hide Self View (Show Self View when hidden), the checked view having the class full-screen-widget__pop-menu--checked",
@@ -166,6 +214,7 @@ def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_wh
         "its real title and words appear in dialogs_seen",
         "the stop notice's real wording too",
         "the room should show a card with two buttons, Leave Meeting then Got it, with Got it highlighted",
+        "Double-tap Got it: the card answers once, and the second tap must not land on a control under it",
         "an entry with empty text; its label is the aria-label of the modal's root",
         "Zoom's record of a participant who is an assistant shows no userId and the name \"You are a assistant\"",
         "date -u",
@@ -173,7 +222,8 @@ def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_wh
         "Zoom did not start recording",
         "The microphone was not muted at join",
         "Zoom answers a participant's own rename with an error (neither host nor co-host) and then with success",
-        "Double taps",
+        "Then double-tap a reaction on the touchscreen: the row closes at the pick, and the second tap must land on nothing",
+        "Double-tap Leave quickly first: the second tap counts only half a second after the first, within five seconds, so a double tap confirms nothing",
         "Zoom did not confirm muteAll in time",
         "Zoom did not answer muteAll in time",
         "What to send back",

@@ -70,6 +70,8 @@ def test_meet_guide_says_what_a_meet_call_offers_from_the_table_and_how_to_confi
         "Meet's chat box has the keyboard; close it on the TV first",
         "\"Turn off microphone\", \"Turn on camera\", \"Raise hand\" and \"Turn on captions\"",
         "a Meet whose labels differ hides the control instead of pressing the wrong thing",
+        "The buttons are found by the labels the plan expects",
+        "(the pre-join labels were seen on a Pi; the in-call ones are confirmed at the first real call with the diagnostics)",
         "http://<device>:8080/api/meeting/diagnostics",
         "lists every label the page draws, what the room made of them and what has the keyboard",
         "check that Mute and Turn camera off each change in Meet with one tap on the table",
@@ -77,3 +79,4 @@ def test_meet_guide_says_what_a_meet_call_offers_from_the_table_and_how_to_confi
     ):
         assert needle in text, needle
     assert html.count('class="kicker">In the call<') == 1                                   # one paragraph, in its own box
+    assert "English labels Meet showed at the time of writing" not in text                    # the in-call labels were not seen: they are the plan's

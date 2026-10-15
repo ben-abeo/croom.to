@@ -1282,6 +1282,7 @@ class TestRoomSettings:
         """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
         class FullDisk:
             path = tmp_path / "control-settings.json"
+            held = {}
 
             def get(self, key, default=None):
                 return default
@@ -1289,12 +1290,16 @@ class TestRoomSettings:
             def save(self, key, value):
                 raise OSError(28, "No space left on device")
 
+            def hold(self, key, value):
+                self.held[key] = value
+
         service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
         client = await client_factory(service)
         response = await client.post("/api/settings", json={"sign_background": "capitol"})
         assert response.status == 200 and (await response.json())["sign_background"] == "capitol"
         assert (await self.read(client))["sign_background"] == "capitol"
-        assert "No space left on device" in caplog.text
+        assert "No space left on device" in caplog.text and [r.levelname for r in caplog.records].count("WARNING") == 1     # one WARNING, as before
+        assert FullDisk.held == {"sign_background": "capitol"}                    # and the store goes on with the choice, as the service does: what reads it from there follows
 
 
 class TestScoresInTheStatus:
@@ -1742,6 +1747,7 @@ class TestKeyClickSetting:
         """As the screensaver's choice does: the choice holds until the restart, and the log says why it will not last."""
         class FullDisk:
             path = tmp_path / "control-settings.json"
+            held = {}
 
             def get(self, key, default=None):
                 return default
@@ -1749,9 +1755,13 @@ class TestKeyClickSetting:
             def save(self, key, value):
                 raise OSError(28, "No space left on device")
 
+            def hold(self, key, value):
+                self.held[key] = value
+
         service = ControlService(config={"host": "127.0.0.1", "port": 0}, store=FullDisk())
         client = await client_factory(service)
         response = await client.post("/api/settings", json={"key_click": False})
         assert response.status == 200 and (await response.json())["key_click"] is False
         assert (await (await client.get("/api/status")).json())["settings"]["key_click"] is False
         assert "No space left on device" in caplog.text
+        assert FullDisk.held == {"key_click": False}

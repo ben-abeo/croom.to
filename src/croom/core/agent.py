@@ -174,6 +174,7 @@ class CroomAgent:
         the page and the scoreboard cannot disagree. Until a school is on it reads nothing from ESPN.
         """
         if settings_store is None:
+            logger.warning("Football scores not available: the room has no settings store, so the switches for the schools would do nothing")
             return None
         try:
             from croom.control.service import read_setting

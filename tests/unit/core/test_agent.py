@@ -3,6 +3,7 @@ Tests for croom.core.agent: service registration and startup without hardware.
 """
 
 import asyncio
+import logging
 import signal
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +12,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from croom.core.agent import CroomAgent
 from croom.core.config import Config
+from croom.control.settings import SettingsStore
 from croom.core.service import ServiceState
 from croom.scores import espn
 from tests.unit.scores.schedules import Feed
@@ -210,3 +212,31 @@ class TestScoresRegistration:
             assert feed.asked == [251]                                        # Texas's team id, and nobody else's
             entries = (await (await client.get("/api/status")).json())["scores"]
             assert [(e["school"], e["last"]["home_score"], e["last"]["away_score"]) for e in entries] == [("texas", 45, 42)]
+
+    async def test_a_school_switched_on_while_the_settings_file_cannot_be_written_is_still_read_until_the_restart(self, tmp_path, no_hardware, monkeypatch, caplog):
+        """The page's switch is answered and shown whether or not the choice reaches the disk, as the screensaver's is; the scoreboard reads the schools from the
+        store, so the store has to go on with it too, or the sign would say a school is on and show nothing, until a restart."""
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        scores, control = agent.service_manager.get_service("scores"), agent.service_manager.get_service("control")
+
+        def refuse(src, dst):
+            raise OSError(28, "No space left on device")
+
+        monkeypatch.setattr("croom.control.settings.os.replace", refuse)
+        async with TestClient(TestServer(control.create_app())) as client:
+            with caplog.at_level(logging.WARNING):
+                response = await client.post("/api/settings", json={"sign_scores": ["texas"]})
+            assert response.status == 200 and (await response.json())["sign_scores"] == ["texas"]
+        assert [entry["school"] for entry in scores.current()] == ["texas"]    # the scoreboard follows the switch
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING and "Could not save the room settings" in r.getMessage()]
+        assert len(warnings) == 1 and "No space left on device" in warnings[0]  # one WARNING, with the reason
+        assert SettingsStore(control._store.path).get("sign_scores") is None   # and the file has not got it: a restart does not either
+
+    def test_the_agent_says_so_when_the_scoreboard_cannot_be_had_for_want_of_a_settings_store(self, tmp_path, no_hardware, caplog):
+        """Without the store the school switches would do nothing: one WARNING says why there is no scoreboard, as the ImportError path says it."""
+        agent = make_agent(make_config(tmp_path, control=True))
+        with caplog.at_level(logging.WARNING, logger="croom.core.agent"):
+            assert agent._register_scores(None) is None
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1 and warnings[0].startswith("Football scores not available") and "settings store" in warnings[0], warnings

@@ -531,8 +531,11 @@ class ControlService(Service):
             for key, value in values.items():
                 self._store.save(key, value)
         except OSError as e:
-            # As the screensaver's choice: it holds until the restart, and the log says why it will not last.
+            # As the screensaver's choice: it holds until the restart, and the log says why it will not last. The store holds it too, so that what reads the
+            # choice from there (the scoreboard, for the schools) goes on with the page's and not with the one on the disk.
             logger.warning(f"Could not save the room settings to {self._store.path}: {e}")
+            for key, value in values.items():
+                self._store.hold(key, value)
         self._settings.update(values)
         logger.info(f"Room settings changed: {', '.join(f'{key} = {value}' for key, value in values.items())}")
         return web.json_response(self._settings_payload())

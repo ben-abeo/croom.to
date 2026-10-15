@@ -6,11 +6,11 @@
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
-  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera view
-  // belongs to whichever mode showed it, so its Back returns there.
-  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
+  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
+  // belong to whichever mode showed them, so their Back returns there.
+  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
-  const SUB_SCREENS = ["participants", "chat", "host"];   // the meeting screen's own: each with its Back, and back to the meeting screen after two idle minutes
+  const SUB_SCREENS = ["participants", "chat", "host", "tv"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
 
   const el = (id) => document.getElementById(id);
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
@@ -21,10 +21,11 @@
   // End meeting for everyone, and Remove on the row of the person with that key, have been asked about and wait for their second tap. errorOn: the
   // view the refusal in `error` was met on (a sub-screen says the refusals of its own controls, and not the meeting screen's).
   const model = { status: null, events: [], offline: false, busy: false, error: "", errorOn: "", confirmLeave: false, confirmEnd: false, confirmRemove: null,
-                  screensaver: null, lastLink: "", lastEvent: "", reactionsUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
-  const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
-  const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
+                  screensaver: null, settings: null, lastLink: "", lastEvent: "", reactionsUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
+  const renderHooks = [];   // devices.js and remote.js register their rendering here; render() calls each with the status
+  const viewHooks = [];     // devices.js, keyboard.js and remote.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
+  let tvMode = "idle";      // the mode that opened the TV view
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
   let passcodeCard = false;      // the last render showed the card for a join Zoom refused over the passcode: its landing happens once too
   let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
@@ -81,10 +82,11 @@
 
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
-  const viewMode = (name) => (name === "camera" ? cameraMode : VIEW_MODES[name]);
+  const viewMode = (name) => (name === "camera" ? cameraMode : name === "tv" ? tvMode : VIEW_MODES[name]);
 
   function applyView(name, automatic) {
     if (name === "camera") cameraMode = mode();
+    if (name === "tv") tvMode = mode();
     const was = view();
     document.body.dataset.view = name;
     if (was !== name) leftView(was);
@@ -107,14 +109,18 @@
 
   // Idle mode returns to the idle screen on its own: the kiosk never reloads and nobody presses Back, so a room left on
   // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns, except that the
-  // sub-screens opened from it (Participants, Chat, Host: glances, and the meeting screen is the one a room needs) go back to it after two minutes.
-  // Upcoming and Camera, opened from the same screen, are as they were: they stay.
+  // sub-screens opened from it (Participants, Chat, Host: glances, and the meeting screen is the one a room needs) and the TV view (the
+  // remote is a quick look in a call) go back to it after two minutes. Upcoming and Camera, opened from the same screen, are as they
+  // were: they stay. The full-screen touchpad (touchpad.js) holds the wait while it is up: a person moving the TV's cursor touches the
+  // surface, not the page, and the surface has a wait of its own; the page's begins again when it goes away.
   const IDLE_RETURN_MS = 10 * 60 * 1000;
   const MEETING_RETURN_MS = 2 * 60 * 1000;
   let idleReturnTimer = null;
+  let idleReturnHeld = false;
   function armIdleReturn() {
     clearTimeout(idleReturnTimer);
     idleReturnTimer = null;
+    if (idleReturnHeld) return;
     if (mode() === "idle" && view() !== "idle") idleReturnTimer = setTimeout(() => setView("idle", true), IDLE_RETURN_MS);
     else if (mode() === "meeting" && SUB_SCREENS.includes(view())) idleReturnTimer = setTimeout(() => setView("meeting", true), MEETING_RETURN_MS);
   }
@@ -128,11 +134,18 @@
   const bounced = (which) => Date.now() < askedAt[which] + ARMED_BOUNCE_MS;
   let lastEventsKey = null;
   let lastPickerKey = null;
+  let lastDoorSignKey = null;
   let lastUpcomingKey = null;
-  const deviceEpoch = { audio: 0, camera: 0, meeting: 0 };   // counts each device's answers, and the meeting's, so a poll already on its way cannot undo one
+  const deviceEpoch = { audio: 0, camera: 0, meeting: 0, tv: 0 };   // counts each device's answers, the meeting's and the TV's, so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
+
+  // The door sign's room settings (spec 2026-10-13): its backgrounds in the order the room page offers them, and the schools
+  // whose football scores it may show. The values are the service's keys; the labels are what the screen says.
+  const SIGN_BACKGROUNDS = [["skyline", "Austin skyline"], ["capitol", "Capitol"], ["tower", "UT Tower"], ["bridge", "Pennybacker Bridge"],
+    ["pool", "Hamilton Pool"], ["star", "Texas star"], ["hills", "Hill Country"], ["stadium", "DKR stadium"], ["plain", "Plain"]];
+  const SIGN_SCHOOLS = [["texas", "Texas"], ["michigan", "Michigan"], ["texas_am", "Texas A&M"], ["missouri", "Missouri"]];
 
   const platformNames = { zoom: "Zoom", google_meet: "Google Meet", teams: "Teams", webex: "Webex" };
   const platformName = (key) => platformNames[key] || key || "";
@@ -177,6 +190,7 @@
       model.status = status;
       model.offline = false;
       if (model.status.screensaver) model.screensaver = model.status.screensaver;
+      if (model.status.settings) model.settings = model.status.settings;
     } catch (e) {
       model.offline = true;
     }
@@ -308,6 +322,7 @@
   // The keyboard's key click is the room's setting (spec 2026-10-13, 3.3): the service keeps it, and every status carries it.
   const setKeyClick = (on) => act(() => post("/api/settings", { key_click: on }));
   const setScreensaver = (style) => act(() => post("/api/screensaver", { style: style }).then((data) => { model.screensaver = data.style; }));
+  const setSettings = (changes) => act(() => post("/api/settings", changes).then((data) => { model.settings = data; }));   // the answer is every setting
 
   // A press on a button leaves the focus where it is. On the kiosk the keys go when the field loses it: the page shrinks, the
   // button moves from under the finger before it lifts, and the tap is lost.
@@ -950,12 +965,14 @@
       renderMeetingScreen(null);
       renderSubScreens(null);   // the lists and their buttons go as the meeting screen's rows do: nothing is known of who is in the meeting, and a Remove could only fail
       document.querySelector(".screen-section").hidden = true;
+      document.querySelector(".door-section").hidden = true;
       document.querySelector(".sound-section").hidden = true;
       document.querySelector(".camera-section").hidden = true;
       document.querySelector(".keyboard-section").hidden = true;
       return;
     }
     document.querySelector(".screen-section").hidden = false;
+    document.querySelector(".door-section").hidden = false;
     document.querySelector(".sound-section").hidden = false;
     document.querySelector(".camera-section").hidden = false;
     document.querySelector(".keyboard-section").hidden = false;
@@ -1025,6 +1042,7 @@
     renderEvents(cal);
     renderKeyClick(s);
     renderPicker();
+    renderDoorSign();
     for (const fn of renderHooks) fn(s);
     guardLayoutShift();   // last: the Sound strip (devices.js) and the rest have moved the screen by now
     if (landing && kiosk && view() === "idle") focusPasscode();
@@ -1049,6 +1067,27 @@
       return b;
     });
     el("screen-picker").replaceChildren(...buttons);
+  }
+
+  // The door sign's two groups: one button per background (the one in use is pressed) and one switch per school (pressed when its
+  // score is on). A school's switch sends the whole list, in the service's order, with that school turned on or off.
+  function renderDoorSign() {
+    // Rebuilt only when a choice or availability changes, as the screensaver's picker is, so a tap is never lost to a re-render.
+    const key = JSON.stringify([model.settings, model.busy]);
+    if (key === lastDoorSignKey) return;
+    lastDoorSignKey = key;
+    const settings = model.settings || {};
+    const schools = settings.sign_scores || [];
+    const pressed = (b, on) => { b.setAttribute("aria-pressed", on ? "true" : "false"); return b; };
+    el("sign-picker").replaceChildren(...SIGN_BACKGROUNDS.map(([value, label]) => {
+      const current = settings.sign_background === value;
+      return pressed(button(label, current ? "primary" : "quiet", () => setSettings({ sign_background: value }), false), current);
+    }));
+    el("scores-picker").replaceChildren(...SIGN_SCHOOLS.map(([value, label]) => {
+      const on = schools.includes(value);
+      const list = SIGN_SCHOOLS.map(([school]) => school).filter((school) => (school === value ? !on : schools.includes(school)));
+      return pressed(button(label, on ? "primary" : "quiet", () => setSettings({ sign_scores: list }), false), on);
+    }));
   }
 
   function renderIdle(cal) {
@@ -1148,20 +1187,26 @@
   el("open-camera-setup").addEventListener("click", () => setView("camera"));
   el("open-screensaver").addEventListener("click", () => setView("screensaver"));
   el("back-from-screensaver").addEventListener("click", () => setView("options"));
+  el("open-door-sign").addEventListener("click", () => setView("door-sign"));
+  el("back-from-door-sign").addEventListener("click", () => setView("options"));
   el("back-from-camera").addEventListener("click", () => setView(cameraMode === "meeting" ? "meeting" : "options"));
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
   for (const name of ["participants", "chat", "host"]) el("back-from-" + name).addEventListener("click", () => setView("meeting"));
+  el("open-tv-options").addEventListener("click", () => setView("tv"));
+  el("open-tv-meeting").addEventListener("click", () => setView("tv"));
+  el("back-from-tv").addEventListener("click", () => setView(tvMode === "meeting" ? "meeting" : "options"));
   el("key-click-on").addEventListener("click", () => setKeyClick(true));
   el("key-click-off").addEventListener("click", () => setKeyClick(false));
 
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,
-    iconsReady: iconsReady, icon: icon, labelWithIcon: labelWithIcon,
+    iconsReady: iconsReady, icon: icon, labelWithIcon: labelWithIcon, keepFocus: keepFocus, CONFIRM_MS: CONFIRM_MS,
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING, submitForm: submitForm,
     view: view, setView: setView, mode: mode, cameraMode: () => cameraMode, kiosk: kiosk,
     onViewChange: (fn) => viewHooks.push(fn),
+    holdIdleReturn: (held) => { idleReturnHeld = Boolean(held); armIdleReturn(); },
     // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
     // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.
     onRender: (fn) => { renderHooks.push(fn); if (model.status && !model.offline) fn(model.status); },

@@ -31,6 +31,14 @@ class SettingsStore:
     def get(self, key: str, default: Any = None) -> Any:
         return self._data.get(key, default)
 
+    def hold(self, key: str, value: Any) -> None:
+        """Remember one key in memory without writing it: what a choice of the room page that could not be saved goes on with until the service restarts.
+
+        What reads the choice from the store (the scoreboard reads the schools from it) follows it as the page does, and the next save of any key writes it
+        with the rest. The camera's home is not held this way: a save of it that fails is the caller's to know, and not carried by a later one.
+        """
+        self._data[key] = value
+
     def save(self, key: str, value: Any) -> None:
         """Set one key and write the whole file atomically, mode 600.
 

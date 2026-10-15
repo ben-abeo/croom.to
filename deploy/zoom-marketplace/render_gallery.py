@@ -125,10 +125,12 @@ class Screen:
 
 
 def clock_shows_now(page) -> None:
-    """The TV redraws its clock every ten seconds; wait until it shows the scene's time."""
+    """The TV redraws its clock every ten seconds; wait until it shows the scene's time, written as the pages write it (12-hour,
+    with a no-break space before AM or PM, so that a time never splits across lines)."""
     page.wait_for_function(
         "document.getElementById('clock').textContent === "
-        "new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })", timeout=15000)
+        "new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })"
+        ".replace(/\\s+(?=[AP]M$)/, '\\u00A0')", timeout=15000)
 
 
 def settle(page) -> None:
@@ -195,6 +197,7 @@ def main() -> None:
         sign = table.new_page(GALLERY)
         sign.goto(f"http://127.0.0.1:{server.port}/sign", wait_until="networkidle")
         sign.wait_for_function("document.body.dataset.state === 'occupied'", timeout=8000)
+        sign.wait_for_function("document.body.dataset.photo === 'skyline'", timeout=8000)  # the photograph is drawn once it has decoded
         shoot(sign, "gallery-5-door-sign.png")
         browser.close()
 

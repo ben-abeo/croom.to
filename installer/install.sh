@@ -29,6 +29,9 @@ CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"
 ROOM_CONFIG=""
 CREDENTIALS_FILE=""
 ZOOM_CREDENTIALS_FILE=""
+# Where the touchpad's virtual mouse is given to the input group, and where the module that makes it is set to load at boot
+UDEV_RULES_DIR="${UDEV_RULES_DIR:-/etc/udev/rules.d}"
+MODULES_LOAD_DIR="${MODULES_LOAD_DIR:-/etc/modules-load.d}"
 
 # Log function
 log() {
@@ -112,11 +115,15 @@ install_dependencies() {
     fi
     log "Using browser package: $CHROMIUM_PKG"
 
-    # Core dependencies
+    # Core dependencies (python3-dev, gcc and libc6-dev: evdev, which makes the room Pi's virtual mouse, has no wheel: pip compiles it, and
+    # its build reads the kernel's headers, which libc6-dev brings and gcc only recommends)
     apt-get install -y \
         python3 \
         python3-pip \
         python3-venv \
+        python3-dev \
+        gcc \
+        libc6-dev \
         "$CHROMIUM_PKG" \
         pulseaudio \
         libpulse0 \
@@ -153,6 +160,30 @@ install_dependencies() {
 create_user() {
     log "Preparing user $CROOM_USER..."
     usermod -a -G video,audio,input,dialout,gpio "$CROOM_USER" 2>/dev/null || true
+}
+
+# The touchscreen's touchpad can move the room Pi's own mouse: the agent makes a virtual one on /dev/uinput (evdev). The device is the
+# input group's to open, and the module that provides it is loaded at every boot.
+write_uinput_rules() {
+    mkdir -p "$UDEV_RULES_DIR" "$MODULES_LOAD_DIR"
+    cat > "$UDEV_RULES_DIR/99-croom-uinput.rules" << 'EOF'
+# Crystal Meet: the touchpad's virtual mouse on the room Pi is made on /dev/uinput, which the input group may use
+KERNEL=="uinput", GROUP="input", MODE="0660"
+EOF
+    echo "uinput" > "$MODULES_LOAD_DIR/croom-uinput.conf"
+}
+
+# Set the virtual mouse up: the rule and the module at boot (write_uinput_rules), the agent's user in the input group, and the
+# module loaded now with the rule in force, so that the touchpad works without a reboot
+install_virtual_mouse() {
+    log "Setting up the room Pi's virtual mouse..."
+    write_uinput_rules
+    # create_user adds this group too, but its one usermod fails as a whole, and silently, where any group it names does not exist
+    # (a PC has no gpio group)
+    usermod -aG input "$CROOM_USER" || warn "Could not add $CROOM_USER to the input group: the touchpad cannot move the room Pi's mouse"
+    udevadm control --reload-rules || true
+    modprobe uinput || warn "The uinput module could not be loaded now: the touchpad cannot move the room Pi's mouse until it is (it is set to load at boot)"
+    udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
 }
 
 # Create directory structure
@@ -221,6 +252,8 @@ room:
   name: "Conference Room"
   location: ""
   timezone: "UTC"
+  # The practice's name beside the logo on the door sign; "" shows the logo alone.
+  company: "Crystal Practice Management"
 
 meeting:
   platforms:
@@ -538,6 +571,7 @@ main() {
     check_desktop_user
     check_platform
     create_user
+    install_virtual_mouse
     create_directories
     install_dependencies
     install_croom
@@ -596,6 +630,15 @@ run_installer() {
                 echo ""
                 echo "Environment:"
                 echo "  CROOM_REPO      pip source to install (default: this fork on GitHub)"
+                echo ""
+                echo "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev, gcc and libc6-dev, which the install adds):"
+                echo "  a udev rule that gives /dev/uinput to the input group, the uinput module at boot, and the desktop user in the input group."
+                echo "  To redo only that step on a device that is already installed: sudo bash -c 'source installer/install.sh && install_virtual_mouse'"
+                echo ""
+                echo "Checks to run afterwards, as the desktop user the service runs as:"
+                echo "  $INSTALL_DIR/venv/bin/croom --check-calendar -c $CONFIG_DIR/config.yaml   the room's Google Calendar"
+                echo "  $INSTALL_DIR/venv/bin/croom --check-zoom -c $CONFIG_DIR/config.yaml       the Zoom credentials"
+                echo "  $INSTALL_DIR/venv/bin/croom --check-tv -c $CONFIG_DIR/config.yaml         the room's LG TV (with none set up, the LG TVs on the network)"
                 exit 0
                 ;;
             *)

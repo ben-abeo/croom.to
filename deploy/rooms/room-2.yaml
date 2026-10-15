@@ -49,6 +49,15 @@ control:
   host: "0.0.0.0"
   port: 8080
 
+# The room's LG TV, if it has one (the room guide's section The TV). Switched off until you set it up: set enabled to true, take the # off the
+# lines under it and put the TV's own address and MAC address in them. Keep this one block: a second tv: in the file would silently win.
+tv:
+  enabled: false
+  # host: "10.0.0.41"           # the TV's address (Options, then TV, then Find TVs on the table lists it)
+  # mac: "AA:BB:CC:DD:EE:FF"    # the TV's MAC address, in quotes; the device needs it even if the TV has Quick Start+
+  # pi_input: "HDMI_1"          # the TV input the room device is plugged into
+  # keep_on: true               # turn the TV on at start and before every join, and keep it on
+
 dashboard:
   enabled: true
   url: "http://REPLACE_WITH_DASHBOARD_ADDRESS:3001"

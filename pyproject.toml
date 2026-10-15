@@ -8,7 +8,7 @@ version = "2.0.0.dev0"
 description = "Enterprise video conferencing for Raspberry Pi"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 authors = [
     {name = "Croom Team", email = "croom@example.com"}
 ]
@@ -29,7 +29,6 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Conferencing",
@@ -45,6 +44,9 @@ dependencies = [
     "google-api-python-client>=2.100.0",
     "google-auth>=2.23.0",
     "google-auth-httplib2>=0.1.1",
+    "aiowebostv>=0.9",
+    "wakeonlan>=3.0",
+    "evdev>=1.6.0; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]
@@ -77,22 +79,26 @@ where = ["src"]
 include = ["croom*"]
 
 [tool.setuptools.package-data]
-croom = ["py.typed", "control/static/*", "control/static/fonts/*", "meeting/providers/zoom_sdk_page/*"]
+croom = ["py.typed", "control/static/*", "control/static/fonts/*", "control/static/backgrounds/*", "meeting/providers/zoom_sdk_page/*"]
 
 [tool.black]
 line-length = 100
-target-version = ["py310", "py311", "py312"]
+target-version = ["py311", "py312"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 select = ["E", "F", "W", "I", "UP", "B", "C4"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_ignores = true
 disallow_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = "evdev"
+ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

@@ -7,7 +7,7 @@ meeting lifecycle.
 
 import asyncio
 import logging
-from typing import Optional, Dict, Any, List, Callable
+from typing import Optional, Dict, Any, List, Callable, Awaitable
 
 from croom.core.config import Config
 from croom.core.service import Service
@@ -32,6 +32,8 @@ class MeetingService(Service):
     for joining and controlling meetings across platforms.
     """
 
+    BEFORE_JOIN_TIMEOUT_S = 30.0   # a before-join hook that takes longer than this is given up on, and the join goes on
+
     def __init__(self, config: Config, display: Optional[TvDisplay] = None):
         super().__init__("meeting")
         self.config = config
@@ -41,6 +43,11 @@ class MeetingService(Service):
         self._providers: Dict[str, MeetingProvider] = {}
         self._active_provider: Optional[MeetingProvider] = None
         self._state_callbacks: List[Callable[[MeetingState], None]] = []
+        # What the room does before a join (the TV is woken here), how many joins are waiting on it just now, and how many
+        # have gone on to ask their provider to join
+        self._before_join: List[Callable[[], Awaitable[Any]]] = []
+        self._preparing = 0
+        self._starting = 0
 
     async def start(self) -> None:
         """Start the TV display and the configured providers on it."""
@@ -107,6 +114,34 @@ class MeetingService(Service):
             except Exception:
                 pass
 
+    def add_before_join(self, hook: Callable[[], Awaitable[Any]]) -> None:
+        """Add something the room does before every join: `await hook()` runs first, and the join waits for it (the TV
+        service wakes the TV here, for up to fifteen seconds). A hook is a courtesy to the join, never a condition of it:
+        one that raises is logged, and so is one that answers False (it could not do what it set out to) and one that
+        takes longer than BEFORE_JOIN_TIMEOUT_S, and the join goes on."""
+        self._before_join.append(hook)
+
+    async def _run_before_join(self) -> None:
+        self._preparing += 1
+        try:
+            for hook in self._before_join:
+                name = getattr(hook, "__qualname__", None) or repr(hook)
+                try:
+                    if await asyncio.wait_for(hook(), self.BEFORE_JOIN_TIMEOUT_S) is False:
+                        logger.warning(f"Before-join hook {name} did not get what it wanted; joining anyway")
+                except asyncio.TimeoutError:
+                    logger.warning(f"Before-join hook {name} did not finish in {self.BEFORE_JOIN_TIMEOUT_S:g} s; joining anyway")
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise                                # the join itself was cancelled (a Leave): that is not a hook failing
+                    # a cancellation that came out of the hook (the TV library's, from a client cancelled earlier): it failed
+                    logger.warning(f"Before-join hook {name} was cancelled; joining anyway")
+                except Exception as e:  # noqa: BLE001 - a failing courtesy must not cost the room its meeting
+                    logger.warning(f"Before-join hook {name} failed ({e}); joining anyway")
+        finally:
+            self._preparing -= 1
+
     async def join_meeting(
         self,
         meeting_url: str,
@@ -119,7 +154,8 @@ class MeetingService(Service):
         Join a meeting.
 
         Automatically detects the platform from the URL and uses
-        the appropriate provider.
+        the appropriate provider. Once the link is known to be one this
+        room can join, the before-join hooks run (see add_before_join).
 
         Args:
             meeting_url: Meeting URL or code
@@ -161,18 +197,26 @@ class MeetingService(Service):
         if self._active_provider and self._active_provider.state == MeetingState.CONNECTED:
             await self.leave_meeting()
 
+        # What the room does first (the TV is woken, and the join waits for it): after the link is known to be one this
+        # room can join, so that a link that cannot be joined is not made to wait for a TV
+        await self._run_before_join()
+
         # Setup state callback
         provider.add_state_callback(self._on_state_change)
 
         # Join meeting
         self._active_provider = provider
-        meeting_info = await provider.join_meeting(
-            meeting_url,
-            display_name=display_name,
-            camera_on=camera_on,
-            mic_on=mic_on,
-            passcode=passcode
-        )
+        self._starting += 1             # (see state: a provider can take a while before it says that it is joining)
+        try:
+            meeting_info = await provider.join_meeting(
+                meeting_url,
+                display_name=display_name,
+                camera_on=camera_on,
+                mic_on=mic_on,
+                passcode=passcode
+            )
+        finally:
+            self._starting -= 1
 
         return meeting_info
 
@@ -233,8 +277,17 @@ class MeetingService(Service):
     @property
     def state(self) -> MeetingState:
         """Get current meeting state."""
+        if self._preparing:
+            # The join has begun and is waiting on the room (for the TV to come on). The room page draws from this: it
+            # must not show an idle room, and let the join be tapped again, for the fifteen seconds that can take.
+            return MeetingState.JOINING
         if self._active_provider:
-            return self._active_provider.state
+            state = self._active_provider.state
+            if self._starting and state == MeetingState.IDLE:
+                # The provider has been asked to join and has not said so itself yet (the Zoom provider waits for the TV's
+                # page first): the same, until it does
+                return MeetingState.JOINING
+            return state
         return MeetingState.IDLE
 
     @property

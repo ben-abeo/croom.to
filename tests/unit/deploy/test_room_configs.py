@@ -88,3 +88,25 @@ def test_git_ignores_real_zoom_credentials():
     for name in ("zoom-credentials.json", "deploy/rooms/zoom-credentials.json"):
         assert subprocess.run(["git", "check-ignore", "-q", name], cwd=repo).returncode == 0, name
     assert subprocess.run(["git", "check-ignore", "-q", "deploy/rooms/zoom-credentials.example.json"], cwd=repo).returncode == 1
+
+
+@pytest.mark.parametrize("path", ROOMS, ids=lambda p: p.name)
+def test_room_configs_carry_one_tv_block_switched_off_with_a_real_line(path):
+    """Every room file ships the room's LG TV switched off, so a room without one behaves as it did, and the guide says to change the
+    block that is there: the file has one tv: key (two load with the last silently winning), and its first line is a real
+    `enabled: false`, because a tv: block of only comments is null and the agent's config refuses it."""
+    text = path.read_text(encoding="utf-8")
+    assert [line for line in text.splitlines() if line.startswith("tv:")] == ["tv:"]
+    data = yaml.safe_load(text)
+    assert data["tv"] == {"enabled": False}
+    config = Config.from_dict(data)
+    assert config.tv.enabled is False
+    assert config.tv == Config().tv            # the other keys are the defaults: nothing is set until the room's TV is
+
+
+def test_a_tv_block_of_only_comments_is_null_and_the_config_refuses_it():
+    """Why the room files' block has a real `enabled: false` line and not just its keys in comments."""
+    data = yaml.safe_load("tv:\n  # host: \"10.0.0.41\"\n")
+    assert data == {"tv": None}
+    with pytest.raises(TypeError):
+        Config.from_dict(data)

@@ -6,6 +6,7 @@ the real commands, and the setup guide points at it.
 import re
 import subprocess
 import sys
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -56,3 +57,11 @@ def test_both_guides_share_one_renderer():
 def test_calendar_guide_covers_blocked_key_creation():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "Disable service account key creation" in html and "Organization policies" in html
+
+
+def test_calendar_guide_says_which_parts_of_the_door_sign_turn_amber():
+    """The door sign is a photograph with the status in a bar, a label and a ring: it is not the whole sign that turns amber."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+    assert "Ten minutes before the start the door sign's bar and label turn amber (the photograph stays as it is) and the room page shows Join now." in text
+    assert "the sign turns amber" not in text

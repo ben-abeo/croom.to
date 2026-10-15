@@ -4596,6 +4596,27 @@ def test_the_meeting_screen_with_everything_still_fits_and_hides_the_unavailable
         page.close()
 
 
+@pytest.mark.parametrize("width, height, menu, tall", [(1280, 800, 72, False), (1920, 1200, 160, True)])
+def test_a_tall_table_has_the_roomy_sizes_of_the_meeting_screen_and_the_kiosk_keeps_the_compact_ones(browser, width, height, menu, tall):
+    """The kiosk lays out at 1280 by 800 and the room's table at 1920 by 1200: the compact fit of the meeting screen (a tight stack, the
+    Sound strip on two lines, 72 px menu buttons) is what 800 px needs. At 1200 px it left more than half the screen empty, so there the
+    screen has its roomy sizes: the rows apart, the Sound strip stacked, the menu buttons at their full height. fits() holds at both."""
+    with PageServer(role="host") as server:
+        page = browser.new_page(viewport={"width": width, "height": height})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        sizes = page.evaluate("""() => ({
+            menu: document.getElementById('open-camera-live').getBoundingClientRect().height,
+            stacked: document.getElementById('volume-slider').getBoundingClientRect().bottom <= document.getElementById('quieter').getBoundingClientRect().top,
+            gap: parseFloat(getComputedStyle(document.querySelector('.view[data-view=meeting]')).rowGap),
+            above: parseFloat(getComputedStyle(document.getElementById('meeting-actions')).marginTop) })""")
+        assert sizes == {"menu": menu, "stacked": tall, "gap": 24 if tall else 14, "above": 22 if tall else 0}, sizes
+        assert fits(page)
+        page.close()
+
+
 def test_a_status_without_controls_keeps_the_three_buttons(browser):
     with PageServer(controls=False) as server:
         page = open_page(browser, server)

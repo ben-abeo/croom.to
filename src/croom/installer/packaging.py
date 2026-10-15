@@ -118,7 +118,7 @@ class PackageInfo:
 
 # Common dependencies for all platforms
 COMMON_DEPENDS = [
-    "python3 (>= 3.9)",
+    "python3 (>= 3.11)",
     "python3-pip",
     "python3-venv",
 ]

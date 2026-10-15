@@ -2,26 +2,34 @@
 Room control page and API (spec docs/superpowers/specs/2026-09-24-room-control-page-design.md).
 
 Serves the room page and a small JSON API on the local network and drives the
-meeting and calendar services on behalf of whoever is in the room.
+meeting and calendar services, the room's devices and the room's TV (spec
+docs/superpowers/specs/2026-10-13-tv-remote-and-touchpad-design.md) on behalf of
+whoever is in the room.
 """
 
 import asyncio
+import contextlib
 import copy
+import json
 import logging
 import mimetypes
 import re
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, NamedTuple, Optional, Set, Tuple
 from urllib.parse import urlsplit
 
-from aiohttp import web
+from aiohttp import WSCloseCode, WSMsgType, web
 
 from croom.control.settings import SettingsStore
 from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingControlError, MeetingState
+from croom.tv.discover import discover_tvs
+from croom.tv.errors import TV_NOT_ENABLED, TvError
+from croom.tv.names import one_line
+from croom.tv.pointer import BAD_MESSAGE, PiMouse, PointerRelay
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +67,7 @@ WEEK_DAYS = 7
 DAY_NAMES = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 # The TV's idle styles (spec 2026-10-07 TV, section 4.1), in the order the room page offers them.
 STYLES = ("info", "quiet", "brand", "bounce")
+TV_REASON_LIMIT = 160   # how much of a failure's own text goes to the table (the TV service's words are never cut)
 # The door sign's backgrounds (spec 2026-10-13, section 2.4), in the order the room page offers them: a photograph of Austin
 # each, from static/backgrounds/<key>.jpg ("hills" and "stadium" wait for theirs; the sign shows plain until a file is there), and
 # plain, the navy alone. The schools whose football scores the sign may show (section 2.5).
@@ -155,6 +164,21 @@ def normalize_passcode(value: Any) -> Optional[str]:
     return passcode
 
 
+class _BadBody(Exception):
+    """A request body that is no use, in words for whoever sent it (a 400)."""
+
+
+class _PageGone(Exception):
+    """The page that sent a request has hung up: there is nobody to do it for."""
+
+
+class _Pointer(NamedTuple):
+    """An open pointer socket's side of the service: the request that opened it (its connection, which stop() cuts when the page does not
+    answer the close) and the relay that carries its messages out."""
+    request: web.Request
+    relay: PointerRelay
+
+
 @web.middleware
 async def _static_no_cache(
     request: web.Request, handler: Callable[[web.Request], Awaitable[web.StreamResponse]]
@@ -182,8 +206,15 @@ class ControlService(Service):
         calendar: the CalendarService instance, or None.
         devices: the room devices the page controls (sound and camera), or None.
         store: the SettingsStore for the page's choices, or None to open settings_file.
+        tv: the TvService for the room's TV, or None when the room has none enabled.
+        discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
+        mouse: the room Pi's virtual mouse that the touchpad drives (a croom.tv.pointer.PiMouse, made when it is first used, unless a
+            test stands in for it).
         scores: the scores service (current() lists the football scores of the schools that are on), or None.
     """
+
+    CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
+    POINTER_HEARTBEAT_S = 5.0   # a pointer socket that has been quiet this long is pinged: a page that does not answer is let go of
 
     def __init__(
         self,
@@ -192,6 +223,9 @@ class ControlService(Service):
         calendar=None,
         devices=None,
         store=None,
+        tv=None,
+        discover=None,
+        mouse=None,
         scores=None,
     ):
         super().__init__("control")
@@ -212,11 +246,20 @@ class ControlService(Service):
         self._settings = self._load_settings()
         self._meeting = meeting
         self._calendar = calendar
+        self._tv = tv
+        self._discover_tvs = discover or discover_tvs
+        self._tv_busy = asyncio.Lock()                       # held by the control that is with the TV (see _handle_tv_control)
+        self._search: Optional[asyncio.Task] = None          # the search for TVs that is running (see _handle_tv_discover)
+        self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
+        self._mouse = mouse if mouse is not None else PiMouse()
+        self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
+        self._mouse_waits: Set[asyncio.Task] = set()         # the sockets' handlers that wait for the room Pi's mouse to be made (stop() ends them)
         self._scores = scores
         self._scores_failure: Optional[str] = None
 
         self._runner: Optional[web.AppRunner] = None
-        self._task: Optional[asyncio.Task] = None
+        self._task: Optional[asyncio.Task] = None            # the running join or leave
+        self._join_task: Optional[asyncio.Task] = None       # the last join: a Leave gives it up while it still runs
         self._last_error: Optional[str] = None
         self._title = ""
         self._joined_at: Optional[datetime] = None
@@ -225,7 +268,14 @@ class ControlService(Service):
 
     @classmethod
     def from_config(
-        cls, config: Config, meeting=None, calendar=None, devices=None, store=None, scores=None
+        cls,
+        config: Config,
+        meeting=None,
+        calendar=None,
+        devices=None,
+        store=None,
+        tv=None,
+        scores=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         return cls(
@@ -243,6 +293,7 @@ class ControlService(Service):
             calendar=calendar,
             devices=devices,
             store=store,
+            tv=tv,
             scores=scores,
         )
 
@@ -284,8 +335,14 @@ class ControlService(Service):
         app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
         app.router.add_post("/api/camera/setup", self._handle_camera_setup)
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
+        app.router.add_post("/api/tv/control", self._handle_tv_control)
+        app.router.add_post("/api/tv/pair", self._handle_tv_pair)
+        app.router.add_post("/api/tv/forget", self._handle_tv_forget)
+        app.router.add_get("/api/tv/discover", self._handle_tv_discover)
+        app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
+        app.on_shutdown.append(self._end_what_is_open)
         return app
 
     async def start(self) -> None:
@@ -311,17 +368,53 @@ class ControlService(Service):
         if not self._running:
             return
         self._running = False
-        if self._task is not None and not self._task.done():
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, Exception):
-                pass
-        self._task = None
         if self._runner is not None:
+            # The listener closes its sockets, then ends what is still running (_end_what_is_open), and only then waits for the
+            # requests that are in flight (a minute for them and another for what is left: more than the agent's shutdown is given)
             await self._runner.cleanup()
             self._runner = None
+        self._task = self._join_task = self._search = None
+        self._mouse.close()
         logger.info("Room control page stopped")
+
+    async def _end_what_is_open(self, app: web.Application) -> None:
+        """The application's on_shutdown, which aiohttp runs after the listening sockets are closed and before it waits for the
+        requests in flight: so no request can arrive while the tasks that are ended here are let go of, and none is left for the wait
+        to wait for. They are the join or the leave, the search for TVs, the requests that are with the TV (a Turn on, a pairing that
+        waits for a person) or wait their turn behind them, and the pointer sockets, which are closed (going away) with the move that is
+        on its way to the TV and the handler that waits for the room Pi's mouse to be made (a device that never appears would hold the
+        listener's wait for a handler up for a minute). None of them is given time to finish: the pages that asked are going away with
+        this service. It must not raise: an error here would end the listener's shutdown half way.
+
+        All of it is bounded by CANCEL_WAIT_S, the pointer sockets' closes included: a page that does not answer a close, or that sends
+        frames and reads no answer (the socket's handler is then blocked in a send, and the close frame cannot be written either), would
+        hold the listener's wait up for two minutes. The connection of a socket that is still open after the bound is cut."""
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.CANCEL_WAIT_S
+        closing = {asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping")): pointer.request
+                   for ws, pointer in self._pointers.items()}
+        moves = [pointer.relay.sending for pointer in self._pointers.values()]
+        await self._cancel(self._task, self._search, *self._tv_requests, *moves, *self._mouse_waits)
+        if closing:
+            _, left = await asyncio.wait(list(closing), timeout=max(0.0, deadline - loop.time()))
+            for task in left:
+                transport = closing[task].transport
+                if transport is not None:
+                    transport.abort()                  # (what the handler is blocked on then fails, and the handler ends)
+
+    async def _cancel(self, *tasks: Optional[asyncio.Task]) -> None:
+        """Cancel the tasks that are running among these and wait until they are over, for CANCEL_WAIT_S in all: what has not ended
+        by then does not hold the caller up (a Leave, the agent's stop), and is warned about. asyncio.wait, not an await of the
+        tasks: it does not raise a task's own cancellation here, and a cancel aimed at the caller itself still gets through."""
+        running = [task for task in tasks if task is not None and not task.done()]
+        if not running:
+            return
+        for task in running:
+            task.cancel()
+        _, left = await asyncio.wait(running, timeout=self.CANCEL_WAIT_S)
+        for task in left:
+            logger.warning(f"A task did not end within {self.CANCEL_WAIT_S:g} s of being cancelled, and is left to end by "
+                           f"itself: {task!r}")
 
     def _on_meeting_state(self, state: MeetingState) -> None:
         if state == MeetingState.CONNECTED:
@@ -435,6 +528,7 @@ class ControlService(Service):
             "settings": self._settings_payload(),
             "audio": self._audio_state(),
             "camera": self._camera_state(),
+            "tv": self._tv_status(),
         }
         scores = self._scores_status()
         if scores:
@@ -736,6 +830,239 @@ class ControlService(Service):
         return await self._device_call(request, camera, action)
 
     # ------------------------------------------------------------------
+    # The room's TV: its status, the controls, pairing, the search for TVs and the pointer (spec 2026-10-13 TV remote and touchpad)
+    # ------------------------------------------------------------------
+
+    NO_TV = {"configured": False, "paired": False}
+
+    def _tv_status(self) -> Dict[str, Any]:
+        """The TV's block of the status: what the TV service shows, and a TV that is not set up when the room has no TV service.
+        The status must always answer: a TV service that fails to report is warned about, with its traceback, once for each
+        distinct message (as the devices are), and the meeting and the calendar are still told."""
+        if self._tv is None:
+            return dict(self.NO_TV)
+        try:
+            return self._tv.status()
+        except Exception as e:  # noqa: BLE001 - the status must always answer
+            message = f"Could not read the TV's status: {type(e).__name__}: {e}"
+            if message != self._read_failures.get("TV"):
+                self._read_failures["TV"] = message
+                logger.warning(message, exc_info=True)
+            return dict(self.NO_TV)
+
+    @staticmethod
+    def _reason(error: BaseException) -> str:
+        """Why something failed, in a few words on one printable line: the error's own text, else the name of its class."""
+        return one_line(str(error), TV_REASON_LIMIT) or type(error).__name__
+
+    async def _tv_call(self, request: web.Request, action: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]) -> web.Response:
+        """Run one thing asked of the TV service: JSON in, `{"tv": status}` out; `action(data)` asks the service and answers
+        with the status it leaves.
+
+        415 for a body that is not JSON, 503 in a room with no TV service, 400 for a body that is not an object or that the
+        action finds no use for (_BadBody), and 409, in words for the table, when the TV could not do it: the TV service's own
+        words for what it refuses (TvError), and a reason on one line for anything else (logged, as it is a bug or a library
+        failing). A cancellation is not a failure to answer for and is not caught: the TV service keeps its own from leaking
+        out, so what arrives here is this request's (stop() ends the requests that are with the TV, and none of them is
+        answered as if it had been done).
+
+        The request is on the books for as long as it lasts, which is how stop() finds it."""
+        task = asyncio.current_task()
+        self._tv_requests.add(task)
+        try:
+            return await self._tv_answer(request, action)
+        finally:
+            self._tv_requests.discard(task)
+
+    async def _tv_answer(self, request: web.Request, action: Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]) -> web.Response:
+        """What _tv_call answers with (see there)."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if self._tv is None:
+            return self._error_response(TV_NOT_ENABLED, 503)
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        try:
+            return web.json_response({"tv": await action(data)})
+        except _BadBody as e:
+            return self._error_response(str(e), 400)
+        except _PageGone:
+            return web.Response(status=499)         # (nginx's "client closed request": nobody is there to read it)
+        except TvError as e:
+            return self._error_response(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - whatever it was, the table is told in words and not left with a 500
+            logger.warning(f"The TV did not carry out the request to {request.path}: {type(e).__name__}: {e}", exc_info=True)
+            return self._error_response("The TV did not do that: " + self._reason(e), 409)
+
+    @staticmethod
+    def _page_has_gone(request: web.Request) -> bool:
+        """The page that made this request has hung up. The listener does not end a handler for that (the request's transport is
+        None from then on, or is closing), so a request that waited has to look."""
+        transport = request.transport
+        return transport is None or transport.is_closing()
+
+    async def _handle_tv_control(self, request: web.Request) -> web.Response:
+        """One control of the TV, {"name", "value"?}, answered with the TV's status after it.
+
+        One at a time: the TV service does not hold its controls apart (a second tap on Turn on during a wake would start a
+        second wake, and a key sent during one goes down the socket the wake is using), so a control that comes while another
+        is with the TV waits for it. There is no time limit of its own here, because the TV service bounds what it does: a command
+        is given ASK_TIMEOUT_S (a connection that has died without the library noticing frees the lock at that, not at the library's
+        heartbeat), and Turn on from the table waits for the TV to come on, up to 23 seconds, which the page's request is made to wait
+        for. The body is looked at before the wait, so that one
+        that is no use is refused at once; and a control whose page has hung up by the time it has its turn is dropped (the
+        listener does not end a handler for that, and a tap that waited behind a Turn on would be made for nobody)."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            name = data.get("name")
+            if not isinstance(name, str) or not name.strip():
+                raise _BadBody('Send a JSON object with the "name" of the control, and its "value" when it has one')
+            async with self._tv_busy:
+                if self._page_has_gone(request):
+                    logger.debug(f"The TV control {name!r} was dropped: the page that asked for it has gone")
+                    raise _PageGone()
+                return await self._tv.control(name, data.get("value"))
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_pair(self, request: web.Request) -> web.Response:
+        """Pair with the TV. The TV shows its prompt and a person accepts it with the TV's own remote, so this request waits
+        for them: the TV service gives them a minute (TvService.PAIR_WAIT_S) and then says in words that nobody accepted the
+        prompt, and a second pairing meanwhile is refused in words (it is the service's own single-flight). This route sets
+        no time of its own. It is not held behind the controls' one-at-a-time, and holds none of them up."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            await self._tv.pair()
+            return self._tv.status()
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_forget(self, request: web.Request) -> web.Response:
+        """Let go of the TV: disconnect and delete the key."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            await self._tv.forget()
+            return self._tv.status()
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_discover(self, request: web.Request) -> web.Response:
+        """The LG TVs on the network. It answers in a room with no TV service as well: that is when it is needed.
+
+        One search at a time. A search is a datagram on the network and a page read from each TV that answers, five or six
+        seconds in all, so a request that comes while one is running waits for that one's answer and does not start another.
+        The wait is shielded: this request going away (the page closed, the connection lost) does not end the search that
+        others are waiting for."""
+        if self._search is None or self._search.done():
+            self._search = asyncio.create_task(self._discover_tvs())
+            self._search.add_done_callback(self._search_ended)
+        try:
+            tvs = await asyncio.shield(self._search)
+        except TvError as e:
+            return self._error_response(str(e), 409)
+        except Exception as e:  # noqa: BLE001 - said in _search_ended; the table is told in words and not left with a 500
+            return self._error_response("The search for TVs did not finish: " + self._reason(e), 409)
+        return web.json_response({"tvs": tvs})
+
+    @staticmethod
+    def _search_ended(search: asyncio.Task) -> None:
+        """Said, once for a search however many requests waited for it, when it ends on an error that is not words for the table
+        (a TvError is): a bug, or a library failing."""
+        if search.cancelled():
+            return
+        error = search.exception()
+        if error is not None and not isinstance(error, TvError):
+            logger.warning(f"The search for TVs failed: {type(error).__name__}: {error}", exc_info=error)
+
+    async def _handle_pointer(self, request: web.Request) -> web.StreamResponse:
+        """WS /ws/pointer: the touchpad's events from the table (spec section 5). Each JSON text frame is one message for the TV's
+        cursor or the room Pi's mouse, `{"target": "tv"|"pi", "type": "move"|"tap"|"right"|"scroll"|"down"|"up", "dx", "dy"}`, handed
+        to this socket's PointerRelay; what cannot be done is answered as a `{"error": words}` frame. A frame that is no use never closes
+        the socket (only one bigger than a request body does: aiohttp ends the connection for that). The cursor is not a control: it takes
+        no turn behind them. However the socket ends, a button that was held goes up.
+
+        A browser lets any page open a WebSocket to any address, and says where the page came from: only a page of this server may drive the
+        room's mouse and TV (the POSTs are kept from cross-site forms by wanting JSON; a WebSocket has no such request to refuse)."""
+        if not self._same_origin(request):
+            return self._error_response("The pointer is for the room's own page", 403)
+        ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
+        await ws.prepare(request)
+        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop)
+        self._pointers[ws] = _Pointer(request, relay)
+        try:
+            await self._make_the_mouse()
+            async for frame in ws:
+                if frame.type == WSMsgType.TEXT:
+                    words = await self._pointer_message(relay, frame.data)
+                elif frame.type == WSMsgType.BINARY:
+                    words = BAD_MESSAGE
+                else:
+                    break
+                if words is not None:
+                    with contextlib.suppress(ConnectionError):         # (the page may have gone while it was answered)
+                        await ws.send_json({"error": words})
+        finally:
+            try:
+                await relay.release_all()
+            finally:
+                self._pointers.pop(ws, None)             # (not before: until the relay is done, stop() ends the move that it waits for)
+        return ws
+
+    async def _make_the_mouse(self) -> None:
+        """Make the room Pi's virtual mouse now, as a pointer socket opens, so that the desktop has taken it up by the time a finger is
+        on the pad. The device takes a moment to appear (evdev waits for it and looks through /dev/input): it is made in a thread, and
+        the event loop goes on. It is kept until the service stops. One that cannot be made is no reason to refuse the socket (the TV's
+        cursor does not need it): every Pi event says why not, in words (PiMouse.unavailable), and tries again."""
+        try:
+            await self._off_the_loop(self._mouse.open)
+        except TvError:
+            pass
+        except Exception:  # noqa: BLE001 - a bug in making it: the first Pi event makes it, or says why not
+            logger.warning("The room Pi's mouse could not be made as the pointer socket opened", exc_info=True)
+
+    async def _off_the_loop(self, call: Callable[..., Any], *args: Any) -> Any:
+        """Run a call that waits for the room Pi's mouse (making the device: evdev waits for it to appear) in a thread, and wait for it
+        without holding the loop up. The task that waits is on the books while it does, which is how stop() finds it: a device that never
+        appears must not keep a socket's handler, and with it the listener's shutdown, waiting."""
+        task = asyncio.current_task()
+        self._mouse_waits.add(task)
+        try:
+            return await asyncio.to_thread(call, *args)
+        finally:
+            self._mouse_waits.discard(task)
+
+    async def _pointer_message(self, relay: PointerRelay, text: str) -> Optional[str]:
+        """Hand one frame to the relay: None when it was carried out, else the words to answer it with. Whatever goes wrong is words
+        and not the end of the socket: the relay's own refusals as they are, anything else (a bug, a library) as a reason on one line,
+        logged once for each distinct message, as the sockets send many frames a second."""
+        try:
+            message = json.loads(text)
+        except (ValueError, RecursionError):                           # (a parser that is given more brackets than it can count is no better)
+            return BAD_MESSAGE
+        try:
+            await relay.handle(message)
+        except TvError as e:
+            return str(e)
+        except Exception as e:  # noqa: BLE001 - whatever it was, the page is told in words and the socket goes on
+            failure = f"The pointer did not do that: {self._reason(e)}"
+            if failure != self._read_failures.get("pointer"):
+                self._read_failures["pointer"] = failure
+                logger.warning(f"The pointer could not carry out a message: {type(e).__name__}: {e}", exc_info=True)
+            return failure
+        return None
+
+    @staticmethod
+    def _same_origin(request: web.Request) -> bool:
+        """Whether the page that opens a WebSocket is one of this server's. A request with no Origin is not from a browser page (a
+        script, a test) and goes through."""
+        origin = request.headers.get("Origin")
+        if origin is None:
+            return True
+        try:
+            return urlsplit(origin).netloc.lower() == request.host.lower()
+        except ValueError:
+            return False
+
+    # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
 
@@ -825,7 +1152,7 @@ class ControlService(Service):
             return self._error_response("A meeting is already in progress", 409)
         self._last_error = None
         self._title = title
-        self._task = asyncio.create_task(self._run_join(url, passcode))
+        self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode))
         return web.json_response({"state": "joining", "url": url}, status=202)
 
     async def _run_join(self, url: str, passcode: Optional[str] = None) -> None:
@@ -843,7 +1170,12 @@ class ControlService(Service):
             return rejection
         if self._meeting is None:
             return self._error_response("Meeting service not available", 503)
-        if self._meeting_state() == "idle":
+        if self._join_task is not None and not self._join_task.done():
+            # The join is still running: waiting for the room (the TV is woken first, for up to fifteen seconds) or asking its
+            # provider. Left to go on it would finish after this Leave and put the room in the meeting that was walked away
+            # from, so it ends first (a join that is given up leaves the meeting service as leave_meeting accepts).
+            await self._give_up_join()
+        elif self._meeting_state() == "idle":
             if self._last_error is not None:
                 # Dismissing a join the provider refused before it started.
                 self._last_error = None
@@ -853,6 +1185,11 @@ class ControlService(Service):
         self._last_error = None
         self._task = asyncio.create_task(self._run_leave())
         return web.json_response({"state": "leaving"}, status=202)
+
+    async def _give_up_join(self) -> None:
+        """End the join that is running and wait until it is over, for CANCEL_WAIT_S at most: a join that does not let go is left to
+        finish in its own time (and said so), and does not hold the Leave up."""
+        await self._cancel(self._join_task)
 
     async def _run_leave(self) -> None:
         try:

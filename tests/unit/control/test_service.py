@@ -1,21 +1,30 @@
 """
-Tests for croom.control.service against stub meeting and calendar services.
+Tests for croom.control.service against stub meeting, calendar, devices and TV services.
 
 The stubs are plain classes that behave like the real services' public API
 and record what the control service asked them to do.
 """
 
 import asyncio
+import base64
+import contextlib
 import json
+import logging
+import os
 import socket
+import sys
+import threading
 from datetime import date, datetime, timedelta, timezone
 from types import SimpleNamespace
+from unittest import mock
 
+import aiohttp
 import pytest
-from aiohttp.test_utils import TestClient, TestServer
+from aiohttp import streams
+from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
-from croom.core.config import Config
+from croom.core.config import Config, TvConfig
 from croom.core.service import Service
 from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, detect_platform
 from croom.scores.service import ScoresService
@@ -23,6 +32,9 @@ from tests.unit.scores.schedules import Clock, Feed
 from croom.control import service as control_service
 from croom.control.service import ControlService, read_setting
 from croom.control.settings import SettingsStore
+from croom.tv.discover import discover_tvs
+from croom.tv.errors import TvError
+from croom.tv.pointer import BAD_MESSAGE, BAD_TARGET, BAD_TYPE, CODES, PiMouse
 
 
 class StubMeeting:
@@ -40,6 +52,9 @@ class StubMeeting:
         self.fail_with = None
         self.fail_before_joining = None
         self.fail_next_join = False
+        self.hold_join = None     # an asyncio.Event that a join waits for before it asks its provider, as the real one waits for the TV
+        self.cancel_gate = None   # an asyncio.Event that a cancelled join waits for before it lets go (a provider that is slow to)
+        self.order = []           # "join given up" and "leave", in the order they happened
 
     def get_available_platforms(self):
         return list(self._platforms)
@@ -56,6 +71,16 @@ class StubMeeting:
         self.joins.append((url, display_name, passcode))
         if self.fail_before_joining is not None:
             raise self.fail_before_joining
+        if self.hold_join is not None:
+            self.set_state(MeetingState.JOINING)        # (the real meeting service says joining while the join waits for the room)
+            try:
+                await self.hold_join.wait()
+            except asyncio.CancelledError:
+                if self.cancel_gate is not None:
+                    await self.cancel_gate.wait()
+                self.order.append("join given up")
+                self.set_state(MeetingState.IDLE)       # nothing is left waiting, as in the real one
+                raise
         if self.fail_next_join:
             # Refused at once, before any "joining" shows: the error state and its reason, as a provider reports them.
             self.fail_next_join = False
@@ -83,6 +108,7 @@ class StubMeeting:
         return self.current_meeting
 
     async def leave_meeting(self):
+        self.order.append("leave")
         self.leaves += 1
         self.current_meeting = None
         self.set_state(MeetingState.IDLE)
@@ -283,6 +309,176 @@ class StubDevices:
         self.camera = camera if camera is not None else StubCamera()
 
 
+class StubTv:
+    """Behaves like TvService for the parts the control service uses, and records what it was asked: `calls` has the controls,
+    pairings and forgettings in the order they came, and `order` the start and the end of each control (two that overlap show
+    as two starts in a row)."""
+
+    def __init__(self, configured=True, paired=True):
+        self.configured, self.paired = configured, paired
+        self.volume, self.name = 24, "Boardroom TV"
+        self.host, self.pi_input = "10.0.0.41", "HDMI_1"   # the config's, as the real status says them: the TV this room is set up for, and the Pi's input
+        self.calls, self.order = [], []
+        self.fail_control = self.fail_pair = self.fail_forget = self.fail_status = None   # what each raises when it is asked
+        self.gate = None          # an asyncio.Event that control() waits for: a control that takes a while, as a wake does
+        self.pair_gate = None     # the same for pair(): the person at the TV has not accepted the prompt yet
+        self.cursor = StubCursor()
+        self.fail_pointer = None  # what pointer() raises: the TV cannot be told anything
+
+    def status(self):
+        if self.fail_status is not None:
+            raise self.fail_status
+        return {"configured": self.configured, "paired": self.paired, "keep_on": True, "held_off": False, "refused": False, "prompting": False,
+                "host": self.host, "pi_input": self.pi_input,
+                "on": True, "reachable": True, "name": self.name, "volume": self.volume, "muted": False,
+                "input": "HDMI_1", "inputs": [{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}],
+                "app": "com.webos.app.hdmi1", "channel": None}
+
+    async def control(self, name, value=None):
+        self.calls.append(("control", name, value))
+        self.order.append(("start", name))
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+            if self.fail_control is not None:
+                raise self.fail_control
+            if name == "volume":
+                self.volume = value
+            return self.status()
+        finally:
+            self.order.append(("end", name))
+
+    async def pair(self):
+        self.calls.append(("pair",))
+        if self.pair_gate is not None:
+            await self.pair_gate.wait()
+        if self.fail_pair is not None:
+            raise self.fail_pair
+        self.paired = True
+
+    async def forget(self):
+        self.calls.append(("forget",))
+        if self.fail_forget is not None:
+            raise self.fail_forget
+        self.paired = False
+
+    def pointer(self):
+        """The client for the cursor (or why not, as TvService.pointer() says it): what it is told is in `cursor.calls`, not in `calls`,
+        which has what was asked of the controls."""
+        if self.fail_pointer is not None:
+            raise self.fail_pointer
+        return self.cursor
+
+
+class StubCursor:
+    """The TV's client as the cursor uses it: notes what it is told, as the library names it, and waits for `gate` (an asyncio.Event) in
+    a move when it has one, as a TV that does not take it. `cancelled` counts the moves that were ended while they waited."""
+
+    def __init__(self):
+        self.calls = []
+        self.gate = None
+        self.cancelled = 0
+
+    async def move(self, d_x, d_y, down=0):
+        self.calls.append(("move", d_x, d_y, down))
+        if self.gate is not None:
+            try:
+                await self.gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+
+    async def click(self):
+        self.calls.append(("click",))
+
+    async def scroll(self, d_x, d_y):
+        self.calls.append(("scroll", d_x, d_y))
+
+
+class StubDevice:
+    """What evdev.UInput is to a real PiMouse: it notes the events written to it, and the times it was closed."""
+
+    def __init__(self):
+        self.writes = []
+        self.closed = 0
+
+    def write(self, kind, code, value):
+        self.writes.append((kind, code, value))
+
+    def syn(self):
+        self.writes.append("syn")
+
+    def close(self):
+        self.closed += 1
+
+
+class StubMouse:
+    """Behaves like PiMouse: notes what it is told, in `calls`, and raises `fail` (an error) when it has one, as a mouse that cannot be
+    made does. `closed` counts the times the service closed it."""
+
+    ready = True                  # its device is always there: an event goes straight to it (see PiMouse.ready)
+
+    def __init__(self):
+        self.calls = []
+        self.fail = None
+        self.unavailable = None
+        self.opened = 0           # the times the service made it ahead of the first event (a socket opened)
+        self.closed = 0
+
+    def open(self):
+        self.opened += 1
+        if self.fail is not None:
+            raise self.fail
+
+    def _note(self, *call):
+        if self.fail is not None:
+            raise self.fail
+        self.calls.append(call)
+
+    def move(self, dx, dy):
+        self._note("move", dx, dy)
+
+    def press(self, button="left"):
+        self._note("press", button)
+
+    def release(self, button="left"):
+        self._note("release", button)
+
+    def click(self, button="left"):
+        self._note("click", button)
+
+    def scroll(self, dy):
+        self._note("scroll", dy)
+
+    def close(self):
+        self.closed += 1
+
+
+class StubSearch:
+    """Stands in for discover_tvs, which puts a packet on the network: it counts how often it was asked and answers `tvs`, or
+    raises `fail`, once `gate` (an asyncio.Event; none: at once) is open."""
+
+    def __init__(self, tvs=(), fail=None):
+        self.tvs, self.fail = [dict(tv) for tv in tvs], fail
+        self.gate = None
+        self.calls = self.cancelled = 0
+
+    async def __call__(self):
+        self.calls += 1
+        try:
+            if self.gate is not None:
+                await self.gate.wait()
+        except asyncio.CancelledError:
+            self.cancelled += 1
+            raise
+        if self.fail is not None:
+            raise self.fail
+        return [dict(tv) for tv in self.tvs]
+
+
+BOARDROOM = {"host": "10.0.0.41", "name": "Boardroom TV", "location": "http://10.0.0.41:1234/udhisapi.xml"}
+
+
 def real_states():
     """What RoomVolume and RoomCamera report before they have looked for a device: the shape every block must
     have. Constructing them does no I/O."""
@@ -305,10 +501,25 @@ def skip_if_day_ends_within(hours: float) -> None:
         pytest.skip(f"less than {hours} hours left in the local day")
 
 
-def make_service(meeting=None, calendar=None, devices=None, scores=None, **config):
+def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
-    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, scores=scores)
+    return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse,
+                          scores=scores)
+
+
+@pytest.fixture(autouse=True)
+def no_packet_leaves_this_machine(monkeypatch):
+    """The search for TVs puts a datagram on the network and asks the TVs it finds for a page: nothing in this module may
+    (a test that wants a search gives make_service a `discover=` of its own, a StubSearch)."""
+    from croom.tv import discover as discovery
+
+    async def refuse(*args, **kwargs):
+        raise AssertionError("a test reached the real network: give make_service a discover=")
+
+    monkeypatch.setattr(discovery, "_multicast", refuse)
+    monkeypatch.setattr(discovery, "_get", refuse)
+    return refuse
 
 
 @pytest.fixture
@@ -359,6 +570,12 @@ class TestControlServiceBasics:
         assert service.config["static_dir"].endswith("croom/control/static")
         assert service._meeting is meeting
         assert service._calendar is calendar
+
+    def test_from_config_hands_the_tv_service_on_and_searches_with_the_real_search(self):
+        tv = StubTv()
+        assert ControlService.from_config(Config(), tv=tv)._tv is tv
+        assert ControlService.from_config(Config())._tv is None
+        assert ControlService.from_config(Config(), tv=tv)._discover_tvs is discover_tvs
 
     async def test_start_binds_an_ephemeral_port_and_stop_releases_it(self):
         service = make_service(meeting=StubMeeting())
@@ -817,7 +1034,7 @@ class TestPage:
         from croom.control.service import STATIC_DIR
         client = await client_factory(make_service())
         names = sorted(p.relative_to(STATIC_DIR).as_posix() for p in STATIC_DIR.rglob("*") if p.is_file())
-        assert {"app.js", "devices.js", "keyboard.js", "style.css"} <= set(names)
+        assert {"app.js", "devices.js", "keyboard.js", "remote.js", "style.css", "touchpad.js"} <= set(names)
         for name in names:
             resp = await client.get("/static/" + name)
             assert resp.status == 200, name
@@ -873,6 +1090,7 @@ class TestPage:
         client = await client_factory(make_service())
         for path, content_type in (
             ("/static/crystalpm-logo-white.svg", "image/svg+xml"),
+            ("/static/icons.svg", "image/svg+xml"),
             ("/static/fonts/lexend-400.woff2", "font/woff2"),
             ("/static/fonts/lexend-600.woff2", "font/woff2"),
             ("/static/fonts/OFL.txt", "text/plain"),
@@ -1649,6 +1867,1516 @@ class TestRoomDevices:
         client = await client_factory(make_service(devices=devices))
         assert (await client.get("/api/status")).status == 200
         assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []
+
+
+TV_NOT_ENABLED = "The TV is not enabled on this device (tv.enabled in its config)"
+
+
+def json_request(path, body):
+    """A POST for a handler to be called with directly, when what matters is what the handler raises: the server answers
+    for an exception with something of its own."""
+    raw = json.dumps(body).encode()
+    payload = streams.StreamReader(mock.Mock(_reading_paused=False), 2 ** 16, loop=asyncio.get_running_loop())
+    payload.feed_data(raw)
+    payload.feed_eof()
+    return make_mocked_request("POST", path, headers={"Content-Type": "application/json", "Content-Length": str(len(raw))},
+                               payload=payload, transport=mock.Mock(is_closing=mock.Mock(return_value=False)))
+
+
+def watching(service, handler_name):
+    """What reaches a handler, noted as it happens: `.arrived` has a path for each request that has come, `.requests` the requests,
+    `.cancelled` a path for each that was cancelled (the test server does that when a client goes away), `.responses` what the
+    others were answered with and `.finished` a path for each that is over, however. A test that holds one request in the handler
+    and sends another waits for this to say that the other has arrived, and does not guess at a time. Call it before the service
+    is started: the routes are made then."""
+    seen = SimpleNamespace(arrived=[], requests=[], cancelled=[], responses=[], finished=[])
+    handler = getattr(service, handler_name)
+
+    async def watched(request):
+        seen.arrived.append(request.path)
+        seen.requests.append(request)
+        try:
+            response = await handler(request)
+            seen.responses.append(response)
+            return response
+        except asyncio.CancelledError:
+            seen.cancelled.append(request.path)
+            raise
+        finally:
+            seen.finished.append(request.path)
+
+    setattr(service, handler_name, watched)
+    return seen
+
+
+class TestTvStatus:
+    """The `tv` block of /api/status (spec 2026-10-13 TV remote and touchpad, section 6)."""
+
+    async def test_the_status_carries_what_the_tv_service_reports_at_each_poll(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        assert (await (await client.get("/api/status")).json())["tv"] == tv.status()
+        tv.volume = 31
+        assert (await (await client.get("/api/status")).json())["tv"]["volume"] == 31
+
+    async def test_a_room_without_a_tv_service_has_a_tv_that_is_neither_configured_nor_paired(self, client_factory):
+        client = await client_factory(make_service())
+        assert (await (await client.get("/api/status")).json())["tv"] == {"configured": False, "paired": False}
+
+    async def test_a_tv_block_that_cannot_be_read_never_breaks_the_status(self, client_factory, caplog):
+        tv = StubTv()
+        tv.fail_status = RuntimeError("the TV module has a bug")
+        client = await client_factory(make_service(meeting=StubMeeting(), tv=tv))
+        for _ in range(3):
+            response = await client.get("/api/status")
+            assert response.status == 200
+        data = await response.json()
+        assert data["tv"] == {"configured": False, "paired": False}
+        assert data["platforms"] == ["zoom", "google_meet"] and data["meeting"]["state"] == "idle"     # the rest is all there
+        said = [r for r in caplog.records if r.levelname == "WARNING" and "the TV module has a bug" in r.getMessage()]
+        assert len(said) == 1 and said[0].exc_info is not None        # once, with its traceback, though every poll fails
+        tv.fail_status = RuntimeError("a different bug")
+        await client.get("/api/status")
+        assert len([r for r in caplog.records if "a different bug" in r.getMessage()]) == 1
+
+    async def test_what_the_tv_calls_itself_goes_out_as_it_is_and_not_as_markup(self, client_factory):
+        tv = StubTv()
+        tv.name = "Tom & Jerry's <TV>"
+        client = await client_factory(make_service(tv=tv))
+        text = await (await client.get("/api/status")).text()
+        assert "Tom & Jerry's <TV>" in text and "&amp;" not in text and "&lt;" not in text
+
+    def test_the_stub_has_the_keys_of_the_real_service(self, tmp_path):
+        from croom.tv.keystore import KeyStore
+        from croom.tv.service import TvService
+
+        def nothing(*args):
+            raise AssertionError("a status asks nothing of the TV")
+        real = TvService(TvConfig(), KeyStore(tmp_path / "tv-client-key"), nothing, nothing).status()
+        for stub in (StubTv(), StubTv(configured=False, paired=False)):
+            assert set(stub.status()) == set(real)
+
+
+class TestTvControl:
+    """POST /api/tv/control answers like the meeting's controls: 200 with the state, 409 with words."""
+
+    async def test_a_control_the_tv_never_answers_is_refused_in_words_within_the_tv_services_bound_and_the_lock_is_free(
+            self, client_factory, tmp_path, monkeypatch):
+        """With the real TV service on a TV whose connection has died without the library noticing: the control that waited for it held the
+        one-at-a-time lock, and every key behind it, until the library's heartbeat ended the connection. It is refused in words at the
+        service's bound, and the next one has its turn."""
+        from croom.tv.service import TvService
+        from tests.unit.tv.fake_client import FakeTvClient
+        from tests.unit.tv.helpers import DoingTv, build_service as build_tv_service
+        never = asyncio.Event()
+
+        class Dead(DoingTv):
+            async def volume_up(self):
+                await never.wait()
+        FakeTvClient.instances.clear()
+        monkeypatch.setattr(TvService, "ASK_TIMEOUT_S", 0.2)
+        tv = build_tv_service(tmp_path, Dead)
+        await tv.start()
+        try:
+            service = make_service(tv=tv)
+            client = await client_factory(service)
+            loop = asyncio.get_running_loop()
+            t0 = loop.time()
+            response = await asyncio.wait_for(client.post("/api/tv/control", json={"name": "volume_up"}), 3.0)
+            assert response.status == 409 and loop.time() - t0 < 1.5
+            assert (await response.json()) == {"error": "The TV did not accept that: no answer in time"}
+            assert not service._tv_busy.locked()
+            response = await asyncio.wait_for(client.post("/api/tv/control", json={"name": "volume_down"}), 3.0)
+            assert response.status == 200 and (await response.json())["tv"]["volume"] == 23
+        finally:
+            never.set()
+            await tv.stop()
+            FakeTvClient.instances.clear()
+
+    async def test_a_control_is_carried_out_and_answered_with_the_status_the_tv_shows_after_it(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post("/api/tv/control", json={"name": "volume", "value": 40})
+        assert response.status == 200
+        body = await response.json()
+        assert body == {"tv": tv.status()} and body["tv"]["volume"] == 40
+        assert tv.calls == [("control", "volume", 40)]
+
+    @pytest.mark.parametrize("body, value", [
+        ({"name": "volume_up"}, None), ({"name": "volume_up", "value": None}, None), ({"name": "mute", "value": False}, False),
+        ({"name": "volume", "value": 0}, 0), ({"name": "volume", "value": 12.5}, 12.5), ({"name": "channel", "value": "7-1"}, "7-1"),
+        ({"name": "toast", "value": ""}, ""), ({"name": "x", "value": [1, "a"]}, [1, "a"]),
+        ({"name": "x", "value": {"a": {"b": None}}}, {"a": {"b": None}}),
+    ])
+    async def test_the_value_goes_to_the_tv_service_as_it_was_sent(self, client_factory, body, value):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        assert (await client.post("/api/tv/control", json=body)).status == 200
+        assert tv.calls == [("control", body["name"], value)]
+
+    @pytest.mark.parametrize("body", [
+        {}, {"value": 3}, {"name": ""}, {"name": "   "}, {"name": None}, {"name": 5}, {"name": True}, {"name": ["volume_up"]},
+        {"name": {"volume_up": 1}},
+    ])
+    async def test_a_body_without_the_name_of_a_control_is_a_400(self, client_factory, body):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post("/api/tv/control", json=body)
+        assert response.status == 400 and "name" in (await response.json())["error"]
+        assert tv.calls == []
+
+    @pytest.mark.parametrize("text", ['["volume_up"]', '"volume_up"', "5", "null", "not json", "{"])
+    async def test_a_body_that_is_not_a_json_object_is_a_400(self, client_factory, text):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post("/api/tv/control", data=text, headers={"Content-Type": "application/json"})
+        assert response.status == 400 and tv.calls == []
+
+    async def test_a_body_that_is_not_declared_json_is_a_415(self, client_factory):
+        """A form on another site can post to the room, and cannot post JSON."""
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        for kwargs in ({"data": '{"name": "volume_up"}', "headers": {"Content-Type": "text/plain"}}, {"data": {"name": "volume_up"}}):
+            assert (await client.post("/api/tv/control", **kwargs)).status == 415
+        assert tv.calls == []
+
+    async def test_what_the_tv_cannot_do_is_a_409_in_the_words_the_service_gave(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        tv.fail_control = TvError("The TV is not answering at 10.0.0.41")
+        response = await client.post("/api/tv/control", json={"name": "volume_up"})
+        assert response.status == 409 and await response.json() == {"error": "The TV is not answering at 10.0.0.41"}
+        words = "The TV at 10.0.0.41 did not turn on: " + "check that Wake-on-LAN is enabled on it " * 5     # (long: nothing is cut)
+        tv.fail_control = TvError(words)
+        assert (await (await client.post("/api/tv/control", json={"name": "power", "value": "on"})).json())["error"] == words
+        tv.fail_control = None
+        assert (await client.post("/api/tv/control", json={"name": "volume_up"})).status == 200      # and nothing is stuck
+
+    async def test_any_other_failure_is_a_409_in_words_and_is_logged(self, client_factory, caplog):
+        tv = StubTv()
+        tv.fail_control = RuntimeError("socket closed")
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post("/api/tv/control", json={"name": "volume_up"})
+        assert response.status == 409 and await response.json() == {"error": "The TV did not do that: socket closed"}
+        said = [r for r in caplog.records if r.levelname == "WARNING" and "socket closed" in r.getMessage()]
+        assert len(said) == 1 and said[0].exc_info is not None
+
+    @pytest.mark.parametrize("failure, reason", [
+        (RuntimeError(""), "RuntimeError"), (KeyError(), "KeyError"), (RuntimeError("two\n   lines\x1b[2J"), "two lines[2J"),
+        (RuntimeError("x" * 500), "x" * 160),
+    ])
+    async def test_the_reason_is_one_printable_line_and_never_nothing(self, client_factory, failure, reason):
+        tv = StubTv()
+        tv.fail_control = failure
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post("/api/tv/control", json={"name": "volume_up"})
+        assert response.status == 409 and (await response.json())["error"] == "The TV did not do that: " + reason
+
+    async def test_a_cancellation_is_never_answered_as_a_failure(self, client_factory):
+        tv = StubTv()
+        tv.fail_control = asyncio.CancelledError()
+        service = make_service(tv=tv)
+        with pytest.raises(asyncio.CancelledError):
+            await service._handle_tv_control(json_request("/api/tv/control", {"name": "volume_up"}))
+        tv.fail_control = None
+        client = await client_factory(service)
+        assert (await client.post("/api/tv/control", json={"name": "volume_up"})).status == 200     # and the lock was let go of
+
+    async def test_controls_are_carried_out_one_at_a_time(self, client_factory):
+        """A second tap on Turn on during a wake must not start a second wake, and a volume key during one must not be sent
+        down the TV's socket in the middle of it: the TV service does not hold controls apart, so the page's route does."""
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        client = await client_factory(service)
+        taps = [asyncio.ensure_future(client.post("/api/tv/control", json=body)) for body in (
+            {"name": "power", "value": "on"}, {"name": "power", "value": "on"}, {"name": "volume_up"})]
+        await wait_until(lambda: len(seen.arrived) == 3)
+        await asyncio.sleep(0.05)                      # (time for a second control to begin, if one could)
+        assert tv.order == [("start", "power")]        # one is with the TV, and the other two wait for it
+        tv.gate.set()
+        assert [response.status for response in await asyncio.gather(*taps)] == [200, 200, 200]
+        assert [kind for kind, _ in tv.order] == ["start", "end"] * 3          # none began before the one before it ended
+        assert sorted(name for kind, name in tv.order if kind == "start") == ["power", "power", "volume_up"]
+
+    async def test_a_control_that_failed_does_not_hold_up_the_next(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        for failure in (TvError("not now"), RuntimeError("boom"), None):
+            tv.fail_control = failure
+            response = await asyncio.wait_for(client.post("/api/tv/control", json={"name": "volume_up"}), 2.0)
+            assert response.status == (409 if failure else 200)
+        assert [kind for kind, _ in tv.order] == ["start", "end"] * 3
+
+    async def test_a_body_that_is_no_use_is_refused_at_once_while_a_control_is_with_the_tv(self, client_factory):
+        """It has nothing to wait for the TV for: the check is made before the control takes its turn."""
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        client = await client_factory(make_service(tv=tv))
+        try:
+            holding = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+            await wait_until(lambda: tv.order == [("start", "power")])
+            for body in ({}, {"name": ""}, {"value": 3}):
+                response = await asyncio.wait_for(client.post("/api/tv/control", json=body), 2.0)
+                assert response.status == 400, body
+        finally:
+            tv.gate.set()
+        assert (await holding).status == 200
+        assert tv.calls == [("control", "power", "on")]
+
+    async def test_without_a_tv_service_a_control_is_a_503_before_its_body_is_looked_at(self, client_factory):
+        client = await client_factory(make_service())
+        for body in ({"name": "volume_up"}, {}, ["not", "an", "object"], []):
+            response = await client.post("/api/tv/control", json=body)
+            assert response.status == 503 and (await response.json())["error"] == TV_NOT_ENABLED
+
+
+class TestTvPairAndForget:
+    async def test_pair_answers_with_the_status_once_the_person_has_accepted_the_prompt(self, client_factory):
+        tv = StubTv(paired=False)
+        tv.pair_gate = asyncio.Event()                  # the prompt is up on the TV, and nobody has accepted it yet
+        client = await client_factory(make_service(tv=tv))
+        pairing = asyncio.ensure_future(client.post("/api/tv/pair", json={}))
+        await wait_until(lambda: tv.calls == [("pair",)])
+        await asyncio.sleep(0.05)
+        assert not pairing.done()                       # the request waits with the person: the route sets no time of its own
+        tv.pair_gate.set()
+        response = await pairing
+        assert response.status == 200 and await response.json() == {"tv": tv.status()} and tv.status()["paired"] is True
+        assert tv.calls == [("pair",)]
+
+    async def test_forget_answers_with_the_status(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post("/api/tv/forget", json={})
+        assert response.status == 200 and await response.json() == {"tv": tv.status()} and tv.status()["paired"] is False
+        assert tv.calls == [("forget",)]
+
+    @pytest.mark.parametrize("path, failing, words", [
+        ("/api/tv/pair", "fail_pair", "Pairing is already waiting for the TV"),
+        ("/api/tv/pair", "fail_pair", "The TV is not set up: use Find TVs and Pair under Options \u203a TV"),
+        ("/api/tv/pair", "fail_pair", "Pairing with the TV at 10.0.0.41 did not finish: check that the TV is on"),
+        ("/api/tv/forget", "fail_forget", "The TV could not be forgotten: its key could not be removed from /data/tv-client-key"),
+    ])
+    async def test_what_cannot_be_done_is_a_409_in_words(self, client_factory, path, failing, words):
+        tv = StubTv()
+        setattr(tv, failing, TvError(words))
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post(path, json={})
+        assert response.status == 409 and await response.json() == {"error": words}
+
+    @pytest.mark.parametrize("path, failing", [("/api/tv/pair", "fail_pair"), ("/api/tv/forget", "fail_forget")])
+    async def test_any_other_failure_is_a_409_in_words_and_is_logged_here_too(self, client_factory, caplog, path, failing):
+        tv = StubTv()
+        setattr(tv, failing, OSError("disk gone"))
+        client = await client_factory(make_service(tv=tv))
+        response = await client.post(path, json={})
+        assert response.status == 409 and await response.json() == {"error": "The TV did not do that: disk gone"}
+        assert [r for r in caplog.records if r.levelname == "WARNING" and "disk gone" in r.getMessage()]
+
+    async def test_pairing_and_the_controls_do_not_hold_each_other_up(self, client_factory):
+        """Pairing is the service's own single-flight (a second one is refused in words), and waits for a person: it is not
+        held behind the controls' one-at-a-time, and the controls are not held behind it."""
+        tv = StubTv()
+        tv.gate, tv.pair_gate = asyncio.Event(), asyncio.Event()
+        service = make_service(tv=tv)
+        client = await client_factory(service)
+        try:
+            control = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+            await wait_until(lambda: tv.order == [("start", "power")])
+            forgotten = await asyncio.wait_for(client.post("/api/tv/forget", json={}), 2.0)      # while the control is with the TV
+            assert forgotten.status == 200
+            pairing = asyncio.ensure_future(client.post("/api/tv/pair", json={}))
+            await wait_until(lambda: ("pair",) in tv.calls)
+            tv.gate.set()
+            assert (await asyncio.wait_for(control, 2.0)).status == 200
+            assert (await asyncio.wait_for(client.post("/api/tv/control", json={"name": "volume_up"}), 2.0)).status == 200  # while the pair waits
+            assert not pairing.done()
+        finally:
+            tv.gate.set()
+            tv.pair_gate.set()
+        assert (await asyncio.wait_for(pairing, 2.0)).status == 200
+
+    async def test_without_a_tv_service_pair_and_forget_are_a_503(self, client_factory):
+        client = await client_factory(make_service())
+        for path in ("/api/tv/pair", "/api/tv/forget"):
+            for body in ({}, []):                       # (a body that is not an object is not looked at: there is no TV to ask)
+                response = await client.post(path, json=body)
+                assert response.status == 503 and (await response.json())["error"] == TV_NOT_ENABLED
+
+    async def test_every_tv_post_wants_a_json_object(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv))
+        for path in ("/api/tv/control", "/api/tv/pair", "/api/tv/forget"):
+            assert (await client.post(path, data="{}", headers={"Content-Type": "text/plain"})).status == 415, path
+            assert (await client.post(path, json=["not", "an", "object"])).status == 400, path
+        assert tv.calls == []
+        bare = await client_factory(make_service())             # the type of the body is looked at before the TV service is
+        for path in ("/api/tv/control", "/api/tv/pair", "/api/tv/forget"):
+            assert (await bare.post(path, data="{}", headers={"Content-Type": "text/plain"})).status == 415, path
+
+
+class TestTvDiscover:
+    """GET /api/tv/discover: the LG TVs on the network. Every search here is a StubSearch: nothing is put on the network."""
+
+    async def test_the_tvs_that_answer_are_listed(self, client_factory):
+        search = StubSearch([BOARDROOM])
+        client = await client_factory(make_service(tv=StubTv(), discover=search))
+        response = await client.get("/api/tv/discover")
+        assert response.status == 200 and await response.json() == {"tvs": [BOARDROOM]}
+        assert search.calls == 1
+
+    async def test_it_answers_without_a_tv_service_because_that_is_when_it_is_needed(self, client_factory):
+        search = StubSearch([BOARDROOM])
+        client = await client_factory(make_service(discover=search))
+        response = await client.get("/api/tv/discover")
+        assert response.status == 200 and await response.json() == {"tvs": [BOARDROOM]}
+
+    async def test_no_tv_answering_is_an_empty_list_and_not_a_failure(self, client_factory):
+        client = await client_factory(make_service(discover=StubSearch()))
+        response = await client.get("/api/tv/discover")
+        assert response.status == 200 and await response.json() == {"tvs": []}
+
+    async def test_what_a_device_calls_itself_goes_out_as_it_is_and_not_as_markup(self, client_factory):
+        odd = {"host": "10.0.0.5", "name": "Tom & Jerry's <TV>", "location": "http://10.0.0.5/d.xml?a=1&b=2"}
+        client = await client_factory(make_service(discover=StubSearch([odd])))
+        text = await (await client.get("/api/tv/discover")).text()
+        assert json.loads(text) == {"tvs": [odd]} and "Tom & Jerry's <TV>" in text and "&amp;" not in text
+
+    async def test_the_default_search_is_the_real_one_and_this_module_keeps_it_off_the_network(
+            self, client_factory, no_packet_leaves_this_machine):
+        from croom.tv import discover as discovery
+        assert make_service()._discover_tvs is discover_tvs
+        # The real search sends its datagram through discovery._multicast: here that is the fixture's, which refuses. (Checked
+        # first, because the test below it would otherwise be the one to put a packet on the network.)
+        assert discovery._multicast is no_packet_leaves_this_machine and discovery._get is no_packet_leaves_this_machine
+        client = await client_factory(make_service())
+        response = await client.get("/api/tv/discover")
+        assert response.status == 409 and "reached the real network" in (await response.json())["error"]
+
+    async def test_two_requests_at_once_share_one_search(self, client_factory):
+        search = StubSearch([BOARDROOM])
+        search.gate = asyncio.Event()
+        service = make_service(discover=search)
+        seen = watching(service, "_handle_tv_discover")
+        client = await client_factory(service)
+        asked = [asyncio.ensure_future(client.get("/api/tv/discover")) for _ in range(2)]
+        await wait_until(lambda: len(seen.arrived) == 2)   # the second has come while the first search is still running
+        await wait_until(lambda: search.calls == 1)        # (and the search is a task of its own: it has begun a turn after the first came)
+        assert search.calls == 1
+        search.gate.set()
+        for response in await asyncio.gather(*asked):
+            assert response.status == 200 and await response.json() == {"tvs": [BOARDROOM]}
+        assert search.calls == 1                           # one search answered both
+
+    async def test_a_request_after_the_search_ended_starts_a_new_search(self, client_factory):
+        search = StubSearch([BOARDROOM])
+        client = await client_factory(make_service(discover=search))
+        for expected in (1, 2, 3):
+            assert (await client.get("/api/tv/discover")).status == 200
+            assert search.calls == expected                # (the answer of a search is not kept: the network changes)
+
+    async def test_a_search_that_cannot_be_sent_is_a_409_in_words_and_is_not_remembered(self, client_factory):
+        words = "The search for TVs could not be sent: Network is unreachable"
+        search = StubSearch(fail=TvError(words))
+        client = await client_factory(make_service(discover=search))
+        response = await client.get("/api/tv/discover")
+        assert response.status == 409 and await response.json() == {"error": words}
+        search.fail = None
+        response = await client.get("/api/tv/discover")
+        assert response.status == 200 and search.calls == 2
+
+    async def test_requests_that_share_a_search_that_fails_all_hear_why(self, client_factory):
+        words = "The search for TVs could not be started: no route"
+        search = StubSearch(fail=TvError(words))
+        search.gate = asyncio.Event()
+        service = make_service(discover=search)
+        seen = watching(service, "_handle_tv_discover")
+        client = await client_factory(service)
+        asked = [asyncio.ensure_future(client.get("/api/tv/discover")) for _ in range(2)]
+        await wait_until(lambda: len(seen.arrived) == 2)
+        search.gate.set()
+        for response in await asyncio.gather(*asked):
+            assert response.status == 409 and await response.json() == {"error": words}
+        assert search.calls == 1
+
+    async def test_any_other_failure_of_the_search_is_a_409_in_words_and_is_logged(self, client_factory, caplog):
+        client = await client_factory(make_service(discover=StubSearch(fail=RuntimeError("socket exploded"))))
+        response = await client.get("/api/tv/discover")
+        assert response.status == 409
+        assert await response.json() == {"error": "The search for TVs did not finish: socket exploded"}
+        said = [r for r in caplog.records if r.levelname == "WARNING" and "socket exploded" in r.getMessage()]
+        assert len(said) == 1 and said[0].exc_info is not None
+
+    async def test_a_client_that_goes_away_does_not_end_the_search_for_the_others(self, client_factory):
+        """The test server, as a person closing the page does, cancels the handler whose client has gone: the search it
+        was waiting for is not the handler's to end while another request is waiting for it too."""
+        search = StubSearch([BOARDROOM])
+        search.gate = asyncio.Event()
+        service = make_service(discover=search)
+        seen = watching(service, "_handle_tv_discover")
+        client = await client_factory(service)
+        first = asyncio.ensure_future(client.get("/api/tv/discover"))
+        second = asyncio.ensure_future(client.get("/api/tv/discover"))
+        await wait_until(lambda: len(seen.arrived) == 2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        await wait_until(lambda: len(seen.cancelled) == 1)  # the server has ended the handler of the client that went away
+        assert search.calls == 1 and search.cancelled == 0  # and the search it was waiting for is still going
+        search.gate.set()
+        response = await second
+        assert response.status == 200 and await response.json() == {"tvs": [BOARDROOM]}
+        assert search.calls == 1 and search.cancelled == 0
+
+    async def test_stopping_the_service_ends_a_search_that_is_still_running(self, client_factory):
+        search = StubSearch([BOARDROOM])
+        search.gate = asyncio.Event()
+        service = make_service(discover=search)
+        await service.start()
+        client = await client_factory(service)
+        asked = asyncio.ensure_future(client.get("/api/tv/discover"))
+        try:
+            await wait_until(lambda: search.calls == 1)
+            await asyncio.wait_for(service.stop(), 2.0)
+            assert search.cancelled == 1                   # nothing is left running after the service
+        finally:
+            search.gate.set()
+        with pytest.raises(aiohttp.ClientError):           # the request that waited for it is let go of, not answered with a list
+            await asked
+
+
+class TestPointerSocket:
+    """WS /ws/pointer: the touchpad's events from the table (spec 2026-10-13 TV remote and touchpad, section 5). A message is a JSON text
+    frame `{"target": "tv"|"pi", "type": "move"|"tap"|"right"|"scroll"|"down"|"up", "dx", "dy"}`. What cannot be done is answered as a
+    `{"error": words}` frame, and a frame that is no use never closes the socket."""
+
+    MOVE = {"target": "tv", "type": "move", "dx": 1, "dy": 0}
+
+    @staticmethod
+    async def says(ws):
+        return await asyncio.wait_for(ws.receive_json(), 2.0)
+
+    def test_the_stubs_have_the_calls_of_the_real_ones(self):
+        import inspect
+        from croom.tv.client import TvClient
+        from croom.tv.service import TvService
+
+        def shape(cls, name):
+            """What a call takes, by the names and defaults of its parameters (not self)."""
+            return [(p.name, p.default) for p in list(inspect.signature(getattr(cls, name)).parameters.values())[1:]]
+        for name in ("move", "click", "scroll"):
+            assert shape(StubCursor, name) == shape(TvClient, name)
+        for name in ("open", "move", "press", "release", "click", "scroll", "close"):
+            assert shape(StubMouse, name) == shape(PiMouse, name)
+        assert isinstance(PiMouse.ready, property) and StubMouse.ready is True              # (and what the relay asks of a mouse before an event)
+        assert shape(StubTv, "pointer") == shape(TvService, "pointer")
+
+    async def test_events_reach_the_tvs_cursor_and_the_room_pis_mouse(self, client_factory):
+        tv, mouse = StubTv(), StubMouse()
+        client = await client_factory(make_service(tv=tv, mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for message in ({"target": "tv", "type": "move", "dx": 5, "dy": -3}, {"target": "tv", "type": "tap"},
+                            {"target": "tv", "type": "scroll", "dy": 2},
+                            {"target": "pi", "type": "move", "dx": 1, "dy": 2}, {"target": "pi", "type": "tap"},
+                            {"target": "pi", "type": "right"}, {"target": "pi", "type": "scroll", "dy": -1},
+                            {"target": "pi", "type": "down"}, {"target": "pi", "type": "up"}):
+                await ws.send_json(message)
+            await wait_until(lambda: tv.cursor.calls == [("move", 5, -3, 0), ("click",), ("scroll", 0, 2)])
+            await wait_until(lambda: mouse.calls == [("move", 1, 2), ("click", "left"), ("click", "right"), ("scroll", -1),
+                                                     ("press", "left"), ("release", "left")])
+        assert tv.calls == []                                  # (the cursor is not a control)
+
+    async def test_a_drag_on_the_tv_is_moves_with_the_button_down_and_an_end(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv, mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for message in ({"target": "tv", "type": "down"}, {"target": "tv", "type": "move", "dx": 3, "dy": 4}, {"target": "tv", "type": "up"}):
+                await ws.send_json(message)
+            await wait_until(lambda: tv.cursor.calls == [("move", 3, 4, 1), ("move", 0, 0, 0)])
+
+    @pytest.mark.parametrize("frame, words", [
+        ("not json at all", BAD_MESSAGE), ("{", BAD_MESSAGE), ("", BAD_MESSAGE), ("[1, 2]", BAD_MESSAGE), ("3", BAD_MESSAGE),
+        ("null", BAD_MESSAGE), ('"move"', BAD_MESSAGE), ("[" * 4000, BAD_MESSAGE),
+        ('{"type": "move"}', BAD_TARGET), ('{"target": "x", "type": "move"}', BAD_TARGET),
+        ('{"target": "tv"}', BAD_TYPE), ('{"target": "tv", "type": "wiggle"}', BAD_TYPE),
+        ('{"target": "tv", "type": "move", "dx": "3"}', "dx is a number"), ('{"target": "pi", "type": "move", "dy": NaN}', "dy is a number"),
+        ('{"target": "tv", "type": "right"}', "The TV's cursor has no right button"),
+        ('{"target": "pi", "type": "keys", "text": "a"}', "Typing into the room Pi comes in a later version"),
+    ])
+    async def test_a_frame_that_is_no_use_is_answered_in_words_and_the_socket_goes_on(self, client_factory, frame, words):
+        tv, mouse = StubTv(), StubMouse()
+        client = await client_factory(make_service(tv=tv, mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str(frame)
+            assert await self.says(ws) == {"error": words}
+            assert not ws.closed
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])                          # and it still works
+        assert tv.cursor.calls == []
+
+    async def test_a_frame_nested_deeper_than_the_parser_takes_is_answered_in_words_and_the_socket_goes_on(self, client_factory, monkeypatch):
+        """Python 3.11's JSON parser stops with a RecursionError (not a ValueError) at about a thousand brackets, which a frame of up to
+        4 KiB can hold; 3.12's takes far more, so the parser is made to say it, as 3.11's does."""
+        def too_deep(text):
+            raise RecursionError("maximum recursion depth exceeded while decoding a JSON array from a unicode string")
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        monkeypatch.setattr("croom.control.service.json", SimpleNamespace(loads=too_deep))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str("[" * 2000 + "]" * 2000)
+            assert await self.says(ws) == {"error": BAD_MESSAGE}
+            assert not ws.closed
+
+    async def test_a_binary_frame_is_answered_in_words_and_the_socket_goes_on(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_bytes(b'{"target": "pi", "type": "tap"}')
+            assert await self.says(ws) == {"error": BAD_MESSAGE}
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+    async def test_a_tv_that_cannot_be_told_anything_is_answered_once_for_each_frame_and_the_socket_stays_open(self, client_factory):
+        tv = StubTv()
+        tv.fail_pointer = TvError("Pair the TV under Options › TV")
+        client = await client_factory(make_service(tv=tv, mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for message in (self.MOVE, {"target": "tv", "type": "tap"}, self.MOVE):
+                await ws.send_json(message)
+            for _ in range(3):
+                assert await self.says(ws) == {"error": "Pair the TV under Options › TV"}
+            tv.fail_pointer = None                                              # the person pairs the TV
+            await ws.send_json({"target": "tv", "type": "tap"})
+            await wait_until(lambda: tv.cursor.calls == [("click",)])
+            assert not ws.closed
+
+    async def test_a_move_the_tv_refused_on_its_way_is_answered_by_the_next_frame(self, client_factory):
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv, mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            async def refusing_move(d_x, d_y, down=0):
+                raise ConnectionResetError("Cannot write to closing transport")
+            tv.cursor.move = refusing_move
+            await ws.send_json(self.MOVE)
+            await asyncio.sleep(0.05)                                           # (it is sent in the background: nothing is answered yet)
+            await ws.send_json(self.MOVE)
+            assert await self.says(ws) == {"error": "The TV did not accept that: Cannot write to closing transport"}
+            assert not ws.closed
+
+    async def test_a_mouse_that_cannot_be_made_is_answered_in_its_words_and_the_socket_stays_open(self, client_factory):
+        words = "The room Pi's mouse is not allowed to use /dev/uinput: the user the agent runs as is not in the input group"
+        mouse = StubMouse()
+        mouse.fail = TvError(words)
+        client = await client_factory(make_service(tv=StubTv(), mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 1})
+            assert await self.says(ws) == {"error": words} and await self.says(ws) == {"error": words}
+            mouse.fail = None
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+    async def test_without_a_mouse_of_its_own_the_service_has_the_real_one_and_says_what_it_lacks(self, client_factory, monkeypatch):
+        monkeypatch.setitem(sys.modules, "evdev", None)                          # (nothing here may make a device on this machine)
+        service = make_service(tv=StubTv())
+        assert isinstance(service._mouse, PiMouse) and isinstance(ControlService.from_config(Config())._mouse, PiMouse)
+        client = await client_factory(service)
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            assert "pip install evdev" in (await self.says(ws))["error"]
+            assert not ws.closed
+
+    async def test_no_test_can_make_a_real_device_on_the_machine_it_runs_on(self, client_factory, tmp_path, monkeypatch):
+        """A service with no mouse of its own has the real one, which uses evdev wherever evdev is installed: a test that opened a
+        pointer socket there would put a mouse on the machine's desktop. The control tests keep evdev out (tests/unit/control/conftest.py),
+        so that with a stand-in evdev on the path, which would make a device and note it in a file, nothing is made."""
+        package = tmp_path / "evdev"
+        package.mkdir()
+        made = tmp_path / "made-a-device"
+        (package / "__init__.py").write_text(f"class UInput:\n    def __init__(self, *args, **kwargs):\n        open({str(made)!r}, 'w').close()\n"
+                                             "    def write(self, *args): pass\n    def syn(self): pass\n    def close(self): pass\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        client = await client_factory(make_service(tv=StubTv()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            assert "pip install evdev" in (await self.says(ws))["error"]
+        assert not made.exists()
+
+    async def test_a_socket_that_opens_makes_the_room_pis_mouse_off_the_loop_and_two_sockets_make_one(self, client_factory):
+        """The device takes a moment to appear (evdev waits for it and looks through /dev/input), and the desktop takes it up a moment
+        after: it is made when a socket opens, in a thread, so that it is there before a finger is on the pad."""
+        made = []
+
+        def factory():
+            made.append(threading.get_ident())
+            return StubDevice()
+        client = await client_factory(make_service(mouse=PiMouse(uinput_factory=factory)))
+        async with client.ws_connect("/ws/pointer") as first, client.ws_connect("/ws/pointer") as second:
+            await wait_until(lambda: made)
+            await first.send_json({"target": "pi", "type": "tap"})                  # (the sockets have been looked at by now)
+            await second.send_json({"target": "pi", "type": "tap"})
+            await asyncio.sleep(0.1)
+        assert len(made) == 1 and made[0] != threading.get_ident()                   # one device, and not made on the loop's thread
+
+    async def test_making_the_mouse_does_not_hold_the_loop_up(self, client_factory):
+        gate, started = threading.Event(), threading.Event()
+
+        def slow_factory():
+            started.set()
+            gate.wait(3.0)
+            return StubDevice()
+        client = await client_factory(make_service(mouse=PiMouse(uinput_factory=slow_factory)))
+        loop = asyncio.get_running_loop()
+        try:
+            t0 = loop.time()
+            async with client.ws_connect("/ws/pointer"):
+                await wait_until(started.is_set)
+                response = await asyncio.wait_for(client.get("/api/status"), 2.0)       # a request is served while the device is being made
+                assert response.status == 200 and not gate.is_set()
+                assert loop.time() - t0 < 1.5                                          # (it did not wait for the 3 s that the factory takes)
+                gate.set()                                                             # (the socket's own end waits for the device)
+        finally:
+            gate.set()
+
+    async def test_a_mouse_that_cannot_be_made_when_a_socket_opens_leaves_every_event_answered_in_words(self, client_factory, caplog):
+        attempts, clock = [], Clock()
+
+        def failing():
+            attempts.append(1)
+            raise PermissionError(13, "Permission denied", "/dev/uinput")
+        tv = StubTv()
+        client = await client_factory(make_service(tv=tv, mouse=PiMouse(uinput_factory=failing, clock=clock)))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await wait_until(lambda: attempts)                                      # (made when the socket opened, and could not be)
+            await ws.send_json({"target": "pi", "type": "tap"})                     # (a moment later: the floor between tries is not passed)
+            answer = (await self.says(ws))["error"]
+            assert "not allowed to use /dev/uinput" in answer and "sudo systemctl restart croom" in answer
+            assert len(attempts) == 1                                               # said again, in the same words, with no new try
+            clock.advance(PiMouse.RETRY_S)
+            await ws.send_json({"target": "pi", "type": "tap"})
+            assert (await self.says(ws))["error"] == answer
+            assert len(attempts) == 2 and not ws.closed                             # the event tried again, and the socket is open
+            await ws.send_json({"target": "tv", "type": "tap"})                     # and the TV's side does not care
+            await wait_until(lambda: tv.cursor.calls == [("click",)])
+        # the mouse said why not, once (the reason is for the log as well as the page); the control service has nothing to add to it
+        assert len([r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.tv.pointer"]) == 1
+        assert [r for r in caplog.records if r.levelname == "WARNING" and r.name == "croom.control.service"] == []
+
+    async def test_a_mouse_that_could_not_be_made_when_the_socket_opened_is_made_by_the_first_event_when_it_can_be(self, client_factory):
+        devices, clock, threads = [], Clock(), []
+
+        def factory():
+            threads.append(threading.get_ident())
+            if not devices:
+                devices.append(None)
+                raise PermissionError(13, "Permission denied", "/dev/uinput")
+            devices.append(StubDevice())
+            return devices[-1]
+        mouse = PiMouse(uinput_factory=factory, clock=clock)
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await wait_until(lambda: mouse.unavailable is not None)                 # (the socket's own try, which failed)
+            clock.advance(PiMouse.RETRY_S)                                          # (the installer's group is there now)
+            await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 0})
+            await wait_until(lambda: len(devices) == 2 and devices[1].writes == [(CODES["EV_REL"], CODES["REL_X"], 1), "syn"])
+        assert threading.get_ident() not in threads                                 # (neither try was made on the loop's thread)
+
+    async def test_a_mouse_that_blows_up_when_it_is_made_does_not_close_the_socket(self, client_factory, caplog):
+        mouse = StubMouse()
+        mouse.fail = RuntimeError("a bug in making the mouse")
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await wait_until(lambda: mouse.opened == 1)
+            mouse.fail = None
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+        assert [r for r in caplog.records if r.levelname == "WARNING" and r.exc_info and "a bug in making the mouse" in str(r.exc_info[1])]
+
+    async def test_a_room_without_a_tv_service_answers_for_the_tv_and_still_has_its_pi(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json(self.MOVE)
+            assert await self.says(ws) == {"error": TV_NOT_ENABLED}
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+    async def test_an_error_that_is_a_bug_is_answered_in_words_logged_once_and_the_socket_goes_on(self, client_factory, caplog):
+        mouse = StubMouse()
+        mouse.fail = RuntimeError("the mouse has a bug")
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            for _ in range(3):
+                await ws.send_json({"target": "pi", "type": "tap"})
+            for _ in range(3):
+                assert await self.says(ws) == {"error": "The pointer did not do that: the mouse has a bug"}
+            assert not ws.closed
+        said = [r for r in caplog.records if r.levelname == "WARNING" and "the mouse has a bug" in r.getMessage()]
+        assert len(said) == 1 and said[0].exc_info is not None
+
+    async def test_the_cursor_does_not_wait_behind_a_control_that_is_with_the_tv(self, client_factory):
+        tv = StubTv()
+        tv.gate = asyncio.Event()                                              # a Turn on, which takes its time
+        service = make_service(tv=tv, mouse=StubMouse())
+        client = await client_factory(service)
+        turn_on = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+        try:
+            await wait_until(lambda: tv.order == [("start", "power")])
+            assert service._tv_busy.locked()
+            async with client.ws_connect("/ws/pointer") as ws:
+                await ws.send_json({"target": "tv", "type": "move", "dx": 3, "dy": 4})
+                await ws.send_json({"target": "tv", "type": "tap"})
+                await wait_until(lambda: tv.cursor.calls == [("move", 3, 4, 0), ("click",)])
+        finally:
+            tv.gate.set()
+            await turn_on
+        assert tv.calls == [("control", "power", "on")] and service._tv_requests == set()    # (the cursor is not a request that stop() looks for)
+
+    async def test_a_socket_that_closes_lets_a_held_button_go(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        ws = await client.ws_connect("/ws/pointer")
+        await ws.send_json({"target": "pi", "type": "down"})
+        await wait_until(lambda: mouse.calls == [("press", "left")])
+        await ws.close()                                                       # the page closed it
+        await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+
+    async def test_a_page_that_goes_quiet_without_a_word_is_let_go_of_and_its_button_released(self, client_factory, monkeypatch):
+        """A page whose network went away leaves the connection open at this end: the sockets are pinged, and one that does not answer
+        is closed (a button the page held would stay down on the room Pi's desktop for as long as it took the system to notice)."""
+        monkeypatch.setattr(ControlService, "POINTER_HEARTBEAT_S", 0.2)
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with aiohttp.ClientSession() as page:
+            ws = await page.ws_connect(client.make_url("/ws/pointer"), autoping=False)       # (and nobody is reading: no pong is sent)
+            await ws.send_json({"target": "pi", "type": "down"})
+            await wait_until(lambda: mouse.calls == [("press", "left")])
+            await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")], timeout=3.0)
+
+    async def test_the_socket_is_for_websockets_only(self, client_factory):
+        client = await client_factory(make_service(mouse=StubMouse()))
+        response = await client.get("/ws/pointer")
+        assert response.status == 400
+
+    async def test_a_socket_that_is_dropped_lets_a_held_button_go_too(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with aiohttp.ClientSession() as page:
+            ws = await page.ws_connect(client.make_url("/ws/pointer"))
+            await ws.send_json({"target": "pi", "type": "down"})
+            await wait_until(lambda: mouse.calls == [("press", "left")])
+        # closing the session cuts the connection with no close frame: the page is gone without a word, and the button goes up all the same
+        await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+
+    @pytest.mark.parametrize("how", ["closed", "dropped"])
+    async def test_on_the_real_listener_a_socket_that_ends_lets_a_held_button_go(self, how):
+        """The listener's handlers are not ended when their client goes away, as the test server's are: the socket's end is seen by
+        the handler as a frame (a close) or as the end of the stream."""
+        mouse = StubMouse()
+        service = make_service(mouse=mouse)
+        await service.start()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                await ws.send_json({"target": "pi", "type": "down"})
+                await wait_until(lambda: mouse.calls == [("press", "left")])
+                if how == "closed":
+                    await ws.close()
+            await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+            assert service._pointers == {}
+        finally:
+            await service.stop()
+
+    async def test_each_socket_holds_its_own_button(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        first, second = await client.ws_connect("/ws/pointer"), await client.ws_connect("/ws/pointer")
+        await first.send_json({"target": "pi", "type": "down"})
+        await wait_until(lambda: mouse.calls == [("press", "left")])
+        await second.send_json({"target": "pi", "type": "up"})                  # the other page had no button down: nothing is released
+        await second.close()
+        await asyncio.sleep(0.05)
+        assert mouse.calls == [("press", "left")]
+        await first.close()
+        await wait_until(lambda: mouse.calls == [("press", "left"), ("release", "left")])
+
+    async def test_stopping_the_service_closes_the_sockets_and_lets_go_of_what_is_held(self):
+        tv, mouse = StubTv(), StubMouse()
+        service = make_service(tv=tv, mouse=mouse)
+        await service.start()
+        async with aiohttp.ClientSession() as page:
+            ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+            await ws.send_json({"target": "pi", "type": "down"})
+            await wait_until(lambda: mouse.calls == [("press", "left")])
+            await asyncio.wait_for(service.stop(), 3.0)
+            closed = await asyncio.wait_for(ws.receive(), 2.0)
+            assert closed.type == aiohttp.WSMsgType.CLOSE and closed.data == 1001          # going away
+        assert mouse.calls == [("press", "left"), ("release", "left")] and mouse.closed == 1
+        assert service._pointers == {}
+
+    async def test_stopping_the_service_ends_a_move_that_the_tv_does_not_take(self):
+        tv = StubTv()
+        tv.cursor.gate = asyncio.Event()                                       # a TV that does not take what it is sent
+        service = make_service(tv=tv, mouse=StubMouse())
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                await ws.send_json(self.MOVE)
+                await wait_until(lambda: tv.cursor.calls == [("move", 1, 0, 0)])
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 1.0                                    # not the time the call is given (CALL_TIMEOUT_S)
+        finally:
+            tv.cursor.gate.set()
+        assert tv.cursor.cancelled == 1
+
+    async def test_stopping_the_service_ends_the_move_of_a_socket_that_has_just_closed_too(self):
+        """A socket that the page closed while a move was with the TV is let wait for that move (it finishes, as a dropped socket's does):
+        the service's stop does not wait for it."""
+        tv = StubTv()
+        tv.cursor.gate = asyncio.Event()
+        service = make_service(tv=tv, mouse=StubMouse())
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                await ws.send_json(self.MOVE)
+                await wait_until(lambda: tv.cursor.calls == [("move", 1, 0, 0)])
+                await ws.close()
+                await asyncio.sleep(0.1)                                         # the socket's end is waiting for the move that is with the TV
+                assert len(service._pointers) == 1
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 1.0
+        finally:
+            tv.cursor.gate.set()
+        assert tv.cursor.cancelled == 1 and service._pointers == {}
+
+    @staticmethod
+    async def a_page_that_floods_and_never_reads(service, seen):
+        """A raw client: it opens a pointer socket, then sends garbage frames and reads no answer. Each is answered with an error, which
+        piles up at the server's end (aiohttp lets 256 KiB of them pile up before a send waits) until the socket's handler is blocked in
+        a send. The window is kept small at both ends so that it takes a few thousand frames, not millions. Returns its end of the
+        connection (the test cuts it, and keeps it until then: a stream writer that is dropped open complains)."""
+        loop = asyncio.get_running_loop()
+        sock = socket.socket()
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024)
+        sock.setblocking(False)
+        await loop.sock_connect(sock, ("127.0.0.1", service.bound_port))
+        reader, writer = await asyncio.open_connection(sock=sock)
+        key = base64.b64encode(os.urandom(16)).decode()
+        writer.write((f"GET /ws/pointer HTTP/1.1\r\nHost: 127.0.0.1:{service.bound_port}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+                      f"Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+        await writer.drain()
+        await reader.readuntil(b"\r\n\r\n")
+        server_end = seen.requests[-1].transport
+        server_end.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 2048)
+        server_end.set_write_buffer_limits(high=2048)
+        mask = os.urandom(4)
+        payload = b"not json"
+        garbage = bytes([0x81, 0x80 | len(payload)]) + mask + bytes(b ^ mask[i % 4] for i, b in enumerate(payload))
+        for _ in range(100):
+            writer.write(garbage * 50)
+            await asyncio.sleep(0)
+        await asyncio.sleep(0.3)
+        return writer
+
+    async def test_stopping_the_service_does_not_wait_for_a_page_that_floods_it_and_never_reads(self, monkeypatch):
+        """Such a page cannot be closed politely (the close frame cannot be written either), and the listener would wait for it for
+        two minutes (a minute for it to end, and another once it is cancelled). After the bounded wait the connection is cut."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.3)
+        service = make_service(mouse=StubMouse())
+        seen = watching(service, "_handle_pointer")
+        await service.start()
+        loop = asyncio.get_running_loop()
+        page = await self.a_page_that_floods_and_never_reads(service, seen)
+        try:
+            t0 = loop.time()
+            await asyncio.wait_for(service.stop(), 5.0)
+            assert loop.time() - t0 < 2.0
+        finally:
+            page.transport.abort()
+
+    async def test_the_bound_on_stop_is_one_for_the_tasks_and_the_closes_together(self, monkeypatch):
+        """A join that is slow to let go takes the whole bound; the closes that are stuck behind a page that floods are cut at that
+        moment, and not given a bound of their own after it."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 1.0)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()
+        service = make_service(meeting=meeting, mouse=StubMouse())
+        seen = watching(service, "_handle_pointer")
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                assert await self.post(page, f"http://127.0.0.1:{service.bound_port}/api/meeting/join", {"url": "https://zoom.us/j/98765432100"}) == 202
+            await wait_until(lambda: meeting.state == MeetingState.JOINING)
+            page = await self.a_page_that_floods_and_never_reads(service, seen)
+            try:
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 8.0)
+                assert 0.9 < loop.time() - t0 < 1.6                       # the join's second, not that and another
+            finally:
+                page.transport.abort()
+        finally:
+            meeting.cancel_gate.set()
+
+    @staticmethod
+    async def post(http, url, body):
+        async with http.post(url, json=body) as response:
+            return response.status
+
+    async def test_the_mouse_is_closed_when_the_service_stops_whether_or_not_a_page_used_it(self):
+        mouse = StubMouse()
+        service = make_service(mouse=mouse)
+        await service.start()
+        await service.stop()
+        assert mouse.closed == 1
+
+    async def test_stopping_the_service_while_a_socket_waits_for_the_mouse_to_be_made_is_prompt_and_leaves_no_device(self):
+        """The device takes a moment to appear (evdev waits for it), and the service may be stopped in that moment: the socket is on the
+        books before it waits for the device, so stop() ends it (not a minute of the listener's waiting), and the device that comes is
+        closed and not left on the desktop."""
+        gate, started, device = threading.Event(), threading.Event(), StubDevice()
+
+        def slow_factory():
+            started.set()
+            gate.wait(3.0)
+            return device
+        mouse = PiMouse(uinput_factory=slow_factory)
+        service = make_service(mouse=mouse)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        threading.Timer(0.3, gate.set).start()                                  # (the device appears while the service stops)
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                reading = asyncio.ensure_future(ws.receive())                   # (a page answers the close, as a browser does)
+                await wait_until(started.is_set)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 1.5
+                reading.cancel()
+        finally:
+            gate.set()
+        assert device.closed == 1 and mouse.ready is False and service._pointers == {}
+
+    async def test_stopping_the_service_does_not_wait_for_a_mouse_that_hangs_while_it_is_made_and_it_is_closed_when_it_comes(self, monkeypatch):
+        """A creation that never ends held stop(): the socket's handler waited for the device (the listener waits for a handler for a
+        minute) and close() waited for the lock that the creation held. The handler that waits for the device is ended with the rest of
+        what is open, close() gives up after its bound, and the thread that makes the device closes it when it is made."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.5)
+        gate, started, device = threading.Event(), threading.Event(), StubDevice()
+
+        def hung_factory():
+            started.set()
+            gate.wait(10.0)
+            return device
+        mouse = PiMouse(uinput_factory=hung_factory)
+        mouse.CLOSE_WAIT_S = 0.2
+        service = make_service(mouse=mouse)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                reading = asyncio.ensure_future(ws.receive())
+                await wait_until(started.is_set)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 5.0)
+                assert loop.time() - t0 < 2.0
+                reading.cancel()
+            assert service._pointers == {} and device.closed == 0               # (it has not come)
+            gate.set()                                                          # now it does ...
+            await wait_until(lambda: device.closed == 1)                        # ... and the thread that made it closes it
+            assert mouse.ready is False
+        finally:
+            gate.set()
+
+    async def test_stopping_the_service_does_not_wait_for_an_event_that_waits_for_the_mouse_to_be_made_either(self, monkeypatch):
+        """The same for the device that is made by the first event, after the socket's own try failed: the handler that waits for it is
+        on the books as well."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.5)
+        attempts, clock = [], Clock()
+        gate, started, device = threading.Event(), threading.Event(), StubDevice()
+
+        def factory():
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise PermissionError(13, "Permission denied", "/dev/uinput")      # the socket's try ...
+            started.set()
+            gate.wait(10.0)                                                         # ... and the event's, which hangs
+            return device
+        mouse = PiMouse(uinput_factory=factory, clock=clock)
+        mouse.CLOSE_WAIT_S = 0.2
+        service = make_service(mouse=mouse)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as page:
+                ws = await page.ws_connect(f"http://127.0.0.1:{service.bound_port}/ws/pointer")
+                reading = asyncio.ensure_future(ws.receive())
+                await wait_until(lambda: mouse.unavailable is not None)             # (the socket's own try, which failed)
+                clock.advance(PiMouse.RETRY_S)
+                await ws.send_json({"target": "pi", "type": "tap"})
+                await wait_until(started.is_set)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 5.0)
+                assert loop.time() - t0 < 2.0
+                reading.cancel()
+            assert service._pointers == {}
+            gate.set()
+            await wait_until(lambda: device.closed == 1)
+            assert device.writes == []                                              # (the tap was never made: nobody was left to hear of it)
+        finally:
+            gate.set()
+
+    async def test_a_close_that_is_left_after_the_bound_is_cut_unless_its_connection_has_gone_already(self, monkeypatch):
+        """On stop each socket is closed, and one that is still open at the bound has its connection cut. A connection that is gone already
+        (the request has no transport any more) has nothing to cut, and must not end the hook half way: the ones after it are cut."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.05)
+        service = make_service(mouse=StubMouse())
+        stuck = asyncio.Event()
+        cut = []
+
+        class Socket:
+            async def close(self, **kwargs):
+                await stuck.wait()                                                  # a page that does not answer the close
+
+        gone = SimpleNamespace(transport=None)
+        open_ = SimpleNamespace(transport=SimpleNamespace(abort=lambda: cut.append("open")))
+        also_open = SimpleNamespace(transport=SimpleNamespace(abort=lambda: cut.append("also open")))
+        for request in (gone, open_, also_open):
+            service._pointers[Socket()] = SimpleNamespace(request=request, relay=SimpleNamespace(sending=None))
+        try:
+            await service._end_what_is_open(None)                                   # raises nothing
+        finally:
+            stuck.set()
+            await asyncio.sleep(0)
+        assert sorted(cut) == ["also open", "open"]                                 # (in no order: the closes that are left are a set)
+
+    async def test_a_frame_bigger_than_a_request_body_is_not_a_pointer_message_and_ends_the_connection(self, client_factory):
+        client = await client_factory(make_service(mouse=StubMouse()))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str("x" * 5000)
+            closed = await asyncio.wait_for(ws.receive(), 2.0)
+            assert closed.type == aiohttp.WSMsgType.CLOSE and closed.data == 1009            # too big: the protocol's own answer
+
+    def test_a_pointer_socket_that_has_been_quiet_for_five_seconds_is_pinged(self):
+        assert ControlService.POINTER_HEARTBEAT_S == 5.0
+
+    async def test_the_origin_is_compared_as_a_host_is_without_regard_to_case_and_one_that_cannot_be_read_is_refused(self, client_factory):
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        async with client.ws_connect("/ws/pointer", headers={"Host": f"Room.Local:{client.port}", "Origin": f"http://ROOM.local:{client.port}"}) as ws:
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+        for origin in ("http://[::1", "http://[", "http://a b:1/"):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect("/ws/pointer", headers={"Origin": origin})
+            assert refused.value.status == 403, origin
+
+    async def test_an_answer_that_cannot_be_sent_because_the_page_has_gone_does_not_end_the_socket(self, client_factory, monkeypatch, caplog):
+        async def gone(self, data, **kwargs):
+            raise ConnectionResetError("Cannot write to closing transport")
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        monkeypatch.setattr(aiohttp.web.WebSocketResponse, "send_json", gone)
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_str("not json")                                            # answered with an error that cannot be sent
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])            # the socket went on
+        assert [r for r in caplog.records if r.levelno >= logging.ERROR] == []
+
+    async def test_a_page_from_another_site_cannot_drive_the_room_through_the_socket(self, client_factory):
+        """A browser lets any page open a WebSocket to any address, and tells the server where the page came from (Origin): a page from
+        anywhere but the room's own may not move the room's mouse (the POSTs are kept from cross-site forms the same way)."""
+        mouse = StubMouse()
+        client = await client_factory(make_service(mouse=mouse))
+        own = f"http://127.0.0.1:{client.port}"
+        for origin in ("http://evil.example", "http://127.0.0.1:1", f"http://127.0.0.1.evil.example:{client.port}", "null", ""):
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect("/ws/pointer", headers={"Origin": origin})
+            assert refused.value.status == 403, origin
+        assert mouse.calls == []
+        async with client.ws_connect("/ws/pointer", headers={"Origin": own}) as ws:         # the room's own page, and tools that send none
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: mouse.calls == [("click", "left")])
+
+
+class TestTvRequestsInFlight:
+    """The agent's stop must not wait for what is with the TV: the listener's cleanup waits for every request that is in flight, a
+    minute for them and another for what is left, and nothing after the control service in the agent's shutdown (the meeting's
+    leave, the browser, the devices) starts before it is over. These run on the real listener (`service.start()`), whose handlers
+    are not ended when a client goes away, as the test server's are."""
+
+    @staticmethod
+    async def post(http, url, body):
+        async with http.post(url, json=body) as response:
+            return response.status
+
+    @pytest.mark.parametrize("path, body, gate", [("/api/tv/control", {"name": "power", "value": "on"}, "gate"),
+                                                  ("/api/tv/pair", {}, "pair_gate")])
+    async def test_stopping_the_service_does_not_wait_for_a_request_that_is_with_the_tv(self, path, body, gate):
+        """A Turn on takes up to 23 s, and a pairing waits for a person (a minute at most, and it was for ever once)."""
+        tv = StubTv()
+        setattr(tv, gate, asyncio.Event())                 # never opened: the request is with the TV for as long as it is let to be
+        service = make_service(tv=tv)
+        await service.start()
+        loop = asyncio.get_running_loop()
+        async with aiohttp.ClientSession() as http:
+            asked = asyncio.ensure_future(self.post(http, f"http://127.0.0.1:{service.bound_port}{path}", body))
+            try:
+                await wait_until(lambda: tv.calls)
+                t0 = loop.time()
+                await asyncio.wait_for(service.stop(), 3.0)
+                assert loop.time() - t0 < 2.0
+            finally:
+                getattr(tv, gate).set()
+            with pytest.raises(aiohttp.ClientError):       # the page is let go of; it is not told that a Turn on was done
+                await asked
+
+    async def test_stopping_the_service_lets_go_of_a_pairing_that_waits_for_a_person_cleanly(self, tmp_path):
+        """With the real TV service: the pairing is cancelled with its request, the TV is hung up on, no key is kept, and the next
+        tap on Pair is not told that a pairing is already waiting."""
+        from tests.unit.tv.fake_client import FakeTvClient, PromptingTvClient
+        from tests.unit.tv.helpers import build_service as build_tv_service, prompt_is_up
+        FakeTvClient.instances.clear()                     # (the fake keeps its instances on the class; the TV tests clear them)
+        tv = build_tv_service(tmp_path, PromptingTvClient, key=None)
+        service = make_service(tv=tv)
+        await service.start()
+        try:
+            async with aiohttp.ClientSession() as http:
+                asked = asyncio.ensure_future(self.post(http, f"http://127.0.0.1:{service.bound_port}/api/tv/pair", {}))
+                await wait_until(prompt_is_up)
+                await asyncio.wait_for(service.stop(), 3.0)
+                with pytest.raises(aiohttp.ClientError):
+                    await asked
+            client = FakeTvClient.instances[-1]
+            assert ("disconnect",) in client.calls and client.connected is False
+            assert tv._pairing is False and tv._client is None and not (tmp_path / "tv-client-key").exists()
+            assert tv.status()["paired"] is False and tv.status()["reachable"] is False
+            again = asyncio.ensure_future(tv.pair())       # the person taps Pair again, on a page that is back
+            await wait_until(lambda: len(FakeTvClient.instances) == 2 and prompt_is_up())
+            FakeTvClient.instances[-1].accept()
+            await asyncio.wait_for(again, 2.0)
+            assert tv.status()["paired"] is True
+        finally:
+            await tv.stop()
+            FakeTvClient.instances.clear()
+
+    async def test_stopping_the_service_does_not_wait_for_the_controls_queued_behind_a_turn_on(self):
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        await service.start()
+        url = f"http://127.0.0.1:{service.bound_port}/api/tv/control"
+        async with aiohttp.ClientSession() as http:
+            taps = [asyncio.ensure_future(self.post(http, url, body))
+                    for body in ({"name": "power", "value": "on"}, {"name": "volume_up"}, {"name": "volume_down"})]
+            try:
+                await wait_until(lambda: len(seen.arrived) == 3)      # one is with the TV, and two wait for their turn
+                await asyncio.wait_for(service.stop(), 3.0)
+            finally:
+                tv.gate.set()
+            for tap in taps:
+                with pytest.raises(aiohttp.ClientError):
+                    await tap
+        assert len(seen.cancelled) == 3 and seen.responses == []      # none was answered, as if it had been done
+        assert tv.calls == [("control", "power", "on")]               # and the two that were waiting never had their turn
+
+    async def test_a_control_whose_page_has_gone_is_not_carried_out_when_its_turn_comes(self, caplog):
+        """The real listener does not end a handler when its client goes away, so a tap that waited behind a Turn on would be made
+        when the Turn on ends, for a page that is no longer there: it is dropped when it has the TV's turn and finds the page
+        gone (the request's transport is None, or is closing)."""
+        caplog.set_level(logging.DEBUG, logger="croom.control.service")
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        await service.start()
+        url = f"http://127.0.0.1:{service.bound_port}/api/tv/control"
+        try:
+            async with aiohttp.ClientSession() as holder:
+                turn_on = asyncio.ensure_future(self.post(holder, url, {"name": "power", "value": "on"}))
+                await wait_until(lambda: tv.order == [("start", "power")])
+                async with aiohttp.ClientSession() as other_page:
+                    tap = asyncio.ensure_future(self.post(other_page, url, {"name": "volume_up"}))
+                    await wait_until(lambda: len(seen.arrived) == 2)     # it waits behind the Turn on ...
+                    tap.cancel()                                          # ... and its page goes away
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await tap
+                gone = seen.requests[1]
+                await wait_until(lambda: gone.transport is None or gone.transport.is_closing())      # the server has seen it go
+                assert seen.finished == []                    # (its handler is waiting still: the listener does not end it)
+                tv.gate.set()
+                assert await asyncio.wait_for(turn_on, 2.0) == 200
+                await wait_until(lambda: len(seen.finished) == 2)
+        finally:
+            tv.gate.set()
+            await service.stop()
+        assert tv.calls == [("control", "power", "on")]               # the tap of the page that had gone was never made
+        assert [response.status for response in seen.responses] == [200, 499]
+        assert "dropped" in caplog.text
+
+    @pytest.mark.parametrize("how, gone", [
+        ("none", True),                  # as the listener leaves the request when the client has hung up
+        ("closing", True),               # or as a request that kept its transport sees it, in a version that caches it
+        ("open", False),
+    ])
+    def test_a_page_has_gone_when_its_transport_is_none_or_closing(self, how, gone):
+        request = make_mocked_request("POST", "/api/tv/control",
+                                      transport=mock.Mock(is_closing=mock.Mock(return_value=how == "closing")))
+        if how == "none":
+            request.protocol.transport = None
+        assert ControlService._page_has_gone(request) is gone
+
+    async def test_a_control_whose_page_is_there_is_carried_out_when_its_turn_comes(self):
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        await service.start()
+        url = f"http://127.0.0.1:{service.bound_port}/api/tv/control"
+        try:
+            async with aiohttp.ClientSession() as http:
+                first = asyncio.ensure_future(self.post(http, url, {"name": "power", "value": "on"}))
+                await wait_until(lambda: tv.order == [("start", "power")])
+                second = asyncio.ensure_future(self.post(http, url, {"name": "volume_up"}))
+                await asyncio.sleep(0.05)
+                tv.gate.set()
+                assert await asyncio.wait_for(first, 2.0) == 200 and await asyncio.wait_for(second, 2.0) == 200
+        finally:
+            tv.gate.set()
+            await service.stop()
+        assert tv.calls == [("control", "power", "on"), ("control", "volume_up", None)]
+
+
+class TestStopEndsWhatIsOpen:
+    """stop() ends the join, the search and the requests that are with the TV from the listener's own shutdown (the app's on_shutdown),
+    which aiohttp runs after the listening sockets are closed and before it waits for the requests in flight: no request can arrive while
+    a cancelled task is let go of. Before, the cancel came first and the listener stayed open for as long as it took, up to CANCEL_WAIT_S:
+    a Turn on that arrived in that time was not cancelled, and the listener's cleanup waited for it (a minute, and another)."""
+
+    URL = "https://zoom.us/j/98765432100"
+
+    @staticmethod
+    async def post(http, url, body):
+        async with http.post(url, json=body) as response:
+            return response.status
+
+    def test_a_task_that_is_cancelled_is_waited_for_five_seconds_and_no_longer(self):
+        assert ControlService.CANCEL_WAIT_S == 5.0
+
+    async def test_a_tv_control_that_comes_while_a_join_is_let_go_of_is_not_served_and_stop_takes_no_longer_than_the_join(self, monkeypatch):
+        """A join that takes 8 s to let go and a TV control that takes 20 s, scaled to 0.3 s for the wait (CANCEL_WAIT_S is 5 s) and for
+        ever for the control. The control that is with the TV when stop() begins is cancelled; the one that comes after is refused
+        (the listener is closed), and stop() is over when the join has been waited for."""
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.3)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()      # a join that is slow to let go
+        tv = StubTv()
+        tv.gate = asyncio.Event()                          # a control that does not end by itself
+        service = make_service(meeting=meeting, tv=tv)
+        await service.start()
+        base = f"http://127.0.0.1:{service.bound_port}"
+        loop = asyncio.get_running_loop()
+        try:
+            async with aiohttp.ClientSession() as joiner, aiohttp.ClientSession() as holder, aiohttp.ClientSession() as late:
+                assert await self.post(joiner, base + "/api/meeting/join", {"url": self.URL}) == 202
+                await wait_until(lambda: meeting.state == MeetingState.JOINING)
+                turn_on = asyncio.ensure_future(self.post(holder, base + "/api/tv/control", {"name": "power", "value": "on"}))
+                await wait_until(lambda: tv.order == [("start", "power")])
+                t0 = loop.time()
+                stopping = asyncio.ensure_future(service.stop())
+                await asyncio.sleep(0.1)                   # stop() is waiting for the join to let go
+                with pytest.raises(aiohttp.ClientError):   # and the listener does not take another request
+                    await asyncio.wait_for(self.post(late, base + "/api/tv/control", {"name": "volume_up"}), 2.0)
+                await asyncio.wait_for(stopping, 3.0)
+                assert loop.time() - t0 < 2.0              # (the control the TV was with did not have to be waited for either)
+                with pytest.raises(aiohttp.ClientError):   # the page that waited for the Turn on is let go of, not told that it was done
+                    await asyncio.wait_for(turn_on, 2.0)
+        finally:
+            meeting.cancel_gate.set()
+            tv.gate.set()
+        assert tv.calls == [("control", "power", "on")] and tv.order == [("start", "power"), ("end", "power")]     # cancelled, and nothing after it
+        assert service._tv_requests == set()
+        await wait_until(lambda: meeting.order == ["join given up"])        # the join ends in its own time, as it did
+
+
+class TestTvRequestsOnTheBooks:
+    """The requests that are with the TV service are on the books (`_tv_requests`) for as long as they last, which is how stop() finds
+    them; none stays on them once it is over, whichever way."""
+
+    ROUTES = [("/api/tv/control", {"name": "volume_up"}, "fail_control"), ("/api/tv/pair", {}, "fail_pair"),
+              ("/api/tv/forget", {}, "fail_forget")]
+
+    @pytest.mark.parametrize("path, body, failing", ROUTES)
+    async def test_an_answered_request_is_off_the_books(self, client_factory, path, body, failing):
+        service = make_service(tv=StubTv())
+        client = await client_factory(service)
+        assert (await client.post(path, json=body)).status == 200
+        assert service._tv_requests == set()
+
+    @pytest.mark.parametrize("path, body, failing", ROUTES)
+    async def test_a_refused_request_is_off_the_books(self, client_factory, path, body, failing):
+        tv = StubTv()
+        setattr(tv, failing, TvError("The TV is not answering"))
+        service = make_service(tv=tv)
+        client = await client_factory(service)
+        assert (await client.post(path, json=body)).status == 409
+        assert service._tv_requests == set()
+
+    @pytest.mark.parametrize("has_tv, request_kwargs, status", [
+        (True, {"json": {"not": "a control"}}, 400),
+        (True, {"data": "[1]", "headers": {"Content-Type": "application/json"}}, 400),
+        (True, {"data": "x", "headers": {"Content-Type": "text/plain"}}, 415),
+        (False, {"json": {"name": "volume_up"}}, 503),
+    ])
+    async def test_a_request_that_is_turned_away_is_off_the_books(self, client_factory, has_tv, request_kwargs, status):
+        service = make_service(tv=StubTv() if has_tv else None)
+        client = await client_factory(service)
+        assert (await client.post("/api/tv/control", **request_kwargs)).status == status
+        assert service._tv_requests == set()
+
+    async def test_a_request_is_on_the_books_while_it_lasts_and_a_cancelled_one_is_off_them(self, client_factory):
+        tv = StubTv()
+        tv.gate = asyncio.Event()
+        service = make_service(tv=tv)
+        seen = watching(service, "_handle_tv_control")
+        client = await client_factory(service)
+        asked = asyncio.ensure_future(client.post("/api/tv/control", json={"name": "power", "value": "on"}))
+        try:
+            await wait_until(lambda: tv.order == [("start", "power")])
+            assert len(service._tv_requests) == 1                       # a Turn on that is with the TV: stop() will find it
+            asked.cancel()                                              # and the page goes away
+            with pytest.raises(asyncio.CancelledError):
+                await asked
+            await wait_until(lambda: len(seen.cancelled) == 1)          # the server has ended the handler that nobody waits for
+            assert service._tv_requests == set()
+        finally:
+            tv.gate.set()
+
+
+class TestLeaveWhileJoining:
+    """A join waits for the room before it asks its provider (the TV is woken, up to fifteen seconds). A person who taps
+    Leave then has changed their mind: the join must not go on, and must not finish after the Leave."""
+
+    URL = "https://zoom.us/j/98765432100"
+
+    async def test_a_leave_while_the_join_waits_for_the_room_gives_the_join_up_before_it_leaves(self, client_factory):
+        meeting = StubMeeting()
+        meeting.hold_join = asyncio.Event()
+        calendar = StubCalendar(events=[event("e1", "Design review", starts_in_minutes=5)])
+        client = await client_factory(make_service(meeting=meeting, calendar=calendar))
+        assert (await client.post("/api/meeting/join", json={"event_id": "e1"})).status == 202
+        await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "joining" and data["meeting"]["title"] == "Design review"
+        response = await client.post("/api/meeting/leave", json={})
+        assert response.status == 202 and await response.json() == {"state": "leaving"}
+        await wait_until(lambda: meeting.leaves == 1)
+        assert meeting.order == ["join given up", "leave"]       # the join was over when the leave began
+        meeting.hold_join.set()                                  # the room answers late: there is no join left to go on
+        await asyncio.sleep(0.05)
+        data = await (await client.get("/api/status")).json()
+        assert data["meeting"]["state"] == "idle" and data["meeting"]["title"] == ""
+        assert meeting.current_meeting is None and len(meeting.joins) == 1
+
+    async def test_a_join_that_takes_time_to_give_up_is_over_before_the_leave_begins(self, client_factory):
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+        await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        asyncio.get_running_loop().call_later(0.05, meeting.cancel_gate.set)       # the provider lets go of the join in 50 ms
+        response = await client.post("/api/meeting/leave", json={})
+        assert response.status == 202
+        await wait_until(lambda: meeting.leaves == 1)
+        assert meeting.order == ["join given up", "leave"]      # the leave waited for the join to be over, and did not begin beside it
+
+    async def test_a_join_that_does_not_let_go_does_not_hold_the_leave_up(self, client_factory, monkeypatch, caplog):
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.05)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()      # (a provider that has not let go: yet)
+        client = await client_factory(make_service(meeting=meeting))
+        assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+        await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        try:
+            response = await asyncio.wait_for(client.post("/api/meeting/leave", json={}), 3.0)
+            assert response.status == 202
+            await wait_until(lambda: meeting.leaves == 1)
+            assert meeting.order == ["leave"]                   # the join was still giving itself up: it was not waited for any longer
+            assert "did not end within" in caplog.text
+        finally:
+            meeting.cancel_gate.set()
+        await wait_until(lambda: meeting.order == ["leave", "join given up"])      # and it ends in its own time
+
+    async def test_a_leave_after_the_join_has_ended_gives_nothing_up(self, client_factory):
+        meeting = StubMeeting()
+        client = await client_factory(make_service(meeting=meeting))
+        await client.post("/api/meeting/join", json={"url": self.URL})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        assert (await client.post("/api/meeting/leave", json={})).status == 202
+        await wait_until(lambda: meeting.leaves == 1)
+        assert meeting.order == ["leave"]
+
+    async def test_a_second_leave_does_not_give_up_the_first(self, client_factory):
+        """The task that is running is a leave this time, and a leave is not given up: it is the way out."""
+        meeting = StubMeeting()
+        gate = asyncio.Event()
+        service = make_service(meeting=meeting)
+        client = await client_factory(service)
+        await client.post("/api/meeting/join", json={"url": self.URL})
+        await wait_until(lambda: meeting.state == MeetingState.CONNECTED)
+        slow_leave = meeting.leave_meeting
+
+        async def held_leave():
+            await gate.wait()
+            await slow_leave()
+        meeting.leave_meeting = held_leave
+        try:
+            assert (await client.post("/api/meeting/leave", json={})).status == 202
+            meeting.set_state(MeetingState.LEAVING)
+            assert (await client.post("/api/meeting/leave", json={})).status == 202
+            await asyncio.sleep(0.02)
+            assert meeting.order == []                             # nothing was cancelled, and neither leave has finished
+        finally:
+            gate.set()
+        await wait_until(lambda: meeting.leaves == 2)
+
+    async def test_stopping_the_service_does_not_wait_for_a_join_that_does_not_let_go(self, client_factory, monkeypatch):
+        monkeypatch.setattr(ControlService, "CANCEL_WAIT_S", 0.05)
+        meeting = StubMeeting()
+        meeting.hold_join, meeting.cancel_gate = asyncio.Event(), asyncio.Event()
+        service = make_service(meeting=meeting)
+        await service.start()
+        client = await client_factory(service)
+        try:
+            assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+            await wait_until(lambda: meeting.state == MeetingState.JOINING)
+            await asyncio.wait_for(service.stop(), 3.0)
+        finally:
+            meeting.cancel_gate.set()
+        await wait_until(lambda: meeting.order == ["join given up"])
+
+    async def test_stopping_the_service_gives_up_a_join_that_still_waits(self, client_factory):
+        meeting = StubMeeting()
+        meeting.hold_join = asyncio.Event()
+        service = make_service(meeting=meeting)
+        await service.start()
+        client = await client_factory(service)
+        try:
+            assert (await client.post("/api/meeting/join", json={"url": self.URL})).status == 202
+            await wait_until(lambda: meeting.state == MeetingState.JOINING)
+        finally:
+            await asyncio.wait_for(service.stop(), 2.0)
+        assert meeting.order == ["join given up"]
 
 
 class TestKeyClickSetting:

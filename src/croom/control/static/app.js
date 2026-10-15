@@ -6,8 +6,8 @@
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
-  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera view
-  // belongs to whichever mode showed it, so its Back returns there.
+  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
+  // belong to whichever mode showed them, so their Back returns there.
   const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
 
@@ -16,20 +16,71 @@
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
   const model = { status: null, events: [], offline: false, busy: false, error: "", confirmLeave: false, screensaver: null, settings: null, lastLink: "", lastEvent: "" };
-  const renderHooks = [];   // devices.js registers its rendering here; render() calls each with the status
-  const viewHooks = [];     // devices.js and keyboard.js register here; called after every view change
+  const renderHooks = [];   // devices.js and remote.js register their rendering here; render() calls each with the status
+  const viewHooks = [];     // devices.js, keyboard.js and remote.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
+  let tvMode = "idle";      // the mode that opened the TV view
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
   let passcodeCard = false;      // the last render showed the card for a join Zoom refused over the passcode: its landing happens once too
   let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
   const kiosk = new URLSearchParams(window.location.search).get("keyboard") === "1";   // the table Pi's kiosk browser has no keyboard of its own (keyboard.js)
 
+  // Icons: one sprite of Lucide symbols (icons.svg), fetched once and kept in the document, so <use href="#icon-..."> resolves
+  // without a request per button. A page without the sprite keeps its labels (the fetch may fail offline).
+  const iconsReady = fetch("/static/icons.svg").then((r) => {
+    if (!r.ok) throw new Error("the server answered " + r.status);
+    return r.text();
+  }).then((svg) => {
+    if (!svg) throw new Error("the file is empty");
+    const holder = document.createElement("div");
+    holder.hidden = true;
+    holder.innerHTML = svg;
+    document.body.prepend(holder);
+    return true;
+  }).catch((e) => {
+    console.warn("The icon sprite did not load, so the buttons show their words alone:", e);   // once: the page keeps working
+    return false;
+  }).then((ok) => {
+    document.body.classList.toggle("no-icons", !ok);   // style.css: no empty icon boxes, the words in the middle again, a glyph on the keyboard button
+    return ok;
+  });
+  // The browser's own HTML parser makes the picture, so that no namespace address is written in this file (the service's
+  // test of the page's files looks for any web address in them); the name goes in as an attribute, never as markup.
+  function icon(name) {
+    const holder = document.createElement("template");
+    holder.innerHTML = '<svg class="icon" aria-hidden="true"><use></use></svg>';
+    const svg = holder.content.firstChild;
+    svg.firstChild.setAttribute("href", "#icon-" + name);
+    return svg;
+  }
+  // A button's content: its icon, if it has one, then its label. The icon is hidden from a screen reader: the label is the name
+  // (a button with an icon and no label, the keyboard toggle, is named by its aria-label). What does not change is not replaced: a
+  // finger that went down on the icon or on the words must find them still there at the lift, or the browser drops the tap, and the
+  // speaker button is drawn again at every volume change, Save at every camera change. A new label or icon is changed in place.
+  function labelWithIcon(node, label, name) {
+    let picture = null, words = null;
+    for (const child of Array.from(node.childNodes)) {
+      if (!picture && child.nodeType === 1 && child.matches("svg.icon")) picture = child;
+      else if (!words && child.nodeType === 1 && child.tagName === "SPAN") words = child;
+      else child.remove();   // the plain text the markup gave the button, or anything else that is not ours
+    }
+    if (name) {
+      if (!picture) { picture = icon(name); node.prepend(picture); }
+      else if (picture.querySelector("use").getAttribute("href") !== "#icon-" + name) picture.querySelector("use").setAttribute("href", "#icon-" + name);
+    } else if (picture) picture.remove();
+    if (label) {
+      if (!words) { words = document.createElement("span"); node.append(words); }
+      if (words.textContent !== label) words.textContent = label;
+    } else if (words) words.remove();
+  }
+
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
-  const viewMode = (name) => (name === "camera" ? cameraMode : VIEW_MODES[name]);
+  const viewMode = (name) => (name === "camera" ? cameraMode : name === "tv" ? tvMode : VIEW_MODES[name]);
 
   function applyView(name, automatic) {
     if (name === "camera") cameraMode = mode();
+    if (name === "tv") tvMode = mode();
     document.body.dataset.view = name;
     // Every view change, an automatic one too, starts or clears the wait. Before the hooks: a hook may start a timer of
     // its own (the preview's 30 s renewal), and when the two fall due together they run in the order they were set, so
@@ -44,13 +95,20 @@
   }
 
   // Idle mode returns to the idle screen on its own: the kiosk never reloads and nobody presses Back, so a room left on
-  // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns.
+  // Camera framing would keep the TV on the camera for good. Any tap restarts the wait; a meeting screen never returns, except
+  // the TV view opened from one (the remote is a quick look in a call): it goes back to the meeting screen after two minutes.
+  // The full-screen touchpad (touchpad.js) holds the wait while it is up: a person moving the TV's cursor touches the surface, not
+  // the page, and the surface has a wait of its own; the page's begins again when it goes away.
   const IDLE_RETURN_MS = 10 * 60 * 1000;
+  const TV_RETURN_MS = 2 * 60 * 1000;
   let idleReturnTimer = null;
+  let idleReturnHeld = false;
   function armIdleReturn() {
     clearTimeout(idleReturnTimer);
     idleReturnTimer = null;
+    if (idleReturnHeld) return;
     if (mode() === "idle" && view() !== "idle") idleReturnTimer = setTimeout(() => setView("idle", true), IDLE_RETURN_MS);
+    else if (mode() === "meeting" && view() === "tv") idleReturnTimer = setTimeout(() => setView("meeting", true), TV_RETURN_MS);
   }
   document.addEventListener("pointerdown", armIdleReturn, true);
 
@@ -59,7 +117,7 @@
   let lastPickerKey = null;
   let lastDoorSignKey = null;
   let lastUpcomingKey = null;
-  const deviceEpoch = { audio: 0, camera: 0 };   // counts each device's answers, so a poll already on its way cannot undo one
+  const deviceEpoch = { audio: 0, camera: 0, tv: 0 };   // counts each device's answers (and the TV's), so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
@@ -231,7 +289,7 @@
     submitForm(el("link-form"));
   }
 
-  const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+  const post = (path, body, extra) => api(path, Object.assign({ method: "POST", body: JSON.stringify(body || {}) }, extra));
   const withPasscode = (body, passcode) => (passcode ? Object.assign(body, { passcode: passcode }) : body);
   const joinLink = (url, passcode) => act(() => post("/api/meeting/join", withPasscode({ url: url }, passcode)).then(() => joinAccepted(url)));
   const joinEvent = (id) => { forgetJoin(); return act(() => post("/api/meeting/join", { event_id: id }).then(() => { model.lastEvent = id; })); };
@@ -249,11 +307,11 @@
   // button moves from under the finger before it lifts, and the tap is lost.
   const keepFocus = (b) => b.addEventListener("pointerdown", (e) => e.preventDefault());
 
-  function button(label, className, onClick, disabled) {
+  function button(label, className, onClick, disabled, iconName) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "button " + className;
-    b.textContent = label;
+    labelWithIcon(b, label, iconName);
     b.disabled = Boolean(disabled) || model.busy;
     keepFocus(b);
     b.addEventListener("click", onClick);
@@ -261,26 +319,26 @@
   }
 
   function setActions(specs, containerId, keyHolder) {
-    // Replace the buttons only when their labels, availability or target change, so a click in progress is never
+    // Replace the buttons only when their labels, icons, availability or target change, so a click in progress is never
     // lost to a re-render (the timer ticks every second), and a Join never acts on a booking it no longer shows (two
     // bookings back to back both say "Join now").
-    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null]));
+    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null, s.icon || null]));
     if (key === keyHolder.key) return;
     keyHolder.key = key;
-    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled)));
+    el(containerId).replaceChildren(...specs.map((s) => button(s.label, s.className, s.onClick, s.disabled, s.icon)));
   }
   const idleActionsKey = { key: null };
   const meetingActionsKey = { key: null };
 
   function leaveSpec() {
     if (model.confirmLeave) {
-      return { label: "Tap again to leave", className: "danger", onClick: () => {
+      return { label: "Tap again to leave", className: "danger", icon: "phone-off", onClick: () => {
         clearTimeout(confirmTimer);
         model.confirmLeave = false;
         leave();
       } };
     }
-    return { label: "Leave", className: "danger", onClick: () => {
+    return { label: "Leave", className: "danger", icon: "phone-off", onClick: () => {
       model.confirmLeave = true;
       clearTimeout(confirmTimer);
       confirmTimer = setTimeout(() => { model.confirmLeave = false; render(); }, CONFIRM_MS);
@@ -450,15 +508,15 @@
       el("kicker").textContent = m.state === "leaving" ? "Leaving" : "Joining";
       el("headline").textContent = m.state === "leaving" ? "Leaving" : "Joining " + label;
       el("detail").textContent = m.state === "in_lobby" ? "Waiting for the host to let the room in." : "The room's screen is connecting.";
-      if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", onClick: leave }];
+      if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", icon: "x-circle", onClick: leave }];
     } else if (m.state === "connected") {
       body.dataset.state = "meeting";
       el("kicker").textContent = "In a meeting";
       el("headline").textContent = "In a meeting";
       el("detail").textContent = meetingDetail(m);
       specs = [
-        { label: m.muted ? "Unmute" : "Mute", className: "", onClick: () => toggle("mute") },
-        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", onClick: () => toggle("camera") },
+        { label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", onClick: () => toggle("mute") },
+        { label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", onClick: () => toggle("camera") },
         leaveSpec(),
       ];
     } else if (m.state === "error") {
@@ -466,8 +524,8 @@
       el("kicker").textContent = "Couldn't join";
       el("headline").textContent = "Couldn't join " + label;
       el("detail").textContent = m.error || "The room's screen could not join. Try again, or join from a different link.";
-      specs = [{ label: "Dismiss", className: "quiet", onClick: leave }];
-      if (asking) specs.push({ label: "Join again", className: "primary", onClick: joinAgain });
+      specs = [{ label: "Dismiss", className: "quiet", icon: "x-circle", onClick: leave }];
+      if (asking) specs.push({ label: "Join again", className: "primary", icon: "video", onClick: joinAgain });
     } else {
       specs = renderIdle(cal);
     }
@@ -539,7 +597,7 @@
       el("kicker").textContent = "Happening now";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
-      return current.joinable ? [{ label: "Join now", className: "primary", onClick: () => joinEvent(current.id), target: current.id }] : [];
+      return current.joinable ? [{ label: "Join now", className: "primary", icon: "video", onClick: () => joinEvent(current.id), target: current.id }] : [];
     }
 
     if (next) {
@@ -557,7 +615,7 @@
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
       if (!next.joinable) return [];
-      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
+      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", icon: "video", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
     }
 
     body.dataset.state = "free";
@@ -588,7 +646,7 @@
     for (const ev of model.events) {
       const window = joinWindow(ev);
       const canJoin = ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error");
-      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev)) : null);
+      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev), "video") : null);
       li.classList.toggle("past", window.past);
       li.classList.toggle("now", Boolean(cal.current && cal.current.id === ev.id));
       list.append(li);
@@ -616,6 +674,10 @@
 
   keepFocus(el("link-form").querySelector("button[type=submit]"));   // Join, beside the link box
 
+  // The buttons in index.html name their icon in data-icon (every Back is the arrow); each gets it once, here, with the label the
+  // markup gives it.
+  for (const b of document.querySelectorAll("button[data-icon], button.back")) labelWithIcon(b, b.textContent.trim(), b.dataset.icon || "back");
+
   el("open-options").addEventListener("click", () => setView("options"));
   el("back-from-options").addEventListener("click", () => setView("idle"));
   el("open-camera-setup").addEventListener("click", () => setView("camera"));
@@ -627,14 +689,19 @@
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
+  el("open-tv-options").addEventListener("click", () => setView("tv"));
+  el("open-tv-meeting").addEventListener("click", () => setView("tv"));
+  el("back-from-tv").addEventListener("click", () => setView(tvMode === "meeting" ? "meeting" : "options"));
   el("key-click-on").addEventListener("click", () => setKeyClick(true));
   el("key-click-off").addEventListener("click", () => setKeyClick(false));
 
   window.croomPage = {
     el: el, model: model, api: api, post: post, act: act, button: button, render: render,
+    iconsReady: iconsReady, icon: icon, labelWithIcon: labelWithIcon, keepFocus: keepFocus, CONFIRM_MS: CONFIRM_MS,
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING, submitForm: submitForm,
     view: view, setView: setView, mode: mode, cameraMode: () => cameraMode, kiosk: kiosk,
     onViewChange: (fn) => viewHooks.push(fn),
+    holdIdleReturn: (held) => { idleReturnHeld = Boolean(held); armIdleReturn(); },
     // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other
     // scripts have run) is given that status at once. The renders behind the hooks are keyed, so the replay is idempotent.
     onRender: (fn) => { renderHooks.push(fn); if (model.status && !model.offline) fn(model.status); },

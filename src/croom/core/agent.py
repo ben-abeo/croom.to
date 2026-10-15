@@ -79,6 +79,20 @@ class CroomAgent:
             except ImportError as e:
                 logger.warning(f"AI service not available: {e}")
 
+        # The room's TV (spec 2026-10-13 TV remote and touchpad): kept on, and woken before a meeting is joined. Registered
+        # ahead of audio and video, and listed among the meeting's dependencies below, so that it starts before the meeting
+        # (with the AI service on, audio and video are put right after it in the start order, and still come first). Its
+        # start never holds the others for long: it waits half a second for the first look at the TV, and no more.
+        tv_service = None
+        if self.config.tv.enabled:
+            try:
+                from croom.tv.service import TvService
+                tv_service = TvService.from_config(self.config)
+                self.service_manager.register(tv_service)
+                logger.info("TV service registered")
+            except ImportError as e:
+                logger.warning(f"TV service not available: {e}")
+
         # Audio Service
         try:
             from croom.audio.service import AudioService
@@ -110,7 +124,11 @@ class CroomAgent:
         try:
             from croom.meeting.service import MeetingService
             meeting_service = MeetingService(self.config)
-            self.service_manager.register(meeting_service, dependencies=["audio", "video"])
+            if tv_service is not None:
+                meeting_service.add_before_join(tv_service.before_join)   # a join waits for the TV, then goes on without it
+            self.service_manager.register(
+                meeting_service, dependencies=["audio", "video"] + (["tv"] if tv_service is not None else [])
+            )
             logger.info("Meeting service registered")
         except ImportError as e:
             logger.warning(f"Meeting service not available: {e}")
@@ -158,9 +176,14 @@ class CroomAgent:
                     calendar=self.service_manager.get_service("calendar"),
                     devices=self.service_manager.get_service("devices"),
                     store=settings_store,
+                    tv=tv_service,   # the room page's TV (None when the room has none enabled): its status and its controls
                     scores=scores_service,
                 )
-                dependencies = ["meeting", "calendar", "devices"] + (["scores"] if scores_service is not None else [])
+                dependencies = (
+                    ["meeting", "calendar", "devices"]
+                    + (["tv"] if tv_service is not None else [])
+                    + (["scores"] if scores_service is not None else [])
+                )
                 self.service_manager.register(control_service, dependencies=dependencies)
                 logger.info("Room control page registered")
             except ImportError as e:
@@ -323,6 +346,11 @@ def main() -> None:
         help="Check the room's Zoom Meeting SDK credentials and exit",
         action="store_true"
     )
+    parser.add_argument(
+        "--check-tv",
+        help="Check that the room's LG TV answers (or, with no TV configured, list the LG TVs on the network) and exit",
+        action="store_true"
+    )
 
     parser.add_argument(
         "--check-meet",
@@ -355,6 +383,14 @@ def main() -> None:
     if args.check_zoom:
         from croom.meeting.zoom_check import check_zoom
         raise SystemExit(asyncio.run(check_zoom(load_config(args.config))))
+
+    if args.check_tv:
+        from croom.tv.check import check_tv
+        # It prints names that a TV, or a person's directory, chose: one that this terminal cannot encode is shown as a ? and does
+        # not end the check in a traceback
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+        raise SystemExit(asyncio.run(check_tv(load_config(args.config))))
 
     if args.check_meet:
         import tempfile

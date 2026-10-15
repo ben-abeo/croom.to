@@ -7,8 +7,6 @@ import os
 import subprocess
 from pathlib import Path
 
-import pytest
-
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "installer" / "install.sh"
 
@@ -314,3 +312,79 @@ def test_a_sudoers_rule_that_validates_leaves_only_the_rule_behind(tmp_path):
     assert result.returncode == 0, result.stderr
     assert [path.name for path in sudoers.iterdir()] == ["croom"]      # the temporary file was moved, not copied
     assert oct((sudoers / "croom").stat().st_mode & 0o777) == "0o440"
+
+
+def test_the_room_pis_virtual_mouse_is_the_input_groups_to_use(tmp_path):
+    """The touchpad drives a virtual mouse on the room Pi through /dev/uinput: a udev rule gives the device to the input group, and the
+    uinput kernel module is loaded at every boot."""
+    rules, modules = tmp_path / "rules.d", tmp_path / "modules-load.d"
+    result = run_bash(f"source {SCRIPT}; UDEV_RULES_DIR={rules}; MODULES_LOAD_DIR={modules}; write_uinput_rules")
+    assert result.returncode == 0, result.stderr
+    (rule_file,) = rules.iterdir()
+    assert rule_file.suffix == ".rules"                                    # (udev reads no other file)
+    assert 'KERNEL=="uinput", GROUP="input", MODE="0660"' in rule_file.read_text().splitlines()
+    (module_file,) = modules.iterdir()
+    assert module_file.suffix == ".conf" and module_file.read_text().split() == ["uinput"]
+
+
+def test_the_rule_and_the_module_go_where_the_system_reads_them():
+    text = SCRIPT.read_text()
+    assert 'UDEV_RULES_DIR="${UDEV_RULES_DIR:-/etc/udev/rules.d}"' in text
+    assert 'MODULES_LOAD_DIR="${MODULES_LOAD_DIR:-/etc/modules-load.d}"' in text
+
+
+def test_the_agents_user_joins_the_input_group_and_the_module_is_loaded_now_with_the_rule_in_force():
+    body = SCRIPT.read_text().split("install_virtual_mouse() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'usermod -aG input "$CROOM_USER"' in body
+    rule, reload, load, trigger = (body.index(step) for step in ("write_uinput_rules", "udevadm control --reload-rules", "modprobe uinput",
+                                                                  "udevadm trigger"))
+    assert rule < reload < load < trigger                                  # the device is made under the rule, or has the rule applied to it
+
+
+def test_the_installer_sets_the_virtual_mouse_up_with_the_rest():
+    assert "install_virtual_mouse" in SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_the_installer_adds_what_building_evdev_needs():
+    """evdev has no wheel: pip compiles its C extension, which needs Python's headers, a compiler and the kernel's linux/input.h, which comes
+    with libc6-dev and which gcc only recommends (a device that installs no recommends has the compiler and not the header)."""
+    body = SCRIPT.read_text().split("install_dependencies() {", 1)[1].split("\n}", 1)[0]
+    assert "python3-dev" in body.split() and "gcc" in body.split() and "libc6-dev" in body.split()
+
+
+def test_help_names_the_virtual_mouse_step_and_the_checks_including_the_tvs():
+    """The help says what the install sets up for the touchpad's virtual mouse and how to redo that step on its own, and lists the checks
+    with the other two where `croom --check-tv` is, as the desktop user the service runs as (the TV's key is private to it)."""
+    result = run_bash(f"bash {SCRIPT} --help")
+    assert result.returncode == 0
+    for needle in (
+        "Every install also sets up the room Pi's virtual mouse for the table's touchpad (it needs python3-dev, gcc and libc6-dev, which the install adds):",
+        "a udev rule that gives /dev/uinput to the input group, the uinput module at boot, and the desktop user in the input group",
+        "To redo only that step on a device that is already installed: sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
+        "Checks to run afterwards, as the desktop user the service runs as:",
+        "/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml",
+        "/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml",
+        "/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml",
+    ):
+        assert needle in result.stdout, needle
+
+
+def test_the_virtual_mouse_step_can_be_run_on_its_own_from_an_installed_device(tmp_path):
+    """What the help and the guides tell a person to type: source the script (it runs nothing when sourced) and call the step. The rule
+    and the module land where the folders say, the user joins the group, the module is loaded now: here with stand-ins for the commands
+    that need root, so that nothing on this machine changes."""
+    bin_dir, rules, modules, calls = tmp_path / "bin", tmp_path / "rules.d", tmp_path / "modules-load.d", tmp_path / "calls.log"
+    bin_dir.mkdir()
+    for command in ("usermod", "udevadm", "modprobe"):
+        stand_in = bin_dir / command
+        stand_in.write_text(f'#!/bin/sh\necho "{command} $@" >> "{calls}"\n')
+        stand_in.chmod(0o755)
+    env = {"PATH": f"{bin_dir}:{os.environ['PATH']}", "SUDO_USER": "pi", "UDEV_RULES_DIR": str(rules), "MODULES_LOAD_DIR": str(modules)}
+    result = run_bash(f"source {SCRIPT} && install_virtual_mouse", env=env)
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == ["usermod -aG input pi", "udevadm control --reload-rules", "modprobe uinput",
+                                              "udevadm trigger --subsystem-match=misc --sysname-match=uinput"]
+    (rule_file,) = rules.iterdir()
+    assert 'KERNEL=="uinput", GROUP="input", MODE="0660"' in rule_file.read_text().splitlines()
+    (module_file,) = modules.iterdir()
+    assert module_file.read_text().split() == ["uinput"]

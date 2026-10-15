@@ -115,6 +115,7 @@ async def meet_page():
             page.goto = goto                  # the provider asks for meet.google.com; this browser is sent to the replica instead
             provider = GoogleMeetProvider(FakeDisplay(page))
             provider.READ_INTERVAL_S = read_interval
+            provider.PAGE_SETTLE_S = provider.LEAVE_SETTLE_S = 0.05      # the provider's own waits for a real page: not needed for the replica
             providers.append(provider)
             if setup is not None:
                 setup(provider)
@@ -236,6 +237,22 @@ async def test_a_button_whose_label_does_not_say_its_state_is_not_offered(meet_p
         await provider.control("camera")
 
 
+async def test_a_copy_of_a_button_that_the_page_keeps_out_of_sight_is_not_the_button(meet_page):
+    """The microphone is live and the camera off, as the drawn toolbar says; stale copies with the opposite words that are not drawn must not be read for them."""
+    stale = '<div aria-label="Turn on microphone" hidden>stale</div><div aria-label="Turn off camera" hidden>stale</div>'
+    provider, info = await meet_page(replica(stale + BUTTONS))
+    assert info.is_muted is False and info.is_camera_on is False
+    assert info.controls["mute"] == {"available": True, "on": True} and info.controls["camera"] == {"available": True, "on": False}
+
+
+async def test_two_drawn_buttons_that_say_different_things_say_nothing(meet_page):
+    provider, info = await meet_page(replica(BUTTONS + '<button aria-label="Turn off camera (ctrl + e)">cam</button>'))
+    assert info.controls["camera"] == {"available": False}
+    with pytest.raises(MeetingControlError, match="^Meet shows no camera button right now$"):
+        await provider.control("camera")
+    assert await keys(provider) == []
+
+
 async def test_the_people_count_is_the_number_in_the_label_or_the_text_and_zero_without_one(meet_page):
     provider, info = await meet_page(replica())
     page = provider._page
@@ -269,6 +286,14 @@ async def test_chat_seen_has_nothing_to_mark_and_answers_with_the_chat(meet_page
     provider, info = await meet_page(replica())
     assert await provider.control("chat.seen") == {"chat": {"unread": 0, "messages": []}}
     assert await keys(provider) == []
+
+
+async def test_leave_is_carried_out_from_the_table_as_zooms_is(meet_page):
+    """The model says leave is available; a control the model offers must work."""
+    provider, info = await meet_page(replica())
+    assert info.controls["leave"] == {"available": True}
+    assert await provider.control("leave") == {}
+    assert provider.state == MeetingState.IDLE
 
 
 async def test_a_control_with_no_call_is_refused_in_words():
@@ -308,6 +333,8 @@ async def test_a_label_that_changes_late_is_waited_for_and_the_press_took(meet_p
 async def test_the_press_and_the_reading_have_their_bounds_pinned():
     assert GoogleMeetProvider.READ_INTERVAL_S == 5
     assert GoogleMeetProvider.PRESS_WAIT_S == 2 and GoogleMeetProvider.PRESS_POLL_S == 0.05
+    assert GoogleMeetProvider.LOOK_TIMEOUT_S == 10                                          # one reading of the page; a frozen tab is given up on after this
+    assert GoogleMeetProvider.PAGE_SETTLE_S == 2 and GoogleMeetProvider.LEAVE_SETTLE_S == 1   # the waits a real page needs (the replica's fixture shortens them)
 
 
 @pytest.mark.parametrize("toggle, attribute, part, page_sets", [
@@ -363,24 +390,44 @@ async def test_the_bare_c_key_is_never_pressed_into_a_text_field(meet_page):
     assert await page.input_value("#chat") == "" and await keys(provider) == ["Control+e", "c", "c"]
 
 
-async def test_the_bare_c_key_goes_to_the_page_or_to_a_button_and_to_nothing_else(meet_page):
-    """Whatever else has the keyboard is not the page's: a text field, an editable area, a link, something that is only focusable. A button
-    (a real one, or an element that says it is one) passes the key on to the page."""
+@pytest.mark.parametrize("html, typing", [
+    pytest.param('<textarea id="x"></textarea>', True, id="textarea"),
+    pytest.param('<input id="x" type="text">', True, id="text-input"),
+    pytest.param('<div id="x" contenteditable="true"></div>', True, id="editable-area"),
+    pytest.param('<select id="x"><option>a</option></select>', True, id="select"),
+    pytest.param('<div id="x" role="textbox" tabindex="0"></div>', True, id="role-textbox"),
+    pytest.param('<div id="x" role="combobox" tabindex="0"></div>', True, id="role-combobox"),
+    pytest.param('<iframe id="x" src="about:blank"></iframe>', True, id="frame"),
+    pytest.param('<div id="x" tabindex="-1"></div>', False, id="container-meet-focuses-itself"),
+    pytest.param('<div id="x" role="dialog" tabindex="-1"></div>', False, id="dialog"),
+    pytest.param('<ul role="menu"><li id="x" role="menuitem" tabindex="-1"></li></ul>', False, id="menu-item"),
+    pytest.param('<a id="x" href="#top">link</a>', False, id="link"),
+    pytest.param('<div id="x" tabindex="0"></div>', False, id="focusable-container"),
+])
+async def test_the_bare_c_key_goes_to_the_page_unless_something_that_takes_typing_has_the_keyboard(meet_page, html, typing):
+    """Meet's own shortcut handler leaves the key alone only when it would be typed. A container Meet focuses itself, a dialog, a menu item, a link
+    or a setting is not that, and a Captions that refused for them would be a button nothing at the table can bring back."""
     provider, info = await meet_page(replica())
     page = provider._page
-    await page.evaluate("""() => {
-      const add = (html) => document.getElementById('meeting').insertAdjacentHTML('beforeend', html);
-      add('<div id="note" contenteditable="true"></div><textarea id="area"></textarea><a id="link" href="#x">link</a>');
-      add('<div id="choice" role="combobox" tabindex="0"></div><div id="plain" tabindex="0"></div><div id="press" role="button" tabindex="0"></div>');
-    }""")
-    for held in ("#note", "#area", "#link", "#choice", "#plain"):
-        await page.focus(held)
-        with pytest.raises(MeetingControlError, match="chat box has the keyboard"):
+    await page.evaluate("(html) => { document.getElementById('meeting').insertAdjacentHTML('beforeend', html); document.getElementById('x').focus(); }", html)
+    if typing:
+        with pytest.raises(MeetingControlError, match="has the keyboard"):
             await provider.control("captions")
-    assert await keys(provider) == []
-    await page.focus("#press")                             # a div that is a button
-    state = await provider.control("captions")
-    assert state["captions"]["on"] is True and await keys(provider) == ["c"]
+        assert await keys(provider) == []
+    else:
+        state = await provider.control("captions")
+        assert state["captions"]["on"] is True and await keys(provider) == ["c"]
+
+
+async def test_the_bare_c_key_is_pressed_with_a_setting_focused(meet_page):
+    """A checkbox takes no typing: the key is sent (the replica's own handler leaves any input alone, so what it answers is Meet's "did not change",
+    never the keyboard's)."""
+    provider, info = await meet_page(replica())
+    provider.PRESS_WAIT_S = 0.3
+    await provider._page.evaluate("() => { document.getElementById('meeting').insertAdjacentHTML('beforeend', '<input id=\"x\" type=\"checkbox\">'); document.getElementById('x').focus(); }")
+    with pytest.raises(MeetingControlError, match="^Meet did not change the captions; try again$"):
+        await provider.control("captions")
+    assert await keys(provider) == ["c"]
 
 
 # ---- One press at a time ----
@@ -505,3 +552,48 @@ async def test_a_press_that_cannot_reach_the_page_is_a_refusal_in_words(meet_pag
     page.evaluate = gone
     with pytest.raises(MeetingControlError, match="^Could not change the camera: Page.evaluate: Target page, context or browser has been closed$"):
         await provider.control("camera")
+
+
+async def test_a_page_that_stops_answering_is_a_refusal_in_words_and_frees_the_press(meet_page):
+    """A frozen tab must not hold the press lock for good (and with it the table's Mute, which waits for its answer)."""
+    provider, info = await meet_page(replica())
+    provider.LOOK_TIMEOUT_S = 0.5
+    page = provider._page
+    real = page.evaluate
+
+    async def frozen(*args, **kwargs):
+        await asyncio.sleep(3600)
+
+    page.evaluate = frozen
+    with pytest.raises(MeetingControlError, match="^Meet's page did not answer within 0.5 seconds$"):
+        await asyncio.wait_for(provider.control("camera"), 5)      # without the bound this never ends: the guard turns that into a TimeoutError
+    page.evaluate = real
+    state = await asyncio.wait_for(provider.control("camera"), 5)  # the lock is free
+    assert state["camera"]["on"] is True
+
+
+# ---- What Meet's page shows, for the first real call ----
+
+
+async def test_meet_diagnostics_list_the_labels_the_page_draws_what_the_reader_makes_of_them_and_what_has_the_keyboard(meet_page):
+    """Meet's labels are the controls plan's English until a real call confirms them: GET /api/meeting/diagnostics during one lists every label the
+    page draws (not the copies it keeps out of sight), what the reader makes of them, and what has the keyboard."""
+    stale = '<div aria-label="Turn on microphone" hidden>stale</div>'
+    provider, info = await meet_page(replica(stale + BUTTONS))
+    data = await provider.diagnostics()
+    assert [(d["tag"], d["role"], d["label"]) for d in data["labels"]] == [
+        ("button", "", "Turn off microphone (ctrl + d)"), ("button", "", "Turn on camera (ctrl + e)"), ("button", "", "Raise hand (ctrl + alt + h)"),
+        ("button", "", "Turn on captions (c)"), ("button", "", "Show everyone (3)"), ("button", "", "Leave call"), ("input", "", "Send a message")]
+    assert data["reading"] == {"mute": {"on": True}, "camera": {"on": False}, "raise_hand": {"on": False}, "captions": {"on": False},
+                               "people": {"count": 3}, "taken": False}
+    assert data["focus"] == "body"
+    page = provider._page
+    await page.focus("#chat")
+    assert (await provider.diagnostics())["focus"] == "input"
+    await page.evaluate("() => { document.getElementById('meeting').insertAdjacentHTML('beforeend', '<div id=\"x\" role=\"textbox\" tabindex=\"0\"></div>'); document.getElementById('x').focus(); }")
+    data = await provider.diagnostics()
+    assert data["focus"] == "div[role=textbox]" and data["reading"]["taken"] is True
+
+
+async def test_meet_diagnostics_are_empty_without_a_call():
+    assert await GoogleMeetProvider(FakeDisplay()).diagnostics() == {}

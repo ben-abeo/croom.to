@@ -32,25 +32,33 @@ except ImportError:
 # One reading of Meet's call page (spec 2026-10-13, section 4.5). Each control's button is found by a label that names what pressing it does, and
 # its state is what that label says: "Turn off camera" means the camera is on, "Lower hand" means the hand is up. A button the page does not have,
 # or whose label names no such action, reads as null. `people` is the people button with the number in its label or its text; `taken` is whether
-# something other than the page itself or a button has the keyboard (a text field, the chat box, say).
+# something that takes typing has the keyboard (a text field, the chat box, an editable area, a frame, say).
 READ_CALL = r"""() => {
-  const labelled = [...document.querySelectorAll("[aria-label]")];
+  // Only what is drawn counts: a copy the page keeps out of sight is not the button. Two drawn buttons that say different things say nothing (null).
+  const labelled = [...document.querySelectorAll("[aria-label]")].filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
   const find = (pattern) => labelled.find((el) => pattern.test(el.getAttribute("aria-label")));
   const state = (pattern, said) => {
-    const el = find(pattern);
-    return el ? { on: el.getAttribute("aria-label").match(pattern)[1].toLowerCase() === said } : null;
+    const says = labelled.filter((el) => pattern.test(el.getAttribute("aria-label"))).map((el) => el.getAttribute("aria-label").match(pattern)[1].toLowerCase() === said);
+    return says.length && says.every((on) => on === says[0]) ? { on: says[0] } : null;
   };
   const people = find(/show everyone|participants|^people\b/i);
   const count = people && (people.getAttribute("aria-label").match(/\d+/) || people.textContent.match(/\d+/));
+  // Whether something that takes typing has the keyboard (the bare C would be typed into it): a text field, a list that selects by typing, an editable
+  // area, an element that says it is one, or a frame (what it holds is not seen from here). A button, a link, a menu item, a container: the key goes on to the page.
   const held = document.activeElement;
-  const role = (held && held.getAttribute && held.getAttribute("role")) || "";
+  const kind = (held && held.getAttribute && (held.getAttribute("type") || "text").toLowerCase()) || "";
+  const role = (held && held.getAttribute && (held.getAttribute("role") || "").toLowerCase()) || "";
+  const typing = Boolean(held && held !== document.body && (
+    held.isContentEditable || ["TEXTAREA", "SELECT", "IFRAME"].includes(held.tagName)
+    || (held.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "color", "hidden"].includes(kind))
+    || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)));
   return {
     mute: state(/turn (on|off) microphone/i, "off"),
     camera: state(/turn (on|off) camera/i, "off"),
     raise_hand: state(/(raise|lower) hand/i, "lower"),
     captions: state(/turn (on|off) captions?/i, "off"),
     people: people ? { count: count ? Number(count[0]) : null } : null,
-    taken: Boolean(held && held !== document.body && held.tagName !== "BUTTON" && role !== "button"),
+    taken: typing,
   };
 }"""
 # What the table is told when the bare C key cannot go to the page: it would be typed into whatever has the keyboard (the chat box).
@@ -96,6 +104,8 @@ class GoogleMeetProvider(MeetingProvider):
     JOIN_FIND_TIMEOUT_MS = 4000      # per selector while looking for the join control
     JOIN_ENABLE_TIMEOUT_MS = 10000   # how long the control may stay disabled after the name is typed
     TOGGLE_TIMEOUT_MS = 3000         # per selector while looking for a camera or microphone button
+    PAGE_SETTLE_S = 2                # after the page has loaded, before the pre-join screen is looked at
+    LEAVE_SETTLE_S = 1               # after the Leave button is pressed, before the TV goes back to the screensaver
     CONNECT_TIMEOUT_MS = 30000       # for Meet's in-call controls after pressing Join
     ADMIT_TIMEOUT_MS = 300000        # how long a host may take to admit the room
     LOBBY_PHRASES = ("waiting for", "asking to join", "someone lets you in", "let you in")
@@ -110,6 +120,7 @@ class GoogleMeetProvider(MeetingProvider):
     READ_INTERVAL_S = 5   # while connected the buttons are read again this often: the host may mute the room, captions may be turned on at the TV
     PRESS_WAIT_S = 2      # a press waits this long for its button's label to change ...
     PRESS_POLL_S = 0.05   # ... looking this often
+    LOOK_TIMEOUT_S = 10   # one reading of the page answers within this, or the page is stuck (a frozen tab would hold the press lock for good)
 
     def __init__(self, display=None, room_name: str = "Conference Room"):
         super().__init__()
@@ -234,7 +245,7 @@ class GoogleMeetProvider(MeetingProvider):
             await self._page.goto(full_url, wait_until="networkidle")
 
             # Wait for page to load
-            await asyncio.sleep(2)
+            await asyncio.sleep(self.PAGE_SETTLE_S)
 
             # Handle pre-join screen
             await self._handle_prejoin(display_name, camera_on, mic_on)
@@ -398,7 +409,7 @@ class GoogleMeetProvider(MeetingProvider):
             leave_btn = await self._page.query_selector('[aria-label*="Leave" i]')
             if leave_btn:
                 await leave_btn.click()
-                await asyncio.sleep(1)
+                await asyncio.sleep(self.LEAVE_SETTLE_S)
 
             # Hand the TV back to the screensaver
             await self._show_idle()
@@ -442,6 +453,9 @@ class GoogleMeetProvider(MeetingProvider):
             await self.toggle_mute()
         elif name in self.SHORTCUTS:
             await self._press(name)
+        elif name == "leave":
+            await self.leave_meeting()                    # the model says leave is available (the table's Leave has its own route): the same answer as Zoom's
+            return {}
         elif name == "chat.seen":
             return {"chat": self._current_meeting.chat}   # the agent reads no chat from Meet: nothing to mark
         else:
@@ -451,9 +465,9 @@ class GoogleMeetProvider(MeetingProvider):
     async def _press(self, name: str) -> bool:
         """Press a control's shortcut and wait for the change to show in its button's label (for PRESS_WAIT_S at most), one press at a
         time; the answer is the state the label shows then (True is on: the microphone live, the camera on, the hand up, the captions on).
-        A control whose button is not on the page is refused before anything is pressed, and so is the bare C key while anything but the
-        page or a button has the keyboard (it would be typed into the chat box). A press that changes no label is a refusal in words,
-        never a success."""
+        A control whose button is not on the page is refused before anything is pressed, and so is the bare C key while something that takes
+        typing has the keyboard (it would be typed into the chat box). A press that changes no label is a refusal in words, never a
+        success."""
         words = self.CONTROL_WORDS[name]
         async with self._pressing:
             try:
@@ -477,13 +491,27 @@ class GoogleMeetProvider(MeetingProvider):
             except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
                 raise MeetingControlError(f"Could not change the {words}: {_first_line(e)}") from e
 
+    async def diagnostics(self) -> Dict[str, Any]:
+        """What Meet's call page shows, for pinning its real wording on a room Pi (GET /api/meeting/diagnostics during a call): every drawn label, what the reader
+        makes of them, and what has the keyboard. Meet's labels are the controls plan's English until a real call confirms them."""
+        if self._page is None:
+            return {}
+        labels = await self._page.evaluate(
+            "() => [...document.querySelectorAll('[aria-label]')].filter((e) => e.getClientRects().length > 0)"
+            ".map((e) => ({ tag: e.tagName.toLowerCase(), role: e.getAttribute('role') || '', label: e.getAttribute('aria-label') }))")
+        held = await self._page.evaluate("() => { const h = document.activeElement; return h ? h.tagName.toLowerCase() + (h.getAttribute('role') ? '[role=' + h.getAttribute('role') + ']' : '') : ''; }")
+        return {"labels": labels, "reading": await self._look(), "focus": held}
+
     # ------------------------------------------------------------------
     # The model, as Meet's page has it
     # ------------------------------------------------------------------
 
     async def _look(self) -> Dict[str, Any]:
-        """One reading of Meet's call page (READ_CALL)."""
-        return await self._page.evaluate(READ_CALL)
+        """One reading of Meet's call page (READ_CALL), which the page must answer within LOOK_TIMEOUT_S."""
+        try:
+            return await asyncio.wait_for(self._page.evaluate(READ_CALL), self.LOOK_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            raise MeetingControlError(f"Meet's page did not answer within {self.LOOK_TIMEOUT_S:g} seconds") from None
 
     async def _read_controls(self) -> Dict[str, Any]:
         """Read Meet's buttons into the model the table draws from (the meeting's controls, people, microphone and camera) and return the

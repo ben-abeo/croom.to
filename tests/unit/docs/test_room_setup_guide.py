@@ -397,7 +397,7 @@ def test_guide_sets_the_tv_up_in_its_own_settings_in_the_config_and_by_pairing_f
     text = visible_text(html)
     for needle in (
         "turn on Mobile TV On (some TVs call it Turn on via Wi-Fi) and LG Connect Apps",
-        "On webOS 25 they are under TV Management or External Devices",
+        "On recent webOS versions (the rooms' LG C6 OLEDs run webOS 26) they are usually under TV Management or External Devices",
         "if yours differs, look through the TV's settings for those two names",
         # Quick Start+: the TV answers in standby and is told to turn on over its connection, so Mobile TV On may stay off; the MAC is needed either way
         "Turn on Quick Start+ as well if the TV has it: the TV then keeps its network connection while it is off, and the device can tell it to turn on "

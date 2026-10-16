@@ -435,7 +435,8 @@ def test_readme_says_how_to_update_a_room_device_for_the_virtual_mouse():
     """The update recipe, in its order: the build tools, the new software, the installer's virtual-mouse step on its own, the restart."""
     text = README.read_text(encoding="utf-8")
     steps = ("sudo apt-get install -y python3-dev gcc libc6-dev",
-             "sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git",
+             "sudo /opt/croom/venv/bin/pip install -q --force-reinstall --no-deps git+https://github.com/ben-abeo/croom.to.git",
+             "sudo /opt/croom/venv/bin/pip install -q git+https://github.com/ben-abeo/croom.to.git",
              "cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
              "sudo systemctl restart croom`; the room guide's section Updating a room device walks through it")
     assert "To update a room device that is already installed, type these on it in this order:" in text

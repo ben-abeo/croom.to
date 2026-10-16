@@ -104,9 +104,11 @@ def test_room_configs_carry_one_tv_block_switched_off_with_a_real_line(path):
     assert config.tv == Config().tv            # the other keys are the defaults: nothing is set until the room's TV is
 
 
-def test_a_tv_block_of_only_comments_is_null_and_the_config_refuses_it():
-    """Why the room files' block has a real `enabled: false` line and not just its keys in comments."""
-    data = yaml.safe_load("tv:\n  # host: \"10.0.0.41\"\n")
-    assert data == {"tv": None}
-    with pytest.raises(TypeError):
-        Config.from_dict(data)
+def test_a_tv_block_of_only_comments_is_read_as_the_tv_defaults_and_the_rest_of_the_file_stands():
+    """YAML reads a block whose keys are all commented out as null; the config takes an empty section as that section's defaults
+    (the TV switched off) and keeps the rest of the file. The room files still write `enabled: false` out, so it is plain to read."""
+    data = yaml.safe_load("room:\n  name: \"Boardroom\"\ntv:\n  # host: \"10.0.0.41\"\n")
+    assert data == {"room": {"name": "Boardroom"}, "tv": None}
+    config = Config.from_dict(data)
+    assert config.tv == Config().tv and config.tv.enabled is False
+    assert config.room.name == "Boardroom"

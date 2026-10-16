@@ -564,7 +564,8 @@ def test_guide_updates_every_room_device_in_the_order_the_virtual_mouse_needs():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     recipe = visible_text(html.split("<h2>Updating a room device</h2>", 1)[1].split("</section>", 1)[0])
     steps = ("sudo apt-get install -y python3-dev gcc libc6-dev",
-             "sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git",
+             "sudo /opt/croom/venv/bin/pip install -q --force-reinstall --no-deps git+https://github.com/ben-abeo/croom.to.git",
+             "sudo /opt/croom/venv/bin/pip install -q git+https://github.com/ben-abeo/croom.to.git",
              "cd ~/croom.to && git pull",
              "sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
              "sudo systemctl restart croom")
@@ -593,7 +594,8 @@ def test_the_marketplace_checklist_updates_a_room_device_in_the_same_order():
     checklist = (REPO / "deploy" / "zoom-marketplace" / "review-response.md").read_text(encoding="utf-8")
     item = checklist.split("- [ ] **Room devices get the no-store fix**", 1)[1].split("\n- [ ] ", 1)[0]
     steps = ("  - `sudo apt-get install -y python3-dev gcc libc6-dev` first",
-             "  - `sudo /opt/croom/venv/bin/pip install -q --upgrade git+https://github.com/ben-abeo/croom.to.git`",
+             "  - `sudo /opt/croom/venv/bin/pip install -q --force-reinstall --no-deps git+https://github.com/ben-abeo/croom.to.git`",
+             "  - `sudo /opt/croom/venv/bin/pip install -q git+https://github.com/ben-abeo/croom.to.git`",
              "  - `cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'`",
              "  - `sudo systemctl restart croom`")
     positions = [item.index(step) for step in steps]

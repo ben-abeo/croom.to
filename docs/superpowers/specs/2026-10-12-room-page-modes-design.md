@@ -2,7 +2,7 @@
 
 **Date:** 2026-10-12. **Branch:** `room-page-modes`, cut from `room-devices` (PR #3); it lands after it.
 **Follows:** the sound and camera controls (`2026-10-08-sound-and-camera-controls-design.md`) and the TV screensaver (`2026-10-07-tv-screensaver-and-one-page-design.md`).
-**Next project:** TV control for the LG C5s (its own spec) adds a TV screen through the view switch this design introduces.
+**Next project:** TV control for the LG C6 OLEDs (its own spec) adds a TV screen through the view switch this design introduces.
 
 ## 1. Why
 

@@ -4,11 +4,14 @@ Configuration management for Croom.
 Handles loading, validation, and access to configuration settings.
 """
 
+import logging
 import os
 import yaml
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Optional, Dict, Any, List
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 # Default configuration paths
@@ -56,10 +59,89 @@ class RoomConfig:
         self.location = without_placeholder(self.location)
 
 
+# Dialogs Zoom draws over the TV that are only a notice (one button): pressed at once and kept on the table as a line under the title.
+DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on",
+                       "has been muted", "has been unmuted", "recording has started", "recording has stopped"]
+# Zoom 6.5.0's reaction picker has no emoji: its items are named, and the table offers them by those names.
+DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
+# The platforms a room joins when its config does not say.
+DEFAULT_PLATFORMS = ["google_meet", "teams", "zoom"]
+
+
+def _listed(value: Any, defaults: List[str], where: str = "a list setting") -> Any:
+    """A list setting as a file gives it: nothing at all (`reactions:` with its lines deleted) is the defaults, a bare word is one item
+    (not the letters it is spelt with), and anything else that is not a list (`reactions: no` is False in YAML) is the defaults with a
+    warning, not a crash the first time the config is written out."""
+    if value is None:
+        return list(defaults)
+    if isinstance(value, str):
+        return [value]
+    if not isinstance(value, (list, tuple)):
+        logger.warning(f"{where} should be a list, not {value!r}: using the defaults")
+        return list(defaults)
+    return value
+
+
+def _flag(value: Any, default: bool, where: str) -> bool:
+    """An on/off setting as a file gives it. YAML turns a bare true/yes/on or false/no/off into a bool, but the same word in quotes is a
+    string (and a string is true to Python, whatever it says): those words are read as they say. Nothing at all is the default, and
+    anything else is the default with a warning, not a guess."""
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in ("true", "yes", "on"):
+            return True
+        if word in ("false", "no", "off"):
+            return False
+    logger.warning(f"{where} should be true or false, not {value!r}: using {str(default).lower()}")
+    return default
+
+
+@dataclass
+class DialogsConfig:
+    """What the agent does with the dialogs Zoom draws over the TV (spec 2026-10-13, section 5)."""
+    acknowledge: List[str] = field(default_factory=lambda: list(DEFAULT_ACKNOWLEDGE))   # one-button notices pressed at once
+    ask_everything: bool = False   # every dialog waits for a tap on the table, the acknowledgeable ones too
+
+    def __post_init__(self):
+        self.acknowledge = _listed(self.acknowledge, DEFAULT_ACKNOWLEDGE, "meeting.dialogs.acknowledge")
+        self.ask_everything = _flag(self.ask_everything, False, "meeting.dialogs.ask_everything")
+
+
+@dataclass
+class ControlsConfig:
+    """What the table offers from the meeting's controls (spec 2026-10-13, section 8)."""
+    reactions: List[str] = field(default_factory=lambda: list(DEFAULT_REACTIONS))   # by the names Zoom's picker gives them
+
+    def __post_init__(self):
+        self.reactions = _listed(self.reactions, DEFAULT_REACTIONS, "meeting.controls.reactions")
+
+
+def _section(cls, value: Any, where: str):
+    """A nested section of the meeting config, as its dataclass. From a file it is a dict: a key the section does not know is left out
+    with a warning (not a TypeError, which makes load_config throw the whole file away), and nothing at all, or anything that is not a
+    mapping, is the defaults."""
+    if isinstance(value, cls):
+        return value
+    if value is None:
+        return cls()
+    if not isinstance(value, dict):
+        logger.warning(f"{where} should be a mapping of settings, not {value!r}: using the defaults")
+        return cls()
+    known = {f.name for f in fields(cls)}
+    unknown = [str(key) for key in value if key not in known]
+    if unknown:
+        logger.warning(f"{where}: ignoring {', '.join(unknown)} (the settings are {', '.join(sorted(known))})")
+    return cls(**{key: setting for key, setting in value.items() if key in known})
+
+
 @dataclass
 class MeetingConfig:
     """Meeting service configuration."""
-    platforms: List[str] = field(default_factory=lambda: ["google_meet", "teams", "zoom"])
+    platforms: List[str] = field(default_factory=lambda: list(DEFAULT_PLATFORMS))
     default_platform: str = "auto"
     join_early_minutes: int = 1
     auto_leave: bool = True
@@ -68,6 +150,15 @@ class MeetingConfig:
     zoom_credentials_path: str = ""  # /etc/croom/zoom-credentials.json on a room device
     google_profile_dir: str = ""  # /var/lib/croom/meet-profile on a room device; empty means a guest browser
     kiosk: bool = True  # the TV browser fills the screen with no window chrome
+    dialogs: DialogsConfig = field(default_factory=DialogsConfig)
+    controls: ControlsConfig = field(default_factory=ControlsConfig)
+
+    def __post_init__(self):
+        # Read as the dialog settings are: a bare word is one platform (not its letters), and `platforms: no`, which YAML reads as False, is the defaults
+        # with a warning and not a TypeError that stops the meeting service, and with it the agent.
+        self.platforms = _listed(self.platforms, DEFAULT_PLATFORMS, "meeting.platforms")
+        self.dialogs = _section(DialogsConfig, self.dialogs, "meeting.dialogs")
+        self.controls = _section(ControlsConfig, self.controls, "meeting.controls")
 
 
 @dataclass
@@ -213,40 +304,13 @@ class Config:
         if "data_dir" in data:
             config.data_dir = data["data_dir"]
 
-        if "room" in data:
-            config.room = RoomConfig(**data["room"])
-
-        if "meeting" in data:
-            config.meeting = MeetingConfig(**data["meeting"])
-
-        if "calendar" in data:
-            config.calendar = CalendarConfig(**data["calendar"])
-
-        if "ai" in data:
-            config.ai = AIConfig(**data["ai"])
-
-        if "audio" in data:
-            config.audio = AudioConfig(**data["audio"])
-
-        if "video" in data:
-            config.video = VideoConfig(**data["video"])
-
-        if "display" in data:
-            config.display = DisplayConfig(**data["display"])
-
-        if "tv" in data:
-            config.tv = TvConfig(**data["tv"])
-
-        if "dashboard" in data:
-            config.dashboard = DashboardConfig(**data["dashboard"])
-        if "control" in data:
-            config.control = ControlConfig(**data["control"])
-
-        if "updates" in data:
-            config.updates = UpdateConfig(**data["updates"])
-
-        if "security" in data:
-            config.security = SecurityConfig(**data["security"])
+        # A section with nothing under it (`meeting:` with its lines deleted loads as None) is that section's defaults, with nothing said about it: it
+        # used to be a TypeError, which load_config answers by setting the whole file aside. A section with a key it does not know still is one.
+        for name, section in (("room", RoomConfig), ("meeting", MeetingConfig), ("calendar", CalendarConfig), ("ai", AIConfig), ("audio", AudioConfig),
+                              ("video", VideoConfig), ("display", DisplayConfig), ("tv", TvConfig), ("dashboard", DashboardConfig),
+                              ("control", ControlConfig), ("updates", UpdateConfig), ("security", SecurityConfig)):
+            if data.get(name) is not None:
+                setattr(config, name, section(**data[name]))
 
         return config
 
@@ -272,6 +336,8 @@ class Config:
                 "zoom_credentials_path": self.meeting.zoom_credentials_path,
                 "google_profile_dir": self.meeting.google_profile_dir,
                 "kiosk": self.meeting.kiosk,
+                "dialogs": {"acknowledge": list(self.meeting.dialogs.acknowledge), "ask_everything": self.meeting.dialogs.ask_everything},
+                "controls": {"reactions": list(self.meeting.controls.reactions)},
             },
             "calendar": {
                 "providers": self.calendar.providers,

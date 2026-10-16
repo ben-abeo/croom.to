@@ -11,11 +11,19 @@ import json
 import logging
 import re
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
-from croom.core.config import Config
-from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingProvider, MeetingState
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config
+from croom.core.logs import DIALOGS_LOGGER
+from croom.meeting.providers.base import (
+    DialogPolicy,
+    MeetingControlError,
+    MeetingInfo,
+    MeetingProvider,
+    MeetingState,
+    controls_from,
+)
 from croom.meeting.providers.zoom import ZoomProvider
 from croom.meeting.providers.zoom_sdk_site import SDK_VERSION, ZoomSdkSite
 from croom.meeting.zoom_auth import (
@@ -26,6 +34,9 @@ from croom.meeting.zoom_auth import (
 )
 
 logger = logging.getLogger(__name__)
+# The three lines each dialog gets (what Zoom drew, and whether it was pressed for the room or left for the table) come from a logger of their own,
+# which the agent keeps at INFO whatever -v says: a stock install logs warnings only, and a new dialog is judged from the journal (core/logs.py).
+dialog_log = logging.getLogger(DIALOGS_LOGGER)
 
 # What Zoom's error carries when the passcode is the problem: its own words, or its wrong-passcode code (3004).
 PASSCODE_REFUSAL = re.compile(r"pass(?:word|code)|\bcode 3004\b", re.IGNORECASE)
@@ -33,6 +44,36 @@ PASSCODE_REFUSAL = re.compile(r"pass(?:word|code)|\bcode 3004\b", re.IGNORECASE)
 PASSCODE_ASKED = "Zoom needs the meeting passcode"
 # How Playwright reports an Error the page's own code threw: "Page.evaluate: Error: <the page's words>".
 PAGE_REFUSAL = re.compile(r"^(?:Page\.evaluate: )?Error: (?P<words>.+)$")
+# How the page begins its words when Zoom drops a mute made again inside the second it keeps for one (meeting.js, ignored()).
+MUTE_IGNORED = "Zoom ignored mute"
+# How the page words a refusal of one of Zoom's own calls, which it names by the SDK's method: "Zoom ignored muteAll (...)", "Zoom did not confirm lockMeeting in
+# time", "Zoom refused endMeeting (code 3003)". The table gives the host's controls the words of their own buttons instead (ZoomSdkProvider.control).
+CALL_REFUSAL = re.compile(r"^(?P<says>Zoom (?:ignored|refused|did not confirm|did not answer)) (?P<call>\w+)")
+# Each host control that has a button of its own, with the Zoom method the bridge calls for it and the words of the button. Record and lock say what a tap
+# does (Start or Stop recording, Lock or Unlock meeting), so their words come from the state (ZoomSdkProvider._call_words).
+HOST_CALLS = {
+    "host.mute_all": ("muteAll", "Mute all"),
+    "host.ask_unmute": ("muteAll", "Ask all to unmute"),
+    "host.admit": ("putOnHold", "Admit"),
+    "host.remove": ("expel", "Remove"),
+    "host.end": ("endMeeting", "End meeting for everyone"),
+}
+# What the page says of a dialog it was asked to press that is no longer there (meeting.js, answerNow()).
+DIALOG_GONE = "no longer on the screen"
+# How Playwright says the page was navigated away from while a call into it was in flight: Zoom sends the page to its leaveUrl when a
+# meeting ends.
+CONTEXT_DESTROYED = "Execution context was destroyed"
+# The calls into the page's bridge (meeting.js): the whole reading of the meeting (the first version of the bridge only had readState), the
+# room's own mute set to a state (Zoom's call takes the state, so a call that finds it so changes nothing), a control by name, and a button
+# of a dialog by its label.
+READ_MEETING = "() => (window.crystalMeet.readMeeting || window.crystalMeet.readState)()"
+MUTE_CALL = "(muted) => window.crystalMeet.mute(muted)"
+CONTROL = "([name, value]) => window.crystalMeet.control(name, value)"
+ANSWER_DIALOG = "([id, label]) => window.crystalMeet.answerDialog(id, label)"
+# The control that has the page open the View menu, read it and close it, picking nothing (meeting.js, readViewMenu()).
+READ_VIEW = "layout.read"
+PEOPLE_LISTED = 50   # the model lists this many people at most (the count is whole)
+CHAT_KEPT = 20       # and keeps this many of the last incoming chat messages
 
 
 def page_failure(error: BaseException, doing: str) -> str:
@@ -61,6 +102,9 @@ class ZoomSdkProvider(MeetingProvider):
     VIDEO_PRESENT_MS = 1500          # a tap: the button must be there, naming a usable camera, within this
     VIDEO_PRESENT_AT_JOIN_MS = 6000  # at join the footer and Zoom's camera list arrive a moment after connected
     VIDEO_SWITCH_MS = 10000   # ... and then this long for Zoom to switch the camera
+    CONTROL_TIMEOUT_S = 30    # a control from the table: the page's own bound is 12 s for each call of Zoom's SDK, and it runs them one at a time
+    ANSWER_SPACING_S = 1      # the provider presses at most one notice's button in this time, whatever Zoom draws and however often
+    LEFT_WAIT_S = 5           # once Zoom has taken the end of the meeting, how long to wait for it to report the meeting over
 
     def __init__(self, credentials: ZoomCredentials, room_name: str = "Conference Room",
                  api: Optional[ZoomApi] = None, display=None,
@@ -84,11 +128,31 @@ class ZoomSdkProvider(MeetingProvider):
         self._watcher: Optional[asyncio.Task] = None
         self._muted = False
         self._camera_on = True
+        # The model for the table (spec 2026-10-13, sections 3 to 5): the policy for the dialogs, the reactions offered, and what the provider
+        # starts on its own and keeps (answering a dialog, reading the meeting again), so that leaving or shutting down can cancel it.
+        self.dialog_policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+        self.reactions: List[str] = list(DEFAULT_REACTIONS)
+        self._answering = asyncio.Lock()
+        self._background: Set[asyncio.Task] = set()
+        self._reset_meeting()
 
     @classmethod
     def from_config(cls, config: Config, display=None) -> "ZoomSdkProvider":
         credentials = load_zoom_credentials(config.meeting.zoom_credentials_path)
-        return cls(credentials, room_name=config.room.name or "Conference Room", display=display)
+        provider = cls(credentials, room_name=config.room.name or "Conference Room", display=display)
+        provider.dialog_policy = DialogPolicy(config.meeting.dialogs.acknowledge, config.meeting.dialogs.ask_everything)
+        provider.reactions = list(config.meeting.controls.reactions)
+        return provider
+
+    def _reset_meeting(self) -> None:
+        """What one meeting leaves that the next must not find: the page numbers its dialogs from 1 each time it loads."""
+        self._reading: Dict[str, Any] = {}          # the page's last whole reading of the meeting
+        self._dialogs: List[Dict[str, Any]] = []    # the dialogs waiting for a tap on the table, oldest first
+        self._on_screen: Set[int] = set()           # every dialog the page has said is open: the waiting ones, and the notices being answered
+        self._answered: Set[int] = set()            # the dialogs this provider has pressed a button of
+        self._notices: Dict[int, Dict[str, Any]] = {}   # the notices it is pressing for the room, by id: handed to the table if the press fails
+        self._last_answer = float("-inf")           # when it last pressed a notice's button by itself
+        self._view_read = False                     # whether the View menu has been looked at in this meeting
 
     @property
     def name(self) -> str:
@@ -149,7 +213,7 @@ class ZoomSdkProvider(MeetingProvider):
             self._events.get_nowait()
 
     async def _cancel_tasks(self) -> None:
-        """Stop the meeting watcher and any join still in flight (never the task doing the cancelling)."""
+        """Stop the meeting watcher, any join still in flight and what the provider started on its own (never the task doing the cancelling)."""
         current = asyncio.current_task()
         for attribute in ("_watcher", "_join_task"):
             task = getattr(self, attribute)
@@ -161,6 +225,11 @@ class ZoomSdkProvider(MeetingProvider):
                 await task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001 - the task's own outcome is not ours
                 pass
+        background = [task for task in self._background if task is not current]
+        for task in background:
+            task.cancel()
+        if background:
+            await asyncio.gather(*background, return_exceptions=True)
 
     async def _blank_page(self) -> None:
         """Hand the page back to the screensaver; the page may already be gone."""
@@ -199,6 +268,7 @@ class ZoomSdkProvider(MeetingProvider):
         await self._cancel_tasks()
         self._join_task = asyncio.current_task()
         self._muted, self._camera_on = not mic_on, camera_on   # this join's own start until Zoom says otherwise, never the last meeting's
+        self._reset_meeting()
         self._current_meeting = MeetingInfo(platform=self.name, meeting_id=meeting_id, meeting_url=meeting_url,
                                             is_camera_on=camera_on, is_muted=not mic_on)
         self._set_state(MeetingState.JOINING)
@@ -223,6 +293,8 @@ class ZoomSdkProvider(MeetingProvider):
             self._publish_state()
             self._watcher = asyncio.create_task(self._watch_meeting())
             self._set_state(MeetingState.CONNECTED)
+            # Once the watcher has taken the events that waited for it (a dialog the client had open when the room came in, say).
+            asyncio.get_running_loop().call_soon(self._look_at_the_view_once)
             logger.info(f"Connected to Zoom meeting {meeting_id}")
             return self._current_meeting
         except asyncio.CancelledError:
@@ -285,29 +357,55 @@ class ZoomSdkProvider(MeetingProvider):
         return RuntimeError(detail or "Zoom reported an error")
 
     async def _watch_meeting(self) -> None:
-        """After connecting: the host ending the meeting, or the SDK reporting an error, returns the room to idle."""
+        """After connecting: what the page reports is taken into the model, and the host ending the meeting, or the SDK reporting an
+        error, returns the room to idle."""
+        events = {"state": self._take_state,            # a change Zoom made: the host muting the room, video stopped, a hand raised
+                  "dialog": self._on_dialog, "dialog-closed": self._on_dialog_closed, "chat": self._on_chat}
         while True:
             state, detail = await self._events.get()
-            if state == "state":   # a change Zoom made: the host muting the room, video stopped
-                try:
-                    self._take_state(json.loads(detail))
-                except ValueError:
-                    logger.debug(f"Unreadable state event from the page: {detail!r}")
+            if state in events:
+                self._take_json(detail, events[state])
                 continue
             if state == "left":
                 logger.info("Zoom meeting ended")
+                self._meeting_over()
                 await self._blank_page()
                 self._current_meeting = None
                 self._watcher = None
                 self._set_state(MeetingState.IDLE)
                 return
             if state == "error":
+                self._meeting_over()
                 if self._current_meeting is not None:
                     self._current_meeting.error_message = detail or "Zoom reported an error"
                 logger.error(f"Zoom meeting error: {detail}")
                 self._watcher = None
                 self._set_state(MeetingState.ERROR)
                 return
+
+    def _take_json(self, detail: str, handler) -> None:
+        """Hand an event's JSON to its handler. An event the provider cannot take is dropped: a fault in one must never end the watcher,
+        which is what sees the meeting end."""
+        try:
+            data = json.loads(detail)
+        except ValueError:
+            logger.debug(f"Unreadable event from the page: {detail!r}")
+            return
+        try:
+            handler(data)
+        except Exception:  # noqa: BLE001 - see above
+            logger.warning(f"Could not take an event from the page: {detail!r}", exc_info=True)
+
+    def _meeting_over(self) -> None:
+        """The page says nothing of its dialogs when the meeting ends: what the provider kept of them goes with the meeting, and so does
+        what it had started on its own (a press that has no page to go to)."""
+        self._dialogs.clear()
+        self._on_screen.clear()
+        self._notices.clear()
+        if self._current_meeting is not None:
+            self._current_meeting.dialog = None
+        for task in list(self._background):
+            task.cancel()
 
     async def _toolbar_up(self) -> bool:
         """Whether the client's own video button is on the screen, whatever it says (just "Video" when Zoom has no usable
@@ -339,30 +437,55 @@ class ZoomSdkProvider(MeetingProvider):
             raise MeetingControlError(page_failure(e, doing)) from e
 
     async def _read_state_from_zoom(self) -> Dict[str, Any]:
-        """Mute and camera as Zoom has them: the current user's record and the client's own video button. Meetings
-        often start the room muted or with video off, and the host can change either at any time. Returns what the page
-        said (empty when it could not say); what Zoom left unsaid (null) keeps the last value."""
+        """The meeting as Zoom has it, taken into the model: mute and camera (the current user's record and the client's own video
+        button; meetings often start the room muted or with video off, and the host can change either at any time), the roster, the
+        client's buttons. Returns the current user's part of what the page said (empty when it could not say); what Zoom left unsaid
+        (null) keeps the last value."""
         try:
-            state = await self._page_call("() => window.crystalMeet.readState()", None, "Could not read the meeting state")
+            reading = await self._page_call(READ_MEETING, None, "Could not read the meeting state")
         except MeetingControlError as e:
             logger.warning(str(e))
             return {}
-        self._take_state(state)
-        return state if isinstance(state, dict) else {}
+        self._take_state(reading)
+        return self._me_of(reading) if isinstance(reading, dict) else {}
 
-    def _take_state(self, state: Any) -> None:
-        if not isinstance(state, dict):
+    @staticmethod
+    def _me_of(reading: Dict[str, Any]) -> Dict[str, Any]:
+        """The current user's fields of a reading: under `me` in the page's readMeeting(), at the top in the first version of its reading."""
+        me = reading.get("me")
+        return me if isinstance(me, dict) else reading
+
+    def _take_state(self, reading: Any) -> None:
+        """Take what the page read of the meeting, from a read or from the page's "state" event, into the model the table draws from."""
+        if not isinstance(reading, dict):
             return
-        if isinstance(state.get("muted"), bool):
-            self._muted = state["muted"]
-        if isinstance(state.get("videoOn"), bool):
-            self._camera_on = state["videoOn"]
+        me = self._me_of(reading)
+        if isinstance(me.get("muted"), bool):
+            self._muted = me["muted"]
+        if isinstance(me.get("videoOn"), bool):
+            self._camera_on = me["videoOn"]
+        if "participants" in reading:
+            self._reading = reading
         self._publish_state()
+        self._look_at_the_view_once()
 
     def _publish_state(self) -> None:
-        if self._current_meeting is not None:
-            self._current_meeting.is_muted = self._muted
-            self._current_meeting.is_camera_on = self._camera_on
+        info = self._current_meeting
+        if info is None:
+            return
+        info.is_muted, info.is_camera_on = self._muted, self._camera_on
+        if self._reading:
+            # Zoom may not have said whether the room is muted (it lists the room a moment after connecting): the status keeps what it
+            # last knew, and the Mute control must say the same.
+            known = dict(self._reading, me=dict(self._me_of(self._reading), muted=self._muted))
+            info.controls = controls_from(known, self.reactions)
+            people = self._reading.get("participants") or []
+            waiting = [p for p in people if p.get("waiting")]     # in the waiting room: not in the meeting yet, and listed apart (controls.host.waiting_room)
+            listed = [p for p in people if not p.get("waiting")]
+            count = self._reading.get("count")
+            info.people = {"count": count - len(waiting) if isinstance(count, int) else len(listed), "list": listed[:PEOPLE_LISTED]}
+            info.recording = bool(self._reading.get("recording"))
+            info.locked = bool(self._reading.get("locked"))
 
     async def _apply_wanted_state(self, zoom: Dict[str, Any], camera_on: bool, mic_on: bool) -> None:
         """The room's own defaults at join (the controller's ruling). The microphone towards muted only: a room that
@@ -372,16 +495,35 @@ class ZoomSdkProvider(MeetingProvider):
         stop it on entry. What Zoom has afterwards is what counts."""
         if not mic_on and zoom.get("muted") is not True:
             try:
-                await self._page_call("(muted) => window.crystalMeet.mute(muted)", True, "Could not mute the microphone")
+                await self._page_call(MUTE_CALL, True, "Could not mute the microphone")
             except MeetingControlError as e:
-                logger.warning(f"The microphone was not muted at join: {e}")
+                if str(e).startswith(MUTE_IGNORED):
+                    # The page's own mic-off default has just muted the room, and Zoom's record can lag that mute, so this look found
+                    # the room live: Zoom drops a second mute inside the second it keeps for one, and the room is muted all the same.
+                    logger.debug(f"The join's own mute was a second one, which Zoom ignores: {e}")
+                else:
+                    logger.warning(f"The microphone was not muted at join: {e}")
         video = zoom.get("videoOn")
         if isinstance(video, bool) and video != camera_on:
             try:
                 await self._set_video(camera_on, at_join=True)
             except MeetingControlError as e:
                 logger.warning(f"The camera was not set at join: {e}")
+        # The watcher starts only after this read, so the page's "state" events from the join are still waiting for it: a read made now is
+        # newer than they are, and taken after it they would put the status back (the room unmuted for a moment after its mic-off default).
+        self._forget_state_events()
         await self._read_state_from_zoom()
+
+    def _forget_state_events(self) -> None:
+        """Drop the "state" events waiting for the watcher. What a read does not say (a dialog, a chat message, the meeting ending) stays."""
+        if self._events is None:
+            return
+        waiting = []
+        while not self._events.empty():
+            waiting.append(self._events.get_nowait())
+        for event in waiting:
+            if event[0] != "state":
+                self._events.put_nowait(event)
 
     async def _set_video(self, on: bool, at_join: bool = False) -> bool:
         """Press the client's video button when Zoom's state differs. The page waits for the button to be there with a
@@ -426,17 +568,254 @@ class ZoomSdkProvider(MeetingProvider):
             raise RuntimeError("Not in a meeting")
 
     async def toggle_mute(self) -> bool:
+        """Flip the microphone as Zoom has it now (the host may have muted the room since the last look). The table does not use this: its
+        button names the state a tap asks for, and set_mute sets it."""
         self._require_meeting()
-        await self._read_state_from_zoom()   # the host may have muted the room since the last look
-        muted = await self._page_call("(muted) => window.crystalMeet.mute(muted)", not self._muted, "Could not change the microphone")
-        self._muted = bool(muted)
-        await self._read_state_from_zoom()   # what Zoom has now, not what was asked
+        await self._read_state_from_zoom()
+        return await self.set_mute(not self._muted)
+
+    async def set_mute(self, muted: bool) -> bool:
+        """Set the microphone to the state asked for (True is muted), whatever Zoom has now or the provider last knew: Zoom's own call is told the
+        state, not to flip it, so a request made against a state that has changed since the table drew its button (the host muted the room a
+        moment before a tap on Mute) ends as the person asked and not the other way round. A call that finds the microphone as asked changes
+        nothing. Zoom drops a mute made again inside the second it keeps for one: when the room is as asked all the same (a second tap, or another
+        device's, in that second) that is the state and not a refusal. The answer is what Zoom has afterwards."""
+        self._require_meeting()
+        muted = bool(muted)
+        try:
+            self._muted = bool(await self._page_call(MUTE_CALL, muted, "Could not change the microphone"))
+        except MeetingControlError as e:
+            if not str(e).startswith(MUTE_IGNORED):
+                raise
+            if (await self._read_state_from_zoom()).get("muted") is not muted:
+                raise                            # Zoom has not said, or says the room is not as asked: the refusal stands
+        else:
+            await self._read_state_from_zoom()   # what Zoom has now, not what was asked
         self._publish_state()
         return self._muted
 
     async def toggle_camera(self) -> bool:
+        """Flip the camera as Zoom has it now; the table asks for a state instead (set_camera)."""
         self._require_meeting()
         await self._read_state_from_zoom()
-        self._camera_on = await self._set_video(not self._camera_on)   # what the button says once Zoom has switched
+        return await self.set_camera(not self._camera_on)
+
+    async def set_camera(self, on: bool) -> bool:
+        """Set the camera to the state asked for (True is on): the client's video button is pressed only when it does not say so already (a camera
+        turned off at the TV a moment before a tap on Turn camera off is left off), and the answer is what the button says once Zoom has switched."""
+        self._require_meeting()
+        self._camera_on = await self._set_video(bool(on))
         self._publish_state()
         return self._camera_on
+
+    # ------------------------------------------------------------------
+    # What the page tells of the meeting beyond mute and camera: the View menu, dialogs and chat (spec 2026-10-13, sections 3 to 5)
+    # ------------------------------------------------------------------
+
+    def _spawn(self, work) -> asyncio.Task:
+        """Run `work` (a coroutine) on its own, kept so that leaving the meeting or shutting down cancels it."""
+        task = asyncio.ensure_future(work)
+        self._background.add(task)
+        task.add_done_callback(self._background_done)
+        return task
+
+    def _background_done(self, task: asyncio.Task) -> None:
+        self._background.discard(task)
+        if not task.cancelled() and task.exception() is not None:
+            logger.warning(f"A step the provider took on its own failed: {task.exception()!r}")
+
+    def _look_at_the_view_once(self) -> None:
+        """The view and self view can only be read from the View menu, and until it has been opened the page says its defaults (speaker,
+        shown). Once the room is in the meeting and the client has drawn its View button, and while no dialog is open (one drawn inside the
+        menu's window would add its buttons to the menu), the page is asked to open the menu, read it and close it with nothing picked, so
+        the table starts from what the client has. It is asked once for a meeting."""
+        if self._view_read or self._state != MeetingState.CONNECTED or self._page is None or self._on_screen:
+            return
+        if "layout" not in (self._reading.get("buttons") or {}):
+            return
+        self._view_read = True
+        self._spawn(self._read_the_view())
+
+    async def _read_the_view(self) -> None:
+        try:
+            reading = await self._page_call(CONTROL, [READ_VIEW, None], "Could not read the View menu", timeout=self.CONTROL_TIMEOUT_S)
+        except MeetingControlError as e:
+            logger.debug(f"The View menu was not read: {e}")
+            return
+        self._take_state(reading)
+
+    @staticmethod
+    def _dialog_id(data: Any) -> Optional[int]:
+        try:
+            return int(data["id"])
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _on_dialog(self, dialog: Dict[str, Any]) -> None:
+        """A dialog Zoom drew over the meeting (the page says each one once). By the policy a notice is pressed for the room, and its
+        words are kept for the table; any other waits for a tap."""
+        info = self._current_meeting
+        dialog_id = self._dialog_id(dialog)
+        if info is None or dialog_id is None or dialog_id in self._on_screen or dialog_id in self._answered:
+            return
+        dialog_log.info(f"Zoom dialog: {dialog.get('title')!r} {dialog.get('text')!r} buttons {dialog.get('buttons')}")
+        self._on_screen.add(dialog_id)
+        words = self._dialog_words(dialog_id, dialog)
+        if self.dialog_policy.decide(dialog) == "acknowledge":
+            self._answered.add(dialog_id)
+            self._notices[dialog_id] = words
+            self._spawn(self._acknowledge(dialog_id, self.dialog_policy.answer(dialog)))
+            sentence = self.dialog_policy.disclosure(dialog)
+            if sentence and sentence not in info.notice:
+                info.notice = f"{info.notice} {sentence}".strip()
+            return
+        self._dialogs.append(words)
+        info.dialog = dict(self._dialogs[0])
+        dialog_log.info("The dialog waits on the table")
+
+    @staticmethod
+    def _dialog_words(dialog_id: int, dialog: Dict[str, Any]) -> Dict[str, Any]:
+        """A dialog as the table is given it."""
+        return {"id": dialog_id, "title": str(dialog.get("title") or ""), "text": str(dialog.get("text") or ""),
+                "buttons": [str(label) for label in dialog.get("buttons") or []]}
+
+    def _on_dialog_closed(self, data: Dict[str, Any]) -> None:
+        dialog_id = self._dialog_id(data)
+        if dialog_id is None:
+            return
+        self._forget_dialog(dialog_id)
+        self._spawn(self._read_state_from_zoom())   # the host may have muted the room with that dialog
+
+    def _forget_dialog(self, dialog_id: int) -> None:
+        """The dialog is off the screen: the table shows the oldest of those still waiting."""
+        self._on_screen.discard(dialog_id)
+        self._notices.pop(dialog_id, None)
+        self._dialogs = [dialog for dialog in self._dialogs if dialog["id"] != dialog_id]
+        if self._current_meeting is not None:
+            self._current_meeting.dialog = dict(self._dialogs[0]) if self._dialogs else None
+
+    async def _acknowledge(self, dialog_id: int, label: str) -> None:
+        """Press a notice's button for the room, at most one dialog in ANSWER_SPACING_S whatever Zoom draws, and not twice. A press the
+        page refuses leaves the dialog on the TV: it goes to the table like any dialog with a choice in it, to wait for a tap."""
+        async with self._answering:
+            wait = self._last_answer + self.ANSWER_SPACING_S - time.monotonic()
+            if wait > 0:
+                await asyncio.sleep(wait)
+            self._last_answer = time.monotonic()
+            try:
+                await self._press_dialog(dialog_id, label)
+            except MeetingControlError as e:
+                failure = e
+            else:
+                dialog_log.info(f"Acknowledged Zoom's dialog with {label!r}")
+                self._notices.pop(dialog_id, None)
+                return
+        self._put_on_the_table(dialog_id, label, failure)
+
+    def _put_on_the_table(self, dialog_id: int, label: str, failure: Exception) -> None:
+        """A notice whose press the page refused is still on the TV, and nothing else will answer it: it waits on the table (its words are
+        on the notice line already), and the journal says so. One that has gone in the meantime (its words are forgotten with it) has
+        nothing to wait for."""
+        words = self._notices.pop(dialog_id, None)
+        info = self._current_meeting
+        if words is None or info is None:
+            logger.debug(f"Could not press {label!r} on Zoom's dialog ({failure}), which has gone")
+            return
+        logger.warning(f"Could not press {label!r} on Zoom's dialog {words['title']!r} {words['text']!r} ({failure}): it waits on the table")
+        self._dialogs.append(words)
+        info.dialog = dict(self._dialogs[0])
+
+    async def _press_dialog(self, dialog_id: int, label: str) -> None:
+        """Press the button the label names on a dialog of the page. The page's words when it will not (the dialog's button is not ready,
+        it did not close); a dialog that is gone after this provider answered it is the answer done, as a second tap finds it."""
+        try:
+            await self._page_call(ANSWER_DIALOG, [dialog_id, label], "Could not answer the dialog", timeout=self.CONTROL_TIMEOUT_S)
+        except MeetingControlError as e:
+            if DIALOG_GONE in str(e) and dialog_id in self._answered:
+                return
+            raise
+        self._answered.add(dialog_id)
+
+    async def _answer_from_table(self, value: Any) -> Dict[str, Any]:
+        """A tap on one of the waiting dialog's buttons: the page presses it, and the dialog is off the table."""
+        try:
+            dialog_id, label = int(value["id"]), str(value["button"])
+        except (KeyError, TypeError, ValueError):
+            raise MeetingControlError("Say which dialog and which button") from None
+        await self._press_dialog(dialog_id, label)
+        self._forget_dialog(dialog_id)
+        info = self._current_meeting
+        return {"dialog": info.dialog if info is not None else None}
+
+    def _on_chat(self, message: Dict[str, Any]) -> None:
+        info = self._current_meeting
+        if info is None or not isinstance(message, dict):
+            return
+        kept = {"from": str(message.get("from", "")), "text": str(message.get("text", "")), "at": str(message.get("at", ""))}
+        info.chat["messages"] = (info.chat["messages"] + [kept])[-CHAT_KEPT:]
+        info.chat["unread"] += 1
+
+    # ------------------------------------------------------------------
+    # Controls from the table (spec 2026-10-13, section 3)
+    # ------------------------------------------------------------------
+
+    def _call_words(self, name: str) -> Optional[Tuple[str, str]]:
+        """The Zoom method a host control makes (what the bridge names in a refusal) and the words of the table's button for it, as the button says them
+        now; None for a control that has no button of its own."""
+        info = self._current_meeting
+        if name == "host.record":
+            return "record", "Stop recording" if info is not None and info.recording else "Start recording"
+        if name == "host.lock":
+            return "lockMeeting", "Unlock meeting" if info is not None and info.locked else "Lock meeting"
+        return HOST_CALLS.get(name)
+
+    def _in_the_tables_words(self, name: str, words: str) -> str:
+        """A refusal the bridge worded with the name of Zoom's method ("Zoom ignored muteAll (...)"), worded with the control's button instead
+        ("Zoom ignored Mute all (...)"). Zoom's own words, and any refusal that does not name this control's call, are left as they are."""
+        named, said = self._call_words(name), CALL_REFUSAL.match(words)
+        if named is None or said is None or said.group("call") != named[0]:
+            return words
+        return f"{said.group('says')} {named[1]}{words[said.end():]}"
+
+    async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
+        """A control from the table, carried out through the page's bridge (see MeetingProvider.control). A refusal is a MeetingControlError in the
+        bridge's words, in which a host call is named by its button and not by the SDK's method (_in_the_tables_words). The answer is the control
+        model as it is afterwards."""
+        self._require_meeting()
+        info = self._current_meeting
+        if name == "chat.seen":
+            info.chat["unread"] = 0
+            return {"chat": info.chat}
+        if name == "dialog":
+            return await self._answer_from_table(value)
+        if name == "leave":
+            await self.leave_meeting()
+            return {}
+        if name == "host.end":
+            return await self._end_meeting_for_everyone()
+        if name == "mute":        # these two have paths of their own: the join's mic-off default and the reconnect rules are made for them
+            await self.toggle_mute()
+        elif name == "camera":
+            await self.toggle_camera()
+            await self._read_state_from_zoom()   # the model says the camera as Zoom has it now
+        else:
+            try:
+                self._take_state(await self._page_call(CONTROL, [name, value], f"Could not carry out {re.sub(r'[^A-Za-z0-9]+', ' ', name).strip() or 'the control'}",
+                                                       timeout=self.CONTROL_TIMEOUT_S))
+            except MeetingControlError as e:
+                raise MeetingControlError(self._in_the_tables_words(name, str(e))) from e
+        return info.controls
+
+    async def _end_meeting_for_everyone(self) -> Dict[str, Any]:
+        """The host's End for everyone. It is done when Zoom answers the call, when the navigation that follows the end of a meeting
+        cuts the call off, or when the meeting is already over by the time the call fails: none of those is a failure, and the control
+        waits (a while, at most) for the room to be idle. Zoom's own refusal is one, in its words."""
+        watcher = self._watcher
+        try:
+            await self._page_call(CONTROL, ["host.end", None], "Could not end the meeting", timeout=self.CONTROL_TIMEOUT_S)
+        except MeetingControlError as e:
+            if CONTEXT_DESTROYED not in str(e) and self._state == MeetingState.CONNECTED:
+                raise MeetingControlError(self._in_the_tables_words("host.end", str(e))) from e
+        if watcher is not None and not watcher.done():
+            await asyncio.wait({watcher}, timeout=self.LEFT_WAIT_S)
+        return {}

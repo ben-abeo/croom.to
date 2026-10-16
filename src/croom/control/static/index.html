@@ -136,7 +136,17 @@
   <section class="view" data-view="meeting">
     <p id="meeting-detail" class="detail"></p>
     <p id="meeting-message" class="message" role="status"></p>
+    <p id="meeting-notice" class="notice"></p>
+    <section id="meeting-dialog" class="dialog-card" hidden>
+      <div class="dialog-words">
+        <p id="dialog-title" class="kicker"></p>
+        <p id="dialog-text" class="detail"></p>
+        <p id="dialog-message" class="message" role="status"></p>
+      </div>
+      <div id="dialog-actions" class="actions"></div>
+    </section>
     <div id="meeting-actions" class="actions meeting-actions"></div>
+    <div id="meeting-secondary" class="actions meeting-secondary"></div>
     <section class="sound-section">
       <p class="kicker">Sound</p>
       <p id="sound-note" class="note"></p>
@@ -155,7 +165,6 @@
     <div class="menu">
       <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
       <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>
-      <button type="button" id="open-tv-meeting" class="button quiet menu-item" data-icon="tv">TV</button>
     </div>
   </section>
 
@@ -165,6 +174,39 @@
       <p class="kicker">Upcoming meetings</p>
       <ul id="upcoming-list" class="events"></ul>
       <p id="upcoming-empty" class="note" hidden>No more meetings today</p>
+    </section>
+  </section>
+
+  <!-- The meeting screen's sub-screens (spec 2026-10-13, section 6.1). Each has its way back and returns to the meeting screen on its own after two idle
+       minutes; app.js draws what is in them. The heading and Back stay where they are while a list scrolls inside its box. -->
+  <section class="view" data-view="participants">
+    <button type="button" id="back-from-participants" class="button quiet back">Back</button>
+    <section class="list-box">
+      <p class="kicker">Participants</p>
+      <div class="list-scroll">
+        <ul id="participant-list" class="participants"></ul>
+        <p id="waiting-kicker" class="kicker" hidden>Waiting room</p>
+        <ul id="waiting-list" class="participants"></ul>
+      </div>
+      <p id="participants-message" class="message" role="status"></p>
+    </section>
+  </section>
+
+  <section class="view" data-view="chat">
+    <button type="button" id="back-from-chat" class="button quiet back">Back</button>
+    <section class="list-box">
+      <p class="kicker">Chat</p>
+      <ul id="chat-list" class="chat"></ul>
+      <p id="chat-empty" class="note" hidden>No messages yet</p>
+    </section>
+  </section>
+
+  <section class="view" data-view="host">
+    <button type="button" id="back-from-host" class="button quiet back">Back</button>
+    <section class="list-box">
+      <p class="kicker">Host controls</p>
+      <div id="host-actions" class="actions host-actions"></div>
+      <p id="host-message" class="message" role="status"></p>
     </section>
   </section>
 

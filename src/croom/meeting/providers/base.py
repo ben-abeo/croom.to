@@ -46,6 +46,15 @@ class MeetingInfo:
     is_camera_on: bool = True
     error_message: str = ""
 
+    # What the table draws from (spec 2026-10-13, section 3), as the platform has it: filled and kept by the provider.
+    controls: Dict[str, Any] = field(default_factory=dict)                                   # see controls_from
+    people: Dict[str, Any] = field(default_factory=lambda: {"count": 0, "list": []})        # the roster, at most 50 listed
+    chat: Dict[str, Any] = field(default_factory=lambda: {"unread": 0, "messages": []})     # the last 20 incoming messages
+    notice: str = ""                                    # what the meeting says of itself (recorded, transcribed), from the notices pressed at once
+    dialog: Optional[Dict[str, Any]] = None             # the dialog waiting for a tap on the table: {id, title, text, buttons}
+    recording: bool = False
+    locked: bool = False
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             "platform": self.platform,
@@ -59,7 +68,142 @@ class MeetingInfo:
             "participants": self.participants,
             "is_muted": self.is_muted,
             "is_camera_on": self.is_camera_on,
+            "controls": self.controls,
+            "people": self.people,
+            "chat": self.chat,
+            "notice": self.notice,
+            "dialog": self.dialog,
+            "recording": self.recording,
+            "locked": self.locked,
         }
+
+
+HOST_ROLES = ("host", "co-host")
+
+
+def _name(text: Any) -> str:
+    """A name as the page compares them: lower case, letters and digits only ("Thumbs Up", "thumbs_up" and " THUMBSUP " are one name)."""
+    return re.sub(r"[^a-z0-9]+", "", str(text).lower())
+
+
+def controls_from(reading: Dict[str, Any], reactions: List[str]) -> Dict[str, Any]:
+    """The table's control model (spec 2026-10-13, section 3) from the page's reading of the meeting: a control is available when the
+    client has its button on the screen (or, for the host's, the role allows it), and its state is what the reading says."""
+    buttons = reading.get("buttons") or {}
+    me = reading.get("me") or {}
+    role = reading.get("role") or "participant"
+    hosting = role in HOST_ROLES
+    waiting = [p for p in (reading.get("participants") or []) if p.get("waiting")]
+
+    def button(name, **extra):
+        state = buttons.get(name)
+        return {"available": state is not None, **(state or {}), **extra}
+
+    # The table offers the configured reactions by Zoom's names. When the page says which the picker holds (it does not yet: the picker is
+    # only open during a control), those of them it has; with none to offer the Reactions button has nothing to open.
+    held = (buttons.get("reactions") or {}).get("choices")
+    offered = [r for r in reactions if held is None or _name(r) in {_name(h) for h in held}]
+    picker = button("reactions", choices=offered)
+    picker["available"] = picker["available"] and bool(offered)
+
+    return {
+        "mute": {"available": True, "on": not bool(me.get("muted"))},
+        "camera": button("camera"),
+        "raise_hand": button("raise_hand"),
+        "reactions": picker,
+        "captions": button("captions"),
+        "layout": button("layout", choices=["speaker", "gallery"]),
+        "hide_self": button("hide_self"),
+        "pin": {"available": False},   # the client's per-participant menu is not driven in this version
+        "leave": {"available": True},
+        "host": {
+            "role": role,
+            "mute_all": {"available": hosting},
+            "ask_unmute": {"available": hosting},
+            "record": {"available": hosting, "on": bool(reading.get("recording"))},
+            "lock": {"available": hosting, "on": bool(reading.get("locked"))},
+            "waiting_room": {"available": hosting, "waiting": [{"id": p.get("id"), "name": p.get("name", "")} for p in waiting]},
+            "mute_one": {"available": hosting},
+            "remove": {"available": hosting},
+            "end": {"available": role == "host"},
+        },
+    }
+
+
+class DialogPolicy:
+    """What the agent does with a dialog Zoom draws over the TV (spec 2026-10-13, section 5), in one place: a notice with a single button
+    whose words are on the list is pressed at once and kept on the table as a line, unless that button leaves or ends the meeting
+    (NEVER_PRESSED); any other dialog, and every dialog when ask_everything is set, waits for a tap on the table."""
+
+    # Notices that say a state changed, which is read from Zoom again once the notice is gone: the room's own mute (the Mute button shows
+    # it), and a recording or a transcript that stopped (what the meeting disclosed stays as it was). They add no line under the title.
+    STATE_ONLY = ("has been muted", "has been unmuted", "have been muted", "have been unmuted",
+                  "recording has stopped", "transcription has stopped")
+
+    # Buttons that are never pressed for the room, whatever the notice around them says: one that leaves or ends the meeting (Leave, Leave Meeting, End,
+    # End Meeting, Exit, Quit), found as a whole word of its label, in any case. A notice whose only button is one of them would walk the room out of its
+    # own meeting by policy, and the line under the title would say all was well. It waits on the table instead, where a person taps it or not.
+    NEVER_PRESSED = ("leave", "end", "exit", "quit")
+
+    # Where a sentence of a notice ends: a full stop, an exclamation mark or a question mark, and the space after it.
+    SENTENCE_END = re.compile(r"(?<=[.!?])\s+")
+
+    def __init__(self, acknowledge: List[str], ask_everything: bool = False):
+        # A blank phrase is in every text, and a bare word is one phrase, not the letters it is spelt with.
+        phrases = [acknowledge] if isinstance(acknowledge, str) else (acknowledge or [])
+        self.acknowledge = [p.strip().lower() for p in phrases if isinstance(p, str) and p.strip()]
+        self.ask_everything = bool(ask_everything)
+
+    @staticmethod
+    def _words(dialog: Dict[str, Any]) -> str:
+        return f"{dialog.get('title') or ''} {dialog.get('text') or ''}".lower()
+
+    @classmethod
+    def _never_pressed(cls, label: Any) -> bool:
+        """The button leaves or ends the meeting: one of NEVER_PRESSED is a whole word of its label ("Weekend" holds "end", and is not one)."""
+        return any(word in cls.NEVER_PRESSED for word in re.findall(r"[a-z0-9]+", str(label).lower()))
+
+    def decide(self, dialog: Dict[str, Any]) -> str:
+        """'acknowledge' or 'ask'."""
+        buttons = dialog.get("buttons") or []
+        if self.ask_everything or len(buttons) != 1:
+            return "ask"    # a dialog with a choice in it is never answered for the room
+        if self._never_pressed(buttons[0]):
+            return "ask"    # nor is a notice whose one button leaves or ends the meeting
+        words = self._words(dialog)
+        return "acknowledge" if any(p in words for p in self.acknowledge) else "ask"
+
+    def answer(self, dialog: Dict[str, Any]) -> str:
+        """The button to press for an acknowledged notice: the last one, which Zoom draws as the affirmative (its footer puts cancel
+        first and OK last); for a notice with one button, that one."""
+        buttons = dialog.get("buttons") or []
+        return str(buttons[-1]) if buttons else ""
+
+    @classmethod
+    def _only_a_state(cls, sentence: str) -> bool:
+        """The sentence only says that a state changed (the room was muted, a recording stopped)."""
+        return any(p in sentence.lower() for p in cls.STATE_ONLY)
+
+    def disclosure(self, dialog: Dict[str, Any]) -> str:
+        """The sentence the table keeps for an acknowledged notice: the first that holds a phrase of the list (what the notice is about:
+        recorded, transcribed, AI Companion) without only saying that a state changed, else the first; empty when the one chosen only says
+        a state changed. A stop is judged by its own sentence: the one beside it ("This meeting is being recorded again") may be what the
+        meeting discloses, and the stop must not take it away. A sentence ends at a full stop, an exclamation mark or a question mark and the
+        space after it, and the line keeps the mark it ended with (a sentence with none, or a full stop, ends the line with a full stop)."""
+        text = (dialog.get("text") or dialog.get("title") or "").strip()
+        sentences = [part.strip().rstrip(".") for part in self.SENTENCE_END.split(text)]
+        sentences = [sentence for sentence in sentences if sentence]
+        if not sentences:
+            return ""
+        named = [sentence for sentence in sentences if any(p in sentence.lower() for p in self.acknowledge)]
+        about = next((sentence for sentence in named if not self._only_a_state(sentence)), None)
+        if about is None:
+            # No sentence names the notice but a state that changed (a stop, a mute, in whatever order): no line. When none names it at
+            # all (the phrase was in the title), the first sentence, unless that only says a state changed.
+            about = "" if named else sentences[0]
+        if not about or self._only_a_state(about):
+            return ""
+        return about if about[-1] in "!?" else about + "."    # a sentence keeps the mark it ended with; one with none, or a full stop, ends with one
 
 
 class MeetingProvider(ABC):
@@ -209,9 +353,26 @@ class MeetingProvider(ABC):
         """
         pass
 
+    async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
+        """Carry out a control from the table (spec 2026-10-13, section 3) and answer with the state it left; the base offers none.
+
+        Args:
+            name: a key of the control model (raise_hand, reactions, captions, layout, hide_self, host.record, dialog, chat.seen, ...)
+            value: the choice the control takes (a reaction, a view, a participant's id, a dialog's button), when it takes one
+
+        Raises:
+            MeetingControlError: in words for the table, when the platform will not or cannot just now
+        """
+        raise MeetingControlError("Not available in this meeting")
+
     async def set_camera(self, on: bool) -> bool:
         """
         Set camera state.
+
+        This default is for a provider that cannot read its platform's state: it trusts the cached one and toggles when that differs. A provider
+        that can read it overrides this with a set that does not depend on a cache (Zoom's asks the client for the state wanted, Meet's reads the
+        button under its press lock), because the table's Camera button sends the state it names, and a request made against a state that changed
+        since the table drew it must not flip the camera the wrong way.
 
         Args:
             on: True to enable camera
@@ -225,7 +386,7 @@ class MeetingProvider(ABC):
 
     async def set_mute(self, muted: bool) -> bool:
         """
-        Set mute state.
+        Set mute state (see set_camera: the same default, and the same override by a provider that can read its platform's microphone).
 
         Args:
             muted: True to mute

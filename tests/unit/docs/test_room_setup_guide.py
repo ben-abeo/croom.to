@@ -309,6 +309,58 @@ def test_guide_describes_the_on_screen_keyboard_its_layers_shift_lock_and_key_cl
     assert "Shift key" not in text and "Delete key" not in text and "Key Click" not in text
 
 
+def test_guide_describes_the_meeting_screen_its_rows_sub_screens_dialog_card_and_return():
+    """The meeting screen after step 4: what each button is called and does, the three screens behind it, the card for a dialog, the second taps and
+    the two idle minutes."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+    assert html.index("First run and the screens") < html.index(">The meeting screen</h2>") < html.index("<h2>Troubleshooting</h2>")
+    for needle in (
+        "While a call lasts the page shows the meeting screen on its own, and draws only what the call's platform offers the room right now",
+        "A Google Meet call offers Mute, Turn camera off, Raise hand, Captions and Leave, and no more (besides TV, which every call has)",
+        "a host muting the room changes the button within a few seconds, and a tap asks for the state the button names, so a Mute tapped just after the host muted the room leaves it muted",
+        "The same for the camera: a Turn camera off tapped after the camera went off at the TV leaves it off",
+        "The remote and touchpad of the room's TV, always the last button of the row: the section The TV, below, sets it up",
+        "Thumbs up", "Clap", "Heart", "Laugh", "Wow", "Celebrate",
+        "Participants (7)", "Chat (2)", "Waiting room", "Admit", "No messages yet",
+        "Mute all", "Ask all to unmute", "Start recording", "Lock meeting", "End meeting for everyone",
+        "each goes back to the meeting screen on its own after two idle minutes; Camera and Upcoming meetings stay where you leave them",
+        "A line under the meeting's title says what the meeting has disclosed of itself",
+        "It is two lines at most, and a longer one is cut short with an ellipsis",
+        "A Zoom dialog that waits for a tap is a card above the controls, with Zoom's own words and buttons in Zoom's order, the last one highlighted",
+        "The card's buttons carry no icons",
+        "Leave, Remove and End meeting for everyone ask for a second tap: Tap again to leave, Tap again to remove, Tap again to end",
+        "Icons are from Lucide (lucide.dev), ISC licence",
+    ):
+        assert needle in text, needle
+
+
+def test_guide_draws_the_meeting_screens_icons_from_the_rooms_own_sprite():
+    """Every icon the guide draws is a symbol in its own inline sprite, and that symbol is the page's, path for path: what the guide shows is what the table shows."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    page = (REPO / "src" / "croom" / "control" / "static" / "icons.svg").read_text(encoding="utf-8")
+    symbol = lambda source, name: re.search(rf'<symbol id="icon-{re.escape(name)}"[^>]*>(.*?)</symbol>', source, re.S)
+    used = sorted(set(re.findall(r'<use href="#icon-([a-z-]+)"', html)))
+    assert {"mic", "mic-off", "video", "video-off", "hand", "smile", "phone-off", "captions", "layout", "user", "users", "message", "lock", "unlock", "record",
+            "door", "x-circle", "thumbs-up", "heart", "laugh", "party-popper", "tv"} <= set(used), used
+    for name in used:
+        ours, theirs = symbol(html, name), symbol(page, name)
+        assert ours and theirs, name
+        assert ours.group(1) == theirs.group(1), name
+    assert not re.search(r"""(src|href)=["']https?://""", html)
+
+
+def test_guide_step_four_lists_the_meeting_screens_rows_as_built_and_mute_only_for_someone_not_muted():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+    for needle in (
+        "During a call the page shows the meeting screen on its own: a first row of Mute, Turn camera off, Raise hand, Reactions and Leave, a second row of Captions, the view, Hide self view, Participants, Chat, Host (for a host) and TV (the section after this step shows them all), then the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next",
+        "A host or co-host also gets Mute (only for someone not already muted) and Remove on each other person (Tap again to remove)",
+    ):
+        assert needle in text, needle
+    assert "During a call the page shows the meeting screen on its own: Mute, Turn camera off, Leave, the volume" not in text      # the row that stopped at Leave
+
+
 def test_guide_has_an_optional_section_for_an_lg_tv_after_step_four_in_two_halves():
     """The TV is optional, so it is a section of its own between step 4 and the troubleshooting (not a step in the glance row), and the
     introduction says it is there. It has two small headings, Set it up and Using it, and the check comes right after Pair (the last of
@@ -410,7 +462,7 @@ def test_guide_describes_the_remote_on_the_table_and_the_touchpad_modes_and_how_
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     text = visible_text(html)
     for needle in (
-        "Open the remote. Tap Options, then TV. During a meeting tap TV on the meeting screen, beside Camera and Upcoming meetings",
+        "Open the remote. Tap Options, then TV. During a meeting tap TV, the last button of the second row",
         f"the remote returns by itself after {words(IDLE_RETURN_MIN)} minutes with no touch, or {words(TV_RETURN_MIN)} minutes during a meeting",
         "The top line names the TV and says what it shows, for example Boardroom TV · On · HDMI 1 (Crystal Meet)",
         "so it can differ from the name Find TVs listed for the same TV",

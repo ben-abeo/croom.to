@@ -6,6 +6,7 @@ the real commands, names and paths.
 import re
 import subprocess
 import sys
+from html import unescape
 from pathlib import Path
 
 import pytest
@@ -54,3 +55,28 @@ def test_meet_guide_says_the_check_also_prints_the_devices_the_browser_sees():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "Devices the browser sees" in html
     assert "microphones, speakers and cameras" in html
+
+
+def test_meet_guide_says_what_a_meet_call_offers_from_the_table_and_how_to_confirm_it_on_the_first_real_call():
+    """One paragraph: the four controls (and Leave), what Meet does not offer here, the words a refusal gets, the English labels the buttons are found by,
+    the diagnostics for the first real call and the two-second wait for a label."""
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
+    for needle in (
+        "From the table a Meet call offers Mute, Turn camera off, Raise hand and Captions",
+        "and Leave",
+        "so the table draws no Chat, Participants, Reactions or Host button in a Meet call",
+        "Meet did not change the camera; try again",
+        "Meet's chat box has the keyboard; close it on the TV first",
+        "\"Turn off microphone\", \"Turn on camera\", \"Raise hand\" and \"Turn on captions\"",
+        "a Meet whose labels differ hides the control instead of pressing the wrong thing",
+        "The buttons are found by the labels the plan expects",
+        "(the pre-join labels were seen on a Pi; the in-call ones are confirmed at the first real call with the diagnostics)",
+        "http://<device>:8080/api/meeting/diagnostics",
+        "lists every label the page draws, what the room made of them and what has the keyboard",
+        "check that Mute and Turn camera off each change in Meet with one tap on the table",
+        "The table waits two seconds for a button's label to change",
+    ):
+        assert needle in text, needle
+    assert html.count('class="kicker">In the call<') == 1                                   # one paragraph, in its own box
+    assert "English labels Meet showed at the time of writing" not in text                    # the in-call labels were not seen: they are the plan's

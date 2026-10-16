@@ -3,12 +3,19 @@ The README explains how to set up and develop Crystal Meet, points at both
 guides, and links every design spec and implementation plan.
 """
 
+import dataclasses
+import logging
+import re
 from pathlib import Path
 
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config, load_config
+from croom.meeting.providers.base import DialogPolicy, controls_from
 from tests.unit.docs.documented_numbers import IDLE_RETURN_MIN, TAP_PX, TOUCHPAD_IDLE_MIN, TURN_ON, TV_RETURN_MIN, reconnect_words, words
 
 REPO = Path(__file__).resolve().parents[3]
 README = REPO / "README.md"
+SERVICE = REPO / "src" / "croom" / "control" / "service.py"
+SPRITE = REPO / "src" / "croom" / "control" / "static" / "icons.svg"
 
 
 def test_readme_starts_with_crystal_meet_and_keeps_upstream():
@@ -130,16 +137,212 @@ def test_readme_says_where_a_zoom_meetings_passcode_comes_from():
     assert "A failed Meet join logs what Meet showed" in text
 
 
+def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps():
+    """The room page row says what the meeting screen draws (the first row, the second row, the three screens behind it, the card for a dialog, the
+    second taps and the two idle minutes), for Zoom and for Meet; the stale row that stopped at Leave is gone."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "a first row of Mute, Turn camera off, Raise hand, **Reactions** and Leave",
+        "a second row of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat**, **Host** (only while the room is host or co-host) and **TV**, "
+        "then the room's volume, **Camera** for presets and nudges and **Upcoming meetings**",
+        "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more (Leave, **TV** and the rest of the screen are as ever)",
+        "A call on a platform that reports no controls at all keeps Mute, Turn camera off and Leave, and **TV**, which is the room's own and never depends on the platform",
+        "a Zoom dialog that waits for a tap shows as a card above the controls with Zoom's own buttons",
+        "**Participants**, **Chat** (read only) and **Host** are screens of their own, each with **Back**, and each returns to the meeting screen after two idle minutes",
+        "Leave, Remove and End meeting for everyone ask for a second tap",
+        "Every button on the meeting screen has a [Lucide](https://lucide.dev) icon before its label (the buttons of a Zoom dialog's card excepted: their words are Zoom's)",
+    ):
+        assert needle in text, needle
+    assert "(Mute, Turn camera off, Leave, the room's volume" not in text
+    assert "**Upcoming meetings** and **TV**" not in text and "**Upcoming meetings**, **TV**" not in text      # the TV is in the second row, not beside Camera
+
+
+def test_readme_names_the_dialog_policys_and_the_reactions_defaults_as_the_code_has_them():
+    """The config table names each default (the code's own lists, not a copy that can drift) and says what `ask_everything` and the leniency do."""
+    text = README.read_text(encoding="utf-8")
+    for phrase in DEFAULT_ACKNOWLEDGE + DEFAULT_REACTIONS:
+        assert f"`{phrase}`" in text, phrase
+    for needle in (
+        "| `meeting.dialogs` | `acknowledge`, `ask_everything` |",
+        "`ask_everything: true` (default `false`) makes every dialog wait for a tap",
+        "Every dialog Zoom draws is written to the journal (`journalctl -u croom`) with its title, words and buttons and what was done with it, whether or not the agent runs with `-v`, so a new one can be judged and added to the list",
+        "| `meeting.controls` | `reactions` |",
+        "(shown on the table as Thumbs up, Clap, Heart, Laugh, Wow and Celebrate); `reactions: []` offers none, and the **Reactions** button is not drawn",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_says_exactly_what_the_config_loader_does_with_a_mistake_and_the_sentences_are_what_it_does(tmp_path, caplog, capsys):
+    """The config row's leniency sentences, one claim at a time, against `load_config` itself: which mistakes are answered with a warning and which are
+    not, what each gives, and what an unknown key anywhere else costs."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "A mistake under `dialogs:` or `controls:` costs only its own setting, with a warning in the journal: a value that is not a list (`acknowledge: no`, which YAML reads as false) is replaced by its default; an `ask_everything` that is not true or false is read as false (the words yes, no, on and off, in quotes, are read as they say); an unknown key is ignored; a section that is not a set of settings gives the defaults.",
+        "Without a warning: a bare word is a one-item list, a setting with nothing after it takes its default, and `acknowledge: []` acknowledges nothing, so every dialog waits.",
+        "Inside any other section an unknown key makes the agent set the whole file aside: none of the file's settings take effect and the agent runs on its built-in defaults (the one line it prints about it is block-buffered and reaches the journal only when the service stops); an unknown key at the top of the file, outside every section, is ignored without a word.",
+    ):
+        assert needle in text, needle
+    caplog.set_level(logging.WARNING, logger="croom.core.config")
+
+    def loaded(body):
+        caplog.clear()
+        (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+        return load_config(str(tmp_path / "config.yaml")), [r.getMessage() for r in caplog.records]
+
+    # each answered with a warning, and with what the sentence says it gives
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge: no\n")
+    assert config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE and len(said) == 1 and "should be a list, not False" in said[0]
+    config, said = loaded("meeting:\n  dialogs:\n    ask_everything: maybe\n")
+    assert config.meeting.dialogs.ask_everything is False and len(said) == 1 and "should be true or false" in said[0]
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledg: [x]\n    ask_everything: true\n")
+    assert config.meeting.dialogs.ask_everything is True and config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE      # the key is ignored, the rest is read
+    assert len(said) == 1 and "ignoring acknowledg" in said[0]
+    config, said = loaded("meeting:\n  controls: reactions\n")
+    assert config.meeting.controls.reactions == DEFAULT_REACTIONS and len(said) == 1 and "should be a mapping of settings" in said[0]
+    for word, value in (("yes", True), ("no", False), ("on", True), ("off", False)):                 # the quoted words are read as they say, and without a warning
+        config, said = loaded(f"meeting:\n  dialogs:\n    ask_everything: '{word}'\n")
+        assert config.meeting.dialogs.ask_everything is value and said == [], word
+    # each answered without one
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge: recording\n")
+    assert config.meeting.dialogs.acknowledge == ["recording"] and said == []
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge:\n  controls:\n    reactions:\n")
+    assert config.meeting.dialogs.acknowledge == DEFAULT_ACKNOWLEDGE and config.meeting.controls.reactions == DEFAULT_REACTIONS and said == []
+    config, said = loaded("meeting:\n  dialogs:\n    acknowledge: []\n    ask_everything:\n  controls:\n    reactions: []\n")
+    assert config.meeting.dialogs.acknowledge == [] and config.meeting.dialogs.ask_everything is False and config.meeting.controls.reactions == [] and said == []
+    notice = {"title": "", "text": "This meeting is being recorded.", "buttons": ["OK"]}
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(notice) == "acknowledge" and DialogPolicy(config.meeting.dialogs.acknowledge).decide(notice) == "ask"   # [] acknowledges nothing
+    reading = {"buttons": {"reactions": {}}}                                                           # `reactions: []` offers none, so the Reactions button has nothing to open
+    assert controls_from(reading, DEFAULT_REACTIONS)["reactions"]["available"] is True and controls_from(reading, config.meeting.controls.reactions)["reactions"]["available"] is False
+    # inside any other section an unknown key costs the whole file, the settings beside it included
+    for section in [f.name for f in dataclasses.fields(Config) if dataclasses.is_dataclass(getattr(Config(), f.name))]:
+        capsys.readouterr()
+        config, said = loaded(f"data_dir: /marker\nroom:\n  name: Lab\n{section}:\n  not_a_setting: 1\n")
+        assert config.data_dir == "" and config.room.name == "Conference Room", section                    # the file's settings did not take effect: the built-in defaults
+    config, said = loaded("meeting:\n  platfroms: [zoom]\n  dialogs:\n    ask_everything: true\n")
+    assert config.meeting.dialogs.ask_everything is False and said == []                                     # the loader said nothing through the logger
+    # ... and the one line it prints about it is a print, which a process whose output goes to a pipe (the journal's) holds in its buffer: the unit does not unbuffer it
+    assert "Warning: Failed to load config from" in capsys.readouterr().out
+    source = (REPO / "src" / "croom" / "core" / "config.py").read_text(encoding="utf-8")
+    assert 'print(f"Warning: Failed to load config from {config_path}: {e}")' in source
+    install = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
+    assert "PYTHONUNBUFFERED" not in install and "python -u" not in install and "-m croom.core.agent -c $CONFIG_DIR/config.yaml" in install
+    # a key at the top of the file that no section is called is ignored: the file is kept, nothing is printed
+    capsys.readouterr()
+    config, said = loaded("not_a_section: 1\nroom:\n  name: Lab\n")
+    assert config.room.name == "Lab" and said == [] and capsys.readouterr().out == ""
+
+
+def test_readme_says_what_the_loader_does_with_the_platforms_and_with_a_section_with_nothing_under_it(tmp_path, caplog, capsys):
+    """The two sentences of the config table, against `load_config` itself: the platforms setting is read as the dialog settings are, and an empty section is its
+    defaults without a word (it used to set the whole file aside)."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "`platforms` is a list: a bare word (`platforms: zoom`) is that one platform, and a value that is not a list (`platforms: no`, which YAML reads as false) is replaced by the default list, "
+        "`google_meet`, `teams` and `zoom`, with a warning in the journal",
+        "A section with nothing under it (`meeting:` with its lines deleted) is that section's defaults, in every section of the file, with no warning and the rest of the file in force",
+    ):
+        assert needle in text, needle
+    caplog.set_level(logging.WARNING, logger="croom.core.config")
+
+    def loaded(body):
+        caplog.clear()
+        (tmp_path / "config.yaml").write_text(body, encoding="utf-8")
+        return load_config(str(tmp_path / "config.yaml")), [r.getMessage() for r in caplog.records]
+
+    config, said = loaded("meeting:\n  platforms: no\n")
+    assert config.meeting.platforms == ["google_meet", "teams", "zoom"] and len(said) == 1 and "meeting.platforms should be a list, not False" in said[0]
+    config, said = loaded("meeting:\n  platforms: zoom\n")
+    assert config.meeting.platforms == ["zoom"] and said == []
+    capsys.readouterr()
+    config, said = loaded("data_dir: /marker\nroom:\nmeeting:\ncalendar:\n")
+    assert config.data_dir == "/marker" and config.meeting == Config().meeting and said == [] and capsys.readouterr().out == ""
+
+
+def test_the_notices_the_readme_says_disclose_nothing_are_the_ones_the_policy_treats_so():
+    """"Except that a notice which only says a state changed ... discloses nothing": the three phrases it names are the policy's own state-only ones, and
+    a notice with one of them as its only sentence has no line, where one that says what the meeting is doing has its sentence."""
+    text = README.read_text(encoding="utf-8")
+    assert "except that a notice which only says a state changed (`has been muted`, `has been unmuted`, `recording has stopped`) refreshes the state and discloses nothing" in text
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    for phrase in ("has been muted", "has been unmuted", "recording has stopped"):
+        assert phrase in DEFAULT_ACKNOWLEDGE and phrase in DialogPolicy.STATE_ONLY, phrase
+        assert policy.disclosure({"text": f"Your microphone {phrase}.", "buttons": ["OK"]}) == "", phrase
+    assert policy.disclosure({"text": "This meeting is being recorded.", "buttons": ["OK"]}) == "This meeting is being recorded."
+
+
+def test_readme_says_a_button_that_leaves_or_ends_the_meeting_is_never_pressed_for_the_room_and_the_notice_line_is_two_lines():
+    """The names are the policy's own (NEVER_PRESSED), and the page's line is clamped to the two lines the README says."""
+    text = README.read_text(encoding="utf-8")
+    assert "and that a dialog whose one button leaves or ends the meeting (the whole word `Leave`, `End`, `Exit` or `Quit` in its label, in any case) is never pressed for the room, whatever its words say" in text
+    assert DialogPolicy.NEVER_PRESSED == ("leave", "end", "exit", "quit")
+    assert "(recorded, transcribed; two lines at most, cut short with an ellipsis)" in text
+    style = (REPO / "src" / "croom" / "control" / "static" / "style.css").read_text(encoding="utf-8")
+    assert re.search(r"\.notice \{[^}]*-webkit-line-clamp: 2;", style)
+
+
+def test_readme_says_the_dialog_cards_buttons_are_the_one_exception_to_an_icon_on_every_button():
+    text = README.read_text(encoding="utf-8")
+    assert "a Lucide icon before the label of every button but the dialog card's (whose labels are Zoom's own words)" in text
+    assert "a Lucide icon on every button," not in text
+
+
+def test_readme_lists_the_meeting_routes_and_says_who_can_read_the_status():
+    """The four routes this work added are named (and exist), a refusal is a 409 even for an unknown name, and the open status says what it now carries."""
+    text = README.read_text(encoding="utf-8")
+    source = SERVICE.read_text(encoding="utf-8")
+    for route in ("/api/meeting/control", "/api/meeting/dialog", "/api/meeting/chat/seen", "/api/meeting/diagnostics"):
+        assert f'"{route}"' in source, route
+        assert f"`{route}`" in text, route
+    for needle in (
+        "answer `{\"meeting\": ...}`, the block `/api/status` carries",
+        "a control the platform cannot carry out is a 409 with its words, an unknown name included",
+        "on a Zoom call it briefly opens the Reactions and View menus on the TV",
+        "`/api/status` is unauthenticated on the LAN, as the whole page is, and now carries the participants' names, the last twenty chat messages and the words of a waiting dialog, as it already carried the meeting link (its passcode too, when the link has one); `/api/meeting/diagnostics` is open the same way and lists more of the meeting (the whole roster with its flags, the words of every dialog met)",
+    ):
+        assert needle in text, needle
+
+
+def test_readme_says_mute_and_camera_send_the_state_their_button_names_and_the_routes_take_it():
+    """A tap decided by what the room is when it arrives flips what the host just did (the whole-branch review): the buttons send the state they name,
+    the routes set it, and a body that names none still toggles."""
+    text = README.read_text(encoding="utf-8")
+    for needle in (
+        "Mute and Camera keep their own routes and send the state their button names, `POST /api/meeting/mute` with `{\"muted\": true}` and `POST /api/meeting/camera` with `{\"on\": false}`: "
+        "the agent sets that state (a microphone or camera that is as asked is left alone)",
+        "a body that names no state still toggles, as the routes always did, and both answer with the meeting block as well as the state",
+    ):
+        assert needle in text, needle
+    # what the sentences rest on: the routes read those two fields, and the page sends them
+    source = SERVICE.read_text(encoding="utf-8")
+    page = (REPO / "src" / "croom" / "control" / "static" / "app.js").read_text(encoding="utf-8")
+    assert '_state_asked_for(request, "muted")' in source and '_state_asked_for(request, "on")' in source
+    assert 'request("mute", "/api/meeting/mute", { muted: muted })' in page and 'request("camera", "/api/meeting/camera", { on: on })' in page
+
+
+def test_readme_credits_lucide_and_ties_the_credit_to_the_sprite():
+    """The sprite says which Lucide it was built from; the README's credit line says the same version and the licence."""
+    text = README.read_text(encoding="utf-8")
+    sprite = SPRITE.read_text(encoding="utf-8")
+    assert "Lucide icons (https://lucide.dev), ISC License" in sprite and "lucide-react 0.303.0" in sprite
+    assert "Icons are [Lucide](https://lucide.dev) (ISC licence, lucide-react 0.303.0), in one sprite, `src/croom/control/static/icons.svg`, with the licence text beside it in `LICENSES.md`" in text
+
+
+def test_readme_says_the_wording_of_the_platforms_pages_is_not_yet_confirmed_on_a_live_meeting():
+    text = README.read_text(encoding="utf-8")
+    assert "were read from Zoom's 6.5.0 web client files, not yet from a live meeting, and the English labels it looks for on Google Meet's call page are the controls plan's wording" in text
+    assert "the Zoom guide's **In the meeting** section lists the inventory to run" in text
+
+
 def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
     """The room page row says where the remote is opened from, what is on it, what its place shows when there is no TV to control, the
     three touchpad modes with how each one ends, and what a person meets on the pad; the features table's row links this spec and plan
     and names the shell check. The waits are the page's own constants."""
     text = README.read_text(encoding="utf-8")
     for needle in (
-        # the remote's place: the idle screen's Options, the meeting screen's own button; it belongs to the screen that opened it
+        # the remote's place: the idle screen's Options, the last button of the meeting screen's second row; it belongs to the screen that opened it
         "the **TV** remote and the keyboard's **Key click**",
-        "**Camera** for presets and nudges, **Upcoming meetings**, **TV**)",
-        "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV** on the meeting screen",
+        "**Chat**, **Host** (only while the room is host or co-host) and **TV**, then the room's volume",
+        "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV**, the last button of the second row, on the meeting screen",
         "**Back** returns to the screen that opened it",
         f"left alone it returns by itself after {words(IDLE_RETURN_MIN)} minutes ({words(TV_RETURN_MIN)} on the meeting screen)",
         # what is on it

@@ -264,6 +264,22 @@ meeting:
   auto_leave: true
   camera_default_on: true
   mic_default_on: true
+  # Dialogs Zoom draws over the TV: a notice with one button whose words match a phrase here is acknowledged at once and its words
+  # shown on the table; every other dialog waits for a tap on the table. ask_everything: true makes them all wait.
+  dialogs:
+    acknowledge:
+      - "is being recorded"
+      - "is being transcribed"
+      - "AI Companion"
+      - "Zoom AI is on"
+      - "has been muted"
+      - "has been unmuted"
+      - "recording has started"
+      - "recording has stopped"
+    ask_everything: false
+  # The Reactions button offers these, by the names Zoom's reaction picker gives them.
+  controls:
+    reactions: ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
 
 calendar:
   providers:

@@ -4,13 +4,20 @@ surfaces here and not at first boot on a Pi.
 """
 
 import json
+import logging
 import subprocess
 from pathlib import Path
 
 import pytest
 import yaml
 
-from croom.core.config import Config
+from croom.core.config import (
+    DEFAULT_ACKNOWLEDGE,
+    DEFAULT_REACTIONS,
+    Config,
+    ControlsConfig,
+    DialogsConfig,
+)
 
 ROOMS = sorted((Path(__file__).resolve().parents[3] / "deploy" / "rooms").glob("room-*.yaml"))
 
@@ -31,6 +38,21 @@ def test_room_configs_load(path):
     assert config.calendar.google_calendar_id == "REPLACE_WITH_ROOM_CALENDAR_ID"
     assert config.meeting.zoom_credentials_path == "/etc/croom/zoom-credentials.json"
     assert config.meeting.google_profile_dir == "/var/lib/croom/meet-profile"
+
+
+@pytest.mark.parametrize("path", ROOMS, ids=lambda p: p.name)
+def test_room_configs_write_out_the_dialog_and_control_settings_at_their_defaults(path, caplog):
+    """The room setup guide copies these files: they carry the dialogs and controls settings (spec 2026-10-13, section 8) as the agent
+    would default them (Zoom's own reaction names, the notices it acknowledges), so an admin edits what is there."""
+    text = path.read_text(encoding="utf-8")
+    data = yaml.safe_load(text)
+    assert data["meeting"]["dialogs"] == {"acknowledge": DEFAULT_ACKNOWLEDGE, "ask_everything": False}
+    assert data["meeting"]["controls"] == {"reactions": DEFAULT_REACTIONS}
+    assert "Dialogs Zoom draws over the TV" in text and "ask_everything: true makes them all wait" in text
+    caplog.set_level(logging.WARNING, logger="croom.core.config")
+    config = Config.from_dict(data)
+    assert config.meeting.dialogs == DialogsConfig() and config.meeting.controls == ControlsConfig()
+    assert not caplog.records
 
 
 def test_there_are_three_rooms():
@@ -82,9 +104,11 @@ def test_room_configs_carry_one_tv_block_switched_off_with_a_real_line(path):
     assert config.tv == Config().tv            # the other keys are the defaults: nothing is set until the room's TV is
 
 
-def test_a_tv_block_of_only_comments_is_null_and_the_config_refuses_it():
-    """Why the room files' block has a real `enabled: false` line and not just its keys in comments."""
-    data = yaml.safe_load("tv:\n  # host: \"10.0.0.41\"\n")
-    assert data == {"tv": None}
-    with pytest.raises(TypeError):
-        Config.from_dict(data)
+def test_a_tv_block_of_only_comments_is_read_as_the_tv_defaults_and_the_rest_of_the_file_stands():
+    """YAML reads a block whose keys are all commented out as null; the config takes an empty section as that section's defaults
+    (the TV switched off) and keeps the rest of the file. The room files still write `enabled: false` out, so it is plain to read."""
+    data = yaml.safe_load("room:\n  name: \"Boardroom\"\ntv:\n  # host: \"10.0.0.41\"\n")
+    assert data == {"room": {"name": "Boardroom"}, "tv": None}
+    config = Config.from_dict(data)
+    assert config.tv == Config().tv and config.tv.enabled is False
+    assert config.room.name == "Boardroom"

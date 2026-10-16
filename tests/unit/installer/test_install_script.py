@@ -3,9 +3,21 @@ Tests for installer/install.sh that do not need root or apt: argument
 handling, the desktop-user check, and config creation with the script sourced.
 """
 
+import logging
 import os
 import subprocess
 from pathlib import Path
+
+import pytest
+import yaml
+
+from croom.core.config import (
+    DEFAULT_ACKNOWLEDGE,
+    DEFAULT_REACTIONS,
+    Config,
+    ControlsConfig,
+    DialogsConfig,
+)
 
 REPO = Path(__file__).resolve().parents[3]
 SCRIPT = REPO / "installer" / "install.sh"
@@ -50,6 +62,24 @@ def test_default_config_has_the_control_section(tmp_path):
     assert "control:" in text and "port: 8080" in text
     assert "platforms:" in text and "- zoom" in text and "- google_meet" in text
     assert "enabled: false" in text.split("ai:")[1].split("\n\n")[0]
+
+
+def test_default_config_writes_out_the_dialog_and_control_settings_at_their_defaults(tmp_path, caplog):
+    """Spec 2026-10-13, section 8: the stock config carries the settings so an admin can edit them. They are the defaults the agent would
+    use without them (Zoom's own reaction names, the notices it acknowledges), and the file loads without a word from the config."""
+    result = run_bash(
+        f"source {SCRIPT}; CONFIG_DIR={tmp_path}; CROOM_USER=$(id -un); create_config",
+    )
+    assert result.returncode == 0, result.stderr
+    text = (tmp_path / "config.yaml").read_text()
+    data = yaml.safe_load(text)
+    assert data["meeting"]["dialogs"] == {"acknowledge": DEFAULT_ACKNOWLEDGE, "ask_everything": False}
+    assert data["meeting"]["controls"] == {"reactions": DEFAULT_REACTIONS}
+    assert "Dialogs Zoom draws over the TV" in text and "ask_everything: true makes them all wait" in text
+    caplog.set_level(logging.WARNING, logger="croom.core.config")
+    config = Config.from_dict(data)
+    assert config.meeting.dialogs == DialogsConfig() and config.meeting.controls == ControlsConfig()
+    assert not caplog.records
 
 
 def test_default_config_names_the_company_for_the_door_sign(tmp_path):

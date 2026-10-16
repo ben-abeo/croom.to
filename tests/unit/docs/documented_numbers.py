@@ -50,7 +50,7 @@ def js_constant(filename, name):
 
 # the page's own waits and thresholds, as the docs state them
 IDLE_RETURN_MIN = js_constant("app.js", "IDLE_RETURN_MS") // 60000        # the remote returns to the idle screen after this long
-TV_RETURN_MIN = js_constant("app.js", "TV_RETURN_MS") // 60000            # ... and to the meeting screen after this long
+TV_RETURN_MIN = js_constant("app.js", "MEETING_RETURN_MS") // 60000       # ... and to the meeting screen after this long (the sub-screens' two minutes, which the TV view shares)
 TOUCHPAD_IDLE_MIN = js_constant("touchpad.js", "TOUCHPAD_IDLE_MS") // 60000   # the full-screen touchpad puts itself away after this long
 TAP_PX = js_constant("touchpad.js", "TAP_PX")                             # how far a held finger moves before it drags
 RECONNECT_S = [milliseconds // 1000 for milliseconds in js_constant("touchpad.js", "RECONNECT_MS")]   # the pointer socket's waits

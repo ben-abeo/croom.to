@@ -49,8 +49,8 @@ control:
   host: "0.0.0.0"
   port: 8080
 
-# The room's LG TV, if it has one (the room guide's section The TV). Switched off until you set it up: set enabled to true, take the # off the
-# lines under it and put the TV's own address and MAC address in them. Keep this one block: a second tv: in the file would silently win.
+# On the table use Options > TV > Find TVs and select your LG or Samsung TV. That saves its settings and starts pairing.
+# Optional manual defaults follow; a saved selection takes priority. Use brand: samsung for a Samsung TV (default: lg).
 tv:
   enabled: false
   # host: "10.0.0.41"           # the TV's address (Options, then TV, then Find TVs on the table lists it)

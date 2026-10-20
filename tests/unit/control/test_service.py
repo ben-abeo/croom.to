@@ -417,6 +417,8 @@ class StubTv:
             raise self.fail_status
         return {"configured": self.configured, "paired": self.paired, "keep_on": True, "held_off": False, "refused": False, "prompting": False,
                 "host": self.host, "pi_input": self.pi_input,
+                "brand": "lg", "mac": "AA:BB:CC:DD:EE:FF",
+                "capabilities": {"pointer": True, "direct_inputs": True, "mute_state": True},
                 "on": True, "reachable": True, "name": self.name, "volume": self.volume, "muted": False,
                 "input": "HDMI_1", "inputs": [{"id": "HDMI_1", "label": "HDMI 1"}, {"id": "HDMI_2", "label": "HDMI 2"}],
                 "app": "com.webos.app.hdmi1", "channel": None}

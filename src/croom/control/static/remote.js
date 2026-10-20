@@ -1,4 +1,4 @@
-// The TV view's remote on the table (spec 2026-10-13 TV remote and touchpad, section 5): the page's own part for the LG TV, with the modes that
+// The TV view's remote on the table (spec 2026-10-13 TV remote and touchpad, section 5): the page's own part for LG and Samsung TVs, with the modes that
 // turn its d-pad into a trackpad. app.js draws the rest of the page and shares it through window.croomPage (as devices.js does): the model, the
 // requests, the buttons, the render and view hooks. touchpad.js reads the fingers for the trackpad and for the full-screen surface.
 (function () {
@@ -57,12 +57,17 @@
     cancelled: false,    // ... and has been given up, so how it ends is no news
     forgetting: false,
     searching: false,    // Find TVs is looking
+    choosing: false,
+    selecting: null,     // the discovery item while saving and pairing, before status has caught up
+    saving: false,
     found: null,         // what the last search found, or null before there was one
     factsKey: null,
     foundKey: null,
   };
   const tvKeyNodes = Array.from(document.querySelectorAll("#tv-remote [data-tv]"));
   const tvBlock = () => (model.status && model.status.tv) || { configured: false, paired: false };
+  const tvSupports = (t, feature) => !t.capabilities || t.capabilities[feature] !== false;
+  const tvResponding = (t) => Boolean(t.on || (t.reachable && t.power_known === false));
   // The inputs the TV lists, as far as they can be drawn: what a device on the network says is not trusted to have the shape it should.
   const tvInputs = (t) => (Array.isArray(t.inputs) ? t.inputs.filter((i) => i && (typeof i.id === "string" || typeof i.id === "number")) : []);
   let tvVisit = 0;   // counts the times the view has been left: what comes back from an earlier visit has nothing to say to this one
@@ -71,6 +76,8 @@
   // What the view shows in the remote's place: "not-set-up", "pairing" or "refused", and "" for the remote. Refused is read with
   // paired: the agent leaves it set after Forget TV, until the next pairing.
   function tvCardOf(t) {
+    if (tvView.selecting) return "pairing";
+    if (tvView.choosing) return "choose";
     if (!t.configured) return "not-set-up";
     if (!t.paired) return "pairing";
     return t.refused ? "refused" : "";
@@ -147,7 +154,7 @@
   // A TV that is on is turned off by two taps on Power, the second after half a second (CONFIRM_GUARD_MS) and within five seconds, as Leave is
   // (without the half second); a TV that is not on is turned on by one.
   function tvPower() {
-    if (!tvBlock().on) { tvTurnOn(); return; }
+    if (!tvResponding(tvBlock())) { tvTurnOn(); return; }
     if (!tvView.armed) {
       tvView.armed = true;
       tvView.armedAt = Date.now();
@@ -185,25 +192,39 @@
     const name = cut < 0 ? spec : spec.slice(0, cut);
     const value = cut < 0 ? undefined : spec.slice(cut + 1);
     if (name === "power") tvPower();
-    else if (name === "input" && value === "menu") tvOpenInputs();
+    else if (name === "input" && value === "menu") {
+      if (tvSupports(tvBlock(), "direct_inputs")) tvOpenInputs();
+      else tvControl("key", "INPUT_HUB", node);
+    }
+    else if (name === "mute" && !tvSupports(tvBlock(), "mute_state")) tvControl("key", "MUTE", node);
     else tvControl(name, value, node);
   }
 
   // Pair: the TV shows its prompt and a person accepts it with the TV's own remote, so the request waits for them. Cancel is the agent's
   // Forget, which ends a waiting pairing at once; the pairing's own answer then says it was stopped, which is no news to the one who stopped it.
-  async function tvPair() {
-    if (tvView.pairing) return;
+  async function tvPair(selection, mac) {
+    if (tvView.pairing || tvView.saving || tvView.forgetting) return;
+    // click listeners also pass an Event; only discovery items select a TV.
+    const selected = selection && typeof selection.host === "string" ? selection : null;
     const visit = tvVisit;
     tvView.pairing = true;
+    tvView.selecting = selected;
+    tvView.choosing = false;
     tvView.cancelled = false;
     tvView.words = "";
     render();
     try {
-      tvTake(await tvAsk(TV_PAIR_MS, "The TV", (extra) => post("/api/tv/pair", {}, extra)));
+      const body = selected ? { host: selected.host } : {};
+      if (selected && mac) body.mac = mac;
+      const answer = await tvAsk(TV_PAIR_MS, "The TV", (extra) => post(selected ? "/api/tv/select" : "/api/tv/pair", body, extra));
+      if (!tvView.cancelled) tvTake(answer);
+      if (selected && !tvView.cancelled) tvView.found = null;
     } catch (e) {
       if (!tvView.cancelled) tvSay(visit, e.message);
+      if (selected) await refreshStatus();   // a declined pairing still leaves the selection saved
     } finally {
       tvView.pairing = false;
+      tvView.selecting = null;
       tvView.cancelling = false;
     }
     render();
@@ -269,7 +290,7 @@
   }
 
   async function tvFind() {
-    if (tvView.searching) return;
+    if (tvView.searching || tvView.pairing || tvView.saving) return;
     const visit = tvVisit;
     tvView.searching = true;
     tvView.words = "";
@@ -283,6 +304,38 @@
     }
     tvView.searching = false;
     render();
+  }
+
+  function tvChoose() {
+    if (tvView.pairing || tvView.turningOn || tvView.forgetting) return;
+    const t = tvBlock();
+    tvView.choosing = true;
+    el("tv-settings-mac").value = t.mac || "";
+    const select = el("tv-settings-input");
+    const input = t.pi_input || "HDMI_1";
+    if (!Array.from(select.options).some((o) => o.value === input)) select.add(new Option(input, input));
+    select.value = input;
+    el("tv-settings-result").textContent = "";
+    tvFind();
+  }
+
+  async function tvSaveSettings(event) {
+    event.preventDefault();
+    if (tvView.saving || tvView.pairing) return;
+    tvView.saving = true;
+    el("tv-settings-result").textContent = "";
+    render();
+    try {
+      tvTake(await tvAsk(TV_CONTROL_MS, "The TV", (extra) => post("/api/tv/settings", {
+        mac: el("tv-settings-mac").value.trim(), pi_input: el("tv-settings-input").value,
+      }, extra)));
+      el("tv-settings-result").textContent = "Saved";
+    } catch (e) {
+      el("tv-settings-result").textContent = e.message;
+    } finally {
+      tvView.saving = false;
+      render();
+    }
   }
 
   // --- the pointer modes (spec section 5.2) ---
@@ -312,7 +365,8 @@
     render();
   }
   // What the surface needs to know of the TV: its name, whether it can be moved, and whether the room has one set up (the words differ).
-  const surfaceTv = (t, card) => ({ usable: card === "", name: t.name || "", configured: Boolean(t.configured) });
+  const surfaceTv = (t, card) => ({ usable: card === "" && tvSupports(t, "pointer"), pointer: tvSupports(t, "pointer"),
+    name: t.name || "", configured: Boolean(t.configured) });
   function openTouchpad() {
     const t = tvBlock();
     T.surface.show({ target: pointer.target || "pi", tv: surfaceTv(t, tvCardOf(t)), opener: el("tv-fullscreen") });
@@ -338,7 +392,7 @@
     el("tv-trackpad").hidden = !target;
     for (const [id, who] of [["tv-pointer", "tv"], ["tv-pi-mouse", "pi"]]) {
       const b = el(id), on = target === who;
-      b.hidden = card !== "";
+      b.hidden = card !== "" || (who === "tv" && !tvSupports(t, "pointer"));
       b.setAttribute("aria-pressed", String(on));
       b.classList.toggle("filled", on);
       b.classList.toggle("quiet", !on);
@@ -369,6 +423,7 @@
     tvCloseInputs();
     tvView.words = "";
     tvView.found = null;
+    tvView.choosing = false;
   }
 
   // --- drawing the view from the status (keyed, so that a button is never replaced under a finger) ---
@@ -389,15 +444,21 @@
     const parts = [["name", t.name || (card === "pairing" && t.host ? "TV at " + t.host : "TV")]];
     let turnOn = false;
     if (card === "not-set-up") parts.push(["text", "Not set up"]);
+    else if (card === "choose") parts.push(["text", "Choose a TV"]);
     else if (card === "pairing") parts.push(["text", tvView.pairing ? "Pairing\u2026" : "Not paired yet"]);
     else if (card === "refused") parts.push(["text", tvView.pairing ? "Pairing\u2026" : "Not accepting this table"]);
     else if (tvView.turningOn) parts.push(["text", "Turning on\u2026"]);
+    else if (t.reachable && t.power_known === false) {
+      parts.push(["text", "Power state unavailable"]);
+      turnOn = Boolean(t.mac);
+    }
     else if (t.on) {
       parts.push(["on", "On"]);
       const where = tvWhere(t);
       if (where) parts.push(["text", where]);
       if (t.channel) parts.push(["text", "Channel " + t.channel]);
     } else if (t.prompting) parts.push(["text", TV_ASKING]);
+    else if (t.mac === "") parts.push(["text", "Wake unavailable \u00B7 Add a MAC address in Change TV"]);
     else turnOn = true;
     if (card === "" && pointer.target === "tv") parts.push(["text", "Pointer on"]);
     const key = JSON.stringify([parts, turnOn]);
@@ -427,9 +488,12 @@
 
   // The remote's keys. A TV that is not on can only be turned on, and one that is turning on is not asked anything: every key waits.
   function renderTvKeys(t, live) {
-    const off = !t.on && !tvView.turningOn;
+    const off = !tvResponding(t) && !tvView.turningOn;
     for (const node of tvKeyNodes) {
-      const allowed = live || (off && node.id === "tv-power");
+      const spec = node.dataset.tv;
+      const keys = t.capabilities && t.capabilities.supported_keys;
+      const supported = !spec.startsWith("key:") || !Array.isArray(keys) || keys.includes(spec.slice(4));
+      const allowed = supported && (live || (off && node.id === "tv-power" && t.mac !== ""));
       if (node.matches("button")) node.disabled = !allowed;
       else node.setAttribute("aria-disabled", allowed ? "false" : "true");
     }
@@ -437,18 +501,21 @@
     const power = el("tv-power");
     labelWithIcon(power, armed ? "Tap again to turn off" : "Power", armed ? "" : "power");
     power.classList.toggle("danger", armed);
-    power.classList.toggle("quiet", !armed && t.on);
-    power.classList.toggle("filled", !t.on);   // the one filled key, while the TV is not on (and while it is turning on)
+    power.classList.toggle("quiet", !armed && tvResponding(t));
+    power.classList.toggle("filled", !tvResponding(t));   // the one filled key, while the TV is not on (and while it is turning on)
     // Mute follows the speaker's button on the meeting screen: the picture is the TV's sound (a speaker while it is live, a crossed one
     // while it is muted) and the words are what a tap does. The key is as wide as "Unmute" in both states (style.css), so nothing moves;
     // a sound that is off also shows as a key that is down, as the input showing does.
     const mute = el("tv-mute");
-    labelWithIcon(mute, t.muted ? "Unmute" : "Mute", t.muted ? "volume-x" : "volume");
-    mute.setAttribute("aria-pressed", t.muted ? "true" : "false");
-    mute.classList.toggle("current", Boolean(t.muted));
+    const knowsMute = tvSupports(t, "mute_state");
+    const muted = knowsMute && Boolean(t.muted);
+    labelWithIcon(mute, muted ? "Unmute" : "Mute", muted ? "volume-x" : "volume");
+    if (knowsMute) mute.setAttribute("aria-pressed", muted ? "true" : "false");
+    else mute.removeAttribute("aria-pressed");
+    mute.classList.toggle("current", muted);
     const level = t.volume === null || t.volume === undefined ? "\u2013" : String(t.volume);
     if (el("tv-level").textContent !== level) el("tv-level").textContent = level;
-    el("tv-level").classList.toggle("muted", Boolean(t.muted));
+    el("tv-level").classList.toggle("muted", muted);
   }
 
   // A pick's check: its picture goes on and off in place.
@@ -462,7 +529,7 @@
   // The picks are drawn again only when the list itself changes. When only the input showing changes (somebody used the TV's own remote)
   // the marks move in place, so that a finger that is down on a pick finds it still there at the lift.
   function renderTvInputs(t, live) {
-    const open = tvView.inputsOpen && live;
+    const open = tvView.inputsOpen && live && tvSupports(t, "direct_inputs");
     el("tv-inputs").hidden = !open;
     el("tv-keys").hidden = open;
     el("tv-input").setAttribute("aria-expanded", open ? "true" : "false");
@@ -495,25 +562,24 @@
     }
   }
 
-  // The TVs a search found, on the cards that have Find TVs: a name and an address to put in the config, no link. The pairing card
-  // tags the one this room is set up for.
+  // Discovery text is untrusted. Connect sends only its cached host; optional MAC text is validated by the server.
   function renderTvFound(thisRoom) {
     const key = JSON.stringify([tvView.found, thisRoom]);
-    if (key === tvView.foundKey) return;
+    const changed = key !== tvView.foundKey;
     tvView.foundKey = key;
-    for (const box of document.querySelectorAll(".tv-found")) {
+    if (changed) for (const box of document.querySelectorAll(".tv-found")) {
       const found = tvView.found;
       box.hidden = found === null;
       if (found === null) continue;
-      const mine = box.closest("#tv-pairing") ? thisRoom : "";
+      const mine = box.closest("#tv-not-set-up") ? "" : thisRoom;
       box.querySelector(".tv-found-label").textContent = found.length ? "Found on the network" : TV_FOUND_NONE;
       const list = box.querySelector(".tv-found-list");
       list.hidden = found.length === 0;
-      list.replaceChildren(...found.filter((tv) => tv && typeof tv === "object").map((tv) => {
+      list.replaceChildren(...found.filter((tv) => tv && typeof tv.host === "string" && tv.host).map((tv) => {
         const li = document.createElement("li");
         const who = document.createElement("span");
         who.className = "tv-who";
-        who.append((tv.name || "LG TV") + " ");
+        who.append((tv.name || (tv.brand === "samsung" ? "Samsung TV" : "LG TV")) + " ");
         if (mine && tv.host === mine) {
           const tag = document.createElement("span");
           tag.className = "tv-tag";
@@ -523,15 +589,39 @@
         const address = document.createElement("span");
         address.className = "tv-addr";
         address.textContent = tv.host || "";
-        li.append(who, address);
+        who.append(address);
+        let mac = null;
+        if (!tv.mac) {
+          const details = document.createElement("details");
+          details.className = "tv-mac";
+          const summary = document.createElement("summary");
+          summary.textContent = "Wake unavailable \u00B7 Add MAC";
+          const label = document.createElement("label");
+          label.append("MAC address (optional)");
+          mac = document.createElement("input");
+          mac.type = "text";
+          mac.dataset.keyboard = "mac";
+          mac.autocomplete = "off";
+          mac.spellcheck = false;
+          mac.placeholder = "AA:BB:CC:DD:EE:FF";
+          label.append(mac);
+          details.append(summary, label);
+          who.append(details);
+        }
+        const connect = button("Connect", "quiet", () => tvPair(tv, mac ? mac.value.trim() : ""), false, null);
+        connect.classList.add("tv-connect");
+        li.append(who, connect);
         return li;
       }));
     }
+    for (const b of document.querySelectorAll(".tv-connect")) b.disabled = tvView.pairing || tvView.searching || tvView.saving;
+    for (const box of document.querySelectorAll(".tv-found")) box.hidden = tvView.found === null || tvView.pairing;
   }
 
   function renderTvCard(t, card) {
     if (card === "pairing") {
       const text = tvView.pairing ? TV_PAIR_WAIT :
+        tvView.found && tvView.found.length ? "Tap Pair for this TV, or Connect beside another TV below." :
         "This room is set up for the TV at " + (t.host || "its address") + ". Tap Pair, then accept the request that appears on the TV, using the TV's own remote. You only do this once.";
       if (el("tv-pairing-text").textContent !== text) el("tv-pairing-text").textContent = text;
       el("tv-pair").hidden = tvView.pairing;
@@ -551,8 +641,12 @@
     }
     for (const b of document.querySelectorAll(".tv-find")) {
       labelWithIcon(b, tvView.searching ? "Looking\u2026" : "Find TVs", "locate");
-      b.disabled = tvView.searching;
+      b.disabled = tvView.searching || tvView.pairing || tvView.saving;
     }
+    el("tv-settings-save").disabled = tvView.saving;
+    el("tv-settings-mac").disabled = tvView.saving;
+    el("tv-settings-input").disabled = tvView.saving;
+    el("tv-choose-done").disabled = tvView.saving;
     renderTvFound(t.host || "");
   }
 
@@ -570,9 +664,9 @@
 
   function renderTv() {
     if (view() !== "tv") return;
-    const t = tvBlock();
+    const t = tvView.selecting ? { ...tvBlock(), ...tvView.selecting, configured: true, paired: false } : tvBlock();
     const card = tvCardOf(t);
-    const on = card === "" && Boolean(t.on);
+    const on = card === "" && tvResponding(t);
     const live = on && !tvView.turningOn;
     if (!on) tvDisarm();             // a Power waiting for its second tap, and the row of inputs, go when the TV is not on
     if (!live) tvCloseInputs();
@@ -580,7 +674,10 @@
     el("tv-not-set-up").hidden = card !== "not-set-up";
     el("tv-pairing").hidden = card !== "pairing";
     el("tv-refused").hidden = card !== "refused";
-    if (card !== "" && pointer.target) stopPointer();   // the cards come before there is a TV to point at
+    el("tv-choose").hidden = card !== "choose";
+    el("tv-change").hidden = !t.configured || tvView.pairing || card === "choose";
+    el("tv-change").disabled = tvView.turningOn || tvView.forgetting;
+    if ((card !== "" || (pointer.target === "tv" && !tvSupports(t, "pointer"))) && pointer.target) stopPointer();
     renderTvStatus(t, card);
     renderTvPointer(card, t);
     renderTvForget(card);
@@ -614,6 +711,9 @@
   el("tv-pointer").addEventListener("click", () => setPointer("tv"));
   el("tv-pi-mouse").addEventListener("click", () => setPointer("pi"));
   el("tv-fullscreen").addEventListener("click", openTouchpad);
+  el("tv-change").addEventListener("click", tvChoose);
+  el("tv-choose-done").addEventListener("click", () => { tvView.choosing = false; render(); });
+  el("tv-settings-form").addEventListener("submit", tvSaveSettings);
   P.onViewChange((name) => {
     if (name === "tv") refreshStatus();   // the TV as it is now, not as of the last poll
     else tvLeft();

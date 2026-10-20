@@ -356,13 +356,13 @@ async def test_with_no_tv_configured_the_tvs_on_the_network_are_listed(tmp_path)
     code, text, built = await run(Config(), discover=discover)
     assert code == 1, text
     assert text.splitlines() == [
-        "No TV is configured: set tv.enabled to true and tv.host to the TV's address in the config.",
-        "Looking for LG TVs on the network (this takes a few seconds)...",
-        "Found 2 LG TVs:",
+        "No TV is configured. On the table use Options > TV > Find TVs and select yours.",
+        "Looking for LG and Samsung TVs on the network (this takes a few seconds)...",
+        "Found 2 TVs:",
         "  Boardroom TV  10.0.0.41",
         "  (no name)  10.0.0.50",
-        "Put the address of yours in tv.host (and its MAC address in tv.mac, in quotes), make sure tv.enabled is true, then pair "
-        "it under Options > TV on the room's table.",
+        "On the room's table open Options > TV > Find TVs, select yours, then accept the request on the TV. "
+        "The room saves its connection settings automatically.",
     ]
     assert asked == [True] and built == []                                # no service: there is no TV to ask
 
@@ -375,7 +375,7 @@ async def test_a_tv_that_is_switched_on_with_no_address_is_said_to_want_an_addre
         return [{"host": "10.0.0.41", "name": "Boardroom TV", "location": ""}]
     code, text, built = await run(config, discover=discover)
     assert code == 1 and built == []
-    assert text.splitlines()[0] == "No TV is configured: tv.host is empty. Set it to the TV's address in the config."
+    assert text.splitlines()[0] == "No TV is configured. On the table use Options > TV > Find TVs and select yours."
     assert "  Boardroom TV  10.0.0.41" in text
 
 
@@ -383,7 +383,7 @@ async def test_one_tv_found_is_one_tv(tmp_path):
     async def discover():
         return [{"host": "10.0.0.41", "name": "Boardroom TV", "location": ""}]
     code, text, _ = await run(Config(), discover=discover)
-    assert "Found 1 LG TV:" in text
+    assert "Found 1 TV:" in text
 
 
 async def test_with_no_tv_configured_and_none_on_the_network_the_check_says_what_to_look_at(tmp_path):
@@ -391,8 +391,7 @@ async def test_with_no_tv_configured_and_none_on_the_network_the_check_says_what
         return []
     code, text, _ = await run(Config(), discover=discover)
     assert code == 1
-    assert ("No LG TV answered. Check that the TV is on, on the same network as this device, and that LG Connect Apps is "
-            "enabled in its settings.") in text
+    assert "No TV answered. Check that the TV is on, on the same network as this device, and allows network control." in text
 
 
 async def test_a_search_that_cannot_be_made_is_said_in_the_words_it_came_with(tmp_path):

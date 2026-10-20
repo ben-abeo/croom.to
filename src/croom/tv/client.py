@@ -1,5 +1,5 @@
 """
-The seam to the TV: the part of aiowebostv's WebOsClient the TV service uses, and the factory for the real one.
+The TV client's common interface, implemented by aiowebostv for LG and the Samsung local adapter.
 The service only ever sees a TvClient it was handed, so its tests run on a fake and never touch a TV or the library.
 """
 
@@ -11,8 +11,8 @@ StateCallback = Callable[[Any], Awaitable[None]]
 
 
 class TvClient(Protocol):
-    """What the service uses of aiowebostv.WebOsClient (names and signatures as the library has them; call them
-    positionally). tv_info and tv_state are the library's WebOsTvInfo and WebOsTvState."""
+    """The interface follows aiowebostv.WebOsClient; adapters provide compatible info and state.
+    Optional features may raise TvError, and unavailable state is reported as None."""
 
     client_key: Optional[str]
     tv_info: Any
@@ -56,10 +56,15 @@ class TvClient(Protocol):
 ClientFactory = Callable[[str, Optional[str]], TvClient]
 
 
-def real_client_factory(host: str, key: Optional[str]) -> TvClient:
+def real_client_factory(host: str, key: Optional[str], brand: str = "lg") -> TvClient:
     """A client for the real TV at host, paired with key (None to pair). Call it from a running event loop: the
     library binds to the loop it is created in. The library is imported here, not at the top of the module, so a
     room without a TV runs without it."""
+    if brand == "samsung":
+        from croom.tv.samsung import SamsungClient
+        return SamsungClient(host, key)
+    if brand != "lg":
+        raise TvError(f"Unsupported TV brand: {brand}")
     try:
         from aiowebostv import WebOsClient
     except ImportError as e:

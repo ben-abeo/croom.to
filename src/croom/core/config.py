@@ -222,8 +222,9 @@ class DisplayConfig:
 
 @dataclass
 class TvConfig:
-    """The room's LG webOS TV (spec 2026-10-13 TV remote)."""
+    """The room's TV; a selection saved from the table overrides these defaults."""
     enabled: bool = False
+    brand: str = "lg"
     host: str = ""          # the TV's address; Find TVs on the table fills it
     mac: str = ""           # for Wake-on-LAN (Mobile TV On must be enabled on the TV)
     pi_input: str = "HDMI_1"   # the input the room Pi is on
@@ -379,6 +380,7 @@ class Config:
             },
             "tv": {
                 "enabled": self.tv.enabled,
+                "brand": self.tv.brand,
                 "host": self.tv.host,
                 "mac": self.tv.mac,
                 "pi_input": self.tv.pi_input,

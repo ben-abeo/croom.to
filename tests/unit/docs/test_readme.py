@@ -380,7 +380,7 @@ def test_readme_has_the_tv_row_in_the_config_table_and_says_what_each_key_does()
     pi_input is acted on, and what keep_on keeps and a manual Off holds (in memory only); the room files ship the block switched off."""
     text = README.read_text(encoding="utf-8")
     for needle in (
-        "| `tv` | `enabled`, `host`, `mac`, `pi_input`, `keep_on` |",
+        "| `tv` | `enabled`, `brand`, `host`, `mac`, `pi_input`, `keep_on` |",
         "the room files in `deploy/rooms/` carry the block with `enabled: false`",
         "**LG Connect Apps** switched on in its settings, and **Mobile TV On** too unless Quick Start+ is on",
         "`mac` is the TV's MAC address, which every Turn on needs (the wake-up message goes out first, so a missing or malformed one stops it even with Quick Start+)",
@@ -462,8 +462,8 @@ def test_the_rooms_readme_says_the_tv_block_is_there_and_off_and_names_all_three
     for needle in (
         "is a complete agent config with three values to replace",
         "an optional location",
-        "`tv`: the room's LG TV, switched off (`enabled: false`) until it is set up",
-        "the room guide's section The TV says how to switch it on",
+        "`tv`: optional defaults for the room's LG or Samsung TV",
+        "select it, and accept the request on the TV",
         "`/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml`",
         "`/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml`",
         "the TV (once it is set up) with `/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml`",

@@ -6,7 +6,7 @@ one Google service account shared with all three room calendars.
 Each `room-N.yaml` is a complete agent config with three values to replace
 before installing it on that room's device (`dashboard.url`,
 `dashboard.enrollment_token` and `calendar.google_calendar_id`), an optional
-location, and a `tv:` block that is switched off until the room's LG TV is set up:
+location, and optional `tv:` defaults. Select an LG or Samsung TV on the table to set it up:
 
 - `room.name` and `room.location`: what people call the room and where it is. The
   location is optional: leave the placeholder or delete the line and the pages
@@ -25,11 +25,15 @@ location, and a `tv:` block that is switched off until the room's LG TV is set u
   session, `/var/lib/croom/meet-profile`. Leave it; the guide "Let Crystal Meet
   rooms join Google Meet" covers the room's Workspace user and the one-time
   `croom --sign-in-meet` on the device.
-- `tv`: the room's LG TV, switched off (`enabled: false`) until it is set up, with
-  its other keys commented under it. Leave it as it is for a room with no LG TV.
-  For one with an LG TV, the room guide's section The TV says how to switch it on:
-  set `enabled` to true and put that TV's own address and MAC address in this one
-  block (a second `tv:` in the file would silently win), then run `croom --check-tv`.
+- `tv`: optional defaults for the room's LG or Samsung TV. To set one up, open
+  **Options > TV > Find TVs** on the table, select it, and accept the request on
+  the TV. The Pi saves the brand, address and discovered MAC in `tv-settings.json`
+  under its data directory and restores them on restart; no YAML edit is needed.
+  If discovery cannot obtain the MAC, enter it in the table's connection settings
+  to enable waking the TV. Set the Pi's HDMI socket there too if it is not HDMI 1.
+  Existing manual configurations work as before; `brand` defaults to `lg`, or
+  can be `samsung`. A table selection overrides the YAML connection defaults.
+  `croom --check-tv` uses the saved selection too.
 
 Zoom needs one more file per room, `zoom-credentials.json`, made from
 `zoom-credentials.example.json`: the Meeting SDK app's client id and secret

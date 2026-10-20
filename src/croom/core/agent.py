@@ -85,14 +85,15 @@ class CroomAgent:
         # (with the AI service on, audio and video are put right after it in the start order, and still come first). Its
         # start never holds the others for long: it waits half a second for the first look at the TV, and no more.
         tv_service = None
-        if self.config.tv.enabled:
-            try:
-                from croom.tv.service import TvService
-                tv_service = TvService.from_config(self.config)
-                self.service_manager.register(tv_service)
-                logger.info("TV service registered")
-            except ImportError as e:
-                logger.warning(f"TV service not available: {e}")
+        # A quiet, unconfigured service lets Find TVs configure and pair at runtime.
+        # from_config also restores a TV selected on the table before this boot.
+        try:
+            from croom.tv.service import TvService
+            tv_service = TvService.from_config(self.config)
+            self.service_manager.register(tv_service)
+            logger.info("TV service registered")
+        except ImportError as e:
+            logger.warning(f"TV service not available: {e}")
 
         # Audio Service
         try:

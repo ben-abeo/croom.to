@@ -1,5 +1,5 @@
 """
-The TV service (spec 2026-10-13 TV remote and touchpad, section 3): holds the pairing with the room's LG webOS TV,
+The TV service (spec 2026-10-13 TV remote and touchpad, section 3): holds the pairing with the room's LG or Samsung TV,
 keeps one connection to it, and keeps a model of what the TV shows (power, volume, input, app, channel) for the room
 page. It carries out what the table asks of the TV, wakes the TV with Wake-on-LAN, and keeps it on unless the table
 turned it off. Every call to the TV goes through an injected client, and the wake through an injected waker, so the
@@ -11,6 +11,7 @@ import contextlib
 import logging
 import re
 import time
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -134,9 +135,9 @@ def _power_says_on(power_state: Any) -> Optional[bool]:
 
 
 def _declined(error: BaseException) -> bool:
-    """The library's WebOsTvPairError: the TV showed its prompt and it was declined, or the TV would not register this
+    """The adapter's pairing error: the TV showed its prompt and it was declined, or the TV would not register this
     client. Told by the class name (any class in the error's ancestry), so that the library is not imported here."""
-    return any(cls.__name__ == "WebOsTvPairError" for cls in type(error).__mro__)
+    return any(cls.__name__ in ("WebOsTvPairError", "SamsungPairError") for cls in type(error).__mro__)
 
 
 def _first(obj: Any, *names: str) -> Any:
@@ -208,10 +209,14 @@ class TvService(Service):
     PAIR_FINISH_S = 5.0
 
     def __init__(self, config: TvConfig, keystore: KeyStore, client_factory: ClientFactory, waker: Waker,
-                 loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep, clock: Callable[[], float] = time.monotonic):
+                 loop_sleep: Callable[[float], Awaitable[Any]] = asyncio.sleep, clock: Callable[[], float] = time.monotonic,
+                 settings_store=None):
         super().__init__("tv")
         self._config, self._keys, self._factory, self._wake, self._sleep = config, keystore, client_factory, waker, loop_sleep
         self._clock = clock                      # the time (seconds, steadily) that PROMPT_AFTER_S is counted on
+        self._settings_store = settings_store
+        self._selecting = False
+        self._selection_generation = 0
         self._client: Optional[TvClient] = None
         # Not _state: the Service base keeps its lifecycle state there, and the manager sets it
         self._shown: Dict[str, Any] = _blank()
@@ -238,7 +243,108 @@ class TvService(Service):
     def from_config(cls, config) -> "TvService":
         from croom.tv.client import real_client_factory
         from croom.tv.wake import wake
-        return cls(config.tv, KeyStore(config.resolve_data_dir() / "tv-client-key"), real_client_factory, wake)
+        from croom.tv.selection import key_path, selected_config
+        from croom.control.settings import SettingsStore
+
+        directory = config.resolve_data_dir()
+        store = SettingsStore(directory / "tv-settings.json")
+        saved = store.get("tv")
+        path = (directory / "tv-client-key" if config.tv.brand == "lg"
+                else key_path(directory, config.tv))
+        if isinstance(saved, dict):
+            try:
+                selected = selected_config(config.tv, saved)
+            except TvError:
+                logger.warning("The saved TV selection is invalid; using the room config")
+            else:
+                config.tv = selected
+                path = key_path(directory, selected)
+        factory = lambda host, key: real_client_factory(host, key, config.tv.brand)
+        return cls(config.tv, KeyStore(path), factory, wake, settings_store=store)
+
+    def capabilities(self) -> Dict[str, Any]:
+        supported = self._config.brand == "lg"
+        capabilities: Dict[str, Any] = {"pointer": supported, "direct_inputs": supported, "mute_state": supported}
+        if self._config.brand == "samsung":
+            from croom.tv.samsung import SamsungClient
+            capabilities["supported_keys"] = sorted(SamsungClient.supported_keys)
+        return capabilities
+
+    def _save_selection(self, selected: TvConfig) -> None:
+        if self._settings_store is None:
+            raise TvError("This TV service cannot save a TV selection")
+        try:
+            self._settings_store.save("tv", asdict(selected))
+        except (OSError, ValueError) as e:
+            raise TvError("Could not save the TV settings; check the room Pi's storage and try again") from e
+
+    def _apply_selection(self, selected: TvConfig) -> None:
+        # Keep the Config object's reference: the real factory reads the current brand.
+        for name, value in asdict(selected).items():
+            setattr(self._config, name, value)
+
+    async def select(self, device: Dict[str, Any]) -> None:
+        """Save a discovered TV and connect now; a saved selection survives a refused pairing."""
+        from croom.tv.selection import key_path, selected_config
+
+        if self._selecting or self._pairing:
+            raise TvError("A TV connection is already waiting; finish or cancel it first")
+        selected = selected_config(self._config, device)
+        generation = self._selection_generation
+        self._selecting = True
+        try:
+            same = (selected.host, selected.brand) == (self._config.host, self._config.brand)
+            if same and not selected.mac:
+                selected.mac = self._config.mac
+            if same and self._answering():
+                # Migrate a legacy pairing to the selection's per-device key before restart.
+                path = key_path(self._keys.path.parent, selected)
+                if path != self._keys.path and self._keys.read():
+                    KeyStore(path).write(self._keys.read())
+                self._save_selection(selected)
+                self._keys = KeyStore(path)
+                self._apply_selection(selected)
+                return
+            self._save_selection(selected)  # failure must leave the current connection intact
+            running = self._started
+            await self.stop()
+            self._apply_selection(selected)
+            self._keys = KeyStore(key_path(self._keys.path.parent, selected))
+            self._shown = _blank()
+            self._held_off = self._refused = self._asked = False
+            self._started = running
+            if generation != self._selection_generation:
+                raise TvError("Connecting to the selected TV was cancelled")
+            if self._keys.read() is not None:
+                try:
+                    connected = await asyncio.wait_for(self._connect_once(), self.ASK_TIMEOUT_S)
+                except asyncio.TimeoutError:
+                    raise TvError("The TV did not answer in time; check that it is on, then try Pair") from None
+                if generation != self._selection_generation:
+                    raise TvError("Connecting to the selected TV was cancelled")
+                if connected:
+                    if running:
+                        self._run_loop()
+                    return
+            await self.pair()
+        finally:
+            self._selecting = False
+
+    async def update_settings(self, changes: Dict[str, Any]) -> None:
+        from croom.tv.selection import connection_settings, key_path
+
+        if self._selecting or self._pairing:
+            raise TvError("A TV connection is already waiting; finish or cancel it first")
+        if not self.configured:
+            raise TvError(NOT_SET_UP)
+        selected = connection_settings(self._config, changes)
+        # A legacy YAML configuration starts using the saved override from this point.
+        path = key_path(self._keys.path.parent, selected)
+        if path != self._keys.path and self._keys.read():
+            KeyStore(path).write(self._keys.read())
+        self._save_selection(selected)
+        self._keys = KeyStore(path)
+        self._apply_selection(selected)
 
     @property
     def configured(self) -> bool:
@@ -264,10 +370,14 @@ class TvService(Service):
         shown["inputs"] = list(shown["inputs"])
         shown["reachable"] = self._answering()
         shown["on"] = shown["on"] and shown["reachable"]
+        if self._config.brand == "samsung":
+            state = getattr(self._client, "tv_state", None)
+            shown["power_known"] = getattr(state, "is_on", None) is not None
         paired = self._keys.read() is not None
         return dict(configured=self.configured, paired=paired, keep_on=self._config.keep_on,
                     held_off=self._held_off, refused=self._refused, prompting=paired and self._asking_to_pair(),
-                    host=self._config.host, pi_input=self._config.pi_input, **shown)
+                    host=self._config.host, pi_input=self._config.pi_input, brand=self._config.brand,
+                    mac=self._config.mac, capabilities=self.capabilities(), **shown)
 
     async def start(self) -> None:
         self._started = True
@@ -367,6 +477,9 @@ class TvService(Service):
     async def forget(self) -> None:
         """Let go of the TV: disconnect and delete the key. The TV keeps its own record of the pairing until it is
         removed in its settings; pairing again replaces it."""
+        # Invalidate a selection before yielding: it may still be disconnecting
+        # the previous TV and must not begin pairing a new client after Cancel.
+        self._selection_generation += 1
         await self._end(self._take_wake())
         await self._halt_loop()
         await self._drop_client()                # a pairing that waits for the person at the TV ends with the client
@@ -438,12 +551,13 @@ class TvService(Service):
             self._held_off = False               # the person wants the TV on: nothing holds it off any more
             self._cancel_wake()                  # and a wake that was waiting its turn is this one now
             if not await self.ensure_on(manual=True) and not self._answering():
+                setting = "Power On with Mobile" if self._config.brand == "samsung" else "Mobile TV On"
                 raise TvError(f"The TV at {self._config.host} did not turn on: check that Wake-on-LAN is enabled on it "
-                              "(Mobile TV On) and that tv.mac is its MAC address")
+                              f"({setting}) and check its MAC address under Options › TV › Connection settings")
             client = self._client
             if client is not None and self._answering():
                 await self._read_back(client, "power")
-            if not self._is_on():
+            if not self._is_on() and self.status().get("power_known") is not False:
                 # The TV answers, was told to turn on (a refusal is the same), and is still not on. The person at the table
                 # is told so: a Turn on that answered "off" without a word would be the table lying by saying nothing.
                 raise TvError(f"The TV at {self._config.host} answered but did not turn on: press its power button")
@@ -475,6 +589,9 @@ class TvService(Service):
     async def _mute(self, client: TvClient, value: Any) -> None:
         """Mute, unmute, or (with no value) switch from what the table shows. The TV tells of the change too, but a
         second tap that comes before it does must switch back, so the answer to the command is taken as it comes."""
+        if not self.capabilities()["mute_state"] and value is None:
+            await client.button("MUTE")
+            return
         if value is None:
             muted = not self._shown["muted"]
         elif isinstance(value, bool):
@@ -600,6 +717,8 @@ class TvService(Service):
         client = self._client
         if client is not None and self._answering():
             return client
+        if not self.capabilities()["pointer"]:
+            raise TvError("This TV does not support a pointer; use Room Pi mouse")
         return self._require_ready()
 
     # Keeping the TV on (spec section 3): woken as the agent starts, before every join, and after it went off by itself;
@@ -1047,7 +1166,7 @@ class TvService(Service):
         self._shown.update(
             on=bool(is_on) if is_on is not None else power.get("state") == "Active",
             volume=getattr(tv_state, "volume", None),
-            muted=bool(getattr(tv_state, "muted", None)),
+            muted=bool(getattr(tv_state, "muted", None)) if self.capabilities()["mute_state"] else None,
             input=_line(current_input),
             inputs=[_listed(key, item) for key, item in known.items()],
             app=_line(app),

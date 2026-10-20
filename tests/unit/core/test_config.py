@@ -361,7 +361,7 @@ class TestTvConfig:
         assert config.tv.pi_input == "HDMI_1" and config.tv.keep_on is True
 
     def test_round_trips_through_dict(self):
-        tv = {"enabled": True, "host": "10.0.0.41", "mac": "aa:bb", "pi_input": "HDMI_2", "keep_on": False}
+        tv = {"enabled": True, "brand": "lg", "host": "10.0.0.41", "mac": "aa:bb", "pi_input": "HDMI_2", "keep_on": False}
         config = Config.from_dict({"tv": tv})
         assert config.tv == TvConfig(**tv)
         assert config.to_dict()["tv"] == tv

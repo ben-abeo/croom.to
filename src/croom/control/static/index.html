@@ -25,6 +25,7 @@
       <p id="clock" class="clock"></p>
       <p id="date" class="date"></p>
     </div>
+    <button type="button" id="open-tv-remote" class="button quiet nav" data-icon="tv" hidden>TV Remote</button>
     <button type="button" id="open-options" class="button quiet nav" data-icon="settings">Options</button>
   </div>
 </header>
@@ -217,6 +218,7 @@
         <p class="tv-line"><span id="tv-facts" class="tv-facts"></span><button type="button" id="tv-turn-on" class="button quiet tv-turn-on" data-icon="power" hidden>Turn on</button></p>
         <p id="tv-words" class="tv-words" role="status" hidden></p>
       </div>
+      <button type="button" id="tv-change" class="button quiet tv-forget-head" data-icon="locate" hidden>Change TV</button>
       <button type="button" id="tv-forget-head" class="button quiet tv-forget-head" data-icon="x-circle" hidden>Forget TV</button>
     </div>
 
@@ -316,7 +318,7 @@
 
     <section id="tv-not-set-up" class="tv-card" hidden>
       <h2>No TV is set up for this room</h2>
-      <p>Find TVs lists the LG TVs on this network, with their addresses.</p>
+      <p>Find LG and Samsung TVs on this network, then connect to the TV in this room.</p>
       <div class="tv-card-actions">
         <button type="button" id="tv-find-unset" class="button quiet tv-find" data-icon="locate">Find TVs</button>
       </div>
@@ -324,7 +326,7 @@
         <p class="tv-found-label"></p>
         <ul class="tv-found-list"></ul>
       </div>
-      <p class="tv-hint">To set one up, put its address in <code>tv.host</code> (and its MAC address in <code>tv.mac</code>, so that the table can turn it on) in <code>/etc/croom/config.yaml</code> on the room's Pi, set <code>tv.enabled</code> to <code>true</code>, then restart the agent.</p>
+      <p class="tv-hint">Tap Connect to save your selection, then accept the request on the TV with its own remote.</p>
     </section>
 
     <section id="tv-pairing" class="tv-card" hidden>
@@ -339,7 +341,29 @@
         <p class="tv-found-label"></p>
         <ul class="tv-found-list"></ul>
       </div>
-      <p class="tv-hint">To use a different TV, put its address in <code>tv.host</code> in <code>/etc/croom/config.yaml</code> on the room's Pi, then restart the agent.</p>
+      <p class="tv-hint">To use a different TV, tap Find TVs and Connect beside its name.</p>
+    </section>
+
+    <section id="tv-choose" class="tv-card" hidden>
+      <h2>Choose the room's TV</h2>
+      <div class="tv-card-actions">
+        <button type="button" class="button quiet tv-find" data-icon="locate">Find TVs</button>
+        <button type="button" id="tv-choose-done" class="button quiet">Done</button>
+      </div>
+      <details id="tv-connection-settings" class="tv-connection">
+        <summary>Connection settings</summary>
+        <form id="tv-settings-form" class="tv-settings-form">
+          <label>TV MAC address<input id="tv-settings-mac" type="text" data-keyboard="mac" autocomplete="off" spellcheck="false" placeholder="AA:BB:CC:DD:EE:FF"></label>
+          <label>Room Pi input<select id="tv-settings-input"><option value="HDMI_1">HDMI 1</option><option value="HDMI_2">HDMI 2</option><option value="HDMI_3">HDMI 3</option><option value="HDMI_4">HDMI 4</option></select></label>
+          <button type="submit" id="tv-settings-save" class="button quiet">Save connection</button>
+          <p id="tv-settings-result" role="status"></p>
+        </form>
+        <p class="tv-hint">The MAC address lets the table wake the TV. Leave it blank if unknown.</p>
+      </details>
+      <div class="tv-found" hidden>
+        <p class="tv-found-label"></p>
+        <ul class="tv-found-list"></ul>
+      </div>
     </section>
 
     <section id="tv-refused" class="tv-card" hidden>

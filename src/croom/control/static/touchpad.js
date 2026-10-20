@@ -256,6 +256,7 @@
     function draw() {
       title.textContent = target === "tv" ? "Moving the TV's cursor" : "Moving the mouse on the room's screen";
       const line = said || (target === "tv" ? tv.name || "The TV" : tv.usable ? "The room Pi behind the TV"
+        : tv.pointer === false ? "This TV does not support a pointer"
         : tv.configured ? "Pair the TV to move its cursor" : "No TV is set up for this room");
       if (small.textContent !== line) small.textContent = line;
       how.textContent = HOW[target];

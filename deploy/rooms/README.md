@@ -50,7 +50,8 @@ the calendar is not configured; without `--zoom-credentials` Zoom joins fall
 back to the public web client, which Zoom blocks for automated guests.
 
 The room page is then at `http://<device>:8080/` for anyone on the network,
-and the door sign at `http://<device>:8080/sign`. Check the calendar with
+and the door sign at `http://<device>:8080/sign` (on an SMT1019 wall panel, the app in
+`android/door-sign` shows it and colours the panel's light bar from it). Check the calendar with
 `/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml`, Zoom
 with `/opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml` and the TV
 (once it is set up) with

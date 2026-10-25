@@ -303,6 +303,39 @@ def test_door_sign_follows_the_room_state(browser):
         page.close()
 
 
+LIGHT_RECORDER = "window.CrystalPanel = { setLight: (state) => (window.lights = window.lights || []).push(state) };"
+
+
+def test_door_sign_tells_the_panel_app_its_state_for_the_light_bar(browser):
+    """The door sign app on the SMT1019 panel puts window.CrystalPanel on the page and colours the light bar from the state it is given:
+    each state the sign shows, offline included, is passed on, and only when it changes."""
+    with PageServer(room_name="Room 1") as server:
+        page = sign_on_a_stopped_clock(browser, server, 1024, 600, init_script=LIGHT_RECORDER)
+        assert page.evaluate("window.lights") == ["free"]
+        poll(page)
+        assert page.evaluate("window.lights") == ["free"]   # the same state again is not passed on
+        page.request.post(f"http://127.0.0.1:{server.port}/api/meeting/join",
+                          data='{"url": "https://zoom.us/j/98765432100"}', headers={"Content-Type": "application/json"})
+        wait_for("the meeting to be joined", lambda: status_of(server)["meeting"]["state"] == "connected")
+        poll(page)
+        assert page.evaluate("window.lights") == ["free", "occupied"]
+        page.route("**/api/status", lambda route: route.abort())
+        page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'offline'", timeout=5000)
+        assert page.evaluate("window.lights") == ["free", "occupied", "offline"]
+        page.close()
+
+
+def test_door_sign_without_the_panel_app_has_no_light_bar_to_tell(browser):
+    with PageServer(room_name="Room 1") as server:
+        page = sign_on_a_stopped_clock(browser, server, 1024, 600)
+        errors = []
+        page.on("pageerror", lambda error: errors.append(error))
+        poll(page)
+        assert page.evaluate("typeof window.CrystalPanel") == "undefined" and errors == []
+        page.close()
+
+
 def test_door_sign_shows_bookings_without_a_video_link(browser):
     # An in-person booking has no link, so the API's "current" is null; the room is still taken.
     # It began 5 minutes ago, but never before today's local midnight: the service lists only today's events.

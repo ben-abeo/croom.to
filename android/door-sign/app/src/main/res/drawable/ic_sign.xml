@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A door sign: a navy panel with a green status bar down its left edge, as the sign draws itself. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <path android:fillColor="#001636" android:pathData="M6,6h36v36h-36z" />
+    <path android:fillColor="#1FA971" android:pathData="M6,6h5v36h-5z" />
+    <path android:fillColor="#FFFFFF" android:pathData="M16,14h20v4h-20z" />
+    <path android:fillColor="#1FA971" android:pathData="M16,22h14v4h-14z" />
+</vector>

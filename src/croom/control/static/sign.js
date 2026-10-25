@@ -199,8 +199,18 @@
 
   // The state (free, soon, occupied, offline, loading) colours the rail, the chip and the ring through the CSS;
   // the chip says it in words and the detail line adds what the room is for.
+  // On the SMT1019 panel the door sign app (android/door-sign) puts window.CrystalPanel on the page and colours the light bar
+  // round the panel from the state; a browser has no CrystalPanel, and the sign is the same without it.
+  let lightState = null;
+  function setLight(state) {
+    if (state === lightState || !window.CrystalPanel) return;
+    lightState = state;
+    window.CrystalPanel.setLight(state);
+  }
+
   function setStatus(state, chipText, detail) {
     setData("state", state);
+    setLight(state);
     setText(el("chip-text"), chipText);
     setText(el("detail"), detail || "");
   }

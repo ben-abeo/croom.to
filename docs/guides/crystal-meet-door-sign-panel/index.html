@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Set up a Crystal Meet door sign panel</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --blue-700: #003EBC;
+  --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --tint-50: #F7F9FF; --slate-500: #647087; --ink-900: #1C2024;
+  --radius: 12px; --radius-sm: 8px;
+}
+@page { size: Letter; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Lexend", "Segoe UI", Arial, sans-serif; color: var(--ink-900); font-size: 10.5pt; line-height: 1.5; }
+h1, h2, h3 { font-weight: 600; line-height: 1.15; margin: 0.2em 0; }
+h2 { font-size: 16pt; color: var(--navy-800); }
+p { margin: 0.4em 0; }
+.kicker { font-size: 9pt; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--blue-600); margin: 0 0 6px; }
+.banner { background: var(--navy-800); color: #fff; border-radius: var(--radius); padding: 28px 32px; margin-bottom: 20px; }
+.banner .kicker { color: var(--periwinkle-300); }
+.banner .kicker.top { color: #fff; margin-bottom: 2px; }
+.banner h1 { font-size: 26pt; margin: 6px 0 8px; }
+.banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
+.banner img { height: 26px; display: block; margin-bottom: 18px; }
+.intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
+.glance { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); padding: 10px 10px; }
+.glance .card:nth-child(2) { border-top-color: #2F62EA; }
+.glance .card:nth-child(3) { border-top-color: #4A78F1; }
+.glance .card:nth-child(4) { border-top-color: #6C92F5; }
+.glance .card:nth-child(5) { border-top-color: #8EABF8; }
+.glance .card:nth-child(6) { border-top-color: var(--periwinkle-300); }
+.card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
+.card .kicker { font-size: 8pt; }
+.card h3 { font-size: 10.5pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9pt; }
+.block { break-inside: avoid; }
+.block.long { break-inside: auto; }
+.step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
+ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+li { position: relative; padding-left: 18px; margin: 5px 0; break-inside: avoid; }
+li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
+.ui { font-weight: 600; color: var(--blue-600); }
+.chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.chip.wrap { white-space: normal; overflow-wrap: anywhere; }
+.see { color: var(--slate-500); font-size: 9.5pt; margin: 4px 0 0 18px; }
+.callout { border-radius: var(--radius-sm); padding: 12px 18px; margin: 12px 0; border-left: 4px solid var(--blue-600); background: var(--tint-100); break-inside: avoid; }
+.callout.warn { background: #FFF8E1; border-left-color: #E8A013; }
+.callout.tip { background: #EDFBF3; border-left-color: #1FA971; }
+.callout .kicker { margin-bottom: 4px; }
+.callout p { margin: 2px 0; }
+.trouble { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.trouble .card { break-inside: avoid; }
+.trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.trouble .card h3 { font-size: 10.5pt; }
+.page-break { break-before: page; }
+pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--blue-600); background: var(--tint-100); border-radius: var(--radius-sm); padding: 10px 14px; margin: 6px 0 0 18px; white-space: pre-wrap; }
+.lights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 6px 0 10px; }
+.light { border: 1px solid var(--tint-100); border-radius: var(--radius-sm); padding: 10px 12px; break-inside: avoid; }
+.light .dot { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; }
+.light p { margin: 2px 0 0; color: var(--slate-500); font-size: 9pt; }
+</style>
+</head>
+<body>
+
+<section class="banner">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker top">Crystal PM</p>
+  <p class="kicker">How-to guide</p>
+  <h1>Set up a Crystal Meet door sign panel</h1>
+  <p>An SMT1019 wall panel by the door shows the room's door sign full screen and lights the bar round its edge green, yellow or red with the room's status.</p>
+</section>
+
+<p class="intro">Do this for each panel, after the room itself is set up (the guide "Set up a Crystal Meet room"). Plan about 15 minutes per panel. You install one small app, the Crystal Meet Door Sign app, from a computer over a USB-C cable; after that the panel needs only power and the network. The door sign itself is the same page any screen can show at <span class="chip">http://&lt;device address&gt;:8080/sign</span>: the app adds the light bar, starts with the panel and keeps people in the hallway out of Android.</p>
+
+<div class="glance">
+  <div class="card"><p class="kicker">Step 1</p><h3>Get the app</h3><p>Build it once from the repository.</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>USB debugging</h3><p>Developer options on the panel, then the cable.</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>Install</h3><p>One adb command.</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>Make it the panel's app</h3><p>It starts with the panel; Home comes back to it.</p></div>
+  <div class="card"><p class="kicker">Step 5</p><h3>First setup</h3><p>The room device's address and a PIN.</p></div>
+  <div class="card"><p class="kicker">Step 6</p><h3>Check the lights</h3><p>Green, yellow, red, off.</p></div>
+</div>
+
+<div class="callout warn">
+  <p class="kicker">Before you begin</p>
+  <p><strong>The panel.</strong> An SMT1019 10.1-inch wall panel (Android 14, made by Apolosign/Hopestar), powered by PoE from a switch or injector, or by its own power supply, and on the office network by Ethernet or Wi-Fi. It must reach the room device on port 8080. Another Android tablet runs the app as well, without the light bar.</p>
+  <p><strong>A computer</strong> with Android Platform Tools (adb) and a USB-C data cable. On Windows, in PowerShell: <span class="chip">winget install Google.PlatformTools</span>, then open a new PowerShell. On Linux or WSL: <span class="chip">sudo apt install adb</span> (WSL reaches the panel over the network only, not over USB).</p>
+  <p><strong>The room device's address</strong>, for example <span class="chip">10.0.0.21</span>: the fixed address the room guide reserved for it.</p>
+</div>
+
+<section class="block">
+<div class="step"><span class="badge">1</span><h2>Get the app</h2></div>
+<ul>
+  <li><strong>Build it once.</strong> The app's code is in <span class="chip">android/door-sign</span> in the Crystal Meet repository. On a computer with JDK 17 and the Android SDK (platform 34, build-tools 34.0.0, NDK 26.3.11579264, CMake 3.22.1), type <span class="chip">cd android/door-sign</span>, then <span class="chip wrap">echo "sdk.dir=$ANDROID_HOME" &gt; local.properties</span>, then <span class="chip">./gradlew testDebugUnitTest assembleDebug</span>.</li>
+  <li><strong>The file to install</strong> is <span class="chip wrap">android/door-sign/app/build/outputs/apk/debug/app-debug.apk</span>. Copy it to the computer you install from and call it <span class="chip">door-sign.apk</span>; the commands below use that name.</li>
+  <li><strong>Build every panel's app on the same computer.</strong> Android accepts an update only from the build that installed the app first. An app built elsewhere has to replace the old one with <span class="chip">adb uninstall to.croom.doorsign</span> first, which also clears the panel's address and PIN.</li>
+</ul>
+<p class="see">You should now have one APK file of about 45 KB.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">2</span><h2>Turn on USB debugging</h2></div>
+<ul>
+  <li><strong>Developer options.</strong> On the panel open <span class="ui">Settings › About tablet</span> and tap <span class="ui">Build number</span> seven times until it says you are a developer. Then <span class="ui">Settings › System › Developer options</span>, and switch on <span class="ui">USB debugging</span>. On a new SMT1019 it is often on already.</li>
+  <li><strong>If the panel is locked in another app</strong> (its kiosk mode was switched on in Android's settings), hold <span class="ui">Back</span> and <span class="ui">Recents</span> together for two seconds, or swipe up from the bottom and hold, to leave it first.</li>
+  <li><strong>Connect the cable</strong> from the computer to the panel's USB-C port. The panel asks <span class="ui">Allow USB debugging?</span>: tick <span class="ui">Always allow from this computer</span> and tap <span class="ui">Allow</span>.</li>
+  <li><strong>Check.</strong> On the computer type <span class="chip">adb devices</span>. The panel is listed with the word <span class="chip">device</span> after its serial number.</li>
+</ul>
+<p class="see">You should now see one line ending in device. "unauthorized" means the prompt on the panel is still waiting.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">3</span><h2>Install the app</h2></div>
+<ul>
+  <li>In the folder with the file, type <span class="chip">adb install -r door-sign.apk</span>. It prints <span class="chip">Success</span>. The same command installs a newer build later and keeps the panel's address and PIN.</li>
+</ul>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">4</span><h2>Make it the panel's app</h2></div>
+<ul>
+  <li><strong>The home app.</strong> Type <span class="chip wrap">adb shell cmd package set-home-activity to.croom.doorsign/.MainActivity</span>. The panel then opens the door sign when it starts, and its Home button comes back to it.</li>
+  <li><strong>The start-up app.</strong> Type <span class="chip wrap">adb shell setprop persist.sys.bootapp to.croom.doorsign/to.croom.doorsign.MainActivity</span>. The SMT1019 opens this app at start-up in place of whatever was set there before (Chrome, on some panels).</li>
+  <li><strong>Open it now</strong> with <span class="chip wrap">adb shell am start -n to.croom.doorsign/.MainActivity</span>, or press Home on the panel.</li>
+</ul>
+<p class="see">You should now see the setup screen on the panel, headed Door sign setup.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">5</span><h2>First setup on the panel</h2></div>
+<ul>
+  <li><strong>Crystal Meet server.</strong> Type the room device's address and port, for example <span class="chip">10.0.0.21:8080</span>. The app adds <span class="chip">http://</span> and <span class="chip">/sign</span>; a full address such as <span class="chip">http://10.0.0.21:8080/sign</span> is kept as it is.</li>
+  <li><strong>PIN.</strong> Choose 4 to 8 digits and keep them with the room's other passwords. The PIN is what lets anyone leave the sign later.</li>
+  <li>Tap <span class="ui">Save</span>. The door sign fills the screen, with no Android bars.</li>
+</ul>
+<p class="see">You should now see the room's name and status, and the light bar in the status colour within a few seconds.</p>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">6</span><h2>Check the lights</h2></div>
+<p>The bar round the panel follows the status the sign shows:</p>
+<div class="lights">
+  <div class="light"><span class="dot" style="background:#1FA971"></span><strong>Green</strong><p>Free.</p></div>
+  <div class="light"><span class="dot" style="background:#E8A013"></span><strong>Yellow</strong><p>A booking starts within 10 minutes.</p></div>
+  <div class="light"><span class="dot" style="background:#E5484D"></span><strong>Red</strong><p>In a meeting, or booked.</p></div>
+  <div class="light"><span class="dot" style="background:#647087"></span><strong>Off</strong><p>The sign cannot reach the room device, or is still loading.</p></div>
+</div>
+<ul>
+  <li><strong>Test the bar itself.</strong> Hold the top-left corner of the sign for 5 seconds, enter the PIN and use <span class="ui">Green</span>, <span class="ui">Yellow</span>, <span class="ui">Red</span> and <span class="ui">Off</span> under <span class="ui">Test the light bar</span>. Press Back to return to the sign, which puts the room's colour back.</li>
+  <li><strong>Test with a booking.</strong> Book the room for a few minutes from now: the bar turns yellow, then red when the booking starts, then green again when it ends. The sign checks the room every 5 seconds and the bookings every minute.</li>
+</ul>
+<p class="see">You should now see the bar change with the sign's own colour, and never disagree with it.</p>
+</section>
+
+<div class="page-break"></div>
+<section class="block">
+<p class="kicker">After setup</p>
+<h2>Everyday use</h2>
+<ul>
+  <li><strong>Open setup.</strong> Hold the top-left corner of the sign, over the Crystal logo, for 5 seconds, and enter the PIN. A shorter touch does nothing, so the sign's own <span class="ui">This week</span> button stays the only thing to press in the hallway.</li>
+  <li><strong>Change the address or the PIN</strong> in setup and tap <span class="ui">Save</span>. Leave the new PIN empty to keep the old one.</li>
+  <li><strong>Leave the sign.</strong> In setup tap <span class="ui">Exit to Android</span>: the panel's own home screen opens with its status bar, and the light bar goes off. Press Home to bring the sign back.</li>
+  <li><strong>After a power cut</strong> the panel starts straight into the sign. Until the room device answers, the sign says <span class="ui">Can't reach Crystal Meet</span> with the address, the lights stay off, and it tries again every 10 seconds.</li>
+  <li><strong>Background and football scores</strong> are chosen on the table screen under <span class="ui">Options</span>, then <span class="ui">Door sign</span>, as for any door sign (the room guide's section The door sign).</li>
+  <li><strong>Update the app</strong> with <span class="chip">adb install -r door-sign.apk</span> from the computer that built the first one; the address and PIN stay.</li>
+</ul>
+</section>
+
+<section class="block">
+<p class="kicker">Taking a panel back</p>
+<h2>Return the panel to a normal tablet</h2>
+<ul>
+  <li>Over the cable type, in this order: <span class="chip wrap">adb shell cmd package set-home-activity com.android.launcher3/.uioverrides.QuickstepLauncher</span>, then <span class="chip">adb shell setprop persist.sys.bootapp ""</span>, then <span class="chip">adb shell am broadcast -a elc.view.show</span> (the status bar), then <span class="chip">adb uninstall to.croom.doorsign</span>.</li>
+</ul>
+</section>
+
+<section class="block">
+<p class="kicker">If something is off</p>
+<h2>Troubleshooting</h2>
+<div class="trouble">
+  <div class="card"><h3>"Can't reach Crystal Meet at …"</h3><p>The panel cannot open the address. Open the same address in a browser on a computer on the panel's network. No answer there: the room device is off, the address or port is wrong, or the panel is on a network (a guest Wi-Fi, another VLAN) that cannot reach the room device. Fix the address in setup.</p></div>
+  <div class="card"><h3>The sign shows, the lights stay off</h3><p>"Sign not connected" on the sign turns the lights off on purpose. If the setup screen's test buttons do nothing either, the panel is not an SMT1019 or its light controller is missing; <span class="chip">adb logcat -s DoorSign</span> says which, and shows every change (<span class="chip">Light bar: free</span>).</p></div>
+  <div class="card"><h3>No internet over the PoE cable</h3><p>Ethernet is on in Android already, so the fault is the cable or what feeds it. <span class="chip">adb shell ip link show eth0</span> says <span class="chip">NO-CARRIER</span> when no data link is there. Check that the PoE injector's data-in port is cabled to the switch, or that the switch port is up and its PoE on; try another cable (all 8 wires) and another port. Wi-Fi works meanwhile.</p></div>
+  <div class="card"><h3>The status bar shows at the top</h3><p>The app hides the SMT1019's status bar each time the sign comes up. If it is still there, press Home, or type <span class="chip">adb shell am broadcast -a elc.view.hide</span>.</p></div>
+  <div class="card"><h3>Forgotten PIN</h3><p>Over the cable type <span class="chip">adb shell pm clear to.croom.doorsign</span>. The app forgets its address and PIN and opens the first setup again.</p></div>
+  <div class="card"><h3>adb install says UPDATE_INCOMPATIBLE</h3><p>The app on the panel came from another build computer. Type <span class="chip">adb uninstall to.croom.doorsign</span>, install again, and redo steps 4 and 5.</p></div>
+</div>
+</section>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p>The panel talks only to the room device, over plain HTTP on the office network. The page tells the app the room's status by name (free, soon, occupied, offline) and the app alone chooses the colours, so a door sign in a browser elsewhere is unchanged. The light bar is driven the way the panel's own LED test drives it, through <span class="chip">/dev/ledjni</span>.</p>
+</div>
+
+</body>
+</html>

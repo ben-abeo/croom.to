@@ -98,6 +98,8 @@ class VideoService(Service):
             "camera": auto_to_default(video.device),
             "resolution": RESOLUTION_ALIASES.get(resolution, video.resolution),
             "fps": video.framerate,
+            # Nothing in the agent reads frames, and an open camera locks Zoom and Meet out of it.
+            "capture": False,
         })
 
     async def initialize(self) -> bool:
@@ -125,7 +127,9 @@ class VideoService(Service):
 
             # Setup camera
             camera_id = self.config.get('camera', 'default')
-            if not await self._setup_camera(camera_id):
+            if not self.config.get('capture', True):
+                logger.info("Camera left free for the meeting apps")
+            elif not await self._setup_camera(camera_id):
                 logger.warning("No camera configured")
 
             # Initialize pipeline

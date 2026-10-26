@@ -56,7 +56,7 @@ def test_book_on_the_sign_picks_a_day_a_time_a_name_and_a_length(browser):  # no
     with PageServer(room_name="Room 1", bookings=True) as server:
         page = sign(browser, server)
         page.click("#book")
-        page.wait_for_selector(".bk-time")
+        page.wait_for_selector(".bk-day")                                         # (not today's times: late in the evening there are none left)
         assert page.locator(".bk-day").count() == 7 and page.locator(".bk-day").first.get_attribute("aria-pressed") == "true"
         page.click(".bk-day >> text=Tomorrow")
         page.wait_for_function("document.querySelector('.bk-day[aria-pressed=true]').textContent.startsWith('Tomorrow')")

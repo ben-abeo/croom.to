@@ -142,9 +142,9 @@ def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps()
     second taps and the two idle minutes), for Zoom and for Meet; the stale row that stopped at Leave is gone."""
     text = README.read_text(encoding="utf-8")
     for needle in (
-        "a first row of Mute, Turn camera off, Raise hand, **Reactions** and Leave",
-        "a second row of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat** and **Host** (only while the room is host or co-host), "
-        "then the room's volume, **Camera** for presets and nudges and **Upcoming meetings**, with **Touchpad** and **TV** in the top bar",
+        "the meeting's card on the left (the time in the call in large type, how many people are in it, the chat that waits, whether the room is host, and **Leave** at its foot)",
+        "on the right Mute, Turn camera off, Raise hand and **Reactions** as tiles, a second set of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat** and **Host** (only while the room is host or co-host), "
+        "and at the foot a dock of the room's volume, **Camera** for presets and nudges and **Upcoming meetings**, with **Touchpad** and **TV** in the top bar",
         "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more (Leave, **TV** and the rest of the screen are as ever)",
         "A call on a platform that reports no controls at all keeps Mute, Turn camera off and Leave, and **TV**, which is the room's own and never depends on the platform",
         "a Zoom dialog that waits for a tap shows as a card above the controls with Zoom's own buttons",
@@ -341,7 +341,7 @@ def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
     for needle in (
         # the remote's place: the idle screen's Options, the meeting screen's top bar beside the Touchpad; it belongs to the screen that opened it
         "the **TV** remote and the keyboard's **Key click**",
-        "**Chat** and **Host** (only while the room is host or co-host), then the room's volume",
+        "**Chat** and **Host** (only while the room is host or co-host), and at the foot a dock of the room's volume",
         "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV** in the top bar on the meeting screen, beside **Touchpad**",
         "**Back** returns to the screen that opened it",
         f"left alone it returns by itself after {words(IDLE_RETURN_MIN)} minutes ({words(TV_RETURN_MIN)} on the meeting screen)",

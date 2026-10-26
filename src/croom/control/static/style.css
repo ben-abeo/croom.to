@@ -242,6 +242,7 @@ body[data-state="soon"] .message { color: #A3260F; }   /* the light card: the pa
      squeeze the name ("Lab" breaks as "La" and "b" at 390 px; "Conference Room Alpha" takes two lines at 600 px). Options keeps to
      its word there; every other button keeps its icon. */
   .button.nav .icon { display: none; }
+  .button.nav { min-height: 48px; padding: 0 14px; }   /* in a meeting the bar holds the clock, Touchpad and TV: on a phone the three keep to one row */
 }
 .button:hover { background: var(--blue-700); }
 .button.quiet { background: transparent; border-color: var(--periwinkle-300); color: inherit; }
@@ -650,26 +651,65 @@ body.keyboard-open .schedule { display: none; }
   .top:has(.next-warning:not([hidden])) .next-warning { flex: 1 1 100%; }
 }
 
-/* A wide, tall screen with no scaling (a 1920 by 1200 browser): the meeting screen's compact fit (the tight stack, the Sound strip on
-   two lines, the 72 px menu buttons: what 800 px needs, above) would leave more than half of it empty, so from 1100 by 1100 px up the
-   screen has its roomy sizes back: the rows apart, the Sound strip stacked, the menu buttons at their full height. The room's own
-   table is not that screen: it is 1920 by 1200, and the kiosk launches Chromium at 1.5x (installer/install-kiosk.sh), so the page
-   lays out at 1280 by 800 there and has the compact sizes. The height is 1100 and not 1000 because between 1000 and 1080 px the roomy
-   stack leaves no room for a dialog's card, which the compact one has. Measured on the host's busiest screen (every control, a notice of two
-   lines, a card with the longest text, the reaction row open): at 1280 by 1000 the roomy sizes leave 5 px and the compact ones 229, and with
-   a refusal in the card and the secondary row wrapped the roomy screen scrolls by 112 px where the compact one has 112 to spare; at 1920
-   by 1080 the roomy sizes leave 20 px and the compact ones 245. The width keeps a portrait tablet (768 by 1024, 820 by 1180) on the
-   compact sizes, which fit it, where the roomy ones scroll it. */
-@media (min-height: 1100px) and (min-width: 1100px) {
-  .view[data-view="meeting"] { row-gap: clamp(16px, 2.5vh, 24px); }
-  .actions.meeting-actions { margin-top: 22px; }
-  .view[data-view="meeting"] .button.menu-item { min-height: 160px; font-size: 1.4rem; }
-  .sound { display: block; }
-  .sound .device { margin-bottom: 10px; }
-  .sound input[type="range"] { width: 100%; }
-  .sound-buttons { margin-top: 8px; }
-}
-
 /* The screen ignores taps while it settles after its layout has moved, or after the view has changed in a meeting (app.js, settle): the whole
    screen, not the meeting screen alone, as a thumb aimed at one lands on the other. */
 body.settling .screen { pointer-events: none; }
+
+/* The meeting screen as a control deck (Ben, 2026-10-25): the meeting's card on the left (what the room is doing, the time in the call in large
+   type, who is in it, the chat that waits, whether the room is host, and Leave at its foot), and on the right a dialog's card when Zoom has one,
+   the controls as tiles, the second row's buttons under them, and a dock of the room's sound, Camera and Upcoming meetings at the foot. The top
+   bar keeps Touchpad and TV; its small "In a meeting" and time give way to the card's on this screen. A narrow screen stacks the two columns. */
+body[data-view="meeting"] .top .meeting-state, body[data-view="meeting"] .top .meeting-elapsed { display: none; }
+.view[data-view="meeting"] [hidden] { display: none !important; }   /* what the screen hides (the second row under the reaction row, a card that is not up) stays hidden whatever the deck's own display rules say */
+.view[data-view="meeting"] { grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); column-gap: 22px;
+                              align-content: stretch; align-items: stretch; min-height: 100%; }   /* the screen's height: Leave and the dock keep to its foot whatever a notice or a dialog's card asks */
+.meeting-hero { display: flex; flex-direction: column; gap: 14px; padding: 26px; border-radius: 22px; background: var(--surface-800); min-width: 0; }
+.meeting-live { display: flex; align-items: center; gap: 10px; margin: 0; }
+.live-dot { width: 10px; height: 10px; border-radius: 50%; background: var(--slate-500); flex: none; }
+.meeting-hero[data-live="yes"] .live-dot { background: #1FA971; }
+.view[data-view="meeting"] #meeting-detail { font-size: 1.6rem; font-weight: 600; line-height: 1.2; color: #fff; overflow-wrap: anywhere; }
+.meeting-clock { margin: 0; font-size: 3.6rem; font-weight: 500; line-height: 1; font-variant-numeric: tabular-nums; }
+.meeting-clock:empty, .meeting-facts:empty { display: none; }
+.meeting-facts { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; color: #D1D5DB; }
+.meeting-facts li { display: flex; align-items: center; gap: 10px; }
+.meeting-facts .icon { width: 1.25em; height: 1.25em; flex: none; color: var(--periwinkle-300); }
+.meeting-leave { margin-top: auto; }
+.meeting-leave:empty { display: none; }
+.meeting-leave .button { width: 100%; min-height: 76px; font-size: 1.3rem; justify-content: center; }
+body[data-state="meeting"] .meeting-leave .button.danger { background: #E5484D; border-color: #E5484D; color: #fff; }
+body[data-state="meeting"] .meeting-leave .button.danger:hover { background: #CE2C31; border-color: #CE2C31; }
+.meeting-main { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.meeting-main .actions.meeting-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin: 0; }
+.meeting-main .meeting-actions .button { min-height: 112px; padding: 16px 20px; border-radius: 20px; flex-direction: column; align-items: flex-start; justify-content: space-between; text-align: left; font-size: 1.2rem; }
+.meeting-main .meeting-actions .button .icon { width: 1.6em; height: 1.6em; }
+body[data-state="meeting"] .meeting-main .meeting-actions .button { background: var(--surface-800); border-color: #374151; }
+body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { background: #273244; }
+.meeting-main .actions.meeting-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
+.meeting-main .meeting-secondary .button { min-height: 56px; padding: 0 12px; justify-content: center; white-space: nowrap; }
+.meeting-main #reaction-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
+/* The dock: the device's name (or why there is no sound) with Camera and Upcoming meetings beside it, then the volume slider and its buttons. The
+   Sound strip's parts take their places in the dock's grid (display: contents), so the strip keeps its markup and its script (devices.js). */
+.meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "device device menu" "slider buttons buttons";
+                align-items: center; gap: 10px 18px; padding: 14px 18px; border-radius: 20px; background: var(--surface-800); }
+.meeting-dock .sound-section, .meeting-dock .sound:not([hidden]) { display: contents; }
+.meeting-dock .sound-section > .kicker { display: none; }   /* the device's name says what the strip is */
+.meeting-dock #sound-note { grid-area: device; margin: 0; }
+.meeting-dock .sound .device { grid-area: device; margin: 0; font-size: 0.9rem; color: var(--periwinkle-300); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meeting-dock #volume-slider { grid-area: slider; width: 100%; max-width: none; }
+.meeting-dock .sound-buttons { grid-area: buttons; flex-wrap: nowrap; margin: 0; }
+.meeting-dock .menu { grid-area: menu; display: flex; justify-content: flex-end; gap: 12px; width: auto; }
+.view[data-view="meeting"] .meeting-dock .button.menu-item { min-height: 56px; font-size: 1rem; padding: 0 18px; }
+@media (max-width: 900px) {
+  .view[data-view="meeting"] { grid-template-columns: minmax(0, 1fr); }   /* a tablet stood up, or a phone: the card over the controls */
+  .meeting-clock { font-size: 2.6rem; }
+}
+@media (max-width: 640px) {
+  .meeting-main .actions.meeting-secondary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .meeting-main .meeting-secondary .button { white-space: normal; }
+  .meeting-dock { grid-template-columns: minmax(0, 1fr); grid-template-areas: "device" "slider" "buttons" "menu"; }
+  .meeting-dock .sound-buttons, .meeting-dock .menu { flex-wrap: wrap; justify-content: flex-start; }
+  .meeting-dock .sound-buttons .button, .meeting-dock .menu .button { flex: 1 1 auto; justify-content: center; }
+  /* A tile on a phone is a button like the others, its symbol beside its words, one to a row: a label that wraps under a symbol grows the tile. */
+  .meeting-main .actions.meeting-actions { grid-template-columns: minmax(0, 1fr); }
+  .meeting-main .meeting-actions .button { min-height: 64px; padding: 0 20px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
+}

@@ -355,7 +355,7 @@ def test_guide_step_four_lists_the_meeting_screens_rows_as_built_and_mute_only_f
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
     for needle in (
-        "During a call the page shows the meeting screen on its own: a first row of Mute, Turn camera off, Raise hand, Reactions and Leave, a second row of Captions, the view, Hide self view, Participants, Chat, Host (for a host) (the section after this step shows them all), then the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next, with Touchpad and TV in the top bar",
+        "During a call the page shows the meeting screen on its own, as a control deck: on the left the meeting's card, with the time in the call, who is in it, the chat that waits and Leave at its foot; on the right Mute, Turn camera off, Raise hand and Reactions as tiles, then Captions, the view, Hide self view, Participants, Chat, Host (for a host) (the section after this step shows them all), and at the foot the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next, with Touchpad and TV in the top bar",
         "A host or co-host also gets Mute (only for someone not already muted) and Remove on each other person (Tap again to remove)",
     ):
         assert needle in text, needle

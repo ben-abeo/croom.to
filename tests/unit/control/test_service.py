@@ -1525,6 +1525,19 @@ class TestPage:
             assert "http://" not in text and "https://" not in text and "//fonts." not in text, name
             assert "Croom" not in text, name
 
+    def test_every_style_sheet_has_its_braces_balanced(self):
+        """A brace too many ends a block early: the browser drops what follows up to the next rule, and nothing says so (a stray one once took
+        the rule that makes the meeting screen ignore taps while it settles)."""
+        import re
+        from croom.control.service import STATIC_DIR
+        for path in sorted(STATIC_DIR.rglob("*.css")):
+            text = re.sub(r"/\*.*?\*/", "", path.read_text(encoding="utf-8"), flags=re.S)
+            depth = 0
+            for ch in text:
+                depth += (ch == "{") - (ch == "}")
+                assert depth >= 0, f"{path.name}: a closing brace with no block open"
+            assert depth == 0, f"{path.name}: {depth} block(s) left open"
+
     async def test_sign_is_served_uncached(self, client_factory):
         client = await client_factory(make_service())
         resp = await client.get("/sign")

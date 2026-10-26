@@ -383,6 +383,7 @@
   }
   const idleActionsKey = { key: null };
   const meetingActionsKey = { key: null };
+  const meetingLeaveKey = { key: null };   // Leave, at the foot of the meeting's card (the hero) on the meeting screen
 
   function leaveSpec() {
     if (model.confirmLeave) {
@@ -606,8 +607,34 @@
 
   // Everything of the meeting screen but the primary row, from the same status: the notice line under the title, the dialog's card, the
   // secondary row, and the reaction row in its place while it is open. Only a connected meeting has any of it; m is null offline.
+  // The meeting's card (the hero, the control deck's left column): what the room is doing, the time in the call in large type, who is in it, the
+  // chat that waits and whether the room is host, then Leave at its foot. The words are drawn only when they change.
+  function renderHero(m, live) {
+    el("meeting-kicker").textContent = m ? STATE_LABELS[m.state] || "" : "";
+    document.querySelector(".meeting-hero").dataset.live = live ? "yes" : "no";
+    el("meeting-clock").textContent = live && m.joined_at ? elapsedSince(m.joined_at) : "";
+    const facts = [];
+    if (live) {
+      const people = m.participants && m.participants.count;
+      if (people) facts.push(["users", (people === 1 ? "1 person" : people + " people") + " in the call"]);
+      if (m.chat && m.chat.unread) facts.push(["message", plural(m.chat.unread, "unread chat message")]);
+      const role = m.controls && m.controls.host && m.controls.host.role;
+      if (role === "host" || role === "co-host") facts.push(["lock", "The room is " + role]);
+    }
+    const key = JSON.stringify(facts);
+    const list = el("meeting-facts");
+    if (list.dataset.key === key) return;
+    list.dataset.key = key;
+    list.replaceChildren(...facts.map(([name, words]) => {
+      const li = document.createElement("li");
+      labelWithIcon(li, words, name);
+      return li;
+    }));
+  }
+
   function renderMeetingScreen(m) {
     const live = Boolean(m) && m.state === "connected";
+    renderHero(m, live);
     const notice = live ? m.notice || "" : "";
     el("meeting-notice").textContent = notice;
     el("meeting-notice").title = notice;   // the whole of it, for when the line cuts it short at two lines (read by nobody on a kiosk, and harmless)
@@ -642,6 +669,7 @@
     const places = new Map();
     if (here === "meeting") {
       places.set("primary", at(el("meeting-actions")));
+      places.set("leave", at(el("meeting-leave")));   // at the meeting card's foot: it moves only when the card is too tall for the screen
       places.set("menu", at(document.querySelector('.view[data-view="meeting"] .menu')));
     } else {
       const list = document.querySelector(".view[data-view=participants] .list-scroll");
@@ -1047,11 +1075,14 @@
       specs = renderIdle(cal);
     }
     if (mode() === "meeting") {
-      setActions(specs, "meeting-actions", meetingActionsKey);
+      // Leave is the meeting card's, at its foot (the control deck, Ben 2026-10-25); the controls are tiles beside it.
+      setActions(specs.filter((s) => s.id !== "leave"), "meeting-actions", meetingActionsKey);
+      setActions(specs.filter((s) => s.id === "leave"), "meeting-leave", meetingLeaveKey);
       setActions([], "actions", idleActionsKey);
     } else {
       setActions(specs, "actions", idleActionsKey);
       setActions([], "meeting-actions", meetingActionsKey);
+      setActions([], "meeting-leave", meetingLeaveKey);
     }
     renderMeetingScreen(mode() === "meeting" ? m : null);
     renderSubScreens(mode() === "meeting" && m.state === "connected" ? m : null);
@@ -1178,7 +1209,10 @@
     el("date").textContent = fmtDate(new Date());
     if (model.status && model.status.meeting.state === "connected") {
       el("detail").textContent = meetingDetail(model.status.meeting);
-      if (model.status.meeting.joined_at) el("meeting-elapsed").textContent = elapsedSince(model.status.meeting.joined_at);
+      if (model.status.meeting.joined_at) {
+        el("meeting-elapsed").textContent = elapsedSince(model.status.meeting.joined_at);
+        el("meeting-clock").textContent = el("meeting-elapsed").textContent;   // the meeting card's large time, every second as the top bar's
+      }
     }
     if (model.reactionsUntil && !reactionsOpen()) closeReactions();   // the row's ten seconds are over
   }

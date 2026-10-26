@@ -267,6 +267,13 @@ class GoogleMeetProvider(MeetingProvider):
         except Exception as e:
             logger.error(f"Failed to join meeting: {e}")
             self._current_meeting.error_message = str(e)
+            # A kiosk has no address bar or Back button. Return the borrowed page
+            # even when Google refuses the call or redirects to Workspace, keeping
+            # the original failure (and any screenshot) for the room controls.
+            try:
+                await self._show_idle()
+            except Exception as idle_error:
+                logger.warning(f"Could not return the TV to Crystal Meet: {idle_error}")
             self._set_state(MeetingState.ERROR)
             raise
 

@@ -715,7 +715,7 @@ class TestStatus:
             "controls": {}, "participants": {"count": 0, "list": []}, "chat": {"unread": 0, "messages": []},
             "notice": "", "dialog": None,
         }
-        assert data["calendar"] == {"connected": False, "provider": None, "current": None, "next": None}
+        assert data["calendar"] == {"connected": False, "provider": None, "current": None, "next": None, "booking": None}
         datetime.fromisoformat(data["server_time"])
 
     async def test_the_status_names_the_company(self, client_factory):
@@ -1535,7 +1535,7 @@ class TestPage:
 
 
 
-EVENT_FIELDS = {"id", "title", "start_time", "end_time", "meeting_platform", "joinable"}
+EVENT_FIELDS = {"id", "title", "start_time", "end_time", "meeting_platform", "joinable", "booking_id", "pending", "clash"}
 
 
 class TestReviewFixes:

@@ -33,6 +33,7 @@
         <div class="chip"><span class="dot"></span><span id="chip-text">Connecting</span></div>
         <p id="detail" class="detail"></p>
       </div>
+      <div id="sign-actions" class="sign-actions" hidden></div>
     </div>
 
     <div id="today" class="today" hidden>
@@ -52,6 +53,8 @@
       <ol id="week-days" class="days"></ol>
       <p id="week-note" class="note"></p>
     </section>
+
+    <section id="booking" class="booking" aria-live="polite" hidden></section>
   </section>
 
   <footer id="score" class="score" hidden>
@@ -59,6 +62,7 @@
     <span id="score-next" class="next"></span>
   </footer>
 </main>
+<script src="/static/booking.js"></script>
 <script src="/static/sign.js"></script>
 </body>
 </html>

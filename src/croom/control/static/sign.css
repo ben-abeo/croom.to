@@ -265,3 +265,43 @@ body[data-view="week"] .main { min-height: 0; grid-template-rows: auto minmax(0,
   .slot .title { grid-area: title; margin: 0; -webkit-line-clamp: 1; }
   .slot .who { grid-area: who; margin: 0; }
 }
+
+/* Book, Use now and End now under the status, Cancel on the room's own bookings in the Today list, and the booking steps (booking.js,
+   spec 2026-10-25), which take the whole width of the sign while they are up: the status steps aside for them, and nothing scrolls. */
+.sign-actions { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }
+.sign-actions .button { font-size: 1.15rem; padding: 12px 22px; }
+.button.primary { background: #fff; border-color: #fff; color: var(--navy-900); }
+.button.armed { background: var(--busy); border-color: var(--busy); color: #fff; }
+.button.small { font-size: 0.875rem; padding: 4px 10px; border-radius: 8px; }
+.button:disabled { opacity: 0.6; cursor: default; }
+.event.mine { grid-template-columns: 8.5ch minmax(0, 1fr) auto; align-items: center; }
+
+body[data-view="book"] .status { display: none; }
+.booking { grid-column: 1 / -1; min-width: 0; }
+.bk-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-bottom: 18px; }
+.bk-title { margin: 0; font-size: 2rem; font-weight: 600; }
+.bk-days { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 18px; }
+.bk-day { flex-direction: column; align-items: flex-start; gap: 0; min-width: 5.5rem; padding: 8px 16px; }
+.bk-day[aria-pressed="true"] { background: #fff; border-color: #fff; color: var(--navy-900); }
+.bk-date { font-size: 0.85rem; font-weight: 400; opacity: 0.85; }
+.bk-times { display: grid; grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr)); gap: 10px; max-height: 52vh; overflow-y: auto; }   /* a day of up to 40 starts fits; a room that books round the clock scrolls them */
+.bk-time { justify-content: center; padding: 12px 8px; font-variant-numeric: tabular-nums; }
+.bk-note { margin: 12px 0 0; color: var(--periwinkle-300); font-size: 1.2rem; }
+.bk-note:empty { display: none; }
+.bk-form { display: grid; gap: 16px; max-width: 36rem; }
+.bk-when { margin: 0; font-size: 1.5rem; font-weight: 600; }
+.bk-label { display: grid; gap: 6px; color: var(--periwinkle-300); font-weight: 600; }
+.bk-name, .bk-length { font: inherit; font-size: 1.25rem; color: #fff; background: rgba(0, 22, 54, 0.6); border: 2px solid rgba(255, 255, 255, 0.55); border-radius: 12px; padding: 12px 14px; }
+.bk-name:focus-visible, .bk-length:focus-visible { outline: 3px solid var(--blue-600); outline-offset: 2px; }
+.bk-length option { color: var(--navy-900); background: #fff; }
+.bk-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.bk-actions .button { font-size: 1.15rem; padding: 12px 26px; }
+.bk-error { margin: 0; color: #FFB4B6; font-size: 1.1rem; }
+.bk-error:empty { display: none; }
+.bk-done { margin: 0; max-width: 40ch; font-size: 1.5rem; font-weight: 600; }
+@media (max-height: 560px) {
+  .bk-title { font-size: 1.5rem; }
+  .bk-head, .bk-days { margin-bottom: 10px; }
+  .bk-times { gap: 6px; }
+  .bk-time { padding: 8px 6px; }
+}

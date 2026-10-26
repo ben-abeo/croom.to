@@ -349,6 +349,7 @@ class TestCalendarServiceAsService:
             "poll_interval": 120,
             "auto_join_minutes": 3,
             "not_configured": "credentials file not found or unreadable: /etc/croom/google-sa.json",
+            "bookings": None,   # no calendar address: nothing to book in
         }
         assert service._poll_interval == 120
         assert service._auto_join_minutes == 3

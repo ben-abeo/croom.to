@@ -8,7 +8,7 @@
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
   // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
   // belong to whichever mode showed them, so their Back returns there.
-  const VIEW_MODES = { idle: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
+  const VIEW_MODES = { idle: "idle", booking: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
   const SUB_SCREENS = ["participants", "chat", "host", "tv"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
 
@@ -905,7 +905,7 @@
     return model.events.filter((ev) => new Date(ev.start_time).getTime() > now && !(title && ev.title === title));
   }
 
-  const rowFields = (ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform];   // what eventItem reads: the key of either list covers it
+  const rowFields = (ev) => [ev.id, ev.title, ev.start_time, ev.joinable, ev.meeting_platform, ev.booking_id, ev.pending, ev.clash];   // what eventItem reads: the key of either list covers it
 
   // The booking the passcode card is for: the one this page joined, else (a join from another page) the one the status names
   // by its title. Its row's Join would send the booking alone, without the code typed on the card; Join again is the retry.
@@ -941,10 +941,12 @@
     title.className = "title";
     title.textContent = ev.title;
     text.append(title);
-    if (ev.joinable) {
+    // A booking made at the room's screens says when it has not reached Google yet, or what it is double-booked with (spec 2026-10-25).
+    const about = ev.joinable ? platformName(ev.meeting_platform) : ev.clash ? "Double-booked with " + ev.clash : ev.pending ? "Not in Google Calendar yet" : "";
+    if (about) {
       const platform = document.createElement("p");
       platform.className = "platform";
-      platform.textContent = platformName(ev.meeting_platform);
+      platform.textContent = about;
       text.append(platform);
     }
     li.append(time, text);
@@ -1106,17 +1108,83 @@
     }));
   }
 
+  // Book the room, Use now and End now (spec 2026-10-25). The room has a calendar to book in when the status carries calendar.booking;
+  // while Google is out of reach the room's day is shown as it was last read (offline_since says since when).
+  const bookingOf = (cal) => (cal && cal.booking) || null;
+  const scheduled = (cal) => !!(cal && (cal.connected || (bookingOf(cal) && bookingOf(cal).offline_since)));
+  let askEnd = null;   // the End now that has had its first tap: { key, until }
+  let lastRevision = null;   // calendar.booking.revision as the last render saw it: a change at either screen reads today's bookings again
+
+  function bookingSpecs(cal, ongoing) {
+    const b = bookingOf(cal);
+    if (!b) return [];
+    const specs = [];
+    if (ongoing && ongoing.booking_id) {
+      const asking = askEnd && askEnd.key === ongoing.booking_id && Date.now() < askEnd.until;
+      specs.push({ id: "end-booking", label: asking ? "Tap again to end" : "End now", className: asking ? "danger" : "quiet", icon: "x-circle",
+                   target: ongoing.booking_id, onClick: () => {
+                     if (asking) { askEnd = null; changeBooking(ongoing.booking_id, "end"); return; }
+                     askEnd = { key: ongoing.booking_id, until: Date.now() + CONFIRM_MS };
+                     render();
+                     setTimeout(render, CONFIRM_MS + 50);
+                   } });
+    }
+    if (!ongoing && b.now.minutes.length) specs.push({ id: "use-now", label: "Use now", className: "quiet", icon: "users", onClick: () => openBooking("now") });
+    specs.push({ id: "book-room", label: "Book room", className: "quiet", icon: "calendar", onClick: () => openBooking("book") });
+    return specs;
+  }
+
+  async function changeBooking(key, change) {
+    try {
+      await api("/api/bookings/" + encodeURIComponent(key) + "/" + change, { method: "POST", body: JSON.stringify({ source: "room page" }) });
+    } catch (e) {
+      el("message").textContent = e.message;
+    }
+    refreshStatus();
+    refreshEvents();
+  }
+
+  let bookingSteps = null;   // the steps that are up (booking.js), so that leaving the view closes them
+  function openBooking(mode) {
+    const b = bookingOf(model.status && model.status.calendar);
+    if (!b) return;
+    setView("booking");
+    bookingSteps = window.croomBooking.open(el("booking-host"), {
+      mode: mode, source: "room page", now: b.now,
+      onClose: (changed) => {
+        bookingSteps = null;
+        if (view() === "booking") setView("idle");
+        if (changed) { refreshStatus(); refreshEvents(); }
+      },
+    });
+  }
+  viewHooks.push((name) => { if (name !== "booking" && bookingSteps) bookingSteps.close(false); });
+
   function renderIdle(cal) {
+    const revision = bookingOf(cal) ? bookingOf(cal).revision : null;
+    if (revision !== null && lastRevision !== null && revision !== lastRevision) refreshEvents();
+    lastRevision = revision;
     const body = document.body;
     const current = cal.current;
     const next = cal.next;
+    const nowMs = Date.now();
+    // The status's "current" is a booking with a video link; one without (booked in person, or at the room's screens) holds the room too.
+    const ongoing = current || model.events.find((ev) => new Date(ev.start_time).getTime() <= nowMs && new Date(ev.end_time).getTime() > nowMs) || null;
+    if (!current && ongoing) {
+      body.dataset.state = "soon";
+      el("kicker").textContent = "In use";
+      el("headline").textContent = ongoing.title + " until " + fmtTime(new Date(ongoing.end_time));
+      el("detail").textContent = ongoing.clash ? "Double-booked with " + ongoing.clash : ongoing.pending ? "Booked here; not in Google Calendar yet." : "";
+      return bookingSpecs(cal, ongoing);
+    }
 
     if (current) {
       body.dataset.state = "soon";
       el("kicker").textContent = "Happening now";
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
-      return current.joinable ? [{ label: "Join now", className: "primary", icon: "video", onClick: () => joinEvent(current.id), target: current.id }] : [];
+      return (current.joinable ? [{ label: "Join now", className: "primary", icon: "video", onClick: () => joinEvent(current.id), target: current.id }] : [])
+        .concat(bookingSpecs(cal, current));
     }
 
     if (next) {
@@ -1133,39 +1201,49 @@
         el("headline").textContent = "Free until " + fmtTime(start);
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
-      if (!next.joinable) return [];
-      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", icon: "video", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }];
+      if (!next.joinable) return bookingSpecs(cal, null);
+      return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", icon: "video", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }]
+        .concat(bookingSpecs(cal, null));
     }
 
     body.dataset.state = "free";
     el("kicker").textContent = "Room free";
-    el("headline").textContent = cal.connected ? "Free for the rest of the day" : "Free";
-    el("detail").textContent = cal.connected ? "Nothing else is booked in here today." : "No calendar is connected. Join with a link below.";
-    return [];
+    el("headline").textContent = scheduled(cal) ? "Free for the rest of the day" : "Free";
+    el("detail").textContent = scheduled(cal) ? "Nothing else is booked in here today." : "No calendar is connected. Join with a link below.";
+    return bookingSpecs(cal, null);
   }
 
   function renderEvents(cal) {
     const list = el("events");
     const note = el("calendar-note");
     const meetingState = model.status ? model.status.meeting.state : "idle";
-    const key = JSON.stringify([cal.connected, cal.current && cal.current.id, meetingState, model.busy,
+    const b = bookingOf(cal);
+    const offline = b && b.offline_since && !cal.connected ? "Calendar offline since " + fmtTime(new Date(b.offline_since)) + ". Bookings made here will sync." : "";
+    const key = JSON.stringify([scheduled(cal), offline, Boolean(b), cal.current && cal.current.id, meetingState, model.busy,
       model.events.map((ev) => [...rowFields(ev), joinWindow(ev).open, joinWindow(ev).past, cardIsFor(ev)])]);
     if (key === lastEventsKey) return;
     lastEventsKey = key;
     list.replaceChildren();
-    if (!cal.connected) {
+    if (!scheduled(cal)) {
       note.textContent = "Calendar not connected.";
       return;
     }
     if (model.events.length === 0) {
-      note.textContent = "Nothing scheduled today.";
+      note.textContent = ["Nothing scheduled today.", offline].filter(Boolean).join(" ");
       return;
     }
-    note.textContent = "";
+    note.textContent = offline;
     for (const ev of model.events) {
       const window = joinWindow(ev);
       const canJoin = ev.joinable && window.open && (!model.status || model.status.meeting.state === "idle" || model.status.meeting.state === "error");
-      const li = eventItem(ev, canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev), "video") : null);
+      let side = canJoin ? button("Join", "primary", () => joinEvent(ev.id), cardIsFor(ev), "video") : null;
+      if (!side && b && ev.booking_id && new Date(ev.start_time).getTime() > Date.now()) {
+        const cancel = document.createElement("button");
+        cancel.type = "button";
+        cancel.className = "button quiet cancel-booking";
+        side = croomBooking.confirmButton(cancel, "Cancel", "Tap again to cancel", ev.booking_id, "cancel", "room page", () => { refreshStatus(); refreshEvents(); });   // not window.croomBooking: `window` here is the booking's join window
+      }
+      const li = eventItem(ev, side);
       li.classList.toggle("past", window.past);
       li.classList.toggle("now", Boolean(cal.current && cal.current.id === ev.id));
       list.append(li);

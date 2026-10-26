@@ -5,6 +5,7 @@ Uses Google Calendar API to fetch events and meeting information.
 """
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
@@ -12,6 +13,7 @@ from typing import Optional, Dict, Any, List
 from croom.calendar.providers.base import (
     CalendarProvider,
     CalendarEvent,
+    CalendarWriteRefused,
     MeetingPlatform,
     detect_meeting_platform,
     extract_meeting_url,
@@ -30,6 +32,29 @@ try:
     GOOGLE_API_AVAILABLE = True
 except ImportError:
     GOOGLE_API_AVAILABLE = False
+
+# The private extended property that marks a booking made at the room's screens, with the room's id for it.
+BOOKING_TAG = "croom_id"
+# 403s that are Google asking the room to slow down, not a calendar that will not take the write.
+BUSY_REASONS = {"rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded", "dailyLimitExceeded"}
+
+
+def _status(error) -> Optional[int]:
+    return getattr(error, 'status_code', None) or getattr(getattr(error, 'resp', None), 'status', None)
+
+
+def _refusal(error) -> bool:
+    """A 401, or a 403 that is not a rate limit: the calendar is not shared for changes with this account."""
+    status = _status(error)
+    if status == 401:
+        return True
+    if status != 403:
+        return False
+    try:
+        reasons = {e.get('reason') for e in json.loads(error.content).get('error', {}).get('errors', [])}
+    except (ValueError, AttributeError, TypeError):
+        reasons = set()
+    return not (reasons & BUSY_REASONS)
 
 
 def choose_meeting_url(conference_url: Optional[str], typed_url: Optional[str]) -> Optional[str]:
@@ -54,9 +79,10 @@ class GoogleCalendarProvider(CalendarProvider):
     Supports OAuth2 user credentials and service account authentication.
     """
 
-    # API scopes needed
+    # API scopes needed: reading the room's calendar, and writing the bookings made at its screens (spec 2026-10-25)
     SCOPES = [
         'https://www.googleapis.com/auth/calendar.readonly',
+        'https://www.googleapis.com/auth/calendar.events',
     ]
 
     def __init__(self):
@@ -207,6 +233,57 @@ class GoogleCalendarProvider(CalendarProvider):
         logger.debug(f"Fetched {len(events)} events from {calendar_id}")
         return events
 
+    # The room's own bookings (spec 2026-10-25), written straight into the room's calendar: nobody is invited and there is no link.
+    # Each carries the room's tag in a private extended property, which the room reads back to know its own. Errors propagate: a
+    # calendar that will not take the write is CalendarWriteRefused, anything else is Google out of reach, and the booking waits.
+
+    async def _write(self, call):
+        try:
+            return await asyncio.to_thread(lambda: call().execute())
+        except HttpError as e:
+            if _refusal(e):
+                raise CalendarWriteRefused(str(e)) from e
+            raise
+
+    async def find_booking(self, calendar_id: str, booking_id: str) -> Optional[str]:
+        """The Google id of the event that carries the room's tag, or None."""
+        result = await asyncio.to_thread(lambda: self._service.events().list(
+            calendarId=calendar_id, privateExtendedProperty=f"{BOOKING_TAG}={booking_id}", maxResults=1, showDeleted=False,
+        ).execute())
+        items = result.get('items', [])
+        return items[0]['id'] if items else None
+
+    async def create_booking(self, calendar_id: str, booking_id: str, title: str, start: datetime, end: datetime,
+                             description: str) -> str:
+        body = {
+            'summary': title,
+            'description': description,
+            'start': {'dateTime': start.isoformat()},
+            'end': {'dateTime': end.isoformat()},
+            'extendedProperties': {'private': {BOOKING_TAG: booking_id}},
+        }
+        result = await self._write(lambda: self._service.events().insert(calendarId=calendar_id, body=body))
+        return result['id']
+
+    async def update_booking(self, calendar_id: str, google_id: str, title: str, start: datetime, end: datetime) -> None:
+        body = {'summary': title, 'start': {'dateTime': start.isoformat()}, 'end': {'dateTime': end.isoformat()}}
+        await self._write(lambda: self._service.events().patch(calendarId=calendar_id, eventId=google_id, body=body))
+
+    async def check_booking(self, calendar_id: str) -> None:
+        """Prove the room can book in its calendar (croom --check-calendar): a quarter hour on January 1, 2000, written and
+        deleted at once, out of sight of any week anyone looks at. CalendarWriteRefused when the calendar is shared for reading."""
+        start = datetime(2000, 1, 1, tzinfo=timezone.utc)
+        google_id = await self.create_booking(calendar_id, "check", "Crystal Meet booking check", start,
+                                              start.replace(minute=15), "Written and deleted by croom --check-calendar")
+        await self.delete_booking(calendar_id, google_id)
+
+    async def delete_booking(self, calendar_id: str, google_id: str) -> None:
+        try:
+            await self._write(lambda: self._service.events().delete(calendarId=calendar_id, eventId=google_id))
+        except HttpError as e:
+            if _status(e) not in (404, 410):   # already gone: cancelled all the same
+                raise
+
     def _parse_event(self, item: Dict, calendar_id: str) -> Optional[CalendarEvent]:
         """Parse Google Calendar API event to CalendarEvent."""
         try:
@@ -276,6 +353,7 @@ class GoogleCalendarProvider(CalendarProvider):
                 status=item.get('status', 'confirmed'),
                 attendees=attendees,
                 response_status=response_status,
+                booking_id=item.get('extendedProperties', {}).get('private', {}).get(BOOKING_TAG),
             )
 
             return event

@@ -41,7 +41,8 @@ def test_calendar_guide_quotes_the_real_commands_and_names():
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     assert "--credentials" in html and "google-service-account.json" in html
     assert "croom --check-calendar -c /etc/croom/config.yaml" in html
-    assert "google_calendar_id" in html and "See all event details" in html
+    assert "google_calendar_id" in html and "Make changes to events" in html   # the rooms book themselves (spec 2026-10-25)
+    assert "Share all information, and outsiders can change calendars" in html
 
 
 def test_setup_guide_points_to_the_calendar_guide():

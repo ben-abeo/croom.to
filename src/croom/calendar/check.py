@@ -1,13 +1,16 @@
 """
 `croom --check-calendar`: prove a room's Google Calendar setup works, in plain
-words (spec 2026-09-25 section 4.4). Exit 0 when the calendar was read, 1 otherwise.
+words (spec 2026-09-25 section 4.4): the calendar is read, and the room can book in it
+(spec 2026-10-25). Exit 0 when both are so, 1 otherwise. It also says what the room has
+booked at its screens that has still to reach Google, and what is double-booked.
 """
 
 import sys
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Optional, TextIO
 
-from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
+from croom.calendar.bookings import RoomBookings
+from croom.calendar.providers.base import CalendarEvent, CalendarWriteRefused, MeetingPlatform
 from croom.calendar.providers.google import GoogleCalendarProvider
 from croom.calendar.service import google_not_configured_reason, service_account_email
 from croom.core.config import Config
@@ -27,10 +30,13 @@ def link_words(event: CalendarEvent) -> str:
     return LINK_WORDS.get(event.meeting_platform, "link: " + event.meeting_url)
 
 
-def booking_line(event: CalendarEvent) -> str:
+def when_words(event: CalendarEvent) -> str:
     start, end = event.start_time.astimezone(), event.end_time.astimezone()
-    when = f"{start:%a %b %d}  all day" if event.is_all_day else f"{start:%a %b %d}  {start:%-I:%M %p} to {end:%-I:%M %p}"
-    return f"  {when:<32} {event.title:<28} {link_words(event)}"
+    return f"{start:%a %b %d}  all day" if event.is_all_day else f"{start:%a %b %d}  {start:%-I:%M %p} to {end:%-I:%M %p}"
+
+
+def booking_line(event: CalendarEvent) -> str:
+    return f"  {when_words(event):<32} {event.title:<28} {link_words(event)}"
 
 
 async def check_calendar(
@@ -60,7 +66,7 @@ async def check_calendar(
         info = await provider.get_calendar(calendar_id)
     except LookupError:
         print(f"Calendar {calendar_id} not found or not shared: in Google Calendar, "
-              f"share the room's calendar with {account} (See all event details), and check the "
+              f"share the room's calendar with {account} (Make changes to events), and check the "
               "address in the config.", file=out)
         return 1
     print(f"Calendar: {info['name']} ({info['id']})", file=out)
@@ -74,4 +80,28 @@ async def check_calendar(
         print(f"Bookings in the next {DAYS_AHEAD} days:", file=out)
         for event in events:
             print(booking_line(event), file=out)
-    return 0
+    code = 0
+    try:
+        await provider.check_booking(info["id"])
+        print("Bookings: the door sign and the room page can book this calendar.", file=out)
+    except CalendarWriteRefused:
+        print(f"Bookings: the calendar is shared with {account} for reading only, so the door sign and the room page "
+              "cannot book it. In Google Calendar, share it with Make changes to events.", file=out)
+        code = 1
+    report_room_bookings(config, out)
+    return code
+
+
+def report_room_bookings(config: Config, out: TextIO) -> None:
+    """What the room booked at its screens and has still to send to Google (the agent sends it on its next poll), and its bookings
+    that overlap another, as the device last had them."""
+    data_dir = config.resolve_data_dir()
+    if not (data_dir / "bookings.json").exists():
+        return
+    rooms = RoomBookings(data_dir / "bookings.json", data_dir / "calendar-cache.json", config.room.name)
+    waiting = rooms.state()["pending"]
+    if waiting:
+        print(f"Waiting to be sent to Google: {waiting} booking{'s' if waiting != 1 else ''} made at the room's screens.", file=out)
+    for event in rooms.merge():
+        if event.clash and event.end_time > datetime.now(timezone.utc):
+            print(f"Double-booked: {event.title}, {' '.join(when_words(event).split())}, overlaps {event.clash}.", file=out)

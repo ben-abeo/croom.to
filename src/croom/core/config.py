@@ -168,6 +168,8 @@ class CalendarConfig:
     sync_interval_seconds: int = 60
     google_credentials_path: str = ""
     google_calendar_id: str = ""  # the room's calendar address, e.g. c_18...@resource.calendar.google.com
+    booking_start: str = "08:00"  # the first start time the door sign and the room page offer for a booking (spec 2026-10-25)
+    booking_end: str = "18:00"    # and the time a booking made there ends by
     microsoft_tenant_id: str = ""
     microsoft_client_id: str = ""
 

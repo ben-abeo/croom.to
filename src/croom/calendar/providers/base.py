@@ -59,6 +59,12 @@ class CalendarEvent:
     # and location it was read from: what keeps a passcode off the room page is the control service's EVENT_FIELDS.
     meeting_passcode: Optional[str] = None
 
+    # A booking made at the door sign or the room page (spec 2026-10-25): booking_id is the room's own tag for it, kept on the Google
+    # event too; pending, that a change of it is still to reach Google; clash, the title of another booking it overlaps.
+    booking_id: Optional[str] = None
+    pending: bool = False
+    clash: Optional[str] = None
+
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary."""
         return {
@@ -75,6 +81,9 @@ class CalendarEvent:
             "is_all_day": self.is_all_day,
             "is_recurring": self.is_recurring,
             "status": self.status,
+            "booking_id": self.booking_id,
+            "pending": self.pending,
+            "clash": self.clash,
         }
 
     @property
@@ -103,6 +112,11 @@ class CalendarEvent:
         """Get time until event starts."""
         now = datetime.now(self.start_time.tzinfo)
         return self.start_time - now
+
+
+class CalendarWriteRefused(Exception):
+    """The calendar would not take a booking from this account: it is shared for reading only (spec 2026-10-25). Any other failure
+    to write is the calendar being out of reach, and the booking waits for it."""
 
 
 def detect_meeting_platform(url: str) -> MeetingPlatform:

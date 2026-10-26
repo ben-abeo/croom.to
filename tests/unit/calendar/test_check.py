@@ -41,6 +41,9 @@ class FakeProvider:
     async def get_events(self, calendar_id, time_min, time_max, max_results=100):
         return list(self._events)
 
+    async def check_booking(self, calendar_id):
+        """A calendar shared with Make changes to events takes the check's booking (spec 2026-10-25)."""
+
 
 def config_for(tmp_path, calendar_id=ROOM, providers=("google",), key=True):
     config = Config()
@@ -153,3 +156,45 @@ class TestCommandLine:
                                 capture_output=True, text=True)
         assert result.returncode == 1
         assert "still the placeholder REPLACE_WITH_ROOM_CALENDAR_ID" in result.stdout
+
+
+class TestBookings:
+    """The check also proves the room can book in its calendar, and says what the room's screens booked that waits (spec 2026-10-25)."""
+
+    class Provider(FakeProvider):
+        def __init__(self, read_only=False, **kwargs):
+            super().__init__(**kwargs)
+            self.read_only = read_only
+
+        async def check_booking(self, calendar_id):
+            from croom.calendar.providers.base import CalendarWriteRefused
+            if self.read_only:
+                raise CalendarWriteRefused("403")
+
+    async def test_a_calendar_the_room_can_book(self, tmp_path):
+        config = config_for(tmp_path)
+        config.data_dir = str(tmp_path)
+        code, text = await run(config, self.Provider())
+        assert code == 0 and "Bookings: the door sign and the room page can book this calendar." in text
+
+    async def test_a_calendar_shared_for_reading_only_fails_the_check_and_says_what_to_share(self, tmp_path):
+        config = config_for(tmp_path)
+        config.data_dir = str(tmp_path)
+        code, text = await run(config, self.Provider(read_only=True))
+        assert code == 1
+        assert f"shared with {ACCOUNT} for reading only" in text and "Make changes to events" in text
+
+    async def test_what_waits_and_what_is_double_booked(self, tmp_path):
+        from croom.calendar.bookings import RoomBookings
+        config = config_for(tmp_path)
+        config.data_dir = str(tmp_path)
+        config.room.name = "Room 1"
+        rooms = RoomBookings(tmp_path / "bookings.json", tmp_path / "calendar-cache.json", "Room 1", booking_start="00:00",
+                             booking_end="23:45")
+        start = (datetime.now().astimezone() + timedelta(hours=1)).replace(second=0, microsecond=0)
+        start = start.replace(minute=start.minute - start.minute % 15) + timedelta(minutes=15)
+        await rooms.book(start, 30, "Private review", "door sign")             # no Google attached: it waits
+        rooms.remember([CalendarEvent(id="g1", title="Board meeting", start_time=start, end_time=start + timedelta(hours=1))])
+        code, text = await run(config, self.Provider())
+        assert "Waiting to be sent to Google: 1 booking made at the room's screens." in text
+        assert "Double-booked: Private review" in text and "overlaps Board meeting." in text

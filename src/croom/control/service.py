@@ -21,6 +21,7 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, WSMsgType, web
 
+from croom.calendar.bookings import BookingError
 from croom.control.settings import SettingsStore
 from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
@@ -62,7 +63,7 @@ PLATFORM_HOSTS = {
     "webex": ("webex.com",),
 }
 # The only calendar fields the page needs; the rest stays off the network.
-EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform")
+EVENT_FIELDS = ("id", "title", "start_time", "end_time", "meeting_platform", "booking_id", "pending", "clash")
 # The week the door sign shows (spec 2026-10-13, section 2.3): today and the six days after it, named in English whatever the
 # machine's locale says (date.strftime would follow it).
 WEEK_DAYS = 7
@@ -323,6 +324,11 @@ class ControlService(Service):
         app.router.add_get("/api/status", self._handle_status)
         app.router.add_get("/api/calendar/events", self._handle_events)
         app.router.add_get("/api/calendar/week", self._handle_week)
+        app.router.add_get("/api/bookings/slots", self._handle_booking_slots)
+        app.router.add_post("/api/bookings", self._handle_book)
+        app.router.add_post("/api/bookings/now", self._handle_book_now)
+        app.router.add_post("/api/bookings/{key}/end", self._handle_booking_end)
+        app.router.add_post("/api/bookings/{key}/cancel", self._handle_booking_cancel)
         app.router.add_post("/api/meeting/join", self._handle_join)
         app.router.add_post("/api/meeting/leave", self._handle_leave)
         app.router.add_post("/api/meeting/mute", self._handle_mute)
@@ -496,7 +502,7 @@ class ControlService(Service):
 
     def _calendar_status(self) -> Dict[str, Any]:
         if self._calendar is None:
-            return {"connected": False, "provider": None, "current": None, "next": None}
+            return {"connected": False, "provider": None, "current": None, "next": None, "booking": None}
         provider = self._calendar.provider
         current = self._calendar.get_current_meeting()
         now = datetime.now(timezone.utc)
@@ -506,6 +512,7 @@ class ControlService(Service):
             "provider": getattr(provider, "name", None) if provider is not None else None,
             "current": self._event_dict(current) if current is not None else None,
             "next": self._event_dict(upcoming) if upcoming is not None else None,
+            "booking": self._bookings.state() if self._bookings is not None else None,
         }
 
     def _meeting_block(self) -> Dict[str, Any]:
@@ -1159,6 +1166,98 @@ class ControlService(Service):
 
     async def _handle_week(self, request: web.Request) -> web.Response:
         return web.json_response({"days": self._week()})
+
+    # ------------------------------------------------------------------
+    # The room's own bookings (spec 2026-10-25): Book and Use now at the door sign and the room page, End now and Cancel
+    # ------------------------------------------------------------------
+
+    @property
+    def _bookings(self):
+        """The calendar service's RoomBookings, or None: a room with no calendar to book in."""
+        return getattr(self._calendar, "bookings", None) if self._calendar is not None else None
+
+    NO_BOOKINGS = "Booking needs the room's Google Calendar, and none is set up"
+
+    async def _handle_booking_slots(self, request: web.Request) -> web.Response:
+        if self._bookings is None:
+            return self._error_response(self.NO_BOOKINGS, 503)
+        days = self._bookings.days()
+        try:
+            day = date.fromisoformat(request.query["date"]) if "date" in request.query else days[0]
+        except ValueError:
+            return self._error_response("date is YYYY-MM-DD", 400)
+        labels = [{"date": d.isoformat(), "label": "Today" if n == 0 else "Tomorrow" if n == 1 else DAY_NAMES[d.weekday()]}
+                  for n, d in enumerate(days)]
+        return web.json_response(dict(self._bookings.slots(day), days=labels))
+
+    async def _booking_request(self, request: web.Request, with_start: bool) -> Tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+        """The body of a Book or Use now: its start (Book only), minutes, title and source, or the response that refuses it."""
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return None, rejection
+        if self._bookings is None:
+            return None, self._error_response(self.NO_BOOKINGS, 503)
+        data = await self._read_object(request)
+        if data is None:
+            return None, self._error_response("Send a JSON object", 400)
+        minutes = data.get("minutes")
+        if not isinstance(minutes, int) or isinstance(minutes, bool):
+            return None, self._error_response("minutes is a whole number", 400)
+        asked = {"minutes": minutes, "title": data.get("title"), "source": data.get("source")}
+        if with_start:
+            try:
+                start = datetime.fromisoformat(str(data.get("start")))
+            except ValueError:
+                return None, self._error_response("start is a time with its offset, as the open times give it", 400)
+            if start.tzinfo is None:
+                return None, self._error_response("start is a time with its offset, as the open times give it", 400)
+            asked["start"] = start
+        return asked, None
+
+    def _booking_answer(self, booking, status: int = 200) -> web.Response:
+        """A booking as the page shows it, whether it waits to reach Google, and the calendar's refusal when it refuses."""
+        event = next((e for e in self._calendar.events if e.booking_id == booking.id), None) or booking.event()
+        problem = self._bookings.state()["problem"]
+        return web.json_response({"booking": self._event_dict(event), "pending": booking.pending,
+                                  "warning": problem if booking.pending else None}, status=status)
+
+    async def _handle_book(self, request: web.Request) -> web.Response:
+        asked, refusal = await self._booking_request(request, with_start=True)
+        if refusal is not None:
+            return refusal
+        try:
+            booking = await self._bookings.book(asked["start"], asked["minutes"], asked["title"], asked["source"])
+        except BookingError as e:
+            return self._error_response(str(e), e.status)
+        return self._booking_answer(booking, 201)
+
+    async def _handle_book_now(self, request: web.Request) -> web.Response:
+        asked, refusal = await self._booking_request(request, with_start=False)
+        if refusal is not None:
+            return refusal
+        try:
+            booking = await self._bookings.start_now(asked["minutes"], asked["title"], asked["source"])
+        except BookingError as e:
+            return self._error_response(str(e), e.status)
+        return self._booking_answer(booking, 201)
+
+    async def _booking_change(self, request: web.Request, change: str) -> web.Response:
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
+        if self._bookings is None:
+            return self._error_response(self.NO_BOOKINGS, 503)
+        try:
+            booking = await getattr(self._bookings, change)(request.match_info["key"])
+        except BookingError as e:
+            return self._error_response(str(e), e.status)
+        return self._booking_answer(booking)
+
+    async def _handle_booking_end(self, request: web.Request) -> web.Response:
+        return await self._booking_change(request, "end")
+
+    async def _handle_booking_cancel(self, request: web.Request) -> web.Response:
+        return await self._booking_change(request, "cancel")
 
     @staticmethod
     def _require_json(request: web.Request) -> Optional[web.Response]:

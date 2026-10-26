@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Dict, Any, List, Callable, Set
 
+from croom.calendar.bookings import RoomBookings
 from croom.calendar.providers.base import (
     CalendarProvider,
     CalendarEvent,
@@ -78,6 +79,7 @@ class CalendarService(Service):
                 - calendar_ids: List of calendar IDs to monitor
                 - poll_interval: How often to check for events (seconds)
                 - auto_join_minutes: Minutes before meeting to trigger auto-join
+                - bookings: the RoomBookings of the room's own bookings and the kept calendar (spec 2026-10-25), or None
         """
         super().__init__("calendar")
         self.config = config or {}
@@ -87,8 +89,9 @@ class CalendarService(Service):
         self._poll_interval = self.config.get('poll_interval', 60)
         self._auto_join_minutes = self.config.get('auto_join_minutes', 1)
 
-        # Event cache
+        # Event cache: Google's events as the last poll had them (or, until one has, as the device kept them)
         self._events: Dict[str, CalendarEvent] = {}
+        self.bookings: Optional[RoomBookings] = self.config.get('bookings')
         self._next_meeting: Optional[CalendarEvent] = None
 
         # Callbacks
@@ -134,7 +137,20 @@ class CalendarService(Service):
             "poll_interval": calendar.sync_interval_seconds,
             "auto_join_minutes": config.meeting.join_early_minutes,
             "not_configured": not_configured,
+            "bookings": cls._bookings_for(config) if provider == "google" and calendar_ids else None,
         })
+
+    @staticmethod
+    def _bookings_for(config: Config) -> RoomBookings:
+        """The room's own bookings and the kept calendar, in the data directory, with the room's booking hours (8 AM to 6 PM unless
+        the config says otherwise; hours it cannot use are warned about and the defaults kept)."""
+        data_dir = config.resolve_data_dir()
+        files = (data_dir / "bookings.json", data_dir / "calendar-cache.json", config.room.name)
+        try:
+            return RoomBookings(*files, booking_start=config.calendar.booking_start, booking_end=config.calendar.booking_end)
+        except ValueError as e:
+            logger.warning(f"calendar booking hours: {e}; using 08:00 to 18:00")
+            return RoomBookings(*files)
 
     @property
     def provider(self) -> Optional[CalendarProvider]:
@@ -153,7 +169,9 @@ class CalendarService(Service):
 
     @property
     def events(self) -> List[CalendarEvent]:
-        """Get all cached events sorted by start time."""
+        """The room's events sorted by start time: Google's, with the room's own bookings laid over them."""
+        if self.bookings is not None:
+            return self.bookings.merge(list(self._events.values()))
         return sorted(
             self._events.values(),
             key=lambda e: e.start_time
@@ -217,6 +235,8 @@ class CalendarService(Service):
             self._initialized = True
             self._last_poll_ok = True
             self._clear_problem()
+            if self.bookings is not None and self._calendar_ids:
+                self.bookings.attach(self._provider, self._calendar_ids[0])
             logger.info(f"Calendar service initialized with {provider_name}")
             return True
 
@@ -234,7 +254,7 @@ class CalendarService(Service):
         except LookupError:
             account = service_account_email(credentials.get('service_account_file', '')) or "the service account"
             self._report(f"Calendar {calendar_id} not found or not shared: share the room's calendar with {account} "
-                         "(See all event details), and check the address in the config")
+                         "(Make changes to events), and check the address in the config")
             return False
         return True
 
@@ -259,6 +279,9 @@ class CalendarService(Service):
         """Start polling. Idle when nothing is configured; keeps retrying when Google cannot be reached yet."""
         if self._running:
             return
+        if self.bookings is not None and not self._events:
+            # Until Google answers, the room shows the day as it was last read: a restart while Google is out of reach keeps it.
+            self._events = {e.id: e for e in self.bookings.cached()[0]}
         if not self._initialized and not await self.initialize():
             if not self._can_retry():
                 logger.info("Calendar service running without a provider; polling disabled")
@@ -303,6 +326,8 @@ class CalendarService(Service):
         """Fetch events from all calendars."""
         if not self._provider or not self._calendar_ids:
             return
+        if self.bookings is not None:
+            await self.bookings.sync()   # what the room booked goes first: the read that follows then has it
 
         try:
             now = datetime.now(timezone.utc)
@@ -327,6 +352,8 @@ class CalendarService(Service):
             self._events = all_events
             self._last_poll_ok = True
             self._clear_problem()
+            if self.bookings is not None:
+                self.bookings.remember(list(all_events.values()))
 
             # Update next meeting
             self._update_next_meeting()
@@ -343,6 +370,8 @@ class CalendarService(Service):
         except Exception as e:
             # Keep the last good bookings; the page and sign show "not connected" until a poll succeeds
             self._last_poll_ok = False
+            if self.bookings is not None:
+                self.bookings.set_online(False)
             self._report(f"Calendar poll failed, keeping the last bookings: {e}")
 
     def _update_next_meeting(self) -> None:
@@ -481,7 +510,7 @@ class CalendarService(Service):
 
     def get_event_by_id(self, event_id: str) -> Optional[CalendarEvent]:
         """Get a specific event by ID."""
-        return self._events.get(event_id)
+        return next((e for e in self.events if e.id == event_id), None)
 
     def get_current_meeting(self) -> Optional[CalendarEvent]:
         """

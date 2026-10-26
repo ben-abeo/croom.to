@@ -56,7 +56,7 @@ class TestServiceRegistration:
         agent = make_agent(make_config(tmp_path))
         agent._initialize_services()
         assert sorted(agent.service_manager.get_all_services()) == [
-            "audio", "calendar", "devices", "display", "meeting", "video",
+            "audio", "calendar", "devices", "display", "meeting", "tv", "video",
         ]
 
     def test_registers_dashboard_client_when_enabled(self, tmp_path, no_hardware):
@@ -75,16 +75,17 @@ class TestTvRegistration:
         config.tv.enabled, config.tv.host = enabled, "10.0.0.41"
         return config
 
-    def test_a_room_without_a_tv_has_no_tv_service(self, tmp_path, no_hardware):
+    def test_a_room_without_a_tv_can_select_one_without_restarting(self, tmp_path, no_hardware):
         agent = make_agent(make_config(tmp_path))
         agent._initialize_services()
-        assert agent.service_manager.get_service("tv") is None
-        assert agent.service_manager.get_service("meeting")._before_join == []
+        tv = agent.service_manager.get_service("tv")
+        assert not tv.configured
+        assert agent.service_manager.get_service("meeting")._before_join == [tv.before_join]
 
-    def test_a_tv_that_is_switched_off_in_the_config_is_not_registered(self, tmp_path, no_hardware):
+    def test_a_tv_switched_off_in_the_config_stays_unconfigured_until_selected(self, tmp_path, no_hardware):
         agent = make_agent(self.with_a_tv(tmp_path, enabled=False))
         agent._initialize_services()
-        assert agent.service_manager.get_service("tv") is None
+        assert not agent.service_manager.get_service("tv").configured
 
     def test_the_tv_is_registered_ahead_of_the_meeting_and_the_meeting_waits_for_it_before_a_join(self, tmp_path, no_hardware):
         config = self.with_a_tv(tmp_path)
@@ -206,18 +207,19 @@ class TestControlRegistration:
         order = agent.service_manager._start_order
         assert order.index("tv") < order.index("control")
 
-    def test_a_room_without_a_tv_hands_the_control_page_none(self, tmp_path, no_hardware):
+    def test_a_room_without_a_tv_hands_the_control_page_a_service_for_selection(self, tmp_path, no_hardware):
         agent = make_agent(make_config(tmp_path, control=True))
         agent._initialize_services()
-        assert agent.service_manager.get_service("tv") is None
-        assert agent.service_manager.get_service("control")._tv is None
+        tv = agent.service_manager.get_service("tv")
+        assert not tv.configured
+        assert agent.service_manager.get_service("control")._tv is tv
 
-    def test_a_tv_that_is_switched_off_in_the_config_is_not_handed_to_the_control_page(self, tmp_path, no_hardware):
+    def test_a_disabled_tv_can_be_set_up_on_the_control_page(self, tmp_path, no_hardware):
         config = make_config(tmp_path, control=True)
         config.tv.enabled, config.tv.host = False, "10.0.0.41"
         agent = make_agent(config)
         agent._initialize_services()
-        assert agent.service_manager.get_service("control")._tv is None
+        assert not agent.service_manager.get_service("control")._tv.configured
 
     def test_control_is_absent_when_disabled(self, tmp_path, no_hardware):
         agent = make_agent(make_config(tmp_path, control=False))

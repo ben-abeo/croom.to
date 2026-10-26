@@ -1,14 +1,14 @@
 """
-Finding LG webOS TVs on the network (spec 2026-10-13 TV remote and touchpad, section 3: Find TVs). A webOS TV answers an
-SSDP search for LG's second-screen service, and gives itself a name in the UPnP description its answer points to. The search
-goes out through `send` and the description is read through `fetch`, which a test replaces, so that the tests put nothing on
-the network. Whatever answers is a device on the network that nobody vetted: what it says is read, not believed (it is
-read from its own address only, as much as a description needs, and what it names itself is printable).
+Find LG webOS and Samsung Tizen TVs through their SSDP services. Descriptions and
+Samsung device information are bounded and fetched only from the answering host.
+MAC discovery prefers the local neighbor table, which identifies the active interface.
 """
 
 import asyncio
 import ipaddress
+import json
 import logging
+import re
 import socket
 import xml.etree.ElementTree as ET
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple, Union
@@ -30,52 +30,79 @@ SEARCH = (
     f"ST: {SEARCH_TARGET}\r\n"
     "\r\n"
 ).encode("ascii")
+SAMSUNG_TARGETS = (
+    "urn:samsung.com:device:RemoteControlReceiver:1",
+    "urn:samsung.com:service:MainTVAgent2:1",
+    "urn:schemas-upnp-org:service:RenderingControl:1",
+)
+TARGETS = (SEARCH_TARGET, *SAMSUNG_TARGETS)
 
 SEARCHES = 2                            # UDP can lose a datagram, and UPnP has a search sent more than once
 RESEND_AFTER_S = 0.5                    # this long after the one before (less when the window is short)
 SEND_GRACE_S = 1.0                      # a search that has not ended this long after its window is cut off
 FETCH_TIMEOUT_S = 2.0                   # a description has this long to arrive
+MAC_TIMEOUT_S = 1.0
 MAX_DESCRIPTION_BYTES = 65536           # and is read as far as this
 MAX_TVS = 64                            # more answers than this from different addresses are not a network of TVs
 
 Answer = Callable[[bytes, str], None]                      # a datagram that came back, and the address it came from
 Send = Callable[[bytes, Answer, float], Awaitable[None]]   # put the search out, hand each answer on, end after the window
 Fetch = Callable[[str], Awaitable[str]]                    # the page at an address, as text
+MacResolver = Callable[[str], Awaitable[str]]
 
 
-async def discover_tvs(timeout: float = 3.0, send: Optional[Send] = None, fetch: Optional[Fetch] = None) -> List[Dict[str, str]]:
-    """The LG webOS TVs on the local network that answer within `timeout` seconds, each as {"host", "name", "location"}: the
-    address it answered from, the name it gives itself (empty when its description cannot be read) and where that description
-    is (empty when it is not a web address on that host). One TV is listed once, however often it answers; a device that is not
-    a webOS TV is left out. Named TVs come first, by name, and by address among TVs of one name.
+async def discover_tvs(
+    timeout: float = 3.0, send: Optional[Send] = None, fetch: Optional[Fetch] = None,
+    mac_resolver: Optional[MacResolver] = None,
+) -> List[Dict[str, str]]:
+    """Return {host, name, location, brand, mac}, deduplicated by the answering IP.
 
-    `send` puts the search on the network and hands each answer to a callback until `timeout` is up; `fetch` gets a page. A
-    search that has not ended a second after its window is cut off and the answers that came stand. Raises TvError, in words,
-    when the search cannot be sent at all: that is not the same as no TV answering."""
+    LG's dedicated service remains discoverable without its description; Samsung
+    candidates require a description identifying their manufacturer. An unknown
+    MAC is "". Searches and per-device probes run concurrently with bounded waits.
+    Injecting send/fetch disables the real MAC lookup unless explicitly supplied.
+    """
+    if mac_resolver is None and send is None and fetch is None:
+        mac_resolver = resolve_mac
     send, fetch = send or _multicast, fetch or _get
-    found: Dict[str, str] = {}              # by the address that answered: where its answer says its description is
+    found: Dict[str, Tuple[str, str]] = {}
 
     def on_answer(datagram: bytes, host: str) -> None:
-        location = _location_of(datagram)
-        if location is None or (host not in found and len(found) >= MAX_TVS):
+        answer = _answer_of(datagram)
+        if answer is None or (host not in found and len(found) >= MAX_TVS):
             return
-        found[host] = found.get(host) or _location_at(location, host)
+        brand, location = answer
+        previous = found.get(host)
+        # LG may also advertise RenderingControl. Its dedicated service wins.
+        if previous and (previous[0] == brand or previous[0] == "lg"):
+            found[host] = previous[0], previous[1] or _location_at(location, host)
+        else:
+            found[host] = brand, _location_at(location, host)
 
-    try:
-        await asyncio.wait_for(send(SEARCH, on_answer, timeout), timeout + SEND_GRACE_S)
-    except asyncio.TimeoutError:
-        logger.debug("The search for TVs did not end in time; the answers that came stand")
-    answered = list(found.items())
-    names = await asyncio.gather(*(_name(fetch, host, location) for host, location in answered))
-    tvs = [{"host": host, "name": name, "location": location} for (host, location), name in zip(answered, names)]
+    async def search(target: str) -> Optional[Exception]:
+        request = SEARCH.replace(SEARCH_TARGET.encode(), target.encode())
+        try:
+            await asyncio.wait_for(send(request, on_answer, timeout), timeout + SEND_GRACE_S)
+        except asyncio.TimeoutError:
+            logger.debug("The search for TVs did not end in time; the answers that came stand")
+        except TvError as error:
+            return error
+        return None
+
+    errors = await asyncio.gather(*(search(target) for target in TARGETS))
+    if all(error is not None for error in errors):
+        raise errors[0]
+    candidates = await asyncio.gather(*(
+        _device(fetch, host, brand, location, mac_resolver)
+        for host, (brand, location) in found.items()
+    ))
+    tvs = [tv for tv in candidates if tv is not None]
     tvs.sort(key=lambda tv: (not tv["name"], tv["name"].casefold(), _address_key(tv["host"])))
     return tvs
 
 
-def _location_of(datagram: bytes) -> Optional[str]:
-    """The LOCATION in an answer from a webOS TV ("" when it names none); None when the datagram is not such an answer (another
-    device, an announcement, noise). An answer is `HTTP/1.x 200` and headers (a UPnP 1.0 device answers in HTTP/1.0), and its ST
-    header says what it answers for: the ST of a search or an announcement, or of an error, is not an answer."""
+def _answer_of(datagram: bytes) -> Optional[Tuple[str, str]]:
+    """Read only successful SSDP responses for the services searched."""
     lines = datagram.decode("utf-8", errors="replace").splitlines()
     status_line = lines[0].split() if lines else []
     if len(status_line) < 2 or not status_line[0].startswith("HTTP/1.") or status_line[1] != "200":
@@ -85,9 +112,10 @@ def _location_of(datagram: bytes) -> Optional[str]:
         name, colon, value = line.partition(":")
         if colon:
             headers.setdefault(name.strip().upper(), value.strip())
-    if headers.get("ST", "").lower() != SEARCH_TARGET:
+    target = headers.get("ST", "").lower()
+    if target not in {value.lower() for value in TARGETS}:
         return None
-    return headers.get("LOCATION", "")
+    return ("lg" if target == SEARCH_TARGET else "samsung"), headers.get("LOCATION", "")
 
 
 def _location_at(location: str, host: str) -> str:
@@ -101,30 +129,114 @@ def _location_at(location: str, host: str) -> str:
         hostname = parts.hostname
     except ValueError:
         return ""
-    return location if parts.scheme in ("http", "https") and hostname == host else ""
+    return location if (
+        parts.scheme in ("http", "https") and hostname == host
+        and parts.username is None and parts.password is None
+    ) else ""
 
 
-async def _name(fetch: Fetch, host: str, location: str) -> str:
-    """The name the TV at `host` gives itself in its description; "" when it has none or the description cannot be read."""
-    if not location:
-        return ""
-    try:
-        return _friendly_name(await asyncio.wait_for(fetch(location), FETCH_TIMEOUT_S))
-    except Exception as e:  # noqa: BLE001 - no answer, an error page, no XML: the TV is listed all the same, without its name
-        logger.debug(f"The description of the TV at {host} could not be read: {str(e) or type(e).__name__}")
-        return ""
+async def _device(
+    fetch: Fetch, host: str, brand: str, location: str, mac_resolver: Optional[MacResolver],
+) -> Optional[Dict[str, str]]:
+    name, manufacturer = "", ""
+    if location:
+        try:
+            page = await asyncio.wait_for(fetch(location), FETCH_TIMEOUT_S)
+            name, manufacturer = _description(page)
+        except Exception as error:  # noqa: BLE001 - one unreadable description does not lose the other TVs
+            logger.debug("The description at %s could not be read: %s", host, error)
+    if brand == "samsung" and not re.match(r"^samsung(?:\s|$)", manufacturer.casefold()):
+        return None
+
+    async def neighbor_mac() -> str:
+        if mac_resolver is None:
+            return ""
+        try:
+            return _normalize_mac(await asyncio.wait_for(mac_resolver(host), MAC_TIMEOUT_S))
+        except Exception:  # noqa: BLE001 - neighbor information is optional
+            return ""
+
+    if brand == "samsung":
+        mac, reported_mac = await asyncio.gather(neighbor_mac(), _samsung_mac(fetch, host))
+        mac = mac or reported_mac
+    else:
+        mac = await neighbor_mac()
+    return {"host": host, "name": name, "location": location, "brand": brand, "mac": mac}
 
 
-def _friendly_name(description: str) -> str:
-    """The friendlyName of a UPnP device description (the first, which is the TV's own), on one printable line; "" when it has
-    none. Raises ET.ParseError when the text is not XML (the caller takes any failure for no name). A description has no DTD,
-    so a text that has one is not read: nothing in it is expanded."""
-    if "<!DOCTYPE" in description:
-        return ""
+def _description(description: str) -> Tuple[str, str]:
+    """Read the root device's own name/manufacturer, without DTD expansion."""
+    if len(description.encode("utf-8")) > MAX_DESCRIPTION_BYTES or "<!DOCTYPE" in description:
+        return "", ""
     root = ET.fromstring(description)
-    for element in root.iter():
-        if element.tag.rpartition("}")[2] == "friendlyName":        # (whatever the namespace is called)
-            return one_line(element.text)
+    device = next((element for element in root.iter() if element.tag.rpartition("}")[2] == "device"), None)
+    if device is None:
+        return "", ""
+    fields = {element.tag.rpartition("}")[2]: one_line(element.text) for element in device}
+    return fields.get("friendlyName", ""), fields.get("manufacturer", "")
+
+
+async def _samsung_mac(fetch: Fetch, host: str) -> str:
+    """A reported Wi-Fi MAC is useful only for a verified wireless TV at this IP."""
+    try:
+        address = ipaddress.ip_address(host)
+        authority = f"[{address}]" if address.version == 6 else str(address)
+        page = await asyncio.wait_for(fetch(f"http://{authority}:8001/api/v2/"), FETCH_TIMEOUT_S)
+        if len(page.encode("utf-8")) > MAX_DESCRIPTION_BYTES:
+            return ""
+        device = json.loads(page)["device"]
+        if (
+            device.get("type") == "Samsung SmartTV" and device.get("ip") == host
+            and device.get("networkType", "").casefold() in ("wireless", "wifi", "wi-fi")
+        ):
+            return _normalize_mac(device.get("wifiMac", ""))
+    except Exception:  # noqa: BLE001 - API unavailable or not a Samsung TV; discovery can still list it
+        pass
+    return ""
+
+
+def _normalize_mac(value: str) -> str:
+    """A usable unicast address, normalized for config and Wake-on-LAN."""
+    if not isinstance(value, str):
+        return ""
+    raw = re.sub(r"[:-]", "", value.strip())
+    if not re.fullmatch(r"[0-9a-fA-F]{12}", raw) or int(raw, 16) == 0 or int(raw[:2], 16) & 1:
+        return ""
+    return ":".join(raw[index:index + 2].lower() for index in range(0, 12, 2))
+
+
+async def resolve_mac(host: str) -> str:
+    """Read Linux's existing neighbor entry for this IP; never scan or use a shell."""
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return ""
+    if address.is_loopback or address.is_multicast or address.is_unspecified:
+        return ""
+    process = None
+    try:
+        process = await asyncio.wait_for(asyncio.create_subprocess_exec(
+            "ip", "neigh", "show", "to", str(address),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        ), MAC_TIMEOUT_S)
+        output, _ = await asyncio.wait_for(process.communicate(), MAC_TIMEOUT_S)
+        if process.returncode != 0:
+            return ""
+        for line in output.decode("ascii", errors="replace").splitlines():
+            fields = line.split()
+            if not fields or fields[0] != str(address) or "FAILED" in fields or "INCOMPLETE" in fields:
+                continue
+            if "lladdr" in fields and fields.index("lladdr") + 1 < len(fields):
+                return _normalize_mac(fields[fields.index("lladdr") + 1])
+    except (OSError, asyncio.TimeoutError):
+        pass
+    finally:
+        if process is not None and process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
     return ""
 
 

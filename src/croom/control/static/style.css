@@ -414,6 +414,7 @@ body.keyboard-open .schedule { display: none; }
 .tv-words[hidden] { display: none; }
 .button.tv-forget-head { flex: 0 0 136px; min-height: 40px; padding: 0 12px; font-size: 0.95rem; text-align: center; }   /* the width of "Forget TV" with its picture; "Tap again to forget the TV" wraps onto two lines in it */
 .button.tv-forget-head.danger { padding: 0 8px; line-height: 1.15; }
+#tv-change { flex-basis: 156px; }
 
 /* The remote: the top keys, then the d-pad with the numbers, or the trackpad in their place. A press is never a selection or a callout. */
 .tv-remote { grid-row: 2; display: grid; grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); gap: 16px; min-height: 0; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
@@ -517,6 +518,28 @@ body.keyboard-open .schedule { display: none; }
 .tv-tag { color: #fff; background: var(--navy-800); border-radius: 6px; padding: 1px 8px; margin-left: 8px; font-size: 0.85rem; white-space: nowrap; }
 .tv-card .tv-hint { margin: 16px 0 0; color: var(--periwinkle-300); font-size: 0.9rem; }
 .tv-card code { font-family: inherit; color: #fff; }
+.tv-found-list li { align-items: flex-start; padding: 8px 2px; }
+.tv-found-list .tv-who { flex: 1 1 auto; }
+.tv-found-list .tv-addr { margin-left: 8px; font-size: 0.9rem; }
+.tv-found-list .tv-connect { flex: 0 0 auto; min-height: 48px; padding: 0 16px; }
+.tv-mac { font-size: 0.85rem; color: var(--periwinkle-300); }
+.tv-mac summary, .tv-connection summary { cursor: pointer; }
+.tv-mac summary { line-height: 1.3; padding-top: 3px; }
+.tv-connection summary { padding: 5px 0; }
+.tv-mac label { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 6px; }
+.tv-mac input { width: 220px; max-width: 100%; }
+.tv-connection { flex: 0 0 auto; margin-bottom: 14px; }
+.tv-settings-form { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; padding-top: 8px; }
+.tv-settings-form label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 0.9rem; }
+.tv-settings-form input, .tv-settings-form select, .tv-mac input {
+  color: #fff; background: var(--surface-900); border: 1px solid var(--periwinkle-300); border-radius: 8px;
+  font: inherit; padding: 10px; min-height: 44px;
+}
+.tv-settings-form input { width: 215px; max-width: 100%; }
+.tv-settings-form .button { min-height: 44px; font-size: 0.95rem; padding: 0 14px; }
+.tv-card #tv-settings-result { margin: 0; font-size: 0.9rem; }
+.tv-connection .tv-hint { margin-top: 8px; }
+#tv-choose .tv-card-actions { margin-bottom: 12px; }
 
 @media (max-width: 1023px) {
   /* A phone, or a window too small for the fixed screen: the rows stack and the page scrolls. */
@@ -608,6 +631,8 @@ body.keyboard-open .schedule { display: none; }
 }
 @media (max-width: 1023px) {
   /* A phone: one column. */
+  .top:has(#open-tv-remote:not([hidden])) { flex-wrap: wrap; row-gap: 12px; }
+  .top:has(#open-tv-remote:not([hidden])) .top-right { flex: 1 1 100%; min-width: 0; flex-wrap: wrap; justify-content: flex-end; gap: 12px; }
   .participant { flex-wrap: wrap; }   /* a row of a name, its marks and two buttons is wider than the screen: the name takes a line, and the marks and the buttons the next */
   .participant .name { flex-basis: 100%; }
   .participant .marks { flex: 1 1 auto; justify-content: flex-start; }

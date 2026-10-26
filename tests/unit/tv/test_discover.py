@@ -14,6 +14,13 @@ LG = "10.0.0.41"
 LG_LOCATION = "http://10.0.0.41:1234/udhisapi.xml"
 
 
+@pytest.fixture(autouse=True)
+def no_real_neighbor_lookup(monkeypatch):
+    async def unavailable(host):
+        return ""
+    monkeypatch.setattr(discover, "resolve_mac", unavailable)
+
+
 def ssdp_answer(location, st=SEARCH_TARGET):
     """What a device on the network sends back to a search: an HTTP-like answer (the status line, then headers)."""
     lines = ["HTTP/1.1 200 OK", "CACHE-CONTROL: max-age=1800", "EXT:"]
@@ -74,7 +81,7 @@ def test_the_waits_and_the_limits_are_the_ones_settled():
 async def test_the_search_is_the_one_a_webos_tv_answers_to_and_goes_to_the_ssdp_group():
     send = answering()
     assert await discover_tvs(timeout=1.5, send=send, fetch=serving({})) == []
-    [(request, window)] = send.sent
+    (request, window) = send.sent[0]
     assert request.decode().split("\r\n") == [
         "M-SEARCH * HTTP/1.1", "HOST: 239.255.255.250:1900", 'MAN: "ssdp:discover"', "MX: 2",
         "ST: urn:lge-com:service:webos-second-screen:1", "", ""]
@@ -95,14 +102,14 @@ async def test_an_lg_tv_is_found_by_its_answer_and_named_by_its_description_and_
     other = ssdp_answer("http://10.0.0.7:49152/rootDesc.xml", st="urn:schemas-upnp-org:device:MediaRenderer:1")
     send = answering((ssdp_answer(LG_LOCATION), LG), (other, "10.0.0.7"))
     fetch = serving({LG_LOCATION: description("Boardroom TV"), "http://10.0.0.7:49152/rootDesc.xml": description("A speaker")})
-    assert await discover_tvs(send=send, fetch=fetch) == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert await discover_tvs(send=send, fetch=fetch) == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
     assert fetch.asked == [LG_LOCATION]                            # the other device's description was not even asked for
 
 
 async def test_a_tv_that_answers_more_than_once_is_listed_once_and_read_once():
     send = answering((ssdp_answer(LG_LOCATION), LG), (ssdp_answer(LG_LOCATION), LG), (ssdp_answer(LG_LOCATION), LG))
     fetch = serving({LG_LOCATION: description()})
-    assert await discover_tvs(send=send, fetch=fetch) == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert await discover_tvs(send=send, fetch=fetch) == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
     assert fetch.asked == [LG_LOCATION]
 
 
@@ -148,7 +155,7 @@ async def test_an_answer_is_a_200_in_http_1_0_or_1_1_with_or_without_a_reason_ph
     """UPnP 1.0 devices answer in HTTP/1.0, and the reason after the status is only words."""
     answer = ssdp_answer(LG_LOCATION).replace(b"HTTP/1.1 200 OK", status_line.encode())
     found = await discover_tvs(send=answering((answer, LG)), fetch=serving({LG_LOCATION: description()}))
-    assert found == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 @pytest.mark.parametrize("how", ["bare newlines", "spaces before the colons", "both"])
@@ -161,14 +168,14 @@ async def test_an_answer_with_bare_newlines_or_spaces_before_the_colons_is_still
     if how != "bare newlines":
         answer = answer.replace(b"ST:", b"ST :").replace(b"LOCATION:", b"LOCATION :")
     found = await discover_tvs(send=answering((answer, LG)), fetch=serving({LG_LOCATION: description()}))
-    assert found == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 # The name
 
 async def test_a_description_that_cannot_be_fetched_gives_the_host_with_no_name():
     found = await discover_tvs(send=answering((ssdp_answer(LG_LOCATION), LG)), fetch=serving({}))
-    assert found == [{"host": LG, "name": "", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": LG_LOCATION}]
 
 
 @pytest.mark.parametrize("page", [
@@ -177,7 +184,7 @@ async def test_a_description_that_cannot_be_fetched_gives_the_host_with_no_name(
 ])
 async def test_a_description_with_no_name_in_it_gives_the_host_with_no_name(page):
     found = await discover_tvs(send=answering((ssdp_answer(LG_LOCATION), LG)), fetch=serving({LG_LOCATION: page}))
-    assert found == [{"host": LG, "name": "", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": LG_LOCATION}]
 
 
 async def test_a_description_that_never_arrives_is_cut_off_and_the_others_are_read(monkeypatch):
@@ -192,7 +199,7 @@ async def test_a_description_that_never_arrives_is_cut_off_and_the_others_are_re
     t0 = loop.time()
     found = await within(discover_tvs(send=answering((ssdp_answer(LG_LOCATION), LG), (ssdp_answer(other), "10.0.0.50")), fetch=fetch), 5.0)
     assert loop.time() - t0 < 1.0
-    assert found == [{"host": "10.0.0.50", "name": "Training room", "location": other}, {"host": LG, "name": "", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": "10.0.0.50", "name": "Training room", "location": other}, {"brand": "lg", "mac": "", "host": LG, "name": "", "location": LG_LOCATION}]
 
 
 async def test_descriptions_are_read_together_so_that_a_search_takes_one_fetch_timeout_not_one_per_tv(monkeypatch):
@@ -225,7 +232,7 @@ async def test_the_name_is_tidied(markup, name):
 async def test_a_name_with_a_terminal_escape_in_it_is_no_name(escape):
     """Names are printed on a terminal (croom --check-tv): the escape is not XML, so the description is not one."""
     found = await discover_tvs(send=answering((ssdp_answer(LG_LOCATION), LG)), fetch=serving({LG_LOCATION: description(f"Board{escape}room")}))
-    assert found == [{"host": LG, "name": "", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": LG_LOCATION}]
 
 
 async def test_a_name_with_other_control_characters_in_it_is_printable_when_it_is_listed():
@@ -252,7 +259,7 @@ async def test_a_description_with_a_doctype_is_not_read_and_nothing_in_it_is_exp
     bomb = ('<?xml version="1.0"?><!DOCTYPE root [<!ENTITY a "aaaaaaaaaa"><!ENTITY b "&a;&a;&a;&a;&a;&a;&a;&a;&a;&a;">]>'
             "<root><device><friendlyName>&b;</friendlyName></device></root>")
     found = await discover_tvs(send=answering((ssdp_answer(LG_LOCATION), LG)), fetch=serving({LG_LOCATION: bomb}))
-    assert found == [{"host": LG, "name": "", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": LG_LOCATION}]
 
 
 # Where a description is read from
@@ -263,7 +270,7 @@ async def test_an_answer_that_sends_the_reader_to_another_address_is_not_followe
     elsewhere = "http://10.0.0.99:8080/admin"
     fetch = serving({elsewhere: description("Not the TV")})
     found = await discover_tvs(send=answering((ssdp_answer(elsewhere), LG)), fetch=fetch)
-    assert found == [{"host": LG, "name": "", "location": ""}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": ""}]
     assert fetch.asked == []
 
 
@@ -271,32 +278,32 @@ async def test_an_answer_that_sends_the_reader_to_another_address_is_not_followe
 async def test_a_location_that_is_not_a_web_address_on_the_tv_is_not_followed(location):
     fetch = serving({location: description()})
     found = await discover_tvs(send=answering((ssdp_answer(location), LG)), fetch=fetch)
-    assert found == [{"host": LG, "name": "", "location": ""}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": ""}]
     assert fetch.asked == []
 
 
 async def test_an_answer_with_no_location_is_listed_with_no_name():
     fetch = serving({})
     found = await discover_tvs(send=answering((ssdp_answer(None), LG)), fetch=fetch)
-    assert found == [{"host": LG, "name": "", "location": ""}] and fetch.asked == []
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": ""}] and fetch.asked == []
 
 
 async def test_a_second_answer_with_a_location_fills_in_for_a_first_that_had_none():
     send = answering((ssdp_answer(None), LG), (ssdp_answer(LG_LOCATION), LG))
     assert await discover_tvs(send=send, fetch=serving({LG_LOCATION: description()})) == [
-        {"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+        {"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 async def test_a_second_answer_with_no_location_does_not_take_the_first_ones_away():
     send = answering((ssdp_answer(LG_LOCATION), LG), (ssdp_answer(None), LG))
     assert await discover_tvs(send=send, fetch=serving({LG_LOCATION: description()})) == [
-        {"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+        {"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 async def test_a_location_with_characters_a_terminal_would_act_on_is_not_listed():
     location = "http://10.0.0.41/\x1b[2Jx"
     found = await discover_tvs(send=answering((ssdp_answer(location), LG)), fetch=serving({location: description()}))
-    assert found == [{"host": LG, "name": "", "location": ""}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "", "location": ""}]
 
 
 async def test_a_flood_of_answers_does_not_become_a_flood_of_requests():
@@ -319,7 +326,7 @@ async def test_a_search_that_does_not_end_is_cut_off_and_what_came_before_stands
     t0 = loop.time()
     found = await within(discover_tvs(timeout=0.1, send=send, fetch=fetch), 5.0)
     assert 0.15 <= loop.time() - t0 < 1.0
-    assert found == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 async def test_a_search_that_cannot_be_sent_is_words_and_not_an_empty_list():
@@ -461,7 +468,7 @@ async def test_a_socket_that_will_not_take_its_options_is_words_and_is_closed(en
 async def test_the_real_search_through_discover_tvs_finds_a_tv(endpoint):
     endpoint.use(answers=[(ssdp_answer(LG_LOCATION), LG)])
     found = await discover_tvs(timeout=0.2, fetch=serving({LG_LOCATION: description()}))
-    assert found == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert found == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
 
 
 # The real fetch: the description, over HTTP, as much of it as a description needs
@@ -557,5 +564,5 @@ async def test_the_real_fetch_does_not_decompress_what_a_device_sends_and_does_n
 async def test_the_real_search_and_the_real_fetch_are_what_discover_tvs_uses_unless_it_is_told_otherwise(endpoint, web):
     endpoint.use(answers=[(ssdp_answer(LG_LOCATION), LG)])
     web.respond([description("Boardroom TV").encode()])
-    assert await discover_tvs(timeout=0.2) == [{"host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
+    assert await discover_tvs(timeout=0.2) == [{"brand": "lg", "mac": "", "host": LG, "name": "Boardroom TV", "location": LG_LOCATION}]
     assert [url for url, kwargs in web.asked] == [LG_LOCATION]

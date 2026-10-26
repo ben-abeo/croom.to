@@ -252,6 +252,9 @@ class ControlService(Service):
         self._discover_tvs = discover or discover_tvs
         self._tv_busy = asyncio.Lock()                       # held by the control that is with the TV (see _handle_tv_control)
         self._search: Optional[asyncio.Task] = None          # the search for TVs that is running (see _handle_tv_discover)
+        self._discovered_tvs: Dict[str, Dict[str, Any]] = {}
+        self._discovered_at = 0.0
+        self._tv_selecting = False
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
         self._mouse = mouse if mouse is not None else PiMouse()
         self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
@@ -342,6 +345,8 @@ class ControlService(Service):
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
         app.router.add_post("/api/tv/control", self._handle_tv_control)
         app.router.add_post("/api/tv/pair", self._handle_tv_pair)
+        app.router.add_post("/api/tv/select", self._handle_tv_select)
+        app.router.add_post("/api/tv/settings", self._handle_tv_settings)
         app.router.add_post("/api/tv/forget", self._handle_tv_forget)
         app.router.add_get("/api/tv/discover", self._handle_tv_discover)
         app.router.add_get("/ws/pointer", self._handle_pointer)
@@ -962,8 +967,46 @@ class ControlService(Service):
 
         return await self._tv_call(request, action)
 
+    async def _handle_tv_select(self, request: web.Request) -> web.Response:
+        """Only a TV from this server's recent discovery can be selected by the browser."""
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            host = data.get("host")
+            recent = asyncio.get_running_loop().time() - self._discovered_at < 300
+            found = self._discovered_tvs.get(host) if isinstance(host, str) and recent else None
+            if found is None:
+                raise _BadBody("Use Find TVs again, then select a TV from the list")
+            if self._tv_selecting:
+                raise TvError("A TV connection is already waiting; finish or cancel it first")
+            selected = dict(found)
+            for name in ("mac", "pi_input"):
+                if name in data:
+                    selected[name] = data[name]
+            self._tv_selecting = True
+            try:
+                async with self._tv_busy:
+                    if self._page_has_gone(request):
+                        raise _PageGone()
+                    await self._tv.select(selected)
+                    return self._tv.status()
+            finally:
+                self._tv_selecting = False
+
+        return await self._tv_call(request, action)
+
+    async def _handle_tv_settings(self, request: web.Request) -> web.Response:
+        async def action(data: Dict[str, Any]) -> Dict[str, Any]:
+            if self._tv_selecting:
+                raise TvError("A TV connection is already waiting; finish or cancel it first")
+            async with self._tv_busy:
+                if self._page_has_gone(request):
+                    raise _PageGone()
+                await self._tv.update_settings(data)
+                return self._tv.status()
+
+        return await self._tv_call(request, action)
+
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
-        """The LG TVs on the network. It answers in a room with no TV service as well: that is when it is needed.
+        """The LG and Samsung TVs on the network. It also answers before a TV is configured.
 
         One search at a time. A search is a datagram on the network and a page read from each TV that answers, five or six
         seconds in all, so a request that comes while one is running waits for that one's answer and does not start another.
@@ -978,6 +1021,10 @@ class ControlService(Service):
             return self._error_response(str(e), 409)
         except Exception as e:  # noqa: BLE001 - said in _search_ended; the table is told in words and not left with a 500
             return self._error_response("The search for TVs did not finish: " + self._reason(e), 409)
+        self._discovered_tvs = {
+            tv["host"]: dict(tv) for tv in tvs if isinstance(tv, dict) and isinstance(tv.get("host"), str)
+        }
+        self._discovered_at = asyncio.get_running_loop().time()
         return web.json_response({"tvs": tvs})
 
     @staticmethod

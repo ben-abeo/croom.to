@@ -26,6 +26,7 @@
   const viewHooks = [];     // devices.js, keyboard.js and remote.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
   let tvMode = "idle";      // the mode that opened the TV view
+  let tvReturnView = "options";
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
   let passcodeCard = false;      // the last render showed the card for a join Zoom refused over the passcode: its landing happens once too
   let restoredLink = "";         // what that card put back in the link box, until the person edits the box: it goes with the card
@@ -85,9 +86,9 @@
   const viewMode = (name) => (name === "camera" ? cameraMode : name === "tv" ? tvMode : VIEW_MODES[name]);
 
   function applyView(name, automatic) {
-    if (name === "camera") cameraMode = mode();
-    if (name === "tv") tvMode = mode();
     const was = view();
+    if (name === "camera") cameraMode = mode();
+    if (name === "tv") { tvMode = mode(); tvReturnView = was; }
     document.body.dataset.view = name;
     if (was !== name) leftView(was);
     if (name === "chat") chatOpened = true;
@@ -963,6 +964,9 @@
 
   function render() {
     const body = document.body;
+    const tv = model.status && model.status.tv;
+    // Pairing survives standby: keep quick access available to wake the room's TV.
+    el("open-tv-remote").hidden = model.offline || mode() !== "idle" || !(tv && tv.configured && tv.paired);
     if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
     el("message").textContent = model.error;   // the idle card's line; the meeting screen's own is written with its dialog card (renderDialog)
 
@@ -1207,7 +1211,8 @@
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
   for (const name of ["participants", "chat", "host"]) el("back-from-" + name).addEventListener("click", () => setView("meeting"));
   el("open-tv-options").addEventListener("click", () => setView("tv"));
-  el("back-from-tv").addEventListener("click", () => setView(tvMode === "meeting" ? "meeting" : "options"));
+  el("open-tv-remote").addEventListener("click", () => setView("tv"));
+  el("back-from-tv").addEventListener("click", () => setView(tvReturnView));
   el("key-click-on").addEventListener("click", () => setKeyClick(true));
   el("key-click-off").addEventListener("click", () => setKeyClick(false));
 

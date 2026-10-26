@@ -94,10 +94,45 @@ lists the values to replace. The sections that matter:
 | `control` | `enabled`, `host`, `port`, `screensaver`, `camera_presets` | The room page, sign and TV page on port 8080, open on the LAN by design. `screensaver` is the TV's style until someone picks another on the room page (`info`, `quiet`, `brand` or `bounce`); the choice is kept in `control-settings.json` under the data directory. `camera_presets` is the three preset names the Camera screens show (default `Wide`, `Table`, `Whiteboard`); the saved Home and presets are kept in the same file, and so is the keyboard's click, `key_click` (on until someone turns it off under **Options**, then **Keyboard**): the page sets it through `/api/settings` and finds it in every `/api/status`. |
 | `audio` | `output_device` | The speaker the meeting screen's Sound row drives: `auto` means PipeWire's default output; otherwise the first output whose name contains this text (`HDMI`, `MeetUp`), so `audio.output_device: HDMI` sends the room's sound to the TV. With no match the room page says No speaker found. With a name set, the chosen output also becomes PipeWire's default sink, so the call plays there too (WirePlumber remembers it: to go back, name the other speaker rather than `auto`), and the upstream audio service, which reads the same key as a PyAudio device id, matches no device to a name like `HDMI` and falls through harmlessly (a room device has no PyAudio). |
 | `video` | `device`, `ptz_travel_seconds` | The camera the Camera screens drive (`auto`: the first video node with zoom or pan controls; with none, the room page says No controllable camera found) and how long it is driven to reach an end stop when homing (8 s). |
-| `tv` | `enabled`, `host`, `mac`, `pi_input`, `keep_on` | An LG webOS TV that the table can control, left alone until `enabled` is `true` (the room files in `deploy/rooms/` carry the block with `enabled: false`). The TV needs **LG Connect Apps** switched on in its settings, and **Mobile TV On** too unless Quick Start+ is on (the room guide's The TV section says where). `host` is the TV's address, which **Options**, then **TV**, then **Find TVs** lists on the table; `mac` is the TV's MAC address, which every Turn on needs (the wake-up message goes out first, so a missing or malformed one stops it even with Quick Start+), and a `mac` of digits only, such as `001122334455` or `10:20:30:40:50:59`, is a number to YAML and must be quoted. `pi_input` is the TV input the room Pi is on (the default, `HDMI_1`, is a guess). `keep_on` (default `true`) wakes the TV when the agent starts, before every join and after an unexpected off, and before every join it also switches the TV to `pi_input`, live TV and apps included, and leaves a TV whose state is not known alone; a manual **Off** from the table holds until a manual **On** or the next join (`held_off` lives in memory only, so a restart forgets it). The key the TV hands out at pairing is kept in `tv-client-key` under the data directory, mode 600, never in the config. `croom --check-tv` checks the TV from a terminal. |
+| `tv` | `enabled`, `brand`, `host`, `mac`, `pi_input`, `keep_on` | Optional manual defaults; selecting a TV on the table overrides these connection settings. `brand` is `lg` (default) or `samsung`; Samsung differences are described below. For an LG webOS TV configured manually, control starts when `enabled` is `true` (the room files in `deploy/rooms/` carry the block with `enabled: false`). The TV needs **LG Connect Apps** switched on in its settings, and **Mobile TV On** too unless Quick Start+ is on (the room guide's The TV section says where). `host` is the TV's address, which **Options**, then **TV**, then **Find TVs** lists on the table; `mac` is the TV's MAC address, which every Turn on needs (the wake-up message goes out first, so a missing or malformed one stops it even with Quick Start+), and a `mac` of digits only, such as `001122334455` or `10:20:30:40:50:59`, is a number to YAML and must be quoted. `pi_input` is the TV input the room Pi is on (the default, `HDMI_1`, is a guess). `keep_on` (default `true`) wakes the TV when the agent starts, before every join and after an unexpected off, and before every join it also switches the TV to `pi_input`, live TV and apps included, and leaves a TV whose state is not known alone; a manual **Off** from the table holds until a manual **On** or the next join (`held_off` lives in memory only, so a restart forgets it). For legacy LG configurations, the key the TV hands out at pairing is kept in `tv-client-key` under the data directory, mode 600, never in the config. Selected TVs and Samsung configurations use a separate key per brand and address. `croom --check-tv` checks the TV from a terminal. |
 | `dashboard` | `url`, `enrollment_token`, `heartbeat_interval_seconds` | The token comes from the dashboard's Provisioning page and works once. |
 
 Never commit a real token or key.
+
+## Select the room TV from the table
+
+Open **Options > TV > Find TVs**, select the LG or Samsung TV, and accept
+**Crystal Meet** on the TV with its own remote. The room Pi saves its brand,
+IP address and discovered MAC and connects immediately. No YAML edit or service
+restart is needed. If the MAC could not be found, the table can still connect;
+enter the active Ethernet or Wi-Fi connection's MAC in the connection settings
+to enable waking the TV. Choose the Pi's HDMI socket there if it is not HDMI 1.
+Keep the TV and Pi on the same local network and reserve the TV's IP on the router.
+
+The selection lives in `tv-settings.json` under the agent's data directory and
+overrides the YAML connection defaults. Pairing keys are kept per brand and
+address, mode 600. Existing LG configurations and their `tv-client-key` continue
+to work; `tv.brand` defaults to `lg` and also accepts `samsung`. Both the agent
+and `croom --check-tv` restore the saved selection. **Find TVs** can change the
+room's TV later; connection settings update its MAC and HDMI socket without
+pairing again.
+
+Samsung S90HD/Tizen control uses a local secure WebSocket, with no SmartThings
+account. Power/wake, volume keys, mute, navigation, Home, Back, the source menu,
+channel and playback keys are supported. Samsung does not expose reliable
+input/volume/mute feedback through this connection: **Input** opens its source
+menu, **Mute** toggles the sound, and automatic HDMI selection before joining
+is unavailable. TV-pointer mode is hidden; **Room Pi mouse** and
+**Full-screen touchpad** remain available. Enable **Power On with Mobile** for
+wake and use **First Time Only** in Device Connection Manager if approval
+prompts repeat. See [Samsung wake settings](https://www.samsung.com/us/support/troubleshoot/TSG10002365/)
+and the [Samsung protocol reference](https://github.com/xchwarze/samsung-tv-ws-api).
+The S90HD still needs a physical-TV acceptance test after deployment.
+
+The picker uses `POST /api/tv/select` with a host from the server's recent
+discovery results, then saves and pairs that TV. `POST /api/tv/settings` changes
+the selected TV's MAC and HDMI socket. Both return the current `tv` status,
+which also includes `brand`, `mac` and `capabilities`.
 
 ## Run the dashboard
 

@@ -2697,6 +2697,41 @@ async def test_a_banner_with_no_buttons_is_not_a_dialog_until_it_has_one():
         assert again["id"] != d["id"] and again["buttons"] == ["Later"]                                                       # and a dialog again, another one
 
 
+async def test_zooms_share_toolbar_is_no_dialog_shown_or_hidden():
+    """Zoom 6.5.0 keeps its screen-share toolbar in a role="dialog" from the join on (a room device reported "Preview Pause Share Stop
+    Share" with its buttons as a dialog, Oct 15): it asks nothing, and a tap on it from the table would stop the share."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            const bar = document.createElement("div"); bar.setAttribute("role", "dialog");
+            bar.innerHTML = '<span>Preview</span><button aria-label="screen share preview"></button><button aria-label="more options"></button>'
+                + '<button>Pause share</button><button>Stop Share</button>';
+            document.body.appendChild(bar);
+        }""")
+        await asyncio.sleep(0.4)
+        assert not [s for s, _ in run.events if s.startswith("dialog")] and await open_dialogs(run) == []
+
+
+async def test_a_dialog_nobody_can_see_is_no_dialog_until_it_is_shown():
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        await run.page.evaluate("""() => {
+            for (const how of ["display: none", "visibility: hidden"]) {
+                const d = document.createElement("div"); d.setAttribute("role", "dialog"); d.setAttribute("style", how); d.className = "hidden-one";
+                d.innerHTML = '<div class="zm-modal-body-title">Kept for later</div><button>OK</button>';
+                document.body.appendChild(d);
+            }
+            const outer = document.createElement("div"); outer.setAttribute("aria-hidden", "true");
+            outer.innerHTML = '<div role="dialog"><div class="zm-modal-body-title">Behind</div><button>OK</button></div>';
+            document.body.appendChild(outer);
+        }""")
+        await asyncio.sleep(0.4)
+        assert not [s for s, _ in run.events if s.startswith("dialog")] and await open_dialogs(run) == []
+        await run.page.evaluate("() => document.querySelector('.hidden-one').removeAttribute('style')")
+        [d] = await reported(run, "dialog")
+        assert (d["title"], d["buttons"]) == ("Kept for later", ["OK"])
+
+
 async def test_the_parts_of_one_modal_are_one_dialog():
     """react-modal draws Zoom's modal in layers that both look like a dialog: the role is on the outer node (div.ReactModal__Content) and
     div.zm-modal.zm-modal-legacy is inside it. They are one dialog, whose buttons are in the order the client's footer draws them

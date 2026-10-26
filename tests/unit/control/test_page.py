@@ -8284,7 +8284,7 @@ def test_a_tv_that_says_odd_things_never_stops_the_page_drawing(browser):
         page.wait_for_selector("#tv-pairing", state="visible", timeout=5000)
         page.click("#tv-find")
         page.wait_for_selector("#tv-pairing .tv-found li", timeout=5000)
-        assert page.locator("#tv-pairing .tv-found li").count() == 2                    # the two entries that are TVs
+        assert page.locator("#tv-pairing .tv-found li").count() == 1                    # only the entry with a usable host can be selected
         assert errors == []
         page.close()
 
@@ -8333,7 +8333,7 @@ def test_an_unpaired_room_shows_the_pairing_card_not_a_dead_remote(browser):
         assert card.locator("h2").inner_text() == "Pair the TV"
         assert " ".join(card.inner_text().split()).startswith(
             "Pair the TV This room is set up for the TV at 10.0.0.41. Tap Pair, then accept the request that appears on the TV, using the TV's own remote. You only do this once.")
-        assert "tv.host" in card.inner_text() and "/etc/croom/config.yaml on the room's Pi" in card.inner_text()     # to use another TV: the file, on the Pi
+        assert "Find TVs and Connect" in card.inner_text()
         assert status_line(page) == "TV at 10.0.0.41 · Not paired yet"
         assert card.locator("#tv-pair").inner_text().strip() == "Pair" and card.locator("#tv-find").inner_text().strip() == "Find TVs"
         page.click("#tv-pair")
@@ -8388,10 +8388,13 @@ def test_find_tvs_lists_the_tvs_with_their_addresses_and_tags_this_rooms_own(bro
         page.wait_for_selector("#tv-pairing .tv-found li", timeout=5000)
         rows = card.locator(".tv-found li")
         assert rows.count() == 3 and "Found on the network" in card.inner_text()
-        assert [" ".join(t.split()) for t in rows.all_inner_texts()] == ["Boardroom TV This room's TV 10.0.0.41", "Lobby TV 10.0.0.57", "LG TV 10.0.0.60"]   # a TV with no name is an LG TV
+        for row, name, address in zip(rows.all(), ["Boardroom TV", "Lobby TV", "LG TV"], ["10.0.0.41", "10.0.0.57", "10.0.0.60"]):
+            assert row.locator(".tv-who").inner_text().startswith(name)
+            assert row.locator(".tv-addr").inner_text() == address
         assert card.locator(".tv-found .tv-tag").count() == 1 and card.locator(".tv-found li").nth(0).locator(".tv-tag").count() == 1
-        assert card.locator(".tv-found li:last-child").inner_text().split()[-1] == "10.0.0.60"
-        assert page.locator("#tv-pairing a, #tv-pairing .tv-found button").count() == 0         # rows are not links or buttons: the address is for the config file
+        assert card.locator(".tv-found li:last-child .tv-addr").inner_text() == "10.0.0.60"
+        assert card.locator(".tv-found button").count() == 3
+        assert page.locator("#tv-pairing a").count() == 0
         assert "udhisapi" not in page.locator("#tv-pairing").inner_text()        # and the address of its description is nobody's business
         assert [(m, r) for m, r, *_ in seen] == [("GET", "tv/discover")]
         page.close()
@@ -8438,13 +8441,15 @@ def test_a_room_with_no_tv_set_up_says_so_and_offers_find_tvs(browser):
             card = page.locator("#tv-not-set-up")
             assert card.is_visible() and page.locator("#tv-remote").is_hidden() and page.locator("#tv-pairing").is_hidden()
             assert card.locator("h2").inner_text() == "No TV is set up for this room"
-            assert "tv.host" in card.inner_text() and "/etc/croom/config.yaml on the room's Pi" in card.inner_text()    # the way to set one up: the file, on the Pi
+            assert "Tap Connect to save your selection" in card.inner_text()
             assert page.locator("#tv-pair").is_hidden()                          # nothing to pair yet
             assert page.locator("[data-tv]:visible").count() == 0
             assert status_line(page) == "TV · Not set up"
             page.click("#tv-find-unset")
             page.wait_for_selector("#tv-not-set-up .tv-found li", timeout=5000)
-            assert " ".join(card.locator(".tv-found li").inner_text().split()) == "Boardroom TV 10.0.0.41"   # nothing is this room's: none is set up
+            assert card.locator(".tv-found li .tv-who").inner_text().startswith("Boardroom TV")
+            assert card.locator(".tv-found li .tv-addr").inner_text() == "10.0.0.41"
+            assert card.get_by_role("button", name="Connect", exact=True).is_enabled()
             assert card.locator(".tv-tag").count() == 0
             page.close()
 
@@ -8681,28 +8686,28 @@ def test_the_tv_view_stacks_on_a_phone_without_scrolling_sideways(browser, state
 def test_every_icon_in_the_tv_view_draws_at_the_size_of_its_text_and_costs_no_height(browser):
     with PageServer(tv=RemoteTv(), discover=StubSearch([BOARDROOM])) as server:
         page = tv_page(browser, server)
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-power", "#icon-monitor", "#icon-home", "#icon-menu",
+        assert shown_icons(page) == ["#icon-tv", "#icon-settings", "#icon-back", "#icon-locate", "#icon-x-circle", "#icon-power", "#icon-monitor", "#icon-home", "#icon-menu",
                                      "#icon-volume", "#icon-up", "#icon-down",
                                      "#icon-return", "#icon-exit", "#icon-info", "#icon-list",
                                      "#icon-rewind", "#icon-play", "#icon-pause", "#icon-stop", "#icon-fast-forward",
                                      "#icon-pointer", "#icon-monitor", "#icon-touchpad"]
         page.click("#tv-input")
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-check", "#icon-exit",
+        assert shown_icons(page) == ["#icon-tv", "#icon-settings", "#icon-back", "#icon-locate", "#icon-x-circle", "#icon-check", "#icon-exit",
                                      "#icon-return", "#icon-exit", "#icon-info", "#icon-list",
                                      "#icon-rewind", "#icon-play", "#icon-pause", "#icon-stop", "#icon-fast-forward",
                                      "#icon-pointer", "#icon-monitor", "#icon-touchpad"]
         page.close()
     with PageServer(tv=RemoteTv(paired=False), discover=StubSearch([BOARDROOM])) as server:
         page = tv_page(browser, server)
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-tv", "#icon-locate", "#icon-touchpad"]    # (the touchpad alone: no TV to point at)
+        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-locate", "#icon-tv", "#icon-locate", "#icon-touchpad"]    # (the touchpad alone: no TV to point at)
         page.close()
     with PageServer(tv=RemoteTv(refused=True)) as server:
         page = tv_page(browser, server)
-        assert shown_icons(page) == ["#icon-settings", "#icon-back", "#icon-x-circle", "#icon-tv", "#icon-touchpad"]
+        assert shown_icons(page) == ["#icon-tv", "#icon-settings", "#icon-back", "#icon-locate", "#icon-x-circle", "#icon-tv", "#icon-touchpad"]
         page.close()
     with PageServer(tv=RemoteTv(on=False, reachable=False, volume=None)) as server:
         page = tv_page(browser, server)
-        assert shown_icons(page)[:5] == ["#icon-settings", "#icon-back", "#icon-power", "#icon-x-circle", "#icon-power"]   # Turn on, Forget TV, and Power
+        assert shown_icons(page)[:7] == ["#icon-tv", "#icon-settings", "#icon-back", "#icon-power", "#icon-locate", "#icon-x-circle", "#icon-power"]   # TV Remote, Options, Back, Turn on, Change TV, Forget TV, and Power
         assert shown_icons(page)[-3:] == ["#icon-pointer", "#icon-monitor", "#icon-touchpad"]                              # (Pointer works on a TV that is off: what it cannot take comes back in words)
         page.close()
     with PageServer() as server:

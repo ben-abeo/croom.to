@@ -63,6 +63,9 @@
   // The idle camera preview (spec 2026-10-08, section 4.7): on while the room page's Camera panel is
   // open and no meeting runs. One stream at a time, and every way out stops its tracks, so the camera
   // is free again before a meeting provider needs it.
+  // The MeetUp films in 4K (Ben, 2026-10-25): asked for nothing more, Chromium opens a camera at 640 by 480. Ideals, so a camera, or a Pi, that
+  // cannot give that much gives its best instead of no picture.
+  const PREVIEW_SIZE = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } };
   const preview = (function () {
     const video = el("camera-preview");
     const caption = el("preview-caption");
@@ -102,7 +105,7 @@
       opening = true;
       let opened = null;
       try {
-        opened = await navigator.mediaDevices.getUserMedia({ video: true });
+        opened = await navigator.mediaDevices.getUserMedia({ video: PREVIEW_SIZE });
       } catch (e) {
         // no camera, no permission or a busy camera: the caption says so, and the next poll tries again
       }

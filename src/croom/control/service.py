@@ -1101,6 +1101,17 @@ class ControlService(Service):
         finally:
             self._mouse_waits.discard(task)
 
+    def _pointer_in_use(self) -> None:
+        """The touchpad drove the room Pi's mouse: the TV shows its pointer for a moment (it is hidden there otherwise; MeetingService and
+        TvDisplay.pointer_in_use)."""
+        hook = getattr(self._meeting, "pointer_in_use", None)
+        if hook is None:
+            return
+        try:
+            hook()
+        except Exception:  # noqa: BLE001 - the pointer is a nicety: the mouse has moved whatever the TV makes of it
+            logger.debug("The TV did not take the pointer's use", exc_info=True)
+
     async def _pointer_message(self, relay: PointerRelay, text: str) -> Optional[str]:
         """Hand one frame to the relay: None when it was carried out, else the words to answer it with. Whatever goes wrong is words
         and not the end of the socket: the relay's own refusals as they are, anything else (a bug, a library) as a reason on one line,
@@ -1111,6 +1122,8 @@ class ControlService(Service):
             return BAD_MESSAGE
         try:
             await relay.handle(message)
+            if isinstance(message, dict) and message.get("target") == "pi":
+                self._pointer_in_use()
         except TvError as e:
             return str(e)
         except Exception as e:  # noqa: BLE001 - whatever it was, the page is told in words and the socket goes on

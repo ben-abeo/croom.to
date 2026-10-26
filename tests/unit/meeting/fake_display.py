@@ -13,7 +13,11 @@ class FakeDisplay:
         self.claimed = 0
         self.started = 0
         self.stopped = 0
+        self.pointer_uses = 0
         self.context = getattr(page, "context", None)
+
+    def pointer_in_use(self):
+        self.pointer_uses += 1
 
     async def start(self):
         self.started += 1

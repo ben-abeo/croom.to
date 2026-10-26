@@ -25,6 +25,7 @@
       <p id="clock" class="clock"></p>
       <p id="date" class="date"></p>
     </div>
+    <button type="button" id="open-touchpad" class="button quiet nav" data-icon="touchpad" hidden>Touchpad</button>
     <button type="button" id="open-tv-remote" class="button quiet nav" data-icon="tv" hidden>TV Remote</button>
     <button type="button" id="open-options" class="button quiet nav" data-icon="settings">Options</button>
   </div>
@@ -139,37 +140,47 @@
   </section>
 
   <section class="view" data-view="meeting">
-    <p id="meeting-detail" class="detail"></p>
-    <p id="meeting-message" class="message" role="status"></p>
-    <p id="meeting-notice" class="notice"></p>
-    <section id="meeting-dialog" class="dialog-card" hidden>
-      <div class="dialog-words">
-        <p id="dialog-title" class="kicker"></p>
-        <p id="dialog-text" class="detail"></p>
-        <p id="dialog-message" class="message" role="status"></p>
-      </div>
-      <div id="dialog-actions" class="actions"></div>
+    <section class="meeting-hero" aria-label="The meeting">
+      <p class="kicker meeting-live"><span class="live-dot" aria-hidden="true"></span><span id="meeting-kicker"></span></p>
+      <p id="meeting-detail" class="detail"></p>
+      <p id="meeting-clock" class="meeting-clock"></p>
+      <ul id="meeting-facts" class="meeting-facts"></ul>
+      <p id="meeting-notice" class="notice"></p>
+      <p id="meeting-message" class="message" role="status"></p>
+      <div id="meeting-leave" class="actions meeting-leave"></div>
     </section>
-    <div id="meeting-actions" class="actions meeting-actions"></div>
-    <div id="meeting-secondary" class="actions meeting-secondary"></div>
-    <section class="sound-section">
-      <p class="kicker">Sound</p>
-      <p id="sound-note" class="note"></p>
-      <div id="sound-panel" class="sound" hidden>
-        <p id="sound-device" class="device"></p>
-        <label class="visually-hidden" for="volume-slider">Volume</label>
-        <input id="volume-slider" type="range" min="0" max="100" step="1" value="0">
-        <div class="sound-buttons">
-          <button type="button" id="quieter" class="button quiet" data-icon="volume">Quieter</button>
-          <span id="volume-level" class="level" aria-live="polite"></span>
-          <button type="button" id="louder" class="button quiet" data-icon="volume">Louder</button>
-          <button type="button" id="speaker-mute" class="button quiet" aria-pressed="false" data-icon="volume">Mute speaker</button>
+    <div class="meeting-main">
+      <section id="meeting-dialog" class="dialog-card" hidden>
+        <div class="dialog-words">
+          <p id="dialog-title" class="kicker"></p>
+          <p id="dialog-text" class="detail"></p>
+          <p id="dialog-message" class="message" role="status"></p>
+        </div>
+        <div id="dialog-actions" class="actions"></div>
+      </section>
+      <div id="meeting-actions" class="actions meeting-actions"></div>
+      <div id="meeting-secondary" class="actions meeting-secondary"></div>
+      <div class="meeting-dock">
+        <section class="sound-section">
+          <p class="kicker">Sound</p>
+          <p id="sound-note" class="note"></p>
+          <div id="sound-panel" class="sound" hidden>
+            <p id="sound-device" class="device"></p>
+            <label class="visually-hidden" for="volume-slider">Volume</label>
+            <input id="volume-slider" type="range" min="0" max="100" step="1" value="0">
+            <div class="sound-buttons">
+              <button type="button" id="quieter" class="button quiet" data-icon="volume">Quieter</button>
+              <span id="volume-level" class="level" aria-live="polite"></span>
+              <button type="button" id="louder" class="button quiet" data-icon="volume">Louder</button>
+              <button type="button" id="speaker-mute" class="button quiet" aria-pressed="false" data-icon="volume">Mute speaker</button>
+            </div>
+          </div>
+        </section>
+        <div class="menu">
+          <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
+          <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>
         </div>
       </div>
-    </section>
-    <div class="menu">
-      <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
-      <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>
     </div>
   </section>
 

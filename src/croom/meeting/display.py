@@ -39,6 +39,16 @@ DARK_PAGE = "data:text/html,<title>Crystal Meet</title><body style='margin:0;bac
 WILDCARD_HOSTS = ("", "0.0.0.0", "::")
 THROWAWAY_PREFIX = "croom-tv-"   # a guest's profile folder: croom-tv-<pid of the agent>-<random>, in the temp folder
 
+# The pointer is hidden on the TV, the screensaver and a meeting alike, in every page and frame the browser shows, unless the page's
+# root says it is shown (data-croom-pointer): the table's touchpad, driving the room Pi's mouse, says so for a moment (pointer_in_use).
+# A style sheet of the document's own, added before the page's scripts run, so a page's own cursor rules lose to it.
+HIDE_POINTER = """(() => {
+  const css = "html:not([data-croom-pointer]), html:not([data-croom-pointer]) * { cursor: none !important; }";
+  const add = () => { const s = document.createElement("style"); s.dataset.croom = "pointer"; s.textContent = css; document.documentElement.appendChild(s); };
+  if (document.documentElement) add(); else document.addEventListener("readystatechange", add, { once: true });
+})()"""
+SHOW_POINTER = "(shown) => { if (shown) document.documentElement.setAttribute('data-croom-pointer', ''); else document.documentElement.removeAttribute('data-croom-pointer'); }"
+
 
 def _alive_pid(pid: int) -> bool:
     try:
@@ -51,6 +61,7 @@ def _alive_pid(pid: int) -> bool:
 
 
 class TvDisplay:
+    POINTER_SHOWN_S = 5.0   # how long the pointer stays after the touchpad last moved the room Pi's mouse
     BASE_ARGS = [
         "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
@@ -79,6 +90,8 @@ class TvDisplay:
         self._throwaway: Optional[Path] = None   # a guest's profile folder, made at start and removed at stop
         self._context: Optional["BrowserContext"] = None
         self._page: Optional["Page"] = None
+        self._pointer_shown = False
+        self._pointer_hide: Optional[asyncio.TimerHandle] = None
         self._retry: Optional[asyncio.Task] = None
         self._parked = False   # True while the page belongs to the screensaver, False while a provider has it
         self._wanted = False   # True from start() to stop(): page() may start the browser again
@@ -158,6 +171,7 @@ class TvDisplay:
         try:
             self._playwright = await async_playwright().start()
             self._context = await self._launch(folder)
+            await self._context.add_init_script(HIDE_POINTER)
             self._adopt(self._context.pages[0] if self._context.pages else await self._context.new_page())
         except BaseException:   # a failed launch, or a caller cancelled while waiting for it
             await self._stop()   # the driver and a guest's folder go with it
@@ -178,6 +192,10 @@ class TvDisplay:
     async def _stop(self) -> None:
         """Lock held. Closes whatever is open and removes a guest's folder; a half-started display is fine."""
         self._cancel_retry()
+        if self._pointer_hide is not None:
+            self._pointer_hide.cancel()
+            self._pointer_hide = None
+        self._pointer_shown = False
         if self._context is not None:
             try:
                 await asyncio.wait_for(self._context.close(), timeout=self.CLOSE_TIMEOUT_S)
@@ -220,6 +238,36 @@ class TvDisplay:
         task = asyncio.ensure_future(coro)
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
+
+    # ------------------------------------------------------------------
+    # The pointer: hidden unless the table's touchpad is moving the room Pi's mouse
+    # ------------------------------------------------------------------
+
+    def pointer_in_use(self) -> None:
+        """The touchpad moved, clicked or scrolled the room Pi's mouse: show the pointer on the TV, and hide it again POINTER_SHOWN_S after
+        the last of these. Called on the event loop, many times a second while a finger moves; nothing when there is no page to show it on."""
+        if self._page is None or self._page.is_closed():
+            return
+        loop = asyncio.get_running_loop()
+        if self._pointer_hide is not None:
+            self._pointer_hide.cancel()
+        self._pointer_hide = loop.call_later(self.POINTER_SHOWN_S, lambda: self._spawn(self._show_pointer(False)))
+        if not self._pointer_shown:
+            self._pointer_shown = True
+            self._spawn(self._show_pointer(True))
+
+    async def _show_pointer(self, shown: bool) -> None:
+        """Mark every frame of the page the TV shows: a frame that has gone, or a page between loads, is skipped (a page that loads anew
+        hides the pointer by itself)."""
+        self._pointer_shown = shown
+        page = self._page
+        if page is None or page.is_closed():
+            return
+        for frame in page.frames:
+            try:
+                await frame.evaluate(SHOW_POINTER, shown)
+            except Exception:  # noqa: BLE001 - the frame went, or is between loads
+                logger.debug("A frame of the TV's page did not take the pointer's state", exc_info=True)
 
     # ------------------------------------------------------------------
     # The page

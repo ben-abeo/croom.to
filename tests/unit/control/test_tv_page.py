@@ -156,9 +156,10 @@ def test_preview_never_shows_during_a_meeting(camera_browser):
 CAMERA_PROBE = """
 (() => {
   const real = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-  const probe = (window.__camera = { calls: 0, streams: [], hold: false, fail: false, held: [] });
+  const probe = (window.__camera = { calls: 0, streams: [], hold: false, fail: false, held: [], asked: [] });
   navigator.mediaDevices.getUserMedia = (constraints) => {
     probe.calls += 1;
+    probe.asked.push(constraints);
     if (probe.fail) return Promise.reject(new DOMException("No camera", "NotFoundError"));
     const open = () => real(constraints).then((stream) => { probe.streams.push(stream); return stream; });
     if (!probe.hold) return open();
@@ -221,6 +222,16 @@ def probed_tv(camera_browser):
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         yield SimpleNamespace(page=page, camera=camera, server=server)
         context.close()
+
+
+def test_the_preview_asks_the_camera_for_4k(probed_tv):
+    """The MeetUp films in 4K (Ben, 2026-10-25): the preview asks for 3840 by 2160 at 30 frames a second, as ideals, so a camera, or a Pi,
+    that cannot give that much gives its best instead of no picture. Asked for nothing, Chromium opens a camera at 640 by 480."""
+    page, camera = probed_tv.page, probed_tv.camera
+    camera.preview_on = True
+    page.wait_for_function(FRAMES, timeout=8000)
+    assert page.evaluate("window.__camera.asked") == [
+        {"video": {"width": {"ideal": 3840}, "height": {"ideal": 2160}, "frameRate": {"ideal": 30}}}]
 
 
 def test_switching_the_preview_off_releases_the_camera_and_a_new_preview_opens_afresh(probed_tv):

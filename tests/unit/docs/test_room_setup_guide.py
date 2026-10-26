@@ -355,7 +355,7 @@ def test_guide_step_four_lists_the_meeting_screens_rows_as_built_and_mute_only_f
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     text = " ".join(unescape(re.sub(r"<[^>]+>", "", html)).split())
     for needle in (
-        "During a call the page shows the meeting screen on its own: a first row of Mute, Turn camera off, Raise hand, Reactions and Leave, a second row of Captions, the view, Hide self view, Participants, Chat, Host (for a host) and TV (the section after this step shows them all), then the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next",
+        "During a call the page shows the meeting screen on its own, as a control deck: on the left the meeting's card, with the time in the call, who is in it, the chat that waits and Leave at its foot; on the right Mute, Turn camera off, Raise hand and Reactions as tiles, then Captions, the view, Hide self view, Participants, Chat, Host (for a host) (the section after this step shows them all), and at the foot the volume, Camera for a preset or a nudge, and Upcoming meetings to see what is booked next, with Touchpad and TV in the top bar",
         "A host or co-host also gets Mute (only for someone not already muted) and Remove on each other person (Tap again to remove)",
     ):
         assert needle in text, needle
@@ -432,7 +432,7 @@ def test_guide_describes_the_remote_on_the_table_and_the_touchpad_modes_and_how_
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     text = visible_text(html)
     for needle in (
-        "Open the remote. Tap Options, then TV. During a meeting tap TV, the last button of the second row",
+        "Open the remote. Tap Options, then TV. During a meeting tap TV in the top bar. Beside it, Touchpad opens the full-screen touchpad on the room Pi's mouse in one tap",
         f"the remote returns by itself after {words(IDLE_RETURN_MIN)} minutes with no touch, or {words(TV_RETURN_MIN)} minutes during a meeting",
         "The top line names the TV and says what it shows, for example Boardroom TV · On · HDMI 1 (Crystal Meet)",
         "so it can differ from the name Find TVs listed for the same TV",

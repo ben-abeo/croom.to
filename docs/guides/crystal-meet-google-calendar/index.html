@@ -117,11 +117,11 @@ pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--
 <section class="block">
 <div class="step"><span class="badge">3</span><h2>Share each room calendar with the service account</h2></div>
 <ul>
-  <li><strong>Allow full sharing to outside addresses, once.</strong> In the Admin console go to <span class="ui">Apps › Google Workspace › Calendar › Sharing settings</span>. Under <span class="ui">External sharing options for secondary calendars</span> choose <span class="ui">Share all information, but outsiders cannot change calendars</span> and save. Room calendars count as secondary calendars, and the service account is an outside address.</li>
+  <li><strong>Allow full sharing to outside addresses, once.</strong> In the Admin console go to <span class="ui">Apps › Google Workspace › Calendar › Sharing settings</span>. Under <span class="ui">External sharing options for secondary calendars</span> choose <span class="ui">Share all information, and outsiders can change calendars</span> and save. Room calendars count as secondary calendars, and the service account is an outside address: the rooms book themselves from the door sign and the room page, so the account has to be able to add events. Nothing changes for anyone a calendar is not shared with.</li>
   <li><strong>Subscribe to the rooms.</strong> Open <span class="chip">calendar.google.com</span>. Next to <span class="ui">Other calendars</span> press <span class="ui">+</span>, choose <span class="ui">Browse resources</span> and tick the three rooms. They appear under Other calendars.</li>
-  <li><strong>Share each room.</strong> Hover the room's name, open its menu, choose <span class="ui">Settings and sharing</span>, then under <span class="ui">Share with specific people or groups</span> press <span class="ui">Add people and groups</span>, paste the service account email, set the permission to <span class="ui">See all event details</span>, and send. Repeat for each room.</li>
+  <li><strong>Share each room.</strong> Hover the room's name, open its menu, choose <span class="ui">Settings and sharing</span>, then under <span class="ui">Share with specific people or groups</span> press <span class="ui">Add people and groups</span>, paste the service account email, set the permission to <span class="ui">Make changes to events</span>, and send. Repeat for each room. A room shared with <span class="ui">See all event details</span> instead shows its bookings but cannot be booked at its screens: what is booked there is kept on the device until the sharing is changed.</li>
 </ul>
-<p class="see">You should now see the service account listed under each room's sharing settings with See all event details.</p>
+<p class="see">You should now see the service account listed under each room's sharing settings with Make changes to events.</p>
 </section>
 
 <section class="block">
@@ -163,7 +163,8 @@ Bookings in the next 7 days:
 <h2>Troubleshooting</h2>
 <div class="trouble">
   <div class="card"><h3>The check says "not configured"</h3><p>It names the cause: no key path, a missing key file, or an empty or placeholder address. Check that <span class="chip">/etc/croom/google-service-account.json</span> exists, fix <span class="chip">/etc/croom/config.yaml</span>, then restart the service and run the check again.</p></div>
-  <div class="card"><h3>The check says "not found or not shared"</h3><p>The address is wrong or step 3 was missed for this room. Copy the resource email again and share the room calendar with the exact service account email. If Google refuses "See all event details", do the sharing setting at the start of step 3 first.</p></div>
+  <div class="card"><h3>The check says "not found or not shared"</h3><p>The address is wrong or step 3 was missed for this room. Copy the resource email again and share the room calendar with the exact service account email. If Google refuses "Make changes to events", do the sharing setting at the start of step 3 first.</p></div>
+  <div class="card"><h3>The check says "for reading only"</h3><p>The room is shared with See all event details. Change the service account's permission on that room to <span class="ui">Make changes to events</span>. Bookings made at the room's screens in the meantime are sent on the device's next poll, within a minute.</p></div>
   <div class="card"><h3>The check says it could not sign in</h3><p>The file is not a service account JSON key (download a new one from the account's Keys page), the Calendar API is not enabled in that project, or the key was deleted in the Cloud console.</p></div>
   <div class="card"><h3>A booking is missing on the room page</h3><p>The room was not added to the event, the room declined it, or it is more than 7 days away. Cancelled bookings never show. Check the device's clock and time zone if today's bookings look shifted.</p></div>
   <div class="card"><h3>The booking shows but Join now is missing</h3><p>The event has no video link the device can join. Add a Google Meet, use the Zoom add-on, or paste the Zoom invitation link. Its passcode can be in the link, in the invitation text, or typed in the room page's <span class="ui">Passcode</span> field.</p></div>
@@ -173,7 +174,7 @@ Bookings in the next 7 days:
 </section>
 <div class="callout">
   <p class="kicker">Good to know</p>
-  <p>The key can only read the calendars you shared with it. To take that away, delete the key on the account's Keys page. To replace it, create a new key and repeat step 4 on each device.</p>
+  <p>The key can only read and book the calendars you shared with it, and it only ever adds, shortens or deletes the bookings made at the rooms' own screens. To take that away, delete the key on the account's Keys page. To replace it, create a new key and repeat step 4 on each device.</p>
 </div>
 
 </body>

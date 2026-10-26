@@ -88,7 +88,9 @@ async def test_use_now_then_end_now(client_factory, rooms, google):  # noqa: F81
     status = await (await client.get("/api/status")).json()
     assert status["calendar"]["booking"]["now"]["minutes"] == []          # the room is taken now
     assert [e["title"] for e in (await (await client.get("/api/calendar/events")).json())["events"]] == ["Ben"]
-    response = await client.post(f"/api/bookings/{booking['booking_id']}/end", json={})
+    refused = await client.post(f"/api/bookings/{booking['booking_id']}/end", json={"source": "door sign"})
+    assert refused.status == 403 and "touch screen" in (await refused.json())["error"]      # never from the hallway
+    response = await client.post(f"/api/bookings/{booking['booking_id']}/end", json={"source": "room page"})
     assert response.status == 200
     status = await (await client.get("/api/status")).json()
     assert status["calendar"]["booking"]["now"]["minutes"][-1] == 240
@@ -106,7 +108,7 @@ async def test_what_is_refused_and_why(client_factory, rooms, google):  # noqa: 
         response = await client.post("/api/bookings", json=bad)
         assert response.status == 400, bad
     assert (await client.post("/api/bookings", data="start=now")).status == 415   # JSON only, as every POST of the room's
-    assert (await client.post("/api/bookings/nothing-like-it/end", json={})).status == 404
+    assert (await client.post("/api/bookings/nothing-like-it/end", json={"source": "room page"})).status == 404
 
 
 async def test_a_booking_made_while_google_is_down_is_accepted_and_waits(client_factory, rooms, google):  # noqa: F811

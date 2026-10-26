@@ -1247,6 +1247,10 @@ class ControlService(Service):
             return rejection
         if self._bookings is None:
             return self._error_response(self.NO_BOOKINGS, 503)
+        data = await self._read_object(request)
+        if change == "end" and (data or {}).get("source") != "room page":
+            # A meeting in progress is ended at the room's own touch screen, not from the hallway (spec 2026-10-25).
+            return self._error_response("End now is on the room's touch screen", 403)
         try:
             booking = await getattr(self._bookings, change)(request.match_info["key"])
         except BookingError as e:

@@ -207,6 +207,7 @@ class RoomBookings:
         self._online = False
         self._problem: Optional[str] = None
         self._lock = asyncio.Lock()
+        self._revision = 0       # counts the changes to what the room shows: a screen reads the day again when it moves
         self._records: List[Booking] = self._load()
         self._google, self._saved_at = self.cached()
 
@@ -223,6 +224,7 @@ class RoomBookings:
         return records
 
     def _save(self) -> None:
+        self._revision += 1
         cutoff = self.clock() - KEEP_ENDED
         self._records = [b for b in self._records if b.pending or b.end > cutoff]
         _write_json(self.store_path, [b.to_json() for b in self._records])
@@ -258,6 +260,8 @@ class RoomBookings:
         or deleted there)."""
         now = self.clock()
         window_start = now - timedelta(hours=1)
+        if [event_to_cache(e) for e in events] != [event_to_cache(e) for e in self._google]:
+            self._revision += 1
         self._google = list(events)
         self._saved_at = now
         self._online = True
@@ -319,6 +323,7 @@ class RoomBookings:
             "offline_since": self._saved_at.isoformat() if not self._online and self._saved_at else None,
             "pending": sum(1 for b in self._records if b.pending),
             "problem": self._problem,
+            "revision": self._revision,
             "hours": {"start": self.start_hour.strftime("%H:%M"), "end": self.end_hour.strftime("%H:%M")},
             "now": {"minutes": minutes, "until": until.isoformat() if until else None},
         }

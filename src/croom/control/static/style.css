@@ -59,6 +59,7 @@ body { display: flex; flex-direction: column; height: auto; min-height: 100vh; }
 .screen { position: relative; flex: 1 1 auto; padding: clamp(16px, 2.5vh, 24px) var(--gutter) var(--gutter); }   /* the containing block of the visually hidden labels, so they scroll with the screen */
 .view { display: none; gap: clamp(16px, 2.5vh, 24px); align-content: start; }
 body[data-view="idle"] .view[data-view="idle"],
+body[data-view="booking"] .view[data-view="booking"],
 body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
@@ -673,3 +674,27 @@ body.keyboard-open .schedule { display: none; }
 /* The screen ignores taps while it settles after its layout has moved, or after the view has changed in a meeting (app.js, settle): the whole
    screen, not the meeting screen alone, as a thumb aimed at one lands on the other. */
 body.settling .screen { pointer-events: none; }
+
+/* The booking steps (booking.js, spec 2026-10-25): a view of the idle mode, a day, its open start times, then a name and a length. */
+.booking { display: grid; gap: 16px; }
+.booking [hidden] { display: none !important; }   /* the steps hide what is not theirs to show; their own display rules would otherwise win */
+.bk-head { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.bk-title { margin: 0; font-size: 1.8rem; font-weight: 600; }
+.bk-days { display: flex; flex-wrap: wrap; gap: 10px; }
+.bk-day { flex-direction: column; align-items: flex-start; gap: 0; min-width: 5.5rem; padding: 8px 16px; }
+.bk-day[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
+.bk-date { font-size: 0.85rem; font-weight: 400; opacity: 0.85; }
+.bk-times { display: grid; grid-template-columns: repeat(auto-fill, minmax(7.5rem, 1fr)); gap: 10px; max-height: 50vh; overflow-y: auto; }
+.bk-time { justify-content: center; padding: 12px 8px; font-variant-numeric: tabular-nums; }
+.bk-note { margin: 0; color: var(--periwinkle-300); }
+.bk-note:empty { display: none; }
+.bk-form { display: grid; gap: 16px; max-width: 36rem; }
+.bk-when { margin: 0; font-size: 1.4rem; font-weight: 600; }
+.bk-label { display: grid; gap: 6px; color: var(--periwinkle-300); font-weight: 600; }
+.bk-name, .bk-length { font: inherit; font-size: 1.2rem; color: inherit; background: transparent; border: 2px solid var(--periwinkle-300); border-radius: var(--radius-sm, 8px); padding: 12px 14px; }
+.bk-length option { color: var(--ink-900, #1C2024); background: #fff; }
+.bk-actions { display: flex; flex-wrap: wrap; gap: 12px; }
+.bk-error { margin: 0; color: #FFB4B6; }
+.bk-error:empty { display: none; }
+.bk-done { margin: 0; font-size: 1.4rem; font-weight: 600; max-width: 40ch; }
+.button.armed { background: var(--surface-900); border-color: var(--warn-bar); }

@@ -220,11 +220,16 @@
   const ongoingEvent = (now) => model.events.filter((ev) => startMs(ev) <= now && endMs(ev) > now).sort((a, b) => endMs(a) - endMs(b))[0] || null;
   const upcomingEvent = (now) => model.events.filter((ev) => startMs(ev) > now).sort((a, b) => startMs(a) - startMs(b))[0] || null;
   const earliest = (a, b) => (!a ? b : !b ? a : startMs(a) <= startMs(b) ? a : b);
+  // The room's day is shown while Google answers, and while it does not from what the room last read (spec 2026-10-25): the status says
+  // since when, in calendar.booking.offline_since.
+  const booking = (cal) => (cal && cal.booking) || null;
+  const scheduled = (cal) => !!(cal && (cal.connected || (booking(cal) && booking(cal).offline_since)));
 
   function render() {
     if (!model.status && !model.offline) return; // still loading: wait for the first status result
     if (model.offline) {
       setStatus("offline", "Sign not connected", "Check that Crystal Meet is running on the room's device.");
+      el("sign-actions").hidden = true;   // nothing to book with: the room cannot be reached
       fitRoomName();   // its two lines of detail are a taller status than the one before
       return;
     }
@@ -256,26 +261,42 @@
     } else if (next) {
       setStatus("free", "Free until " + fmtTime(new Date(next.start_time)), "Next: " + next.title);
     } else {
-      setStatus("free", cal.connected ? "Free for the rest of the day" : "Free", cal.connected ? "Nothing else is booked in here today." : "");
+      setStatus("free", scheduled(cal) ? "Free for the rest of the day" : "Free", scheduled(cal) ? "Nothing else is booked in here today." : "");
     }
 
+    // A booking made, ended or cancelled at either screen, or a new read of the calendar, moves the revision: read the day again now, not
+    // at the minute's poll.
+    const revision = booking(cal) ? booking(cal).revision : null;
+    if (revision !== null && lastRevision !== null && revision !== lastRevision) refreshEvents();
+    lastRevision = revision;
     renderEvents(cal, now, current);
+    renderActions(cal, current, IN_PROGRESS.includes(m.state));
     drawView();
     drawScore();
   }
 
   // The next bookings as rows: the time, the title and, for a video meeting, the platform. The one in progress is ringed
   // in the status colour (sign.css).
+  // A booking made at the room's screens (it has a booking_id) says when it has not reached Google yet, or what it is double-booked with,
+  // and one still to start has Cancel (a second tap confirms it). The list is drawn again only when what it shows changes, so that a
+  // poll between the two taps of a Cancel leaves the button as it is.
+  let eventsKey = null;
+  let lastRevision = null;
   function renderEvents(cal, now, current) {
     const list = el("events");
     const note = el("calendar-note");
+    const upcoming = scheduled(cal) ? model.events.filter((ev) => new Date(ev.end_time).getTime() > now).slice(0, TODAY_ROWS) : [];
+    const b = booking(cal);
+    const offline = b && b.offline_since && !cal.connected ? "Calendar offline since " + fmtTime(new Date(b.offline_since)) + ". Bookings made here will sync." : "";
+    const key = JSON.stringify([scheduled(cal), current && current.id, upcoming, offline, Boolean(b)]);
+    if (key === eventsKey) return;
+    eventsKey = key;
     list.replaceChildren();
-    if (!cal.connected) {
+    if (!scheduled(cal)) {
       note.textContent = "";
       return;
     }
-    const upcoming = model.events.filter((ev) => new Date(ev.end_time).getTime() > now).slice(0, TODAY_ROWS);
-    note.textContent = upcoming.length ? "" : "Nothing else scheduled today.";
+    note.textContent = [upcoming.length ? "" : "Nothing else scheduled today.", offline].filter(Boolean).join(" ");
     for (const ev of upcoming) {
       const li = document.createElement("li");
       li.className = "event";
@@ -288,13 +309,20 @@
       title.className = "title";
       title.textContent = ev.title;
       text.append(title);
-      if (platformNames[ev.meeting_platform]) {
+      const about = platformNames[ev.meeting_platform] || (ev.clash ? "Double-booked with " + ev.clash : ev.pending ? "Not in Google Calendar yet" : "");
+      if (about) {
         const who = document.createElement("p");
         who.className = "who";
-        who.textContent = platformNames[ev.meeting_platform];
+        who.textContent = about;
         text.append(who);
       }
       li.append(time, text);
+      if (b && ev.booking_id && startMs(ev) > now) {
+        li.classList.add("mine");
+        const cancel = make("button", "button small cancel");
+        cancel.type = "button";
+        li.append(window.CroomBooking.confirmButton(cancel, "Cancel", "Tap again to cancel", ev.booking_id, "cancel", "door sign", bookingChanged));
+      }
       list.append(li);
     }
   }
@@ -337,11 +365,12 @@
   // every render, and when the week opens or closes, so that those work while the room cannot be reached (render returns early then).
   function drawView() {
     const cal = model.status && model.status.calendar;
-    const connected = !!(cal && cal.connected);
-    const showWeek = weekOpen && connected;
-    el("today").hidden = !connected || showWeek;
+    const connected = scheduled(cal);
+    const showBooking = bookingOpen;
+    const showWeek = weekOpen && connected && !showBooking;
+    el("today").hidden = !connected || showWeek || showBooking;
     el("week").hidden = !showWeek;
-    setData("view", showWeek ? "week" : "today");
+    setData("view", showBooking ? "book" : showWeek ? "week" : "today");
     fitRoomName();
     if (showWeek) renderWeek(Date.now(), cal.current || ongoingEvent(Date.now()));
   }
@@ -503,6 +532,53 @@
     const at = usable.findIndex((e) => e.school === scoreShown);
     scoreShown = usable[(at + 1) % usable.length].school;
     drawScore();
+  }
+
+  // Book and Use now (spec 2026-10-25), under the room's status: Use now while the room is free long enough for 15 minutes, Book whenever
+  // the room has a calendar to book in. A meeting in progress is ended at the room's own touch screen, never from the hallway: the sign has
+  // no End now. Drawn again only when which of them show changes.
+  let actionsKey = null;
+  function renderActions(cal, current, inMeeting) {
+    const b = booking(cal);
+    const box = el("sign-actions");
+    const useNow = !!b && !current && !inMeeting && b.now.minutes.length > 0;
+    const key = JSON.stringify([Boolean(b), useNow]);
+    if (key === actionsKey) return;
+    actionsKey = key;
+    const buttons = [];
+    if (useNow) buttons.push(actionButton("Use now", "use-now", "primary", () => openBooking("now")));
+    if (b) buttons.push(actionButton("Book", "book", "", () => openBooking("book")));
+    box.replaceChildren(...buttons);
+    box.hidden = !buttons.length;
+    fitRoomName();
+  }
+
+  function actionButton(label, id, kind, onClick) {
+    const button = make("button", "button" + (kind ? " " + kind : ""), label);
+    button.type = "button";
+    button.id = id;
+    button.addEventListener("click", onClick);
+    return button;
+  }
+
+  // The booking steps (booking.js) take the sign's width while they are up; they close by themselves after a minute left alone.
+  let bookingOpen = false;
+  function openBooking(mode) {
+    const b = booking(model.status && model.status.calendar);
+    if (!b) return;
+    if (weekOpen) closeWeek();
+    bookingOpen = true;
+    drawView();
+    window.CroomBooking.open(el("booking"), {
+      mode: mode, source: "door sign", now: b.now,
+      onClose: (changed) => { bookingOpen = false; drawView(); if (changed) bookingChanged(); },
+    });
+  }
+
+  function bookingChanged() {
+    eventsKey = actionsKey = null;
+    refreshStatus();
+    refreshEvents();
   }
 
   function tick() {

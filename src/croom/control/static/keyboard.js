@@ -60,9 +60,13 @@
 
   const field = () => (input.hidden ? link : input);
   const inTray = (t) => Boolean(t && t.closest && t.closest(".key, .keyboard"));   // a key may be on the shelf: its row is not under the tray then
-  const macField = (target) => target && target.matches && target.matches('input[data-keyboard="mac"]');
+  // A field of a view of its own that the keys type into: a TV's MAC address (data-keyboard="mac") or a booking's name
+  // (data-keyboard="name", booking.js). The keys come up for it in the view it is in, and Done takes the place of Join: a name's
+  // Done sends its form, a MAC address's only puts the keys away.
+  const extraField = (target) => Boolean(target && target.matches && target.matches("input[data-keyboard]"));
+  const inView = (target) => { const v = target.closest(".view"); return Boolean(v) && v.dataset.view === P.view(); };
   const layer = () => layers.get(field()) || "letters";
-  const label = (key) => (key === "join" && macField(field()) ? "Done" :
+  const label = (key) => (key === "join" && extraField(field()) ? "Done" :
     LABELS[key] || (shift !== "off" && layer() === "letters" ? key.toUpperCase() : key));
 
   function keyButton(key) {
@@ -116,7 +120,7 @@
     else document.removeEventListener("touchstart", cancelTrayTouch, true);
   }
   function show() {
-    if ((P.view() !== "idle" && !(P.view() === "tv" && macField(field()))) || open) return;
+    if (open || !(extraField(field()) ? inView(field()) : P.view() === "idle")) return;
     open = true;
     trayTouches(true);
     place(layer());
@@ -176,7 +180,13 @@
     }
     if (key.startsWith("layer:")) { switchLayer(key.slice(6)); return; }
     if (key === "hide") { hide(); return; }
-    if (key === "join") { hide(); if (!macField(field())) P.submitForm(el("link-form")); return; }
+    if (key === "join") {
+      const target = field();
+      hide();
+      if (!extraField(target)) P.submitForm(el("link-form"));
+      else if (target.dataset.keyboard === "name" && target.form) target.form.requestSubmit();
+      return;
+    }
     if (key === "backspace") { edit("", true); return; }
     if (key === "space") { edit(" "); return; }
     edit(label(key));
@@ -277,25 +287,26 @@
     });
     for (const type of ["pointerdown", "click"]) target.addEventListener(type, () => { if (kiosk && !open) { aim(target); show(); } });
   }
-  // Discovery creates and replaces MAC fields. Delegated listeners cover each new row without retaining detached inputs.
+  // Discovery creates and replaces MAC fields, and the booking steps their name field. Delegated listeners cover each new one without
+  // retaining detached inputs.
   document.addEventListener("focusin", (e) => {
-    if (!macField(e.target)) return;
+    if (!extraField(e.target)) return;
     aim(e.target);
     if (kiosk) show();
   });
   document.addEventListener("focusout", (e) => {
-    if (!macField(e.target) || down.size) return;
-    if (e.relatedTarget && (box.contains(e.relatedTarget) || macField(e.relatedTarget))) return;
+    if (!extraField(e.target) || down.size) return;
+    if (e.relatedTarget && (box.contains(e.relatedTarget) || extraField(e.relatedTarget))) return;
     hide();
   });
   for (const type of ["pointerdown", "click"]) document.addEventListener(type, (e) => {
-    if (macField(e.target) && kiosk && !open) { aim(e.target); show(); }
+    if (extraField(e.target) && kiosk && !open) { aim(e.target); show(); }
   });
   box.addEventListener("pointerdown", (e) => e.preventDefault());   // the tray's gaps: no focus change either
   document.addEventListener("contextmenu", (e) => { if (inTray(e.target)) e.preventDefault(); }, true);   // a long press is no context menu on the keys either
   toggle.addEventListener("pointerdown", (e) => e.preventDefault());
   toggle.addEventListener("click", () => { if (open) { hide(); return; } show(); field().focus(); });
-  P.onViewChange((name) => { if (name !== "idle" || macField(input)) hide(); if (macField(input)) input = link; });
+  P.onViewChange((name) => { if (name !== "idle" || extraField(input)) hide(); if (extraField(input)) input = link; });
   const setClick = (on) => { clickOn = Boolean(on); };
   P.onRender((s) => { if (s.settings) setClick(s.settings.key_click !== false); });   // the room's setting, with every status
   // Nothing in the page calls this: it is the tests' hold on the keyboard. open and hide bring the keys up and put them away as a

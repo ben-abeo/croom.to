@@ -26,6 +26,7 @@ from types import SimpleNamespace
 import pytest
 from aiohttp import web
 
+from croom.calendar.bookings import RoomBookings
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.control import service as control_service
 from croom.control.service import SIGN_BACKGROUNDS, STATIC_DIR, ControlService, read_setting
@@ -39,6 +40,8 @@ from croom.tv.errors import TvError
 from tests.unit.control.test_service import (
     BOARDROOM, STUB_PEOPLE, StubCalendar, StubDevices, StubMeeting, StubMouse, StubSearch, StubTv, event, skip_if_day_ends_within,
 )
+from tests.unit.calendar.test_bookings import ROOM_CAL, FakeGoogle
+from tests.unit.control.test_bookings_api import BookingCalendar
 from tests.unit.scores.schedules import Feed, every_school, game, longest_names, schedule, texas_sample
 
 playwright = pytest.importorskip("playwright.sync_api")
@@ -50,7 +53,8 @@ class PageServer:
     model yet would give."""
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
-                 role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None):
+                 role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
+                 bookings=False):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -60,6 +64,9 @@ class PageServer:
         self.calendar_connected = calendar_connected
         self.port_arg = port
         self.schedules = schedules      # team id -> the schedule ESPN would answer; None leaves the room without a scoreboard
+        self.with_bookings = bookings   # the room books in its calendar (spec 2026-10-25): self.rooms keeps them, self.google is a fake Google
+        self.rooms = None
+        self.google = None
         self.feed = None                # the scoreboard's fake feed, once the server runs: what it was asked, and `down` to fail it
         self.devices = devices if devices is not None else StubDevices()
         self.tv = tv                                                       # the room's TV service: none is a room with no TV set up
@@ -94,9 +101,17 @@ class PageServer:
             self.feed = Feed(self.schedules)
             scores = ScoresService(self.feed, lambda: read_setting(store, "sign_scores"), interval_s=0.2, retry_s=0.2, check_s=0.05)
             await scores.start()
+        calendar = StubCalendar(events=self.events, connected=self.calendar_connected)
+        if self.with_bookings:
+            # Booking hours that cover the whole day, so that a test finds open times whatever the time it runs at.
+            self.rooms = RoomBookings(Path(self._settings_dir.name) / "bookings.json", Path(self._settings_dir.name) / "calendar-cache.json",
+                                      self.room_name, booking_start="00:00", booking_end="23:45")
+            self.google = FakeGoogle()
+            self.rooms.attach(self.google, ROOM_CAL)
+            calendar = BookingCalendar(self.rooms, self.events)
         service = ControlService(
             config=config,
-            meeting=self.meeting, calendar=StubCalendar(events=self.events, connected=self.calendar_connected),
+            meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
         )
         await service.start()

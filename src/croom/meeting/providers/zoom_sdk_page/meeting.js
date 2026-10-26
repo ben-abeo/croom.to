@@ -692,7 +692,13 @@
   const metDialog = (id) => dialogsSeen.find((d) => d.id === Number(id));
   const clean = (s) => String(s || "").replace(/\s+/g, " ").trim();
   const dialogButtons = (el) => Array.from(el.querySelectorAll("button")).filter((b) => clean(labelOf(b)));
-  const isOpen = (el) => el.isConnected && el.matches(DIALOG_SELECTOR) && dialogButtons(el).length > 0;
+  // Zoom keeps parts of its own interface in role="dialog" elements that ask nothing of anyone: the screen-share toolbar (Pause share,
+  // Stop Share) is one, in the page from the join on (seen on a room device, Oct 15). A dialog is one a person can see, and the share
+  // toolbar is never one, wherever it is drawn: answering it from the table would stop or pause a share.
+  const SHARE_TOOLBAR = ["stop share", "pause share"];
+  const drawn = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden" && !el.closest('[aria-hidden="true"]');
+  const shareToolbar = (el) => dialogButtons(el).some((b) => SHARE_TOOLBAR.includes(clean(labelOf(b)).toLowerCase()));
+  const isOpen = (el) => el.isConnected && el.matches(DIALOG_SELECTOR) && dialogButtons(el).length > 0 && drawn(el) && !shareToolbar(el);
   // Its title, its words and its buttons, as the client has them now. The title is the words of the title node without a button's: the
   // consent banner holds its OK button inside its title node. The words are the other text nodes, not a button's, a script's or a
   // style's, nor the footer's (a checkbox, a link); the banner has none, its description is only in its aria-label ("<title>
@@ -746,7 +752,8 @@
   new MutationObserver(() => {
     if (dialogTimer !== null || bridge.state !== "connected") return;
     dialogTimer = setTimeout(() => { dialogTimer = null; scanDialogs(); }, DIALOG_LOOK_MS);
-  }).observe(document.body, { childList: true, subtree: true });
+  // Attributes too: a dialog the client keeps in the page and shows by its style or class is one from the moment it can be seen.
+  }).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ["style", "class", "hidden", "aria-hidden"] });
   bridge.dialogs = () => Array.from(dialogs, ([el, id]) => dialogInfo(el, id));
   // Press the button the label names and see the dialog go: the client closes it when it takes the press, and a press it does not
   // take is a failure in words, not an answer. It is one of the page's presses, so it waits its turn among the controls. The look that

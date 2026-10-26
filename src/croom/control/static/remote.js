@@ -719,4 +719,7 @@
     else tvLeft();
   });
   P.onRender(renderTv);   // after every status the page draws (and once now, for a status that came before this script did)
+  // The meeting screen's Touchpad (app.js): the full-screen touchpad on a target, with the TV as the remote knows it; Done gives the focus back to
+  // the button that opened it.
+  window.croomRemote = { openTouchpad: (target, opener) => { const t = tvBlock(); T.surface.show({ target: target, tv: surfaceTv(t, tvCardOf(t)), opener: opener }); } };
 })();

@@ -504,10 +504,9 @@
     return specs;
   }
 
-  // The secondary row: Captions, View, Self view, Participants (with the count), Chat (with the unread count), Host (for a host or
-  // co-host), and the TV's remote, the table's own button and the last of them. Without a model there is nothing to draw the platform's
-  // controls from, so none of them is drawn (a platform that has none keeps the three buttons the screen began with); the TV is the room's,
-  // not the platform's, and the row holds it alone.
+  // The secondary row: Captions, View, Self view, Participants (with the count), Chat (with the unread count) and Host (for a host or
+  // co-host). Without a model there is nothing to draw the platform's controls from, so none of them is drawn (a platform that has none
+  // keeps the three buttons the screen began with), and the row is empty.
   function meetingSecondary(m) {
     const c = m.controls || {};
     const modelled = Object.keys(c).length > 0;
@@ -525,9 +524,7 @@
     if (modelled && people.length) specs.push({ id: "participants", label: "Participants (" + (m.participants.count || people.length) + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
     if (modelled && m.chat && !(c.chat && c.chat.available === false)) specs.push({ id: "chat", label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
     if (c.host && c.host.role && c.host.role !== "participant") specs.push({ id: "host", label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
-    // The TV is the room's, not the platform's: it is drawn with the row, after Host, whatever the TV's state (a room with no TV set up, or a TV not
-    // yet paired, finds its cards in the view that this opens).
-    specs.push({ id: "tv", label: "TV", icon: "tv", className: "quiet", onClick: () => setView("tv") });
+    // The TV and the Touchpad are the room's, not the platform's: they are in the top bar in a meeting (render), not in this row.
     // A reaction row that closes uncovers these buttons under the finger that picked: the second tap of a double tap (or a tap at the
     // moment the row lapses) is not meant for them.
     return specs.map((spec) => Object.assign({}, spec, { onClick: () => { if (Date.now() >= model.ignoreUntil) spec.onClick(); } }));
@@ -965,8 +962,12 @@
   function render() {
     const body = document.body;
     const tv = model.status && model.status.tv;
-    // Pairing survives standby: keep quick access available to wake the room's TV.
-    el("open-tv-remote").hidden = model.offline || mode() !== "idle" || !(tv && tv.configured && tv.paired);
+    // Pairing survives standby: keep quick access available to wake the room's TV. In a meeting the top bar has the TV and the Touchpad whatever
+    // the TV's state (Ben, 2026-10-25): the TV view has a card for a TV that is not set up or paired, and the Touchpad drives the room Pi's mouse.
+    const inMeeting = mode() === "meeting";
+    el("open-touchpad").hidden = model.offline || !inMeeting;
+    el("open-tv-remote").hidden = model.offline || (!inMeeting && !(tv && tv.configured && tv.paired));
+    labelWithIcon(el("open-tv-remote"), inMeeting ? "TV" : "TV Remote", "tv");
     if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
     el("message").textContent = model.error;   // the idle card's line; the meeting screen's own is written with its dialog card (renderDialog)
 
@@ -1208,6 +1209,9 @@
   el("back-from-camera").addEventListener("click", () => setView(cameraMode === "meeting" ? "meeting" : "options"));
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
+  // Touchpad, in the top bar in a meeting: the room Pi's mouse in one tap, for a dialog on the TV in a call (Ben, 2026-10-25), without going by
+  // the TV's remote (remote.js); Done brings the meeting screen back.
+  el("open-touchpad").addEventListener("click", () => { if (window.croomRemote) window.croomRemote.openTouchpad("pi", el("open-touchpad")); });
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
   for (const name of ["participants", "chat", "host"]) el("back-from-" + name).addEventListener("click", () => setView("meeting"));
   el("open-tv-options").addEventListener("click", () => setView("tv"));

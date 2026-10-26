@@ -585,3 +585,15 @@ def test_every_provider_takes_the_passcode_after_the_existing_arguments(provider
     parameters = inspect.signature(provider.join_meeting).parameters
     assert list(parameters) == ["self", "meeting_url", "display_name", "camera_on", "mic_on", "passcode"]
     assert parameters["passcode"].default is None
+
+
+def test_the_touchpad_on_the_room_pis_mouse_shows_the_tvs_pointer():
+    """The TV hides its pointer but while the table's touchpad drives the room Pi's mouse (Ben, 2026-10-25): the control service tells the
+    meeting service, which owns the TV."""
+    from tests.unit.meeting.fake_display import FakeDisplay
+    display = FakeDisplay()
+    service = MeetingService(Config(), display=display)
+    service.pointer_in_use()
+    service.pointer_in_use()
+    assert display.pointer_uses == 2
+    MeetingService(Config()).pointer_in_use()   # no TV yet: nothing to show it on, and no error

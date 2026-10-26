@@ -63,6 +63,7 @@ class StubMeeting:
 
     def __init__(self, platforms=("zoom", "google_meet"), role="participant", controls=True):
         self._platforms = list(platforms)
+        self.pointer_uses = 0         # the times the control service said the touchpad moved the room Pi's mouse
         self.state = MeetingState.IDLE
         self.current_meeting = None
         self.joins = []
@@ -90,6 +91,9 @@ class StubMeeting:
 
     def get_available_platforms(self):
         return list(self._platforms)
+
+    def pointer_in_use(self):
+        self.pointer_uses += 1
 
     def add_state_callback(self, callback):
         self.callbacks.append(callback)
@@ -2798,6 +2802,22 @@ class TestPointerSocket:
             await wait_until(lambda: mouse.calls == [("move", 1, 2), ("click", "left"), ("click", "right"), ("scroll", -1),
                                                      ("press", "left"), ("release", "left")])
         assert tv.calls == []                                  # (the cursor is not a control)
+
+    async def test_the_room_pis_mouse_in_use_shows_the_pointer_on_the_tv(self, client_factory):
+        """The pointer is hidden on the TV but while the touchpad drives the room Pi's mouse (Ben, 2026-10-25): every Pi event the mouse
+        took tells the meeting service, which tells the TV; the TV's own cursor, and a Pi event that failed, do not."""
+        meeting, mouse = StubMeeting(), StubMouse()
+        client = await client_factory(make_service(meeting=meeting, tv=StubTv(), mouse=mouse))
+        async with client.ws_connect("/ws/pointer") as ws:
+            await ws.send_json({"target": "tv", "type": "move", "dx": 5, "dy": -3})
+            await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 2})
+            await ws.send_json({"target": "pi", "type": "tap"})
+            await wait_until(lambda: len(mouse.calls) == 2)
+            await wait_until(lambda: meeting.pointer_uses == 2)
+            mouse.fail = TvError("The room Pi's mouse is not there")
+            await ws.send_json({"target": "pi", "type": "move", "dx": 1, "dy": 2})
+            assert (await ws.receive_json())["error"]
+        assert meeting.pointer_uses == 2
 
     async def test_a_drag_on_the_tv_is_moves_with_the_button_down_and_an_end(self, client_factory):
         tv = StubTv()

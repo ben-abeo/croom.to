@@ -502,3 +502,65 @@ async def test_the_page_fills_the_window_whatever_its_size():
     finally:
         await display.stop()
         await site.stop()
+
+
+# The pointer (Ben, 2026-10-25): hidden on the TV, the screensaver and a meeting alike, except while the table's touchpad drives the room
+# Pi's mouse; it goes again a few seconds after the touchpad stops. Every page and frame the TV shows hides it.
+
+CURSOR = "getComputedStyle(document.body).cursor"
+FRAMED = ("<title>Crystal Meet TV</title><body><h1>Meeting</h1>"
+          "<iframe srcdoc=\"<body style='cursor: pointer'><p>inside</p></body>\"></iframe></body>")
+
+
+def framed_page():
+    """FRAMED as a page to navigate to, as a provider's page is (an init script runs at a navigation)."""
+    from urllib.parse import quote
+    return "data:text/html," + quote(FRAMED)
+
+
+async def frame_cursors(page):
+    """The body's cursor in the page and in each of its frames."""
+    return [await frame.evaluate(CURSOR) for frame in page.frames]
+
+
+async def test_the_pointer_is_hidden_on_every_page_and_frame_the_tv_shows():
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        page = await display.page()
+        await page.wait_for_function("document.title === 'Crystal Meet TV'", timeout=5000)
+        assert await frame_cursors(page) == ["none"]
+        await page.goto(framed_page())                       # a provider's page, with a frame of its own that asks for a pointer
+        await page.wait_for_function("document.querySelector('iframe').contentDocument.body", timeout=5000)
+        assert await frame_cursors(page) == ["none", "none"]
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+async def test_the_touchpad_shows_the_pointer_until_it_stops(monkeypatch):
+    monkeypatch.setattr(TvDisplay, "POINTER_SHOWN_S", 0.4)
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    try:
+        await display.start()
+        page = await display.page()
+        await page.goto(framed_page())
+        await page.wait_for_function("document.querySelector('iframe').contentDocument.body", timeout=5000)
+        display.pointer_in_use()
+        await asyncio.sleep(0.15)
+        assert await frame_cursors(page) == ["auto", "pointer"]   # the page's own cursors again, frames too
+        for _ in range(3):                                        # the touchpad goes on: the pointer stays
+            await asyncio.sleep(0.2)
+            display.pointer_in_use()
+        assert await frame_cursors(page) == ["auto", "pointer"]
+        await asyncio.sleep(0.7)                                  # and goes a moment after it stops
+        assert await frame_cursors(page) == ["none", "none"]
+    finally:
+        await display.stop()
+        await site.stop()
+
+
+def test_the_pointer_hint_is_nothing_without_a_browser():
+    TvDisplay("http://127.0.0.1:1/tv", headless=True).pointer_in_use()   # no page yet: nothing to show it on, and no error

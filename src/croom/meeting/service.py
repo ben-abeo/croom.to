@@ -49,6 +49,11 @@ class MeetingService(Service):
         self._preparing = 0
         self._starting = 0
 
+    def pointer_in_use(self) -> None:
+        """The table's touchpad drove the room Pi's mouse: the TV shows its pointer for a moment (TvDisplay.pointer_in_use)."""
+        if self._display is not None:
+            self._display.pointer_in_use()
+
     async def start(self) -> None:
         """Start the TV display and the configured providers on it."""
         if self._display is None:

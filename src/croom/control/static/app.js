@@ -1149,7 +1149,7 @@
     const b = bookingOf(model.status && model.status.calendar);
     if (!b) return;
     setView("booking");
-    bookingSteps = window.CroomBooking.open(el("booking-host"), {
+    bookingSteps = window.croomBooking.open(el("booking-host"), {
       mode: mode, source: "room page", now: b.now,
       onClose: (changed) => {
         bookingSteps = null;
@@ -1241,7 +1241,7 @@
         const cancel = document.createElement("button");
         cancel.type = "button";
         cancel.className = "button quiet cancel-booking";
-        side = CroomBooking.confirmButton(cancel, "Cancel", "Tap again to cancel", ev.booking_id, "cancel", "room page", () => { refreshStatus(); refreshEvents(); });   // not window.CroomBooking: `window` here is the booking's join window
+        side = croomBooking.confirmButton(cancel, "Cancel", "Tap again to cancel", ev.booking_id, "cancel", "room page", () => { refreshStatus(); refreshEvents(); });   // not window.croomBooking: `window` here is the booking's join window
       }
       const li = eventItem(ev, side);
       li.classList.toggle("past", window.past);

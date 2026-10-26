@@ -321,7 +321,7 @@
         li.classList.add("mine");
         const cancel = make("button", "button small cancel");
         cancel.type = "button";
-        li.append(window.CroomBooking.confirmButton(cancel, "Cancel", "Tap again to cancel", ev.booking_id, "cancel", "door sign", bookingChanged));
+        li.append(window.croomBooking.confirmButton(cancel, "Cancel", "Tap again to cancel", ev.booking_id, "cancel", "door sign", bookingChanged));
       }
       list.append(li);
     }
@@ -569,7 +569,7 @@
     if (weekOpen) closeWeek();
     bookingOpen = true;
     drawView();
-    window.CroomBooking.open(el("booking"), {
+    window.croomBooking.open(el("booking"), {
       mode: mode, source: "door sign", now: b.now,
       onClose: (changed) => { bookingOpen = false; drawView(); if (changed) bookingChanged(); },
     });

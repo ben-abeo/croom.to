@@ -268,5 +268,5 @@
     return button;
   }
 
-  window.CroomBooking = { open: open, confirmButton: confirmButton, fmtLength: fmtLength };
+  window.croomBooking = { open: open, confirmButton: confirmButton, fmtLength: fmtLength };
 })();

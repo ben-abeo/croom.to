@@ -31,11 +31,14 @@ def test_use_now_on_the_sign_takes_the_room_and_only_the_room_page_ends_it(brows
         page = sign(browser, server, init_script=LIGHT_RECORDER)
         page.click("#use-now")
         page.fill(".bk-name", "Ben")
+        assert " \u00b7 until " in page.locator(".bk-length option").first.inner_text()   # each length says the quarter hour it ends on
         page.select_option(".bk-length", "45")
         page.click(".bk-submit")
         page.wait_for_selector(".bk-done:not([hidden])")
         assert page.locator(".bk-done").inner_text().startswith("The room is yours until")
         assert google_titles(server) == ["Ben"]
+        [booked] = server.google.events.values()
+        assert booked.end_time.minute % 15 == 0 and booked.end_time.second == 0     # on a quarter hour, not 45 minutes from an odd minute
         page.click(".bk-back")                                                     # Done
         page.wait_for_function("document.body.dataset.state === 'occupied'", timeout=5000)
         assert page.locator("#chip-text").inner_text().startswith("Booked until") and page.locator("#detail").inner_text() == "Ben"

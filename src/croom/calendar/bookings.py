@@ -100,14 +100,32 @@ def open_starts(day: date, now: datetime, busy: List[Span], start_hour: time, en
     return starts
 
 
-def now_minutes(now: datetime, busy: List[Span]) -> Tuple[List[int], Optional[datetime]]:
-    """What Use now offers at this moment, and the start of the booking that cuts it short: nothing while the room is taken, or
-    when the next booking is less than 15 minutes away."""
+def nearest_step(moment: datetime) -> datetime:
+    """The quarter hour nearest a moment; halfway goes on to the later one."""
+    floor = moment.replace(minute=moment.minute - moment.minute % STEP_MINUTES, second=0, microsecond=0)
+    return floor + timedelta(minutes=STEP_MINUTES) if moment - floor >= timedelta(minutes=STEP_MINUTES) / 2 else floor
+
+
+def now_ends(now: datetime, busy: List[Span]) -> List[Tuple[int, datetime]]:
+    """What Use now offers at this moment: each length (15 minutes to four hours, in steps of 15) with the quarter hour it ends on, the one
+    nearest the length asked (Ben, 2026-10-26: at 12:03 half an hour is until 12:30, not 12:33), up to the next booking. Nothing while the room
+    is taken, or when the first of them would run into the next booking."""
     if any(s <= now < e for s, e, _ in busy):
-        return [], None
+        return []
     following = min((s for s, _, _ in busy if s > now), default=None)
-    limit = following if following is not None else now + timedelta(minutes=MAX_MINUTES)
-    return _durations(now, limit), following
+    ends = []
+    for minutes in range(STEP_MINUTES, MAX_MINUTES + 1, STEP_MINUTES):
+        end = nearest_step(now + timedelta(minutes=minutes))
+        if following is not None and end > following:
+            break
+        ends.append((minutes, end))
+    return ends
+
+
+def now_minutes(now: datetime, busy: List[Span]) -> Tuple[List[int], Optional[datetime]]:
+    """The lengths Use now offers at this moment (now_ends), and the start of the booking that cuts them short."""
+    following = None if any(s <= now < e for s, e, _ in busy) else min((s for s, _, _ in busy if s > now), default=None)
+    return [minutes for minutes, _ in now_ends(now, busy)], following
 
 
 # ----------------------------------------------------------------------------------------------------------------------
@@ -317,7 +335,8 @@ class RoomBookings:
 
     def state(self) -> Dict[str, Any]:
         now = self.clock()
-        minutes, until = now_minutes(now, self.busy())
+        ends = now_ends(now, self.busy())
+        _, until = now_minutes(now, self.busy())
         return {
             "online": self._online,
             "offline_since": self._saved_at.isoformat() if not self._online and self._saved_at else None,
@@ -325,7 +344,7 @@ class RoomBookings:
             "problem": self._problem,
             "revision": self._revision,
             "hours": {"start": self.start_hour.strftime("%H:%M"), "end": self.end_hour.strftime("%H:%M")},
-            "now": {"minutes": minutes, "until": until.isoformat() if until else None},
+            "now": {"minutes": [m for m, _ in ends], "ends": [e.isoformat() for _, e in ends], "until": until.isoformat() if until else None},
         }
 
     # -- what the screens do
@@ -365,12 +384,12 @@ class RoomBookings:
     async def start_now(self, minutes: int, title: str, source: str) -> Booking:
         title, source = self._title(title), self._source(source)
         now = self.clock().replace(second=0, microsecond=0)
-        allowed, _ = now_minutes(self.clock(), self.busy())
+        allowed = dict(now_ends(self.clock(), self.busy()))
         if minutes not in allowed:
             if not allowed:
                 raise SlotTaken("The room is booked now or very soon")
             raise BookingError("Choose a duration the time allows")
-        return await self._add(title, now, now + timedelta(minutes=minutes), source)
+        return await self._add(title, now, allowed[minutes], source)   # from this minute to the quarter hour nearest the length
 
     async def _add(self, title: str, start: datetime, end: datetime, source: str) -> Booking:
         booking = Booking(id=uuid.uuid4().hex[:12], title=title, start=start, end=end, source=source, created=self.clock())

@@ -117,8 +117,13 @@
     });
     change.addEventListener("click", showTimes);
 
-    function fillLengths(minutes) {
-      length.replaceChildren(...minutes.map((m) => { const o = make("option", "", fmtLength(m)); o.value = String(m); return o; }));
+    // ends: for Use now, the quarter hour each length ends on (the room rounds a length to the nearest one: at 12:03, 30 min is until 12:30).
+    function fillLengths(minutes, ends) {
+      length.replaceChildren(...minutes.map((m, i) => {
+        const o = make("option", "", fmtLength(m) + (ends && ends[i] ? " \u00b7 until " + fmtTime(new Date(ends[i])) : ""));
+        o.value = String(m);
+        return o;
+      }));
       length.value = String(minutes.includes(30) ? 30 : minutes[minutes.length - 1]);
     }
 
@@ -229,7 +234,7 @@
       const now = options.now || { minutes: [], until: null };
       days.hidden = times.hidden = true;
       when.textContent = now.until ? "Free until " + fmtTime(new Date(now.until)) : "From now";
-      fillLengths(now.minutes);
+      fillLengths(now.minutes, now.ends);
       form.hidden = false;
       name.focus({ preventScroll: true });
     } else {

@@ -13,6 +13,7 @@ from croom.calendar.bookings import (
     RoomBookings,
     SlotTaken,
     UnknownBooking,
+    now_ends,
     now_minutes,
     open_starts,
 )
@@ -170,11 +171,20 @@ async def test_a_booking_goes_to_google_tagged_as_the_rooms_own(tmp_path, clock,
     assert rooms.state()["pending"] == 0
 
 
-async def test_use_now_starts_this_minute(tmp_path, clock, google):
+def test_use_now_ends_on_the_quarter_hour_nearest_the_length_asked():
+    """At 12:03 half an hour is until 12:30, not 12:33 (Ben, 2026-10-26): Use now ends on a quarter hour, the one nearest the length asked."""
+    assert [(m, e.strftime("%H:%M")) for m, e in now_ends(at(12, 3), [])][:4] == [(15, "12:15"), (30, "12:30"), (45, "12:45"), (60, "13:00")]
+    assert [(m, e.strftime("%H:%M")) for m, e in now_ends(at(12, 8), [])][:2] == [(15, "12:30"), (30, "12:45")]   # 12:23 is nearer 12:30
+    assert [e.strftime("%H:%M") for _, e in now_ends(at(12, 7, ) + timedelta(seconds=30), [])][:1] == ["12:30"]    # halfway goes on to the later one
+    assert now_minutes(at(12, 3), [(at(12, 15), at(13), "Standup")]) == ([15], at(12, 15))   # until 12:15, just before the standup
+    assert now_minutes(at(12, 9), [(at(12, 15), at(13), "Standup")]) == ([], at(12, 15))     # 12:24 is nearer 12:30: past it
+
+
+async def test_use_now_starts_this_minute_and_ends_on_a_quarter_hour(tmp_path, clock, google):
     clock.now = at(9, 31) + timedelta(seconds=40)
     rooms = make(tmp_path, clock, google)
     booking = await rooms.start_now(30, "Ben", "room page")
-    assert (booking.start, booking.end) == (at(9, 31), at(10, 1))
+    assert (booking.start, booking.end) == (at(9, 31), at(10, 0))
     assert google.events[booking.google_id].description == "Started on the Room 1 room page"
 
 
@@ -379,4 +389,4 @@ async def test_the_state_says_when_the_calendar_went_offline_and_what_use_now_of
     clock.now = at(9, 40)
     state = rooms.state()
     assert state["online"] is False and state["offline_since"] == at(9, 30).isoformat()
-    assert state["now"] == {"minutes": [15, 30], "until": at(10, 15).isoformat()}
+    assert state["now"] == {"minutes": [15, 30], "ends": [at(10).isoformat(), at(10, 15).isoformat()], "until": at(10, 15).isoformat()}

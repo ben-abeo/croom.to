@@ -29,8 +29,9 @@ working when Google has a problem: what is booked is kept on the device as well 
 - **The rules.** Book: today and the six days after it (the week the room reads), starts every 15 minutes from `booking_start` to
   the last start before `booking_end` (`calendar.booking_start` / `booking_end` in the config, `"08:00"` and `"18:00"` unless set;
   hours it cannot use are warned about and the defaults kept), never in the past; 15 minutes to four hours in steps of 15, up to the
-  next booking and `booking_end`. Use now: from this minute, not held to the booking hours, 15 minutes to four hours up to the next
-  booking; not offered while the room is taken or the next booking is less than 15 minutes away. A name of 1 to 60 characters.
+  next booking and `booking_end`. Use now: from this minute, not held to the booking hours, 15 minutes to four hours, each ending on the quarter
+  hour nearest the length (Ben, 2026-10-26: at 12:03, 30 minutes is until 12:30, not 12:33; halfway goes to the later one), up to the
+  next booking; not offered while the room is taken or the first of them would run into the next booking. A name of 1 to 60 characters.
 - **End now** shortens a booking in progress to this minute (one that has not started is cancelled instead). It is on the room's
   touch screen only, never on the door sign (Ben: "The end now should only be able to be done from the touch controller"); the route
   refuses a request that does not say it comes from the room page. **Cancel** deletes a booking that has not started, from either

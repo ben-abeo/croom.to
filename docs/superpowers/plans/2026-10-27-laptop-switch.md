@@ -2207,7 +2207,7 @@ Expected: no failure that `main` does not also have. To know `main`'s, run its s
 
 ```bash
 git worktree add "$SCRATCH/main-check" main
-(cd "$SCRATCH/main-check" && /home/cpm_ssh/croom.to/.venv/bin/python -m pytest -q -p no:cacheprovider | tail -3)
+(cd "$SCRATCH/main-check" && PYTHONPATH=src /home/cpm_ssh/croom.to/.venv/bin/python -m pytest -q -p no:cacheprovider | tail -3)   # PYTHONPATH: main's code, not this branch's
 git worktree remove "$SCRATCH/main-check"
 ```
 

@@ -430,3 +430,67 @@ async def test_a_speaker_check_that_raises_does_not_stop_the_camera_being_found_
             await service.stop()
     failures = records(caplog, "Device check failed")
     assert [r.levelno for r in failures] == [logging.WARNING] and failures[0].exc_info
+
+
+# ----------------------------------------------------------------------
+# Laptop mode (spec 2026-10-27): the MeetUp goes to a laptop and comes back
+# ----------------------------------------------------------------------
+
+async def test_release_closes_the_camera_and_the_background_check_leaves_it_alone(tmp_path):
+    service, v4l2, _ = service_for(tmp_path)
+    service.REDISCOVER_S = 0.02
+    await service.start()
+    try:
+        service.camera.set_preview(True)
+        await service.release()
+        assert not service.camera.available and not service.camera.preview
+        opens = [c for c in v4l2.calls if c[0] == "open"]
+        await asyncio.sleep(0.1)                        # several rounds of the background check
+        assert [c for c in v4l2.calls if c[0] == "open"] == opens
+    finally:
+        await service.stop()
+
+
+async def test_reclaim_finds_the_camera_now_and_homes_it(tmp_path):
+    service, v4l2, runner = service_for(tmp_path, home=HOME)
+    await service.start()
+    try:
+        await service.homing
+        await service.release()
+        dumps = runner.calls.count(["pw-dump"])
+        await service.reclaim()
+        assert service.camera.available and runner.calls.count(["pw-dump"]) > dumps
+        await service.homing
+        assert service.camera.position_known
+    finally:
+        await service.stop()
+
+
+async def test_reclaim_waits_for_a_camera_that_takes_a_moment_to_come_back(tmp_path):
+    service, v4l2, _ = service_for(tmp_path)
+    service.RECLAIM_POLL_S = 0.01
+    await service.start()
+    try:
+        await service.release()
+        meetup = v4l2._nodes.pop("/dev/video0")           # the switch has moved it, and it is not back yet
+        reclaiming = asyncio.ensure_future(service.reclaim())
+        await asyncio.sleep(0.05)
+        assert not reclaiming.done()
+        v4l2._nodes["/dev/video0"] = meetup
+        await asyncio.wait_for(reclaiming, 2)
+        assert service.camera.available
+    finally:
+        await service.stop()
+
+
+async def test_reclaim_gives_up_on_a_camera_that_does_not_come_back(tmp_path):
+    service, v4l2, _ = service_for(tmp_path)
+    service.RECLAIM_S, service.RECLAIM_POLL_S = 0.1, 0.01
+    await service.start()
+    try:
+        await service.release()
+        v4l2._nodes.pop("/dev/video0")
+        await asyncio.wait_for(service.reclaim(), 2)
+        assert not service.camera.available
+    finally:
+        await service.stop()

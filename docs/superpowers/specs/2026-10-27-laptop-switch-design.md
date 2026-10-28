@@ -154,3 +154,9 @@ The door sign changes only through the booking: the room is shown taken by "Lapt
 Pan, tilt and zoom of the MeetUp from the touch Pi while the laptop has it (the laptop's software has them); the laptop's picture
 on the TV through anything but its own HDMI input; more than one laptop port; other switches (the `UsbSwitch` interface leaves room
 for one, such as an Acroname hub, later); a room auto-join.
+
+## 9. As built
+
+The plan (`docs/superpowers/plans/2026-10-27-laptop-switch.md`) settled four things the design left open: the fake switch lives with
+the tests; a room with no Google calendar lends the MeetUp with no end and no booking; the status's `holder` is `room` or
+`laptop` only; and the Laptop screen is the idle card taken over (the join-by-link section and Options hidden, the TV Remote kept).

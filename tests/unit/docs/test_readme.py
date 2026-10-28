@@ -380,7 +380,8 @@ def test_readme_has_the_tv_row_in_the_config_table_and_says_what_each_key_does()
     pi_input is acted on, and what keep_on keeps and a manual Off holds (in memory only); the room files ship the block switched off."""
     text = README.read_text(encoding="utf-8")
     for needle in (
-        "| `tv` | `enabled`, `brand`, `host`, `mac`, `pi_input`, `keep_on` |",
+        "| `tv` | `enabled`, `brand`, `host`, `mac`, `pi_input`, `laptop_input`, `keep_on` |",
+        "`laptop_input` is the TV input a laptop at the table is on, chosen under **Options**, then **TV**, as **Laptop input**; empty (the default) leaves the TV alone in Laptop mode",
         "the room files in `deploy/rooms/` carry the block with `enabled: false`",
         "**LG Connect Apps** switched on in its settings, and **Mobile TV On** too unless Quick Start+ is on",
         "`mac` is the TV's MAC address, which every Turn on needs (the wake-up message goes out first, so a missing or malformed one stops it even with Quick Start+)",

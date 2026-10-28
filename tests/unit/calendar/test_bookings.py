@@ -390,3 +390,31 @@ async def test_the_state_says_when_the_calendar_went_offline_and_what_use_now_of
     state = rooms.state()
     assert state["online"] is False and state["offline_since"] == at(9, 30).isoformat()
     assert state["now"] == {"minutes": [15, 30], "ends": [at(10).isoformat(), at(10, 15).isoformat()], "until": at(10, 15).isoformat()}
+
+
+async def test_the_booking_in_progress_is_googles_or_the_rooms_own(tmp_path, clock, google):
+    rooms = make(tmp_path, clock, google)
+    assert rooms.in_progress() is None
+    gid = google.add("Design review", at(9), at(10))
+    rooms.remember(list(google.events.values()))
+    assert rooms.in_progress().id == gid
+    clock.now = at(10, 5)
+    assert rooms.in_progress() is None                  # it ended at 10:00
+    booking = await rooms.start_now(30, "Laptop", "room page")
+    assert rooms.in_progress().booking_id == booking.id
+
+
+async def test_a_declined_or_cancelled_booking_is_not_in_progress(tmp_path, clock, google):
+    rooms = make(tmp_path, clock, google)
+    gid = google.add("Declined", at(9), at(10))
+    google.events[gid].response_status = "declined"
+    rooms.remember(list(google.events.values()))
+    assert rooms.in_progress() is None
+
+
+async def test_a_booking_is_found_by_the_rooms_tag_or_googles_id(tmp_path, clock, google):
+    rooms = make(tmp_path, clock, google)
+    booking = await rooms.start_now(30, "Laptop", "room page")
+    assert rooms.find(booking.id).end_time == booking.end
+    assert rooms.find(booking.google_id).booking_id == booking.id
+    assert rooms.find("nothing-like-it") is None

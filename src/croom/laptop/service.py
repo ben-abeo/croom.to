@@ -37,6 +37,7 @@ class LaptopService(Service):
         self._watch_task: Optional[asyncio.Task] = None
         self._problem: Optional[str] = None
         self._active, self._until, self._key, self._made = False, None, None, False
+        self._auto_return_failed = False   # the watch stopped pressing after one automatic return that did not move
         self._load()
 
     @classmethod
@@ -108,28 +109,34 @@ class LaptopService(Service):
             await self._tick()
 
     async def _tick(self) -> None:
-        """One look: the MeetUp moved at the switch itself, the booking's end moved in Google, or the end has come."""
+        """One look: the MeetUp moved at the switch itself, the booking's end moved in Google, or the end has come. A request in
+        hand is not interrupted, and while the watch changes the devices and the TV a request is told "Switching…"."""
         if self._lock.locked():
             return
-        try:
-            holder = self._switch.holder()
-            if holder == LAPTOP and not self._active:
-                logger.info("The MeetUp left this Pi without Laptop mode asking: the laptop has it")
-                self._set(True)
-                await self._release()
-            elif holder == ROOM and self._active:
-                logger.info("The MeetUp came back to this Pi at the switch: Laptop mode ends")
-                self._set(False)
-                await self._reclaim()
-            elif self._active:
-                self._follow_booking()
-                if self._until is not None and self._clock() >= self._until:
-                    logger.info("The laptop's time is up: the MeetUp goes back to the room")
-                    await self.to_room(by_hand=False)
-        except LaptopError as e:
-            self._problem = str(e)
-        except Exception:  # noqa: BLE001 - the watch must go on
-            logger.exception("Laptop mode's look at the switch failed")
+        async with self._lock:
+            try:
+                holder = self._switch.holder()
+                if holder == LAPTOP and not self._active:
+                    logger.info("The MeetUp left this Pi without Laptop mode asking: the laptop has it")
+                    self._auto_return_failed = False
+                    self._set(True)
+                    await self._release()
+                elif holder == ROOM and self._active:
+                    logger.info("The MeetUp came back to this Pi at the switch: Laptop mode ends")
+                    self._auto_return_failed = False
+                    self._set(False)
+                    await self._reclaim()
+                elif self._active:
+                    self._follow_booking()
+                    if self._until is not None and self._clock() >= self._until and not self._auto_return_failed:
+                        logger.info("The laptop's time is up: the MeetUp goes back to the room")
+                        try:
+                            await self._back_to_room(by_hand=False)
+                        except LaptopError as e:
+                            self._problem = str(e)
+                            self._auto_return_failed = True    # not pressed again until something changes
+            except Exception:  # noqa: BLE001 - the watch must go on
+                logger.exception("Laptop mode's look at the switch failed")
 
     def _follow_booking(self) -> None:
         bookings = self.bookings
@@ -138,6 +145,7 @@ class LaptopService(Service):
         event = bookings.find(self._key)
         if event is not None and event.end_time != self._until:
             logger.info(f"The laptop's booking now ends at {event.end_time:%H:%M}")
+            self._auto_return_failed = False
             self._set(True, event.end_time, self._key, self._made)
 
     # -- what the page asks
@@ -152,6 +160,7 @@ class LaptopService(Service):
         if self._lock.locked():
             raise LaptopError(SWITCHING)
         async with self._lock:
+            self._auto_return_failed = False
             if self._active:
                 return self.state()
             bookings = self.bookings
@@ -169,7 +178,7 @@ class LaptopService(Service):
             await self._release()
             if not await self._switch.move_to(LAPTOP):
                 if made:
-                    await self._end_booking(key)
+                    await self._withdraw_booking(key)
                 await self._reclaim()
                 self._problem = NO_ANSWER
                 raise LaptopError(NO_ANSWER)
@@ -183,18 +192,23 @@ class LaptopService(Service):
         if self._lock.locked():
             raise LaptopError(SWITCHING)
         async with self._lock:
-            if not self._switch.available:
-                raise LaptopError(self._switch.problem or NOT_READY)
-            if not await self._switch.move_to(ROOM):
-                self._problem = NO_ANSWER
-                raise LaptopError(NO_ANSWER)
-            key, made = self._key, self._made
-            self._set(False)
-            await self._reclaim()
-            if by_hand and made and key:
-                await self._end_booking(key)
-            logger.info("The MeetUp is back on the room")
-            return self.state()
+            self._auto_return_failed = False
+            return await self._back_to_room(by_hand)
+
+    async def _back_to_room(self, by_hand: bool) -> Dict[str, Any]:
+        """to_room's work, for a caller that holds the lock (the person's request, or the watch at the booking's end)."""
+        if not self._switch.available:
+            raise LaptopError(self._switch.problem or NOT_READY)
+        if not await self._switch.move_to(ROOM):
+            self._problem = NO_ANSWER
+            raise LaptopError(NO_ANSWER)
+        key, made = self._key, self._made
+        self._set(False)
+        await self._reclaim()
+        if by_hand and made and key:
+            await self._end_booking(key)
+        logger.info("The MeetUp is back on the room")
+        return self.state()
 
     # -- the others
 
@@ -215,6 +229,15 @@ class LaptopService(Service):
         except Exception as e:  # noqa: BLE001 - the TV never stops the switch
             logger.warning(f"The TV did not switch to the {which} input: {type(e).__name__}: {e}")
             return TV_FAILED
+
+    async def _withdraw_booking(self, key: Optional[str]) -> None:
+        bookings = self.bookings
+        if bookings is None or key is None:
+            return
+        try:
+            await bookings.withdraw(key)
+        except BookingError as e:
+            logger.info(f"The laptop's booking was left as it is: {e}")
 
     async def _end_booking(self, key: Optional[str]) -> None:
         bookings = self.bookings

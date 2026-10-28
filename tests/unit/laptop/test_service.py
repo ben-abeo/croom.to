@@ -211,6 +211,54 @@ async def test_a_second_tap_while_switching_is_told_so(room):
     await first
 
 
+async def test_a_booking_made_is_withdrawn_even_when_the_switch_gave_up_a_minute_later(room):
+    async def slow_and_failing(holder):
+        room.clock.now = at(9, 31)                                # the press took long enough for the minute to turn
+        return False
+    room.switch.move_to = slow_and_failing
+    with pytest.raises(LaptopError, match=NO_ANSWER):
+        await room.service.to_laptop(30)
+    assert room.google.events == {}
+
+
+async def test_the_watch_holds_the_lock_while_it_changes_the_devices(room):
+    gate = asyncio.Event()
+    reclaiming = room.devices.reclaim
+
+    async def slow_reclaim():
+        await gate.wait()
+        await reclaiming()
+    await room.service.to_laptop(30)
+    room.devices.reclaim = slow_reclaim
+    room.devices.calls.clear()
+    room.switch.on_pi = True                                      # given back at the switch itself
+    watching = asyncio.ensure_future(room.look())
+    for _ in range(100):
+        if room.service.state()["switching"]:
+            break
+        await asyncio.sleep(0.01)
+    assert room.service.state()["switching"]
+    with pytest.raises(LaptopError, match="Switching"):
+        await room.service.to_laptop(30)
+    assert room.devices.calls == [] and room.switch.moves == ["laptop"]
+    gate.set()
+    await watching
+    assert room.devices.calls == ["reclaim"] and room.tv.calls == ["laptop", "pi"]
+
+
+async def test_a_failed_automatic_return_is_tried_once_until_something_changes(room):
+    await room.service.to_laptop(30)
+    room.switch.answers = False
+    room.clock.now = at(10, 0)
+    for _ in range(4):
+        await room.look()
+    assert room.switch.moves == ["laptop", "room"] and room.service.camera_away
+    assert room.service.state()["problem"] == NO_ANSWER
+    with pytest.raises(LaptopError):                              # by hand still tries
+        await room.service.to_room()
+    assert room.switch.moves == ["laptop", "room", "room"]
+
+
 def test_the_words_for_join_are_the_specs():
     assert CAMERA_AWAY == "The camera is on the laptop: press Back to room first"
 

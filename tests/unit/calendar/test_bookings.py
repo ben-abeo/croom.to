@@ -256,6 +256,16 @@ async def test_cancel_takes_a_future_booking_out_of_google(tmp_path, clock, goog
     assert google.events == {} and rooms.merge([]) == []
 
 
+async def test_withdraw_cancels_a_booking_that_started_a_minute_ago(tmp_path, clock, google):
+    rooms = make(tmp_path, clock, google)
+    booking = await rooms.start_now(30, "Laptop", "room page")
+    clock.now = at(9, 31)
+    with pytest.raises(BookingError):
+        await rooms.cancel(booking.id)
+    await rooms.withdraw(booking.id)
+    assert google.events == {} and rooms.merge([]) == []
+
+
 async def test_end_and_cancel_are_only_for_the_rooms_own_bookings(tmp_path, clock, google):
     gid = google.add("Booked in Google", at(9), at(10))
     rooms = make(tmp_path, clock, google)

@@ -449,6 +449,13 @@ class RoomBookings:
         booking.cancelled = True
         return await self._changed(booking)
 
+    async def withdraw(self, key: str) -> Booking:
+        """A booking whose purpose fell through a moment after it was made (Laptop mode's switch did not move): cancelled
+        whatever the minute."""
+        booking = self._find(key)
+        booking.cancelled = True
+        return await self._changed(booking)
+
     async def _changed(self, booking: Booking) -> Booking:
         booking.pending = True
         self._save()

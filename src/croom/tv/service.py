@@ -376,7 +376,8 @@ class TvService(Service):
         paired = self._keys.read() is not None
         return dict(configured=self.configured, paired=paired, keep_on=self._config.keep_on,
                     held_off=self._held_off, refused=self._refused, prompting=paired and self._asking_to_pair(),
-                    host=self._config.host, pi_input=self._config.pi_input, brand=self._config.brand,
+                    host=self._config.host, pi_input=self._config.pi_input, laptop_input=self._config.laptop_input,
+                    brand=self._config.brand,
                     mac=self._config.mac, capabilities=self.capabilities(), **shown)
 
     async def start(self) -> None:
@@ -838,17 +839,44 @@ class TvService(Service):
         nor an app) is left alone, and one the input list cannot be matched for is on the room Pi when the app it runs is the
         Pi's (shows_the_pi). A TV that refuses is logged and the join goes on. The switch and the reads after it are held to
         `deadline` (a time on the loop's clock), as the steps of the wake are."""
-        pi, shown, app, client = self._config.pi_input, self._shown["input"], self._shown["app"], self._client
+        await self._show(self._config.pi_input, "the room Pi's input", deadline)
+
+    async def _show(self, input_id: str, what: str, deadline: Optional[float] = None) -> bool:
+        """The TV switched to `input_id` unless it shows it already (or says too little to tell, see shows_the_pi); `what` names the
+        input in the log. Whether it shows it now. A TV that refuses is logged; the switch and the reads after it are held to
+        `deadline` (a time on the loop's clock)."""
+        shown, app, client = self._shown["input"], self._shown["app"], self._client
+        if shows_the_pi(input_id, shown, app) is not False:
+            return True
         ask = self._within(self.ASK_TIMEOUT_S, deadline)
-        if client is None or shows_the_pi(pi, shown, app) is not False or not ask:
-            return
+        if client is None or not ask:
+            return False
         try:
-            await asyncio.wait_for(client.set_input(pi), ask)
+            await asyncio.wait_for(client.set_input(input_id), ask)
         except Exception as e:  # noqa: BLE001
-            logger.warning(f"The TV at {self._config.host} did not switch to the room Pi's input {pi}: {_why(e)}")
-            return
-        logger.info(f"The TV at {self._config.host} showed {shown or app}: switched to the room Pi's input {pi}")
+            logger.warning(f"The TV at {self._config.host} did not switch to {what} {input_id}: {_why(e)}")
+            return False
+        logger.info(f"The TV at {self._config.host} showed {shown or app}: switched to {what} {input_id}")
         await self._read_back(client, "input", deadline)
+        return True
+
+    async def show_input(self, which: str) -> Optional[str]:
+        """Laptop mode (spec 2026-10-27): the TV woken and switched to the room Pi's input ("pi") or the laptop's ("laptop"). None
+        when the TV shows it; else the words that tell the person at the table which input to choose with the TV's own remote (a TV
+        not set up, not answering, not reporting its inputs, or refusing)."""
+        input_id = self._config.pi_input if which == "pi" else self._config.laptop_input
+        if not input_id:
+            return "Choose the laptop's input under Options › TV, then on the TV with its Input button"
+        words = f"Choose {input_id.replace('_', ' ')} on the TV with its Input button"
+        if not self._can_wait():
+            return words
+        self._held_off = False
+        if not await self.ensure_on() or not self._is_on():
+            return words
+        if self.capabilities().get("direct_inputs") is False:
+            return words
+        what = "the room Pi's input" if which == "pi" else "the laptop's input"
+        return None if await self._show(input_id, what) else words
 
     def _is_on(self) -> bool:
         return bool(self._shown["on"]) and self._answering()

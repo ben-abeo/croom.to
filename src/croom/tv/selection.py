@@ -11,9 +11,9 @@ from croom.tv.errors import TvError
 
 
 def connection_settings(current: TvConfig, changes: Dict[str, Any]) -> TvConfig:
-    """Only the two settings a person can correct without selecting another TV."""
-    if set(changes) - {"mac", "pi_input"}:
-        raise TvError("Only the MAC address and HDMI input can be changed here; use Find TVs to choose another TV")
+    """Only the settings a person can correct without selecting another TV: its MAC address and the HDMI inputs."""
+    if set(changes) - {"mac", "pi_input", "laptop_input"}:
+        raise TvError("Only the MAC address and the HDMI inputs can be changed here; use Find TVs to choose another TV")
     mac = changes.get("mac", current.mac)
     if not isinstance(mac, str):
         raise TvError("The MAC address must be text")
@@ -28,7 +28,12 @@ def connection_settings(current: TvConfig, changes: Dict[str, Any]) -> TvConfig:
     pi_input = changes.get("pi_input", current.pi_input)
     if not isinstance(pi_input, str) or not re.fullmatch(r"HDMI_[1-9][0-9]?", pi_input):
         raise TvError("Choose the HDMI input the room Pi is connected to")
-    return replace(current, mac=mac, pi_input=pi_input)
+    laptop_input = changes.get("laptop_input", current.laptop_input)
+    if not isinstance(laptop_input, str) or (laptop_input and not re.fullmatch(r"HDMI_[1-9][0-9]?", laptop_input)):
+        raise TvError("Choose the HDMI input the laptop's cable is on, or Not set")
+    if laptop_input and laptop_input == pi_input:
+        raise TvError("The laptop needs an HDMI input of its own, not the room Pi's")
+    return replace(current, mac=mac, pi_input=pi_input, laptop_input=laptop_input)
 
 
 def selected_config(current: TvConfig, device: Dict[str, Any]) -> TvConfig:
@@ -45,6 +50,7 @@ def selected_config(current: TvConfig, device: Dict[str, Any]) -> TvConfig:
     return connection_settings(chosen, {
         "mac": device.get("mac", ""),
         "pi_input": device.get("pi_input", current.pi_input),
+        "laptop_input": device.get("laptop_input", current.laptop_input),
     })
 
 

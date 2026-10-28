@@ -420,7 +420,7 @@ class StubTv:
         if self.fail_status is not None:
             raise self.fail_status
         return {"configured": self.configured, "paired": self.paired, "keep_on": True, "held_off": False, "refused": False, "prompting": False,
-                "host": self.host, "pi_input": self.pi_input,
+                "host": self.host, "pi_input": self.pi_input, "laptop_input": "",
                 "brand": "lg", "mac": "AA:BB:CC:DD:EE:FF",
                 "capabilities": {"pointer": True, "direct_inputs": True, "mute_state": True},
                 "on": True, "reachable": True, "name": self.name, "volume": self.volume, "muted": False,

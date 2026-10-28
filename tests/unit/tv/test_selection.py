@@ -302,3 +302,16 @@ async def test_cancel_during_saved_token_reconnect_does_not_start_pairing(room, 
         assert not tv.status()["paired"]
     finally:
         await tv.stop()
+
+
+def test_the_laptops_input_is_an_hdmi_input_of_its_own_or_not_set():
+    from croom.core.config import TvConfig
+    from croom.tv.errors import TvError
+    from croom.tv.selection import connection_settings
+    current = TvConfig(enabled=True, host="10.0.0.41", pi_input="HDMI_1")
+    assert connection_settings(current, {"laptop_input": "HDMI_2"}).laptop_input == "HDMI_2"
+    assert connection_settings(current, {"laptop_input": ""}).laptop_input == ""
+    with pytest.raises(TvError, match="of its own"):
+        connection_settings(current, {"laptop_input": "HDMI_1"})
+    with pytest.raises(TvError, match="laptop"):
+        connection_settings(current, {"laptop_input": "USB"})

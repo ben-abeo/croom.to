@@ -96,9 +96,9 @@ class DevicesService(Service):
         await self.camera.close()
         self.camera.forget_position()
 
-    async def reclaim(self) -> None:
+    async def reclaim(self, home: bool = True) -> None:
         """The MeetUp is back: look for it now, not at the next background check, giving it RECLAIM_S to reappear as a camera, then
-        home the camera, which the laptop may have moved."""
+        (when `home`) home the camera, which the laptop may have moved. Not in a meeting: the camera is in use."""
         self._away = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.RECLAIM_S
@@ -108,7 +108,7 @@ class DevicesService(Service):
             if self.camera.available or loop.time() >= deadline:
                 break
             await asyncio.sleep(self.RECLAIM_POLL_S)
-        if self.camera.available and self.camera.home_saved and (self.homing is None or self.homing.done()):
+        if home and self.camera.available and self.camera.home_saved and (self.homing is None or self.homing.done()):
             self.homing = asyncio.create_task(self._home_at_start())
 
     async def stop(self) -> None:

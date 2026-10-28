@@ -38,6 +38,7 @@ class LaptopService(Service):
         self._problem: Optional[str] = None
         self._active, self._until, self._key, self._made = False, None, None, False
         self._auto_return_failed = False   # the watch stopped pressing after one automatic return that did not move
+        self._last_holder: Optional[str] = None   # the watch's previous look: a change it did not ask for is acted on at the second
         self._load()
 
     @classmethod
@@ -61,6 +62,7 @@ class LaptopService(Service):
 
     def _set(self, active: bool, until: Optional[datetime] = None, key: Optional[str] = None, made: bool = False) -> None:
         self._active, self._until, self._key, self._made = active, until, key, made
+        self._last_holder = None     # a request or the watch has just settled who has it: the next look starts afresh
         data = {"active": active, "until": until.isoformat() if until else None, "booking": key, "made_booking": made}
         try:
             self._store.save("laptop", data)
@@ -76,6 +78,18 @@ class LaptopService(Service):
     @property
     def camera_away(self) -> bool:
         return self._active
+
+    def join_refusal(self) -> Optional[str]:
+        """Why a Join is refused now, in words: the laptop has the MeetUp, or it is on its way (a switch, in either direction, holds
+        the lock), or None."""
+        if self._active:
+            return CAMERA_AWAY
+        if self._lock.locked():
+            return SWITCHING
+        return None
+
+    def _busy(self) -> bool:
+        return self._meeting is not None and getattr(self._meeting, "state", None) in BUSY_STATES
 
     def state(self) -> Dict[str, Any]:
         return {
@@ -116,16 +130,24 @@ class LaptopService(Service):
         async with self._lock:
             try:
                 holder = self._switch.holder()
-                if holder == LAPTOP and not self._active:
-                    logger.info("The MeetUp left this Pi without Laptop mode asking: the laptop has it")
-                    self._auto_return_failed = False
-                    self._set(True)
-                    await self._release()
-                elif holder == ROOM and self._active:
-                    logger.info("The MeetUp came back to this Pi at the switch: Laptop mode ends")
-                    self._auto_return_failed = False
-                    self._set(False)
-                    await self._reclaim()
+                # A change of holder nobody asked for (taken at the switch, or given back there) is acted on at the second look that
+                # agrees, so one reading that lost the MeetUp for a moment moves nothing.
+                seen, self._last_holder = self._last_holder, holder
+                unrequested = (holder == LAPTOP and not self._active) or (holder == ROOM and self._active)
+                if unrequested:
+                    if seen != holder:
+                        return
+                    if holder == LAPTOP:
+                        logger.info("The MeetUp left this Pi without Laptop mode asking: the laptop has it")
+                        self._auto_return_failed = False
+                        self._problem = None
+                        self._set(True)
+                        await self._release()
+                    else:
+                        logger.info("The MeetUp came back to this Pi at the switch: Laptop mode ends")
+                        self._auto_return_failed = False
+                        self._set(False)
+                        await self._reclaim()
                 elif self._active:
                     self._follow_booking()
                     if self._until is not None and self._clock() >= self._until and not self._auto_return_failed:
@@ -155,7 +177,7 @@ class LaptopService(Service):
         that time is taken, before anything is pressed), or with no end in a room with no calendar to book in."""
         if not self._switch.available:
             raise LaptopError(self._switch.problem or NOT_READY)
-        if self._meeting is not None and getattr(self._meeting, "state", None) in BUSY_STATES:
+        if self._busy():
             raise LaptopError(IN_A_MEETING)
         if self._lock.locked():
             raise LaptopError(SWITCHING)
@@ -174,9 +196,18 @@ class LaptopService(Service):
                 until, key, made = booking.end, booking.id, True
             else:
                 until, key, made = None, None, False
+            if self._busy():          # a Join got in while the booking was being made: the room is not the laptop's to take
+                if made:
+                    await self._withdraw_booking(key)
+                raise LaptopError(IN_A_MEETING)
             self._problem = None
-            await self._release()
-            if not await self._switch.move_to(LAPTOP):
+            try:
+                await self._release()
+                moved = await self._switch.move_to(LAPTOP)
+            except Exception:  # noqa: BLE001 - whatever failed is a switch that did not answer: nothing may be left holding the room
+                logger.exception("Lending the MeetUp to the laptop failed")
+                moved = False
+            if not moved:
                 if made:
                     await self._withdraw_booking(key)
                 await self._reclaim()
@@ -192,6 +223,8 @@ class LaptopService(Service):
         if self._lock.locked():
             raise LaptopError(SWITCHING)
         async with self._lock:
+            if not self._active and self._switch.holder() == ROOM:
+                return self.state()        # a Back to room from a screen that is behind: the MeetUp is already here, and may be in use
             self._auto_return_failed = False
             return await self._back_to_room(by_hand)
 
@@ -218,7 +251,7 @@ class LaptopService(Service):
 
     async def _reclaim(self) -> None:
         if self._devices is not None:
-            await self._devices.reclaim()
+            await self._devices.reclaim(home=not self._busy())    # a camera in a call is not driven to its home
         self._problem = await self._show("pi")
 
     async def _show(self, which: str) -> Optional[str]:

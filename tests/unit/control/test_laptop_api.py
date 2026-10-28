@@ -1,17 +1,21 @@
 """The room page's Laptop route (spec 2026-10-27): both ways, what it refuses, the status's laptop block, and Join refused while the
 laptop has the MeetUp."""
 from croom.calendar.bookings import SlotTaken
+from croom.laptop.errors import SWITCHING
 from croom.laptop.service import CAMERA_AWAY, LaptopError
 from tests.unit.control.test_service import StubMeeting, client_factory, make_service  # noqa: F401  (client_factory is a fixture)
 
 
 class StubLaptop:
     def __init__(self):
-        self.calls, self.away, self.fail = [], False, None
+        self.calls, self.away, self.fail, self.refusal = [], False, None, None
 
     @property
     def camera_away(self):
         return self.away
+
+    def join_refusal(self):
+        return self.refusal or (CAMERA_AWAY if self.away else None)
 
     def state(self):
         return {"enabled": True, "available": True, "holder": "laptop" if self.away else "room", "until": None,
@@ -81,4 +85,13 @@ async def test_join_is_refused_while_the_laptop_has_the_meetup(client_factory): 
     client = await client_factory(make_service(meeting=meeting, laptop=laptop))
     response = await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
     assert response.status == 409 and (await response.json())["error"] == CAMERA_AWAY
+    assert meeting.joins == []
+
+
+async def test_join_is_refused_while_the_meetup_is_being_switched(client_factory):  # noqa: F811
+    laptop, meeting = StubLaptop(), StubMeeting()
+    laptop.refusal = SWITCHING
+    client = await client_factory(make_service(meeting=meeting, laptop=laptop))
+    response = await client.post("/api/meeting/join", json={"url": "https://zoom.us/j/98765432100"})
+    assert response.status == 409 and (await response.json())["error"] == "Switching…"
     assert meeting.joins == []

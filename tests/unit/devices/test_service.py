@@ -469,6 +469,20 @@ async def test_reclaim_finds_the_camera_now_and_homes_it(tmp_path):
         await service.stop()
 
 
+async def test_reclaim_without_home_starts_no_homing(tmp_path):
+    service, _, _ = service_for(tmp_path, home=HOME)
+    await service.start()
+    try:
+        await service.homing
+        start_homing = service.homing
+        await service.release()
+        await service.reclaim(home=False)                    # the room is in a meeting: the camera is in use
+        assert service.camera.available and service._away is False
+        assert service.homing is start_homing                # no new homing
+    finally:
+        await service.stop()
+
+
 async def test_release_makes_the_camera_position_unknown_when_no_home_is_saved(tmp_path):
     service, _, _ = service_for(tmp_path)
     await service.start()

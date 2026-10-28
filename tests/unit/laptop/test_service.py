@@ -6,7 +6,7 @@ import pytest
 
 from croom.calendar.bookings import RoomBookings, SlotTaken
 from croom.control.settings import SettingsStore
-from croom.laptop.service import CAMERA_AWAY, HOW_LONG, IN_A_MEETING, LaptopError, LaptopService
+from croom.laptop.service import CAMERA_AWAY, HOW_LONG, IN_A_MEETING, SWITCHING, LaptopError, LaptopService
 from croom.laptop.switch import NO_ANSWER
 from croom.meeting.providers.base import MeetingState
 from tests.unit.calendar.test_bookings import ROOM_CAL, Clock, FakeGoogle, at
@@ -139,6 +139,8 @@ async def test_the_end_follows_the_booking_as_it_moves_in_google(room):
 async def test_the_meetup_taken_at_the_switch_shows_laptop_mode_with_no_end(room):
     room.switch.on_pi = False
     await room.look()
+    assert not room.service.camera_away and room.devices.calls == []   # one look only records it
+    await room.look()
     state = room.service.state()
     assert state["holder"] == "laptop" and state["until"] is None and room.devices.calls == ["release"]
 
@@ -147,9 +149,57 @@ async def test_the_meetup_given_back_at_the_switch_ends_laptop_mode_and_keeps_th
     await room.service.to_laptop(60)
     room.switch.on_pi = True
     await room.look()
+    assert room.service.camera_away                                 # one look only records it
+    await room.look()
     assert not room.service.camera_away and room.tv.calls == ["laptop", "pi"]
     [booked] = room.google.events.values()
     assert booked.end_time == at(10, 30)
+
+
+async def test_one_absent_look_during_a_meeting_changes_nothing(room):
+    room.meeting.state = MeetingState.CONNECTED
+    room.switch.on_pi = False                                     # a reading that lost the MeetUp for a moment
+    await room.look()
+    room.switch.on_pi = True
+    await room.look()
+    await room.look()
+    assert not room.service.camera_away and room.devices.calls == [] and room.tv.calls == []
+
+
+async def test_one_present_look_while_lent_changes_nothing(room):
+    await room.service.to_laptop(60)
+    room.devices.calls.clear()
+    room.switch.on_pi = True
+    await room.look()
+    room.switch.on_pi = False
+    await room.look()
+    await room.look()
+    assert room.service.camera_away and room.devices.calls == []
+
+
+async def test_the_meetup_given_back_during_a_meeting_is_not_homed(room):
+    await room.service.to_laptop(60)
+    room.meeting.state = MeetingState.CONNECTED
+    room.switch.on_pi = True
+    await room.look()
+    await room.look()
+    assert not room.service.camera_away and room.devices.homes == [False]
+
+
+async def test_the_meetup_given_back_when_idle_is_homed(room):
+    await room.service.to_laptop(60)
+    room.switch.on_pi = True
+    await room.look()
+    await room.look()
+    assert room.devices.homes == [True]
+
+
+async def test_a_new_hand_taken_session_starts_clean(room):
+    room.service._problem = NO_ANSWER                             # left over from a session that went wrong
+    room.switch.on_pi = False
+    await room.look()
+    await room.look()
+    assert room.service.camera_away and room.service.state()["problem"] is None
 
 
 async def test_a_restart_keeps_the_time_to_give_it_back(room):
@@ -225,13 +275,14 @@ async def test_the_watch_holds_the_lock_while_it_changes_the_devices(room):
     gate = asyncio.Event()
     reclaiming = room.devices.reclaim
 
-    async def slow_reclaim():
+    async def slow_reclaim(home=True):
         await gate.wait()
-        await reclaiming()
+        await reclaiming(home)
     await room.service.to_laptop(30)
     room.devices.reclaim = slow_reclaim
     room.devices.calls.clear()
     room.switch.on_pi = True                                      # given back at the switch itself
+    await room.look()                                             # the first look agrees with nothing yet
     watching = asyncio.ensure_future(room.look())
     for _ in range(100):
         if room.service.state()["switching"]:
@@ -270,3 +321,65 @@ def test_the_errors_import_without_the_control_package():
     code = "import croom.laptop.errors, sys; assert 'croom.control' not in sys.modules"
     done = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
     assert done.returncode == 0, done.stderr
+
+
+async def test_join_is_refused_in_words_while_the_meetup_is_on_its_way(room):
+    assert room.service.join_refusal() is None
+    gate = asyncio.Event()
+    moving = room.switch.move_to
+
+    async def slow(holder):
+        await gate.wait()
+        return await moving(holder)
+    room.switch.move_to = slow
+    first = asyncio.ensure_future(room.service.to_laptop(30))
+    for _ in range(100):
+        if room.service.state()["switching"]:
+            break
+        await asyncio.sleep(0.01)
+    assert room.service.join_refusal() == SWITCHING
+    gate.set()
+    await first
+    assert room.service.join_refusal() == CAMERA_AWAY
+    await room.service.to_room()
+    assert room.service.join_refusal() is None
+
+
+async def test_the_room_becoming_busy_while_the_booking_is_made_withdraws_it(room):
+    starting = room.rooms.start_now
+
+    async def start_then_a_join(minutes, title, source):
+        booking = await starting(minutes, title, source)
+        room.meeting.state = MeetingState.JOINING
+        return booking
+    room.rooms.start_now = start_then_a_join
+    with pytest.raises(LaptopError, match=IN_A_MEETING):
+        await room.service.to_laptop(30)
+    assert room.google.events == {} and room.devices.calls == [] and room.switch.moves == [] and not room.service.camera_away
+
+
+async def test_back_to_room_from_a_stale_screen_does_nothing(room):
+    room.meeting.state = MeetingState.CONNECTED
+    state = await room.service.to_room()
+    assert state["holder"] == "room"
+    assert room.devices.calls == [] and room.tv.calls == [] and room.switch.moves == []
+
+
+async def test_an_unexpected_failure_while_lending_leaves_nothing_held(room, caplog):
+    async def breaks(holder):
+        raise RuntimeError("the pin went away")
+    room.switch.move_to = breaks
+    with pytest.raises(LaptopError, match=NO_ANSWER):
+        await room.service.to_laptop(30)
+    assert room.google.events == {} and not room.service.camera_away
+    assert room.devices.calls == ["release", "reclaim"] and room.service.state()["problem"] == NO_ANSWER
+    assert "the pin went away" in caplog.text
+
+
+async def test_an_unexpected_failure_in_release_is_the_same(room):
+    async def breaks():
+        raise RuntimeError("the camera would not close")
+    room.devices.release = breaks
+    with pytest.raises(LaptopError, match=NO_ANSWER):
+        await room.service.to_laptop(30)
+    assert room.google.events == {} and room.devices.calls == ["reclaim"] and room.switch.moves == []

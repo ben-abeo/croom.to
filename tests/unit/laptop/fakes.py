@@ -35,13 +35,14 @@ class FakeUsbSwitch:
 
 class FakeDevices:
     def __init__(self):
-        self.calls = []
+        self.calls, self.homes = [], []
 
     async def release(self):
         self.calls.append("release")
 
-    async def reclaim(self):
+    async def reclaim(self, home=True):
         self.calls.append("reclaim")
+        self.homes.append(home)
 
 
 class FakeTv:

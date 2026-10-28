@@ -11,11 +11,12 @@ playwright = pytest.importorskip("playwright.sync_api")
 class TimedLaptop(StubLaptop):
     def __init__(self, until=None):
         super().__init__()
-        self.until = until
+        self.until, self.problem = until, None
 
     def state(self):
         state = super().state()
         state["until"] = self.until if self.away else None
+        state["problem"] = self.problem
         return state
 
 
@@ -35,6 +36,7 @@ def test_laptop_in_a_room_with_no_calendar_switches_in_one_tap_and_back(browser)
         assert laptop.calls == [("laptop", None)]
         assert page.locator("#headline").inner_text() == "The camera, microphones and speaker are on the laptop"
         assert "Logitech MeetUp" in page.locator("#detail").inner_text()
+        assert page.locator("#laptop-problem").is_hidden()
         assert page.locator(".link").is_hidden() and page.locator("#open-options").is_hidden()
         assert fits(page)
         page.click("#actions button:has-text('Back to room')")
@@ -85,7 +87,7 @@ def test_a_room_without_the_switch_has_no_laptop_button(browser):  # noqa: F811
 
 def test_the_laptop_input_is_chosen_beside_the_pis(browser):  # noqa: F811
     tv = RemoteTv()
-    with PageServer(tv=tv) as server:
+    with PageServer(tv=tv, laptop=TimedLaptop()) as server:
         page = tv_page(browser, server)
         saved = []
 
@@ -102,3 +104,37 @@ def test_the_laptop_input_is_chosen_beside_the_pis(browser):  # noqa: F811
         page.get_by_role("button", name="Save connection", exact=True).click()
         page.wait_for_function("document.getElementById('tv-settings-result').textContent.includes('Saved')")
         assert saved[-1]["laptop_input"] == "HDMI_2" and saved[-1]["pi_input"] == "HDMI_1"
+
+
+def test_the_laptop_screen_shows_the_hint_always_and_the_problem_on_its_own_line(browser):  # noqa: F811
+    laptop = TimedLaptop()
+    laptop.away = True
+    laptop.problem = "The TV did not switch: choose its input with the TV's Input button"
+    with PageServer(calendar_connected=False, laptop=laptop) as server:
+        page = browser.new_page(viewport={"width": 1280, "height": 800})
+        page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        page.wait_for_function("document.body.dataset.laptop === 'on'", timeout=5000)
+        assert "Logitech MeetUp" in page.locator("#detail").inner_text()
+        assert page.locator("#laptop-problem").inner_text() == laptop.problem
+        assert page.locator("#message").is_hidden()
+        assert fits(page)
+
+
+def open_tv_settings(page):
+    page.get_by_role("button", name="Change TV", exact=True).click()
+    page.locator("#tv-connection-settings summary").click()
+
+
+def test_the_laptop_input_is_hidden_in_a_room_without_the_switch(browser):  # noqa: F811
+    with PageServer(tv=RemoteTv()) as server:
+        page = tv_page(browser, server)
+        open_tv_settings(page)
+        assert page.get_by_label("Room Pi input").is_visible()
+        assert page.get_by_label("Laptop input").is_hidden()
+
+
+def test_the_laptop_input_is_shown_in_a_room_with_the_switch(browser):  # noqa: F811
+    with PageServer(tv=RemoteTv(), laptop=TimedLaptop()) as server:
+        page = tv_page(browser, server)
+        open_tv_settings(page)
+        assert page.get_by_label("Laptop input").is_visible()

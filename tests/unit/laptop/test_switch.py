@@ -186,3 +186,28 @@ def test_from_config_reads_the_laptop_section():
     config = Config.from_dict({"laptop": {"usb_id": "046d:0893", "press_ms": 300, "switch_wait_s": 4}})
     switch = UsbSwitch.from_config(config)
     assert (switch._usb_id, switch._press_s, switch._wait_s) == ("046d:0893", 0.3, 4)
+
+
+async def test_close_during_a_press_lets_go_of_the_pin_without_an_error():
+    bench = Bench()
+    made = bench.switch()
+    real_sleep = made._sleep
+
+    async def closes_then_sleeps(seconds):
+        made.close()
+        await real_sleep(seconds)
+    made._sleep = closes_then_sleeps
+    await made.press()
+    assert bench.levels == [(0.0, True), (0.2, False)]
+
+
+@pytest.mark.parametrize("usb_id", ["046d", "046d:", "046d:086", "046d:08666", "xxxx:0866", "046d-0866", " 046d:0866", ""])
+def test_a_usb_id_that_is_not_vendor_colon_product_leaves_the_switch_unavailable(usb_id):
+    asked = []
+    made = UsbSwitch(lambda: asked.append("pin") or object(), usb_id)
+    assert made.open() is False and not made.available and asked == []
+    assert "laptop.usb_id" in made.problem and repr(usb_id) in made.problem
+
+
+def test_a_usb_id_in_either_case_is_accepted():
+    assert UsbSwitch(lambda: object(), "046D:0B21").open() is True

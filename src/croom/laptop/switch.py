@@ -7,6 +7,7 @@ other computer each time it is pressed, so a press is never repeated before the 
 import asyncio
 import glob
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -17,6 +18,7 @@ USB_DEVICES = Path("/sys/bus/usb/devices")
 HEADER_CHIPS = ("pinctrl-rp1", "pinctrl-bcm2711")   # the 40-pin header's GPIO chip on a Pi 5 and on a Pi 4
 NO_ANSWER = "The switch did not answer: press the button on the switch box"
 ROOM, LAPTOP = "room", "laptop"
+USB_ID = re.compile(r"[0-9a-fA-F]{4}:[0-9a-fA-F]{4}")
 
 
 def usb_present(usb_id: str, root: Path = USB_DEVICES) -> bool:
@@ -93,6 +95,10 @@ class UsbSwitch:
     def open(self) -> bool:
         """Request the pin. One that cannot be had (no gpiod, not a Pi, the pin taken by another program) leaves the room without
         Laptop mode, and says why, never without its page."""
+        if not USB_ID.fullmatch(self._usb_id):
+            self._problem = f"laptop.usb_id must be a vendor:product id like 046d:0866, not {self._usb_id!r}"
+            logger.warning(f"Laptop switch unavailable: {self._problem}")
+            return False
         try:
             self._pin = self._pin_factory()
         except ImportError as e:
@@ -124,11 +130,12 @@ class UsbSwitch:
     async def press(self) -> None:
         if self._pin is None:
             raise RuntimeError(self._problem or "the switch is not open")
-        self._pin.set(True)
+        pin = self._pin         # close() may take it away while the press sleeps: let go of this one
+        pin.set(True)
         try:
             await self._sleep(self._press_s)
         finally:
-            self._pin.set(False)
+            pin.set(False)
 
     async def move_to(self, holder: str) -> bool:
         """Send the MeetUp to `holder` (ROOM or LAPTOP): a press, a wait for it to arrive, one look more, and only then a second

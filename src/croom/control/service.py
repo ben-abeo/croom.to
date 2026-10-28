@@ -26,7 +26,7 @@ from croom.control.settings import SettingsStore
 from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
-from croom.laptop.errors import CAMERA_AWAY, LaptopError
+from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
@@ -1380,8 +1380,9 @@ class ControlService(Service):
         url = normalize_link(url)
         if self._platform_for(url) is None:
             return self._error_response("Unsupported meeting link", 400)
-        if self._laptop is not None and self._laptop.camera_away:
-            return self._error_response(CAMERA_AWAY, 409)
+        refusal = self._laptop.join_refusal() if self._laptop is not None else None
+        if refusal:
+            return self._error_response(refusal, 409)
         if self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response("A meeting is already in progress", 409)
         self._last_error = None

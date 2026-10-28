@@ -999,6 +999,7 @@
     el("open-tv-remote").hidden = model.offline || (!inMeeting && !(tv && tv.configured && tv.paired));
     labelWithIcon(el("open-tv-remote"), inMeeting ? "TV" : "TV Remote", "tv");
     if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
+    el("laptop-problem").textContent = "";   // the Laptop screen's, written by renderLaptop
     el("message").textContent = model.error;   // the idle card's line; the meeting screen's own is written with its dialog card (renderDialog)
 
     if (model.offline || !model.status) {
@@ -1216,7 +1217,8 @@
     document.body.dataset.state = "soon";
     el("kicker").textContent = "Laptop";
     el("headline").textContent = "The camera, microphones and speaker are on the laptop" + (l.until ? " until " + fmtTime(new Date(l.until)) : "");
-    el("detail").textContent = l.problem || "Choose Logitech MeetUp as the camera, microphone and speaker in your meeting app";
+    el("detail").textContent = "Choose Logitech MeetUp as the camera, microphone and speaker in your meeting app";
+    el("laptop-problem").textContent = l.problem || "";   // its own line (spec 3): the card's #message belongs to the last refusal (model.error)
     const busy = laptopBusy || l.switching;
     return [{ id: "laptop-back", label: busy ? "Switching…" : "Back to room", className: "primary", icon: "home", disabled: busy,
               onClick: () => switchLaptop("room") }];

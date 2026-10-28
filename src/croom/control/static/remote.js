@@ -679,6 +679,8 @@
     el("tv-pairing").hidden = card !== "pairing";
     el("tv-refused").hidden = card !== "refused";
     el("tv-choose").hidden = card !== "choose";
+    const laptopSwitch = Boolean(model.status && model.status.laptop && model.status.laptop.enabled);
+    el("tv-settings-laptop").closest("label").hidden = !laptopSwitch;   // a room with no laptop switch has no laptop input to choose
     el("tv-change").hidden = !t.configured || tvView.pairing || card === "choose";
     el("tv-change").disabled = tvView.turningOn || tvView.forgetting;
     if ((card !== "" || (pointer.target === "tv" && !tvSupports(t, "pointer"))) && pointer.target) stopPointer();

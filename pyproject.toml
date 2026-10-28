@@ -47,6 +47,7 @@ dependencies = [
     "aiowebostv>=0.9",
     "wakeonlan>=3.0",
     "evdev>=1.6.0; sys_platform == 'linux'",
+    "gpiod>=2.1; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

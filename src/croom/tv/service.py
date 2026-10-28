@@ -841,12 +841,14 @@ class TvService(Service):
         `deadline` (a time on the loop's clock), as the steps of the wake are."""
         await self._show(self._config.pi_input, "the room Pi's input", deadline)
 
-    async def _show(self, input_id: str, what: str, deadline: Optional[float] = None) -> bool:
-        """The TV switched to `input_id` unless it shows it already (or says too little to tell, see shows_the_pi); `what` names the
-        input in the log. Whether it shows it now. A TV that refuses is logged; the switch and the reads after it are held to
+    async def _show(self, input_id: str, what: str, deadline: Optional[float] = None, unknown_switches: bool = False) -> bool:
+        """The TV switched to `input_id` unless it shows it already; `what` names the input in the log. A TV that says too little
+        to tell (see shows_the_pi) is left alone, as a join leaves it, unless `unknown_switches`: a person who asked for the input
+        gets the switch. Whether it shows it now. A TV that refuses is logged; the switch and the reads after it are held to
         `deadline` (a time on the loop's clock)."""
         shown, app, client = self._shown["input"], self._shown["app"], self._client
-        if shows_the_pi(input_id, shown, app) is not False:
+        showing = shows_the_pi(input_id, shown, app)
+        if showing is True or (showing is None and not unknown_switches):
             return True
         ask = self._within(self.ASK_TIMEOUT_S, deadline)
         if client is None or not ask:
@@ -876,7 +878,7 @@ class TvService(Service):
         if self.capabilities().get("direct_inputs") is False:
             return words
         what = "the room Pi's input" if which == "pi" else "the laptop's input"
-        return None if await self._show(input_id, what) else words
+        return None if await self._show(input_id, what, unknown_switches=True) else words
 
     def _is_on(self) -> bool:
         return bool(self._shown["on"]) and self._answering()

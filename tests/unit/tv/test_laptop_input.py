@@ -48,3 +48,15 @@ async def test_a_tv_that_refuses_the_switch_gets_the_input_in_words(tmp_path):
     service = service_for(tmp_path, refusing, key="key-9", laptop_input="HDMI_2")
     async with running(service):
         assert await service.show_input("laptop") == "Choose HDMI 2 on the TV with its Input button"
+
+
+async def test_a_tv_that_says_neither_input_nor_app_is_switched_when_asked_for_an_input(tmp_path):
+    def saying_nothing(host, key):
+        client = on_input("HDMI_1")(host, key)
+        client.tv_state.current_input, client.tv_state.current_app_id = None, None
+        return client
+    service = service_for(tmp_path, saying_nothing, key="key-9", laptop_input="HDMI_2")
+    async with running(service) as client:
+        assert service.status()["input"] is None and service.status()["app"] is None
+        assert await service.show_input("laptop") is None
+        assert switched(client) == [("set_input", "HDMI_2")]

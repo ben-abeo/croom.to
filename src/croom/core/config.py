@@ -230,7 +230,20 @@ class TvConfig:
     host: str = ""          # the TV's address; Find TVs on the table fills it
     mac: str = ""           # for Wake-on-LAN (Mobile TV On must be enabled on the TV)
     pi_input: str = "HDMI_1"   # the input the room Pi is on
+    laptop_input: str = ""     # the input a laptop at the table is on (spec 2026-10-27); empty: Laptop mode leaves the TV alone
     keep_on: bool = True    # wake the TV at start, before a join, and after an unexpected off
+
+
+@dataclass
+class LaptopConfig:
+    """The room's MeetUp lent to a laptop at the table through an ATEN US234, whose remote button a relay on a GPIO pin presses
+    (spec 2026-10-27). Off unless a room has the switch."""
+    enabled: bool = False
+    gpio_pin: int = 17              # BCM numbering: header pin 11
+    active_low: bool = False        # true for a relay or optocoupler board that switches on when the pin goes low
+    press_ms: int = 200             # how long the button is held
+    usb_id: str = "046d:0866"       # the MeetUp, as lsusb shows it
+    switch_wait_s: float = 10.0     # how long a press is given to move the MeetUp
 
 
 @dataclass
@@ -282,6 +295,7 @@ class Config:
     video: VideoConfig = field(default_factory=VideoConfig)
     display: DisplayConfig = field(default_factory=DisplayConfig)
     tv: TvConfig = field(default_factory=TvConfig)
+    laptop: LaptopConfig = field(default_factory=LaptopConfig)
     dashboard: DashboardConfig = field(default_factory=DashboardConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     updates: UpdateConfig = field(default_factory=UpdateConfig)
@@ -310,7 +324,7 @@ class Config:
         # A section with nothing under it (`meeting:` with its lines deleted loads as None) is that section's defaults, with nothing said about it: it
         # used to be a TypeError, which load_config answers by setting the whole file aside. A section with a key it does not know still is one.
         for name, section in (("room", RoomConfig), ("meeting", MeetingConfig), ("calendar", CalendarConfig), ("ai", AIConfig), ("audio", AudioConfig),
-                              ("video", VideoConfig), ("display", DisplayConfig), ("tv", TvConfig), ("dashboard", DashboardConfig),
+                              ("video", VideoConfig), ("display", DisplayConfig), ("tv", TvConfig), ("laptop", LaptopConfig), ("dashboard", DashboardConfig),
                               ("control", ControlConfig), ("updates", UpdateConfig), ("security", SecurityConfig)):
             if data.get(name) is not None:
                 setattr(config, name, section(**data[name]))
@@ -386,7 +400,16 @@ class Config:
                 "host": self.tv.host,
                 "mac": self.tv.mac,
                 "pi_input": self.tv.pi_input,
+                "laptop_input": self.tv.laptop_input,
                 "keep_on": self.tv.keep_on,
+            },
+            "laptop": {
+                "enabled": self.laptop.enabled,
+                "gpio_pin": self.laptop.gpio_pin,
+                "active_low": self.laptop.active_low,
+                "press_ms": self.laptop.press_ms,
+                "usb_id": self.laptop.usb_id,
+                "switch_wait_s": self.laptop.switch_wait_s,
             },
             "dashboard": {
                 "enabled": self.dashboard.enabled,

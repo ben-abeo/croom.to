@@ -456,12 +456,27 @@ async def test_reclaim_finds_the_camera_now_and_homes_it(tmp_path):
     await service.start()
     try:
         await service.homing
+        start_homing = service.homing
         await service.release()
-        dumps = runner.calls.count(["pw-dump"])
+        dumps, writes = runner.calls.count(["pw-dump"]), len(v4l2.sets(V4L2_CID_PAN_SPEED))
         await service.reclaim()
         assert service.camera.available and runner.calls.count(["pw-dump"]) > dumps
+        assert service.homing is not start_homing            # a new homing, not the one from the start
         await service.homing
+        assert len(v4l2.sets(V4L2_CID_PAN_SPEED)) > writes   # the motors were driven after the reclaim
         assert service.camera.position_known
+    finally:
+        await service.stop()
+
+
+async def test_release_makes_the_camera_position_unknown_when_no_home_is_saved(tmp_path):
+    service, _, _ = service_for(tmp_path)
+    await service.start()
+    try:
+        service.camera._position_known = True                # as after a move the room made
+        await service.release()
+        await service.reclaim()
+        assert service.camera.available and not service.camera.position_known   # the laptop may have moved it
     finally:
         await service.stop()
 

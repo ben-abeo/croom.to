@@ -94,6 +94,7 @@ class DevicesService(Service):
         self._away = True
         self.camera.set_preview(False)
         await self.camera.close()
+        self.camera.forget_position()
 
     async def reclaim(self) -> None:
         """The MeetUp is back: look for it now, not at the next background check, giving it RECLAIM_S to reappear as a camera, then

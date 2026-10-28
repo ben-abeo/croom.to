@@ -59,6 +59,10 @@ async def test_selected_tv_settings_can_be_updated_without_changing_host(client_
         response = await client.post("/api/tv/settings", json={"mac": "aa:bb:cc:dd:ee:04", "pi_input": "HDMI_2"})
         assert response.status == 200
         assert (await response.json())["tv"]["pi_input"] == "HDMI_2"
+        response = await client.post("/api/tv/settings", json={"laptop_input": "HDMI_3"})
+        assert response.status == 200 and (await response.json())["tv"]["laptop_input"] == "HDMI_3"
+        response = await client.post("/api/tv/settings", json={"laptop_input": "HDMI_2"})       # the room Pi's input
+        assert response.status == 409
         response = await client.post("/api/tv/settings", json={"host": "10.0.0.99"})
         assert response.status == 409
         assert tv.status()["host"] == TV["host"]

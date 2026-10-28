@@ -594,11 +594,11 @@ def skip_if_day_ends_within(hours: float) -> None:
         pytest.skip(f"less than {hours} hours left in the local day")
 
 
-def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, **config):
+def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, laptop=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
     return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse,
-                          scores=scores)
+                          scores=scores, laptop=laptop)
 
 
 @pytest.fixture(autouse=True)

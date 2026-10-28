@@ -315,6 +315,10 @@
     const input = t.pi_input || "HDMI_1";
     if (!Array.from(select.options).some((o) => o.value === input)) select.add(new Option(input, input));
     select.value = input;
+    const laptop = el("tv-settings-laptop");
+    const laptopInput = t.laptop_input || "";
+    if (laptopInput && !Array.from(laptop.options).some((o) => o.value === laptopInput)) laptop.add(new Option(laptopInput, laptopInput));
+    laptop.value = laptopInput;
     el("tv-settings-result").textContent = "";
     tvFind();
   }
@@ -327,7 +331,7 @@
     render();
     try {
       tvTake(await tvAsk(TV_CONTROL_MS, "The TV", (extra) => post("/api/tv/settings", {
-        mac: el("tv-settings-mac").value.trim(), pi_input: el("tv-settings-input").value,
+        mac: el("tv-settings-mac").value.trim(), pi_input: el("tv-settings-input").value, laptop_input: el("tv-settings-laptop").value,
       }, extra)));
       el("tv-settings-result").textContent = "Saved";
     } catch (e) {

@@ -45,13 +45,14 @@
   // field(input) (the page's hold on the name field, for its own keyboard).
   function open(host, options) {
     const state = { mode: options.mode, days: [], date: null, starts: null, chosen: null, busy: false, closed: false };
+    const laptop = state.mode === "laptop";   // Laptop mode (spec 2026-10-27): a length only, sent to /api/laptop
     let idleTimer = null;
     let doneTimer = null;
 
     const root = make("div", "bk");
     root.dataset.mode = state.mode;
     const head = make("div", "bk-head");
-    const title = make("h2", "bk-title", state.mode === "now" ? "Use the room now" : "Book the room");
+    const title = make("h2", "bk-title", laptop ? "Use a laptop for" : state.mode === "now" ? "Use the room now" : "Book the room");
     const back = make("button", "button quiet bk-back", "Back");
     back.type = "button";
     head.append(title, back);
@@ -73,15 +74,16 @@
     name.setAttribute("autocapitalize", "words");
     name.dataset.keyboard = "name";
     nameLabel.append(name);
+    nameLabel.hidden = laptop;
     const lengthLabel = make("label", "bk-label", "How long");
     const length = make("select", "bk-length");
     lengthLabel.append(length);
     const actions = make("div", "bk-actions");
-    const submit = make("button", "button primary bk-submit", state.mode === "now" ? "Start" : "Book");
+    const submit = make("button", "button primary bk-submit", laptop ? "Switch to laptop" : state.mode === "now" ? "Start" : "Book");
     submit.type = "submit";
     const change = make("button", "button quiet bk-change", "Change time");
     change.type = "button";
-    change.hidden = state.mode === "now";
+    change.hidden = state.mode !== "book";
     actions.append(submit, change);
     const error = make("p", "bk-error");
     error.setAttribute("role", "alert");
@@ -214,14 +216,17 @@
       e.preventDefault();
       if (state.busy) return;
       const words = name.value.trim();
-      if (!words) { error.textContent = "Type your name or the meeting's name."; name.focus({ preventScroll: true }); return; }
-      const body = { title: words, minutes: Number(length.value), source: options.source };
+      if (!laptop && !words) { error.textContent = "Type your name or the meeting's name."; name.focus({ preventScroll: true }); return; }
+      const body = laptop ? { to: "laptop", minutes: Number(length.value) } : { title: words, minutes: Number(length.value), source: options.source };
       if (state.mode === "book") body.start = state.chosen.start;
       state.busy = true;
       submit.disabled = true;
       error.textContent = "";
       try {
-        finish(await call(state.mode === "now" ? "/api/bookings/now" : "/api/bookings", { method: "POST", body: JSON.stringify(body) }));
+        const path = laptop ? "/api/laptop" : state.mode === "now" ? "/api/bookings/now" : "/api/bookings";
+        const data = await call(path, { method: "POST", body: JSON.stringify(body) });
+        if (laptop) close(true);            // the room page's Laptop screen says the rest
+        else finish(data);
       } catch (err) {
         error.textContent = err.message;
       } finally {
@@ -230,13 +235,13 @@
       }
     });
 
-    if (state.mode === "now") {
+    if (state.mode === "now" || laptop) {
       const now = options.now || { minutes: [], until: null };
       days.hidden = times.hidden = true;
       when.textContent = now.until ? "Free until " + fmtTime(new Date(now.until)) : "From now";
       fillLengths(now.minutes, now.ends);
       form.hidden = false;
-      name.focus({ preventScroll: true });
+      if (!laptop) name.focus({ preventScroll: true });
     } else {
       loadDay(null);
     }

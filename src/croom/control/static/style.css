@@ -737,3 +737,6 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
   .meeting-main .actions.meeting-actions { grid-template-columns: minmax(0, 1fr); }
   .meeting-main .meeting-actions .button { min-height: 64px; padding: 0 20px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 }
+
+/* Laptop mode (spec 2026-10-27): the idle card is the Laptop screen; joining by link waits for the MeetUp to come back. */
+body[data-laptop="on"] .link { display: none; }

@@ -529,6 +529,7 @@ class Jobs:
                     f.flush()
                     os.fsync(f.fileno())   # the Wi-Fi record must be on the card before the change it announces is made
                 os.replace(temp, self._paths.state)
+                self._sync_admin_dir()   # the rename itself on the card: a power cut must not bring the record before it back
             except BaseException:
                 if fd >= 0:
                     os.close(fd)
@@ -537,6 +538,18 @@ class Jobs:
                 except FileNotFoundError:
                     pass
                 raise
+
+    def _sync_admin_dir(self) -> None:
+        try:
+            folder = os.open(self._paths.admin_dir, os.O_RDONLY)
+        except OSError:
+            return
+        try:
+            os.fsync(folder)
+        except OSError:
+            pass
+        finally:
+            os.close(folder)
 
     def _record(self, state: str, undone: bool, why: str = "") -> None:
         record = {"state": state, "undone": undone, "at": datetime.fromtimestamp(self._host.clock()).astimezone().isoformat(timespec="seconds")}
@@ -667,8 +680,13 @@ class Jobs:
             self._paths.legacy_state.unlink(missing_ok=True)
         except OSError as e:
             logger.warning(f"Could not remove the old record {self._paths.legacy_state}: {e}")
-        self._updater.resume()
-        self._wifi.resume()
+        # The Wi-Fi first (the TV Pi back on a network that works is what everything after needs), and each on its own: one that
+        # fails must neither stop the other nor stop the helper starting (a crash here would be a crash at every start).
+        for name, resume in (("Wi-Fi change", self._wifi.resume), ("update", self._updater.resume)):
+            try:
+                resume()
+            except Exception:  # noqa: BLE001
+                logger.exception(f"Could not take up the {name} that was under way")
         state = self._read_state()
         record = state.get("restart")
         asked_at = state.get("watch_asked_at")

@@ -4,7 +4,8 @@ and the touch Pi's agent (tools/kiosk_agent, which loads this file by its path) 
 say how a device is connected. Standard-library Python only, and nothing of croom is imported: the touch Pi runs it with the system's
 python3, outside any venv.
 
-nmcli is run with argument lists (never a shell) in its terse mode (-t -f FIELDS), whose values escape ":" and "\\" with a backslash
+nmcli is run with argument lists (never a shell), in the C locale (env LC_ALL=C LANG=C: its state words and errors are matched in
+English), in its terse mode (-t -f FIELDS), whose values escape ":" and "\\" with a backslash
 (split_terse). The password never goes on a command line, where any user could read it in the process list: a new network's profile
 is written by this module as a NetworkManager keyfile, root's and mode 600, in NetworkManager's own folder, and loaded with `nmcli
 connection load`; it is then brought up by its UUID.
@@ -35,6 +36,7 @@ CONNECT_WAIT_S = 45               # nmcli --wait: how long joining may take (DHC
 SCAN_CACHE_S = 20                 # a scan is reused this long (Join looks a network up in it)
 MAX_NETWORKS = 30
 UNDER_WAY = ("trying", "proven", "undoing")
+C_LOCALE = ["env", "LC_ALL=C", "LANG=C"]   # every command runs in the C locale: the words matched here are the ones nmcli prints
 SSID_WORDS = "A network's name is 1 to 32 characters"
 PASSWORD_WORDS = "A Wi-Fi password is 8 to 63 letters, digits and symbols, or a key of 64 characters 0 to 9 and A to F"
 WIFI_TYPES = ("wifi", "802-11-wireless")
@@ -250,7 +252,7 @@ class Wifi:
     def __init__(self, run: Runner, store: Any, connections: Path, name: str, clock: Callable[[], float] = time.time,
                  monotonic: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                  new_uuid: Callable[[], str] = lambda: str(uuid_module.uuid4())):
-        self.run = run
+        self.run = lambda args: run(C_LOCALE + list(args))
         self.store = store
         self.connections = Path(connections)
         self.name = name
@@ -407,6 +409,7 @@ class Wifi:
         if kind == "sae" and len(password) == 64:
             raise WifiError(f"{ssid} takes its password, not a key of 64 characters")
         reuse = profiles[0]["uuid"] if profiles and not password else None
+        reuse_autoconnect = self.autoconnect(reuse) if reuse else None
         if kind in ("psk", "sae") and not password and reuse is None:
             raise WifiError(f"Enter the password for {ssid}")
         old = next((a for a in self.active() if a["device"] == wifi["device"]), None)
@@ -414,8 +417,29 @@ class Wifi:
             raise WifiError(f"The {self.name} is on {ssid} already")
         return Plan(ssid=ssid, password=password, hidden=hidden, kind=kind, device=wifi["device"],
                     ethernet=self.on_ethernet(devices) is not None, old=old["uuid"] if old else None,
-                    old_name=old["name"] if old else None, reuse=reuse,
+                    old_name=old["name"] if old else None, reuse=reuse, reuse_autoconnect=reuse_autoconnect,
                     superseded=[p["uuid"] for p in profiles] if not reuse else [])
+
+    def autoconnect(self, connection_uuid: str) -> bool:
+        """Whether a saved profile connects by itself (when nmcli does not say: yes, NetworkManager's default)."""
+        code, output = self.run(["nmcli", "-t", "-f", "connection.autoconnect", "connection", "show", "uuid", connection_uuid])
+        return not (code == 0 and parse_values(output).get("connection.autoconnect", "").strip() == "no")
+
+    def _set_autoconnect(self, connection_uuid: str, on: bool) -> Tuple[int, str]:
+        return self.run(["nmcli", "connection", "modify", "uuid", connection_uuid, "connection.autoconnect", "yes" if on else "no"])
+
+    def _active_or_none(self) -> List[Dict[str, str]]:
+        try:
+            return self.active()
+        except WifiError:
+            return []
+
+    def on_profile(self, device: str, connection_uuid: Optional[str]) -> bool:
+        """Whether `device` is on the profile `connection_uuid` now (when nmcli can't say: no, the stricter answer)."""
+        try:
+            return any(a["device"] == device and a["uuid"] == connection_uuid for a in self.active())
+        except WifiError:
+            return False
 
     def _keyfile(self, connection_uuid: str) -> Path:
         return self.connections / f"croom-{connection_uuid}.nmconnection"
@@ -428,9 +452,15 @@ class Wifi:
         new = plan.reuse or self.new_uuid()
         record = self._save({"state": "trying", "ssid": plan.ssid, "device": plan.device, "old": plan.old, "old_name": plan.old_name,
                              "new": new, "created": plan.reuse is None, "superseded": plan.superseded, "words": f"Joining {plan.ssid}",
-                             **extra})
+                             "reuse_autoconnect": plan.reuse_autoconnect, **extra})
         progress(f"Joining {plan.ssid}")
-        if plan.reuse is None:
+        if plan.reuse is not None:
+            # A saved profile on trial must not connect by itself either: a power cut now must not boot onto an unproven network.
+            # What it was is in the record (written above), and is put back if the change is undone.
+            code, output = self._set_autoconnect(new, False)
+            if code != 0:
+                raise WifiError(self.go_back(record, f"Could not prepare {plan.ssid}: {why_words(output)}"))
+        else:
             path = self._keyfile(new)
             try:
                 write_private(path, keyfile(new, plan.ssid, plan.password, plan.kind, plan.hidden))
@@ -446,18 +476,25 @@ class Wifi:
         self._save(record, words=f"Joined {plan.ssid}: checking that the {self.name} can do its job on it")
         progress(f"Joined {plan.ssid}: checking that the {self.name} can do its job on it")
         tests, note = checks(plan.device, since)
-        failure = self.trial(tests)
+        left = f"the {self.name} did not stay on {plan.ssid}"
+        failure = self.trial(tests, on_new=lambda: self.on_profile(plan.device, new), left=left)
+        if not failure and not self.on_profile(plan.device, new):   # once more, just before it is written down as proven
+            failure = left
         if failure:
             raise WifiError(self.go_back(record, f"Joined {plan.ssid}, but {failure}"))
         words = f"Joined {plan.ssid}" + (f". {note}" if note else "")
         self._save(record, state="proven", words=words)
         return self.keep(record)
 
-    def trial(self, checks: List[Check]) -> Optional[str]:
-        """Ask each check every CHECK_EVERY_S until each has passed once: None, or the failure of the first that had not in TRIAL_S."""
+    def trial(self, checks: List[Check], on_new: Optional[Callable[[], bool]] = None, left: str = "") -> Optional[str]:
+        """Ask each check every CHECK_EVERY_S until each has passed once: None, or the failure of the first that had not in TRIAL_S.
+        `on_new`, asked before and after each round: the device is still on the new network. When it is not (the network dropped it
+        and NetworkManager went back to another), the checks would pass over the other network: the trial fails at once with `left`."""
         deadline = self.monotonic() + TRIAL_S
         passed = set()
         while True:
+            if on_new is not None and not on_new():
+                return left
             for n, check in enumerate(checks):
                 if n in passed:
                     continue
@@ -466,6 +503,8 @@ class Wifi:
                         passed.add(n)
                 except Exception:  # noqa: BLE001 - a check that breaks has not passed
                     pass
+            if on_new is not None and not on_new():
+                return left
             if len(passed) == len(checks):
                 return None
             if self.monotonic() >= deadline:
@@ -498,6 +537,8 @@ class Wifi:
             back = None if code == 0 else why_words(output)
         elif new and not record.get("created"):
             self.run(["nmcli", "connection", "down", "uuid", new])
+        if new and not record.get("created") and isinstance(record.get("reuse_autoconnect"), bool):
+            self._set_autoconnect(new, record["reuse_autoconnect"])   # the saved profile as it was before the change
         if new and record.get("created") and new != old:
             self.run(["nmcli", "connection", "delete", "uuid", new])
             try:
@@ -533,6 +574,8 @@ class Wifi:
                 if code != 0:
                     return self.go_back(record, f"{record.get('ssid')} could not be joined again after the {self.name} restarted: "
                                                 f"{why_words(output)}")
+            if not (self.on_profile(device, new) if device else any(a["uuid"] == new for a in self._active_or_none())):
+                return self.go_back(record, f"The {self.name} did not stay on {record.get('ssid')} after it restarted")
             return self.keep(record)
         if state in ("trying", "undoing"):
             why = record.get("why") or f"The {self.name} restarted before {record.get('ssid') or 'the new network'} was proven"

@@ -98,7 +98,7 @@ class Runner:
         self.cut = None                 # a callable run before each command (PowerCut counts them)
 
     def __call__(self, args, env=None, timeout=None):
-        if self.nm is not None and args[0] in ("nmcli", "ping"):
+        if self.nm is not None and (args[0] in ("nmcli", "ping") or (args[0] == "env" and args[3:4] and args[3] in ("nmcli", "ping"))):
             return self.nm(args)
         if self.cut:
             self.cut()

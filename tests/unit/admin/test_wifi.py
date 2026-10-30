@@ -196,3 +196,43 @@ def test_forget(m):
     assert m.job("wifi_forget", ssid="Guest") == {"words": "Forgot Guest"}
     with pytest.raises(JobError, match="The TV Pi is on Office: join another network first"):
         m.job("wifi_forget", ssid="Office")
+
+
+def test_the_helpers_start_takes_up_the_wifi_first_and_one_failing_stops_neither_the_other_nor_the_start(tmp_path, monkeypatch, caplog):
+    m = Machine(tmp_path)
+    order = []
+    from croom.admin.update import Updater
+    from croom.admin.wifi import WifiJobs
+
+    def broken(name):
+        def resume(self):
+            order.append(name)
+            raise RuntimeError(f"{name} broke")
+        return resume
+
+    monkeypatch.setattr(WifiJobs, "resume", broken("wifi"))
+    monkeypatch.setattr(Updater, "resume", lambda self: order.append("update"))
+    m.make().resume()
+    assert order == ["wifi", "update"]
+    monkeypatch.setattr(WifiJobs, "resume", lambda self: order.append("wifi"))
+    monkeypatch.setattr(Updater, "resume", broken("update"))
+    m.make().resume()                                      # no exception: the helper starts
+    assert order[2:] == ["wifi", "update"]
+    assert sum("Could not take up" in r.message for r in caplog.records) == 2
+
+
+def test_the_record_and_its_rename_reach_the_card(m, monkeypatch):
+    import stat as stat_module
+
+    synced = []
+    real = os.fsync
+    monkeypatch.setattr("croom.admin.jobs.os.fsync", lambda fd: (synced.append(stat_module.S_ISDIR(os.fstat(fd).st_mode)), real(fd)))
+    m.jobs._update_state(wifi={"state": "trying"})
+    assert synced == [False, True]                         # the file, then its folder (the rename)
+
+
+def test_wifi_commands_run_in_the_c_locale(m):
+    m.room.touch_at = m.clock.now + 10
+    m.job("wifi_status")
+    m.job("wifi_connect", ssid="New Net", password="correct horse")
+    assert m.nm.calls and m.nm.without_c_locale == []

@@ -153,3 +153,23 @@ def test_the_wifi_status_in_the_check_ins_is_read_now_and_then(device):
     _, body, _ = device.room.posts[-1]
     assert body["network"]["wifi"] is False and body["network"]["connection"] == "ethernet"
     assert body["network"]["address"] == "10.0.0.9"         # the address it reaches the room from, kept
+
+
+def test_a_network_that_drops_the_touch_pi_during_its_trial_is_not_kept(device):
+    """Dropped from the new network, NetworkManager puts the touch Pi back on the old one, where the room answers: not proof."""
+    me = allowed(device)
+    asked = []
+
+    def room_up(url):
+        asked.append(device.nm.ssid_on())
+        if device.nm.ssid_on() == "New Net":
+            device.nm.active["wlan0"] = "u-old"            # dropped as it first asks the room
+            return False
+        return True
+
+    device.room_up = room_up
+    give(device, me, "wifi_connect", ssid="New Net", password="correct horse")
+    assert last(device, me)["state"] == "failed"
+    assert last(device, me)["words"] == "Joined New Net, but the touch Pi did not stay on New Net. The touch Pi is back on Office"
+    assert all(p["ssid"] != "New Net" for p in device.nm.profiles.values())
+    assert device.nm.without_c_locale == []                # the agent's nmcli runs in the C locale too

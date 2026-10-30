@@ -329,14 +329,28 @@ def test_going_back_that_fails_says_so(nm, clock):
     assert str(refused.value).endswith(", and going back to Office failed: the network was not found")
 
 
-def every_step(nm, clock, nm_setup=lambda nm: None):
+def saved_guest(nm):
+    nm.profiles["u-guest"] = {"name": "Guest", "ssid": "Guest", "psk": None, "autoconnect": True, "file": None, "hidden": False,
+                              "mgmt": None}
+
+
+# (the network joined, its password, how the stand-in is set up): a new profile or a saved one reused, on a network that works or not
+CASES = {
+    "new, works": ("New Net", "correct horse", lambda nm: None),
+    "new, fails": ("New Net", "correct horse", lambda nm: setattr(nm, "reachable", lambda ssid: ssid != "New Net")),
+    "saved, works": ("Guest", "", saved_guest),
+    "saved, fails": ("Guest", "", lambda nm: (saved_guest(nm), setattr(nm, "reachable", lambda ssid: ssid != "Guest"))),
+}
+
+
+def every_step(nm, clock, ssid, password, nm_setup):
     """How many steps (commands and writes of the record) a whole change takes."""
     probe = FakeNM(nm.dir / "probe")
     probe.dir.mkdir()
     nm_setup(probe)
     store = Store()
     wifi = wifi_of(probe, clock, store)
-    plan = wifi.prepare("New Net", "correct horse")
+    plan = wifi.prepare(ssid, password)
     count = {"n": 0}
     probe.cut = store.cut = lambda args: count.update(n=count["n"] + 1)
     try:
@@ -346,22 +360,26 @@ def every_step(nm, clock, nm_setup=lambda nm: None):
     return count["n"]
 
 
-@pytest.mark.parametrize("works", [True, False])
-def test_a_power_cut_at_any_step_leaves_the_device_on_a_network_that_works(tmp_path, clock, works):
-    """At every command of a change, and every write of its record, the power goes; the device boots (NetworkManager brings up what connects by itself) and the helper
-    or the agent starts (recover): it ends on the new network only when that one was proven, else on the old one, with a record that
-    says it is over, and no profile or keyfile left of a network that was not kept."""
-    setup = (lambda nm: None) if works else (lambda nm: setattr(nm, "reachable", lambda ssid: ssid != "New Net"))
-    total = every_step(FakeNM(tmp_path), clock, setup)
+@pytest.mark.parametrize("case", list(CASES))
+def test_a_power_cut_at_any_step_leaves_the_device_on_a_network_that_works(tmp_path, clock, case):
+    """At every command of a change, and every write of its record, the power goes; the device boots (NetworkManager brings up the
+    most recently used profile that connects by itself) and the helper or the agent starts (recover). The boot itself never comes up on
+    a network that was not proven (a profile on trial, new or saved, does not connect by itself); after recover the device is on the new
+    network only when that one was proven, else on the old one, with a record that says it is over, no profile or keyfile left of a new
+    network that was not kept, and a saved network as it was."""
+    ssid, password, setup = CASES[case]
+    works, reused = case.endswith("works"), case.startswith("saved")
+    target = "u-guest" if reused else NEW_UUID
+    total = every_step(FakeNM(tmp_path), clock, ssid, password, setup)
     assert total >= 9
     for cut_at in range(total):
-        folder = tmp_path / f"cut-{works}-{cut_at}"
+        folder = tmp_path / f"cut-{cut_at}"
         folder.mkdir()
         nm = FakeNM(folder)
         setup(nm)
         store = Store()
         wifi = wifi_of(nm, clock, store)
-        plan = wifi.prepare("New Net", "correct horse")
+        plan = wifi.prepare(ssid, password)
         count = {"n": 0}
 
         def cut(args, at=cut_at):
@@ -374,19 +392,106 @@ def test_a_power_cut_at_any_step_leaves_the_device_on_a_network_that_works(tmp_p
             wifi.change(plan, gateway_only(wifi))
         nm.cut = store.cut = None
         nm.reboot()
+        if store.load().get("state") not in ("proven", "done"):
+            assert nm.ssid_on() == "Office", (cut_at, store.load())        # the boot did not bring up the network on trial
         after = wifi_of(nm, clock, store)
         after.recover()
         record = after.record()
         if not record:                                      # cut before the record was written: nothing had changed
-            assert cut_at == 0 and nm.ssid_on() == "Office" and set(nm.profiles) == {"u-old"}
+            assert cut_at == 0 and nm.ssid_on() == "Office"
             continue
         assert record["state"] in ("done", "undone"), (cut_at, record)
         if record["state"] == "done":
-            assert works and nm.ssid_on() == "New Net" and nm.profiles[NEW_UUID]["autoconnect"], cut_at
+            assert works and nm.ssid_on() == ssid and nm.profiles[target]["autoconnect"], cut_at
         else:
             assert nm.ssid_on() == "Office", (cut_at, record)
-            assert NEW_UUID not in nm.profiles and list(folder.iterdir()) == [], cut_at
+            if reused:
+                assert nm.profiles["u-guest"]["autoconnect"] is True, cut_at          # put back as it was
+            else:
+                assert NEW_UUID not in nm.profiles and list(folder.iterdir()) == [], cut_at
         assert after.recover() is None                       # a second start has nothing left to do
+
+
+def test_a_network_that_drops_the_device_during_its_trial_is_not_kept(nm, clock):
+    """The new network joins, then drops the device; NetworkManager goes back to the old one by itself, and the checks would pass
+    there: the trial sees the device is not on the new network and goes back, saying so."""
+    def drop(args):
+        if args[0] == "ping" and nm.ssid_on() == "New Net":
+            nm.active["wlan0"] = "u-old"                   # after its first ping on the new network, the device is dropped
+
+    nm.after = drop
+    wifi = wifi_of(nm, clock)
+    with pytest.raises(WifiError) as refused:
+        wifi.change(wifi.prepare("New Net", "correct horse"), gateway_only(wifi))
+    assert str(refused.value) == "Joined New Net, but the TV Pi did not stay on New Net. The TV Pi is back on Office"
+    assert nm.ssid_on() == "Office" and NEW_UUID not in nm.profiles and "u-old" in nm.profiles
+
+
+def test_a_drop_after_the_last_check_is_seen_before_it_is_written_down_as_proven(nm, clock):
+    wifi = wifi_of(nm, clock)
+    store = wifi.store
+    rounds = {"n": 0}
+
+    def drop(args):
+        # The checks pass; then, as the change asks one last time whether the device is on it, it has gone
+        if args[0] == "ping":
+            rounds["n"] += 1
+        if args[-1] == "--active" and rounds["n"] >= 1 and nm.ssid_on() == "New Net":
+            rounds["seen"] = rounds.get("seen", 0) + 1
+            if rounds["seen"] >= 2:                         # the first ask is the trial's, after the ping; the second is the last one
+                nm.active["wlan0"] = "u-old"
+
+    nm.cut = drop
+    with pytest.raises(WifiError, match="did not stay on New Net"):
+        wifi.change(wifi.prepare("New Net", "correct horse"), gateway_only(wifi))
+    assert "proven" not in [r["state"] for r in store.saved]
+
+
+def test_a_proven_change_the_device_is_not_on_after_a_restart_is_undone(nm, clock):
+    store = Store()
+    wifi = wifi_of(nm, clock, store)
+    plan = wifi.prepare("New Net", "correct horse")
+    cut_at_keep = {"on": True}
+
+    def cut(args):
+        if cut_at_keep["on"] and args[1:3] == ["connection", "modify"]:
+            raise PowerCut()
+
+    nm.cut = cut
+    with pytest.raises(PowerCut):
+        wifi.change(plan, gateway_only(wifi))
+    cut_at_keep["on"] = False
+    assert store.load()["state"] == "proven"
+    nm.reboot()                                             # on the old one: the new one did not yet connect by itself
+    nm.after = lambda args: nm.active.update(wlan0="u-old") if args[1:4] == ["--wait", "45", "connection"] and NEW_UUID in args else None
+    words = wifi_of(nm, clock, store).recover()             # it joins it again, and is dropped at once
+    assert words == "The TV Pi did not stay on New Net after it restarted. The TV Pi is back on Office"
+    assert NEW_UUID not in nm.profiles and nm.ssid_on() == "Office"
+
+
+def test_a_saved_network_on_trial_does_not_connect_by_itself_and_is_put_back(nm, clock):
+    saved_guest(nm)
+    seen = []
+    nm.after = lambda args: seen.append(nm.profiles["u-guest"]["autoconnect"]) if args[0] == "ping" else None
+    wifi = wifi_of(nm, clock)
+    nm.reachable = lambda ssid: ssid != "Guest"
+    with pytest.raises(WifiError):
+        wifi.change(wifi.prepare("Guest", ""), gateway_only(wifi))
+    assert seen and not any(seen)                          # during the trial: off
+    assert nm.profiles["u-guest"]["autoconnect"] is True   # after going back: as it was
+    nm.reachable = lambda ssid: True
+    nm.profiles["u-guest"]["autoconnect"] = False          # a saved network that did not connect by itself...
+    wifi.change(wifi.prepare("Guest", ""), gateway_only(wifi))
+    assert nm.profiles["u-guest"]["autoconnect"] is True   # ...connects by itself once it is the one proven
+
+
+def test_every_command_runs_in_the_c_locale(nm, clock):
+    wifi = wifi_of(nm, clock)
+    wifi.status()
+    wifi.scan()
+    wifi.change(wifi.prepare("New Net", "correct horse"), gateway_only(wifi))
+    wifi.forget("Office")
+    assert nm.calls and nm.without_c_locale == []
 
 
 def test_forget_deletes_a_saved_network_but_not_the_one_the_device_depends_on(nm, clock):

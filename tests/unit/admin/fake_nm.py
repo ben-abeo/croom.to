@@ -60,8 +60,11 @@ class FakeNM:
         self.reachable = lambda ssid: True  # whether the gateway of the network the Wi-Fi is on answers a ping
         self.scan_fails = False
         self.rescan_refused = False
-        self.calls = []
+        self.calls = []                     # every command, without the env LC_ALL=C LANG=C before it
+        self.without_c_locale = []          # commands that came without it (none should)
         self.cut = None                     # run before each command: raises PowerCut at the chosen one
+        self.after = None                   # run after each command, with it: a test changes the air (a network drops the device)
+        self.used = {"u-old": 1}            # when each profile was last connected (NetworkManager's timestamp): a counter
 
     # --- what the device is on
 
@@ -70,13 +73,13 @@ class FakeNM:
         return self.profiles[uuid]["ssid"] if uuid in self.profiles else None
 
     def reboot(self):
-        """A power cut and the boot after it: the Wi-Fi comes up on a profile that connects by itself and whose network is in range
-        and takes its password (the old one, since a profile on trial does not connect by itself)."""
+        """A power cut and the boot after it: the Wi-Fi comes up as NetworkManager brings it up, on the most recently used profile
+        that connects by itself and whose network is in range and takes its password (the old one, since a profile on trial does not
+        connect by itself)."""
         self.active = {}
-        for uuid, profile in self.profiles.items():
-            if profile["autoconnect"] and self._works(profile):
-                self.active[self.wifi_device] = uuid
-                break
+        ready = [uuid for uuid, profile in self.profiles.items() if profile["autoconnect"] and self._works(profile)]
+        if ready:
+            self.active[self.wifi_device] = max(ready, key=lambda uuid: self.used.get(uuid, 0))
 
     def _works(self, profile):
         ssid = profile["ssid"]
@@ -89,9 +92,20 @@ class FakeNM:
     # --- nmcli
 
     def __call__(self, args, env=None, timeout=None):
+        args = list(args)
+        if args[:3] == ["env", "LC_ALL=C", "LANG=C"]:
+            args = args[3:]
+        else:
+            self.without_c_locale.append(args)
         if self.cut:
             self.cut(args)
         self.calls.append(list(args))
+        answer = self._answer(args)
+        if self.after:
+            self.after(args)
+        return answer
+
+    def _answer(self, args):
         if args[0] == "ping":
             ssid = self.ssid_on(args[args.index("-I") + 1])
             ok = ssid is not None and self.gateways.get(ssid) == args[-1] and self.reachable(ssid)
@@ -110,8 +124,8 @@ class FakeNM:
             uuid = rest[3]
             if uuid not in self.profiles:
                 return 10, "Error: unknown connection"
-            assert rest[4:] == ["connection.autoconnect", "yes"], rest
-            self.profiles[uuid]["autoconnect"] = True
+            assert rest[4] == "connection.autoconnect" and rest[5] in ("yes", "no"), rest
+            self.profiles[uuid]["autoconnect"] = rest[5] == "yes"
             return 0, ""
         if rest[:3] == ["connection", "delete", "uuid"]:
             uuid = rest[3]
@@ -154,6 +168,9 @@ class FakeNM:
             lines = [f"{esc(p['name'])}:{u}:802-11-wireless" for u, p in self.profiles.items()]
             lines.append("Wired connection 1:u-eth:802-3-ethernet")
             return 0, "\n".join(lines) + "\n"
+        if fields == "connection.autoconnect" and rest[:3] == ["connection", "show", "uuid"]:
+            profile = self.profiles.get(rest[3])
+            return (0, f"connection.autoconnect:{'yes' if profile['autoconnect'] else 'no'}\n") if profile else (10, "Error: no such profile.")
         if fields == "802-11-wireless.ssid" and rest[:3] == ["connection", "show", "uuid"]:
             profile = self.profiles.get(rest[3])
             return (0, f"802-11-wireless.ssid:{esc(profile['ssid'])}\n") if profile else (10, "Error: no such connection profile.")
@@ -205,4 +222,5 @@ class FakeNM:
             self.active.pop(device, None)
             return 4, WRONG_PASSWORD
         self.active[device] = uuid
+        self.used[uuid] = max(self.used.values(), default=0) + 1
         return 0, f"Connection successfully activated (D-Bus active path: /org/freedesktop/NetworkManager/ActiveConnection/{len(self.calls)})"

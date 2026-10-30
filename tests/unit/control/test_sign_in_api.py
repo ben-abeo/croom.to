@@ -158,6 +158,7 @@ async def test_a_join_is_refused_while_signing_in(client, unlocked, meeting):
 
 
 async def test_typing_on_the_touch_pi_reaches_the_room_pis_keyboard_and_keeps_the_sign_in_open(client, meeting, keyboard):
+    meeting.signing_in = True
     async with client.ws_connect("/ws/pointer") as ws:
         await ws.send_json({"target": "pi", "type": "keys", "text": "Room@crystalpm.com"})
         await ws.send_json({"target": "pi", "type": "keys", "key": "Enter"})
@@ -193,3 +194,25 @@ async def test_the_whole_way_with_the_real_meeting_service_on_a_fake_tv(client_f
     assert rig.events == ["display stopped", "browser opened", "browser closed", "display started"]
     state = await (await client.get(STATE, headers=unlocked)).json()
     assert state["signed_in"] is True and state["address"] == "room@crystalpm.com" and state["active"] is False
+
+
+async def test_typing_is_refused_in_words_unless_a_sign_in_is_open(client, unlocked, meeting, keyboard):
+    async with client.ws_connect("/ws/pointer") as ws:
+        await ws.send_json({"target": "pi", "type": "keys", "text": "a"})
+        assert (await asyncio.wait_for(ws.receive_json(), 2)) == {"error": "Typing on the TV is only for signing in"}
+        await client.post(BEGIN, json={}, headers=unlocked)
+        await ws.send_json({"target": "pi", "type": "keys", "text": "a"})
+        await wait_until(lambda: keyboard.typed() == "a")
+        await client.post(CANCEL, json={}, headers=unlocked)
+        await ws.send_json({"target": "pi", "type": "keys", "key": "Enter"})
+        assert (await asyncio.wait_for(ws.receive_json(), 2)) == {"error": "Typing on the TV is only for signing in"}
+    assert keyboard.typed() == "a"
+
+
+async def test_the_keyboard_is_made_only_once_a_sign_in_has_begun(client, unlocked, meeting, keyboard):
+    meeting.google_profile = None
+    assert (await client.post(BEGIN, json={}, headers=unlocked)).status == 409
+    assert keyboard.opened == 0
+    meeting.google_profile = "/var/lib/croom/meet-profile"
+    assert (await client.post(BEGIN, json={}, headers=unlocked)).status == 200
+    assert keyboard.opened == 1

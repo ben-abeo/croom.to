@@ -1562,13 +1562,17 @@ class ControlService(Service):
         refusal = self._laptop.join_refusal() if self._laptop is not None else None
         if refusal:
             return self._error_response(refusal, 409)
-        await self._make_the_keyboard()
         try:
             await self._meeting.begin_sign_in()
         except SignInError as e:
             return self._error_response(str(e), e.status)
+        await self._make_the_keyboard()
         logger.info("Sign in to Google on the TV asked for from Settings")
         return web.json_response(await self._sign_in_answer())
+
+    def _signing_in(self) -> bool:
+        """Whether a sign-in to Google has the TV: the only time the touch Pi types on the room Pi."""
+        return bool(getattr(self._meeting, "signing_in", False))
 
     async def _make_the_keyboard(self) -> None:
         """Make the room Pi's virtual keyboard as the sign-in begins, so that the desktop has taken it up by the first key (as the mouse is
@@ -1649,7 +1653,7 @@ class ControlService(Service):
             return self._error_response("The pointer is for the room's own page", 403)
         ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
         await ws.prepare(request)
-        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop, keyboard=self._keyboard)
+        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop, keyboard=self._keyboard, may_type=self._signing_in)
         self._pointers[ws] = _Pointer(request, relay)
         try:
             await self._make_the_mouse()

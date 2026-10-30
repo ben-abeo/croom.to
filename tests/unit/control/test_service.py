@@ -2973,8 +2973,7 @@ class TestPointerSocket:
         ('{"target": "tv", "type": "move", "dx": "3"}', "dx is a number"), ('{"target": "pi", "type": "move", "dy": NaN}', "dy is a number"),
         ('{"target": "tv", "type": "right"}', "The TV's cursor has no right button"),
         ('{"target": "tv", "type": "keys", "text": "a"}', "Typing goes to the room Pi: the TV's cursor has no keyboard"),
-        ('{"target": "pi", "type": "keys", "text": "\u00e9"}',
-         'The TV keyboard types the letters, digits and symbols of a US keyboard: "\u00e9" is not one of them'),
+        ('{"target": "pi", "type": "keys", "text": "a"}', "Typing on the TV is only for signing in"),
     ])
     async def test_a_frame_that_is_no_use_is_answered_in_words_and_the_socket_goes_on(self, client_factory, frame, words):
         tv, mouse = StubTv(), StubMouse()

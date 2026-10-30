@@ -37,6 +37,7 @@ SET_UP_FIRST = ("Set up Google Meet first: the room keeps its Google sign-in in 
                 "sign-in), and starts using it after a restart")
 NOT_SIGNING_IN = "The sign-in has ended already"
 PROFILE_HELD = "The TV's browser did not let go of the room's Google profile: try again in a moment"
+STOPPING = "The room software is stopping: sign in once it is back"
 ROOM_ACCOUNT = "the room's Google account"
 SIGNED_IN_AS = "Signed in as {address}"
 
@@ -128,6 +129,8 @@ class SignInSession:
         self._display_was_on = False
         self._touched = 0.0
         self._watchers: List[asyncio.Task] = []
+        self._stopping = False                   # the agent is stopping: no browser is started from here on, the sign-in's or the TV's
+        self._tasks: set = set()                 # the TV's browser brought back in the background after a start that failed
         self.last: Optional[Dict[str, Any]] = None   # how the last sign-in ended: {"outcome", "words", "at", "address"?}
 
     @property
@@ -153,14 +156,18 @@ class SignInSession:
         when it cannot be opened; the TV has its browser back then."""
         if self._phase != "idle":
             return
+        if self._stopping:
+            raise SignInError(STOPPING)
         self._phase = "starting"                 # (before anything is awaited: a join asked for meanwhile is refused)
         async with self._lock:
             try:
                 await self._open()
             except BaseException as e:
-                await self._close_browser()
-                await self._give_back(keep=True)
-                self._phase = "idle"
+                try:
+                    await self._close_browser()
+                finally:
+                    await self._give_back(keep=True)
+                    self._phase = "idle"
                 if isinstance(e, SignInError) or not isinstance(e, Exception):
                     raise
                 logger.error(f"Google's sign-in could not be opened on the TV: {type(e).__name__}: {e}")
@@ -179,6 +186,8 @@ class SignInSession:
         await self._wait_for_release()
         await asyncio.to_thread(self._snapshot)
         executable = await self._find_executable()
+        if self._stopping:                       # (the agent began stopping meanwhile: no browser is started)
+            raise SignInError(STOPPING)
         self._process = await self._spawn(sign_in_command(executable, self.profile_dir, kiosk=True))
 
     async def _wait_for_release(self) -> None:
@@ -195,35 +204,45 @@ class SignInSession:
     async def end(self, outcome: str, give_back: bool = True) -> Optional[str]:
         """End the sign-in: DONE keeps what Google saved and gives back the address it is signed in as (ROOM_ACCOUNT when the profile does
         not say), or None when Google kept no session; any other outcome puts the cookies back as they were and gives back None. The TV
-        gets its browser back unless `give_back` is False (the agent is stopping, and the TV's browser with it). SignInError when there
-        is no sign-in to end."""
+        gets its browser back unless `give_back` is False (the agent is stopping, and the TV's browser with it): whatever happens on the
+        way, a failure or a cancellation, the browser is closed and the TV given back (Done's cookies are kept only once they were looked
+        at). SignInError when there is no sign-in to end."""
         async with self._lock:
             if self._phase != "open":
                 raise SignInError(NOT_SIGNING_IN)
             self._phase = "ending"
             address: Optional[str] = None
+            checked = False                      # Done's look at the profile finished: what Google saved is kept
             try:
                 self._stop_watchers()
                 await self._close_browser()
                 if outcome == DONE:
                     account = await asyncio.to_thread(google_account, self.profile_dir)
                     address = account["address"]
-                await self._give_back(keep=outcome == DONE, start=give_back)
+                    checked = True
             finally:
-                self._phase = "idle"
-                if outcome == DONE:
-                    words = SIGNED_IN_AS.format(address=address) if address else NO_SESSION
-                else:
-                    words = ENDED_WORDS.get(outcome, ENDED_WORDS[CANCELLED])
-                self.last = {"outcome": outcome, "words": words, "address": address,
-                             "at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")}
-                logger.info(f"Sign-in to Google ended ({outcome}): {words}")
+                try:
+                    await self._close_browser()  # (gone already, unless the close above was cut short)
+                    await self._give_back(keep=checked, start=give_back)
+                finally:
+                    self._phase = "idle"
+                    if outcome == DONE and checked:
+                        words = SIGNED_IN_AS.format(address=address) if address else NO_SESSION
+                    else:
+                        words = ENDED_WORDS.get(outcome, ENDED_WORDS[CANCELLED])
+                    self.last = {"outcome": outcome, "words": words, "address": address,
+                                 "at": datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")}
+                    logger.info(f"Sign-in to Google ended ({outcome}): {words}")
             return address
 
     async def close(self) -> None:
-        """The agent is stopping: a sign-in that is on ends (nothing changes), and the TV's browser is left to stop with the agent."""
-        if self._phase == "starting":
-            async with self._lock:   # (the beginning finishes first)
+        """The agent is stopping: a sign-in that is on ends (nothing changes), and the TV's browser is left to stop with the agent. From
+        here on no browser is started, the sign-in's or the TV's: a beginning or an end that is under way finishes first, without one."""
+        self._stopping = True
+        for task in list(self._tasks):
+            task.cancel()
+        if self._phase in ("starting", "ending"):
+            async with self._lock:   # (the beginning, or the end, finishes first)
                 pass
         if self._phase == "open":
             try:
@@ -239,27 +258,36 @@ class SignInSession:
         self._watchers = []
 
     async def _close_browser(self) -> None:
-        """The sign-in browser asked to close (it writes its cookies as it does), and killed when it has not within TERMINATE_WAIT_S."""
-        process, self._process = self._process, None
-        if process is None or process.returncode is not None:
+        """The sign-in browser asked to close (it writes its cookies as it does), and killed when it has not within TERMINATE_WAIT_S, or
+        when the wait for it is cut short (a cancellation): it is never left running."""
+        process = self._process
+        if process is None:
             return
         try:
-            process.terminate()
+            if process.returncode is None and self._signal(process, "terminate"):
+                try:
+                    await asyncio.wait_for(process.wait(), self.TERMINATE_WAIT_S)
+                except asyncio.TimeoutError:
+                    logger.warning(f"The sign-in browser did not close within {self.TERMINATE_WAIT_S:g} s; killing it")
+                    if self._signal(process, "kill"):
+                        try:
+                            await asyncio.wait_for(process.wait(), self.TERMINATE_WAIT_S)
+                        except asyncio.TimeoutError:
+                            logger.error("The sign-in browser did not end when killed")
+        finally:
+            if process.returncode is None:
+                self._signal(process, "kill")
+            else:
+                self._process = None
+
+    @staticmethod
+    def _signal(process: Any, how: str) -> bool:
+        """terminate() or kill(); False when the process is gone already."""
+        try:
+            getattr(process, how)()
+            return True
         except ProcessLookupError:
-            return
-        try:
-            await asyncio.wait_for(process.wait(), self.TERMINATE_WAIT_S)
-            return
-        except asyncio.TimeoutError:
-            logger.warning(f"The sign-in browser did not close within {self.TERMINATE_WAIT_S:g} s; killing it")
-        try:
-            process.kill()
-        except ProcessLookupError:
-            return
-        try:
-            await asyncio.wait_for(process.wait(), self.TERMINATE_WAIT_S)
-        except asyncio.TimeoutError:
-            logger.error("The sign-in browser did not end when killed")
+            return False
 
     async def _give_back(self, keep: bool, start: bool = True) -> None:
         """The profile as it was unless `keep`, then the TV's browser back, if it was on before. Raises nothing: the TV's browser comes
@@ -268,11 +296,28 @@ class SignInSession:
             await asyncio.to_thread(self._restore if not keep else self._drop_snapshot)
         except Exception as e:  # noqa: BLE001 - the TV must come back whatever
             logger.error(f"The room's Google profile could not be put back as it was: {type(e).__name__}: {e}")
-        if start and self._display is not None and self._display_was_on:
+        if start and not self._stopping and self._display is not None and self._display_was_on:
             try:
                 await self._display.start()
-            except Exception as e:  # noqa: BLE001 - the display tries again by itself at its next use
-                logger.error(f"The TV's browser did not start again after the sign-in: {type(e).__name__}: {e}")
+            except Exception as e:  # noqa: BLE001 - the display's own retry brings it back, below
+                logger.error(f"The TV's browser did not start again after the sign-in: {type(e).__name__}: {e}; trying again")
+                self._bring_the_display_back()
+
+    def _bring_the_display_back(self) -> None:
+        """A display whose start failed is still wanted: its page() starts the browser again, and when that fails too it keeps trying
+        by itself (TvDisplay's retry), so the screensaver comes back without waiting for the next join."""
+        page = getattr(self._display, "page", None)
+        if page is None or self._stopping:
+            return
+
+        async def again() -> None:
+            try:
+                await page()
+            except Exception as e:  # noqa: BLE001 - page() has arranged its next try
+                logger.warning(f"The TV's browser is still not back after the sign-in ({type(e).__name__}: {e}); it keeps trying")
+        task = asyncio.ensure_future(again())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
 
     # --- the profile's cookies, as they were
 

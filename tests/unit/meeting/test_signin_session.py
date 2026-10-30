@@ -16,7 +16,7 @@ from croom.meeting.meet_signin import SIGN_IN_URL
 from croom.meeting.providers.base import MeetingState
 from croom.meeting.service import MeetingService
 from croom.meeting.signin_session import (
-    LEAVE_FIRST, NO_SESSION, NOT_SIGNING_IN, PROFILE_HELD, ROOM_ACCOUNT, SET_UP_FIRST, SIGN_IN_FIRST, SignInError, SignInSession,
+    LEAVE_FIRST, NO_SESSION, NOT_SIGNING_IN, PROFILE_HELD, ROOM_ACCOUNT, SET_UP_FIRST, SIGN_IN_FIRST, STOPPING, SignInError, SignInSession,
     google_account, signed_in_address,
 )
 
@@ -55,6 +55,11 @@ class FakeDisplay:
         if self.fail_start is not None:
             raise self.fail_start
         self.started = True
+
+    async def page(self):
+        """What a join, or the sign-in after a start that failed, asks of it: TvDisplay starts its browser again from here, and keeps
+        trying by itself when that fails."""
+        self.events.append("display page")
 
     def pointer_in_use(self):
         pass
@@ -150,11 +155,13 @@ async def settle():
         await asyncio.sleep(0)
 
 
-async def until(condition, rounds=500):
-    for _ in range(rounds):
+async def until(condition, timeout=3.0):
+    """The condition, within `timeout` of real time (the session's file work runs in threads)."""
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
         if condition():
             return
-        await asyncio.sleep(0)
+        await asyncio.sleep(0.001)
     raise AssertionError("never happened")
 
 
@@ -272,6 +279,105 @@ async def test_a_display_that_fails_to_start_again_does_not_fail_the_end(tmp_pat
     await rig.session.begin()
     await rig.session.end("cancelled")
     assert not rig.session.active and rig.events[-1] == "display started"
+
+
+async def test_a_display_that_fails_to_start_again_is_brought_back_by_its_own_retry(tmp_path):
+    """The screensaver comes back without waiting for the next join: the display's page() starts its browser again, and keeps trying."""
+    rig = Rig(tmp_path)
+    rig.display.fail_start = RuntimeError("Chromium did not start")
+    await rig.session.begin()
+    await rig.session.end("cancelled")
+    await until(lambda: "display page" in rig.events)
+    assert rig.events[-2:] == ["display started", "display page"]
+
+
+async def test_a_failure_in_the_middle_of_done_still_gives_the_tv_back_and_keeps_nothing(tmp_path, monkeypatch):
+    rig = Rig(tmp_path)
+    write_cookies(rig.profile, ["SID", "OLD"])
+    rig.google_signs_in = lambda: write_cookies(rig.profile, ["NID"])
+
+    def unreadable(profile):
+        raise OSError(5, "Input/output error")
+    monkeypatch.setattr("croom.meeting.signin_session.google_account", unreadable)
+    await rig.session.begin()
+    with pytest.raises(OSError):
+        await rig.session.end("done")
+    assert rig.events[-2:] == ["browser closed", "display started"] and not rig.session.active
+    assert rig.session.last["outcome"] == "done" and rig.session.last["words"] == "Sign-in cancelled: nothing changed"
+    monkeypatch.undo()
+    db = sqlite3.connect(rig.profile / "Default" / "Cookies")
+    assert sorted(name for (name,) in db.execute("SELECT name FROM cookies")) == ["OLD", "SID"]   # the look did not finish: put back
+    db.close()
+
+
+async def test_an_end_cancelled_while_the_browser_closes_kills_it_and_still_gives_the_tv_back(tmp_path):
+    rig = Rig(tmp_path, stubborn=True)
+    rig.session.TERMINATE_WAIT_S = 60
+    await rig.session.begin()
+    ending = asyncio.ensure_future(rig.session.end("done"))
+    await until(lambda: rig.process.terminated == 1)
+    ending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await ending
+    assert rig.process.killed == 1 and rig.process.returncode is not None
+    assert rig.events[-2:] == ["browser closed", "display started"] and not rig.session.active
+
+
+async def test_the_agent_stopping_while_a_sign_in_ends_lets_it_end_without_starting_the_tvs_browser(tmp_path):
+    rig = Rig(tmp_path, stubborn=True)
+    rig.session.TERMINATE_WAIT_S = 0.05
+    await rig.session.begin()
+    ending = asyncio.ensure_future(rig.session.end("cancelled"))
+    await until(lambda: rig.process.terminated == 1)
+    await rig.session.close()                              # waits for the end, which starts nothing now
+    await ending
+    assert rig.events == ["display stopped", "browser opened", "browser closed"]
+    assert not rig.session.active and rig.session.last["outcome"] == "cancelled"
+    with pytest.raises(SignInError) as failure:            # and no sign-in begins once the agent is stopping
+        await rig.session.begin()
+    assert str(failure.value) == STOPPING
+    assert rig.events == ["display stopped", "browser opened", "browser closed"]
+
+
+async def test_the_agent_stopping_while_a_sign_in_opens_starts_no_browser(tmp_path):
+    rig = Rig(tmp_path)
+    gate = asyncio.Event()
+
+    async def slow_find():
+        await gate.wait()
+        return "/opt/chrome"
+    rig.session._find_executable = slow_find
+    opening = asyncio.ensure_future(rig.session.begin())
+    await until(lambda: rig.events == ["display stopped"])
+    closing = asyncio.ensure_future(rig.session.close())
+    await settle()
+    gate.set()
+    with pytest.raises(SignInError) as failure:
+        await opening
+    await closing
+    assert str(failure.value) == STOPPING
+    assert rig.events == ["display stopped"] and not rig.session.active    # neither the sign-in's browser nor the TV's
+
+
+async def test_the_agent_stopping_ends_a_retry_of_the_tvs_browser_that_is_under_way(tmp_path):
+    rig = Rig(tmp_path)
+    rig.display.fail_start = RuntimeError("Chromium did not start")
+    retrying = asyncio.Event()
+    cancelled = []
+
+    async def slow_page():
+        retrying.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.append(True)
+            raise
+    rig.display.page = slow_page
+    await rig.session.begin()
+    await rig.session.end("cancelled")
+    await asyncio.wait_for(retrying.wait(), 2)
+    await rig.session.close()
+    await until(lambda: cancelled == [True])
 
 
 async def test_ending_when_no_sign_in_is_on_is_refused_in_words(tmp_path):

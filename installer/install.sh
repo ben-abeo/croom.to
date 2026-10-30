@@ -32,6 +32,8 @@ ZOOM_CREDENTIALS_FILE=""
 # Where the touchpad's virtual mouse is given to the input group, and where the module that makes it is set to load at boot
 UDEV_RULES_DIR="${UDEV_RULES_DIR:-/etc/udev/rules.d}"
 MODULES_LOAD_DIR="${MODULES_LOAD_DIR:-/etc/modules-load.d}"
+# The room Pi's keyboard layout (Sign in to Google on the TV types US key codes): the system's, and labwc's for the desktop user
+KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"
 
 # Log function
 log() {
@@ -184,6 +186,38 @@ install_virtual_mouse() {
     udevadm control --reload-rules || true
     modprobe uinput || warn "The uinput module could not be loaded now: the touchpad cannot move the room Pi's mouse until it is (it is set to load at boot)"
     udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
+}
+
+# Set KEY=value in a file of KEY=value lines: the line that sets KEY is replaced, or the line added; the rest of the file is kept.
+# Running it again changes nothing.
+set_key_line() {
+    local file="$1" key="$2" value="$3" tmp
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+    tmp=$(mktemp "$file.XXXXXX")
+    grep -v "^[[:space:]]*$key=" "$file" > "$tmp" || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    chmod --reference="$file" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+    mv -f "$tmp" "$file"
+}
+
+# Sign in to Google on the TV types on the room Pi through a virtual keyboard that sends US key codes. Raspberry Pi OS starts with a GB
+# layout, where Shift+2 is " and not @: no address could be typed. The room Pi's layout is set to US for the desktop session that shows
+# the TV: the system's (/etc/default/keyboard, which X and the console read) and labwc's environment for the desktop user (Wayland).
+# It applies at the next start of the desktop (a reboot).
+set_keyboard_layout() {
+    local home labwc_dir
+    log "Setting the room Pi's keyboard layout to US (for typing on the TV when signing in to Google)..."
+    set_key_line "$KEYBOARD_FILE" XKBLAYOUT '"us"'
+    set_key_line "$KEYBOARD_FILE" XKBVARIANT '""'
+    home=$(getent passwd "$CROOM_USER" | cut -d: -f6)
+    labwc_dir="${LABWC_DIR:-$home/.config/labwc}"
+    if [[ -z "${LABWC_DIR:-}" && ! -d "$home/.config" ]]; then
+        mkdir -p "$home/.config"
+        chown "$CROOM_USER:" "$home/.config" 2>/dev/null || true
+    fi
+    set_key_line "$labwc_dir/environment" XKB_DEFAULT_LAYOUT us
+    chown "$CROOM_USER:" "$labwc_dir" "$labwc_dir/environment" 2>/dev/null || true
 }
 
 # Create directory structure
@@ -491,6 +525,7 @@ print_completion() {
     echo "Room page: http://$(hostname).local:8080/  (or use this device's IP address)"
     echo ""
     echo "If the service ever stops, the Start Crystal Meet icon on this device's desktop (over VNC) starts it again."
+    echo "The keyboard layout is now US (Sign in to Google on the TV types with it): reboot once for the desktop to use it."
     echo ""
     if [[ -n "$ROOM_CONFIG" ]]; then
         echo "Next steps:"
@@ -593,6 +628,7 @@ main() {
     check_platform
     create_user
     install_virtual_mouse
+    set_keyboard_layout
     create_directories
     install_dependencies
     install_croom

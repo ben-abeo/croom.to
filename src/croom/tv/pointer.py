@@ -31,6 +31,7 @@ BAD_TYPE = "The type of a pointer message is one of " + ", ".join(TYPES)
 NO_RIGHT_BUTTON = "The TV's cursor has no right button"
 KEYS_FOR_THE_PI = "Typing goes to the room Pi: the TV's cursor has no keyboard"
 NO_KEYBOARD = "The room Pi has no keyboard to type with here"
+ONLY_SIGNING_IN = "Typing on the TV is only for signing in"
 MAX_TEXT = 200            # the most one keys message types: a pasted address or a password, never a page of text
 
 # The kernel's input codes that the virtual mouse uses (linux/input-event-codes.h), by the names evdev.ecodes has for them: here, so
@@ -362,7 +363,8 @@ class PointerRelay:
 
     Typing (`{"target": "pi", "type": "keys", "text": "..."}` or `"key": "Enter"`) goes to the room Pi's keyboard, a key KEY_GAP_S after
     the one before it: the desktop reads a device's events at its own pace, and a burst of them all at once can be more than the kernel
-    keeps for it. The socket waits for a message's typing before it reads the next, so the order is kept. The TV is not typed on.
+    keeps for it. The socket waits for a message's typing before it reads the next, so the order is kept. The TV is not typed on, and
+    the room Pi only while may_type() says so (a sign-in to Google is open: the room's own screen is not a keyboard for anything else).
     """
 
     KEY_GAP_S = 0.012          # between two keys of one message
@@ -372,10 +374,11 @@ class PointerRelay:
     STALE_FAILURE_S = 1.0     # a move that failed on its way is said by the next move if it comes this soon; after that it is old news
 
     def __init__(self, tv_service: Any, pi_mouse: PiMouse, off_the_loop: Optional[Callable[..., Awaitable[Any]]] = None,
-                 keyboard: Optional[PiKeyboard] = None):
+                 keyboard: Optional[PiKeyboard] = None, may_type: Callable[[], bool] = lambda: False):
         self._tv = tv_service
         self._mouse = pi_mouse
         self._keyboard = keyboard
+        self._may_type = may_type
         self._off_the_loop = off_the_loop or asyncio.to_thread
         self._pending: Optional[List[int]] = None      # the moves that came in while one was in flight, added up: [dx, dy]
         self._sender: Optional[asyncio.Task] = None    # sends the TV's moves, for as long as there are any to send
@@ -402,6 +405,8 @@ class PointerRelay:
         if kind == "keys":
             if target != "pi":
                 raise TvError(KEYS_FOR_THE_PI)
+            if not self._may_type():
+                raise TvError(ONLY_SIGNING_IN)
             await self._type(keystrokes(message))
             return
         if target == "pi":

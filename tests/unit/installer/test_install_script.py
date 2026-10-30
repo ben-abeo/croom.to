@@ -456,3 +456,59 @@ def test_the_virtual_mouse_step_can_be_run_on_its_own_from_an_installed_device(t
     assert 'KERNEL=="uinput", GROUP="input", MODE="0660"' in rule_file.read_text().splitlines()
     (module_file,) = modules.iterdir()
     assert module_file.read_text().split() == ["uinput"]
+
+
+GB_KEYBOARD = '''# KEYBOARD CONFIGURATION FILE
+
+# Consult the keyboard(5) manual page.
+
+XKBMODEL="pc105"
+XKBLAYOUT="gb"
+XKBVARIANT=""
+XKBOPTIONS=""
+
+BACKSPACE="guess"
+'''
+
+
+def test_the_room_pis_keyboard_layout_is_set_to_us_for_typing_on_the_tv(tmp_path):
+    """Sign in to Google on the TV types US key codes through the room Pi's virtual keyboard; Raspberry Pi OS starts in GB, where Shift+2
+    is " and no address can be typed. The system's layout and labwc's for the desktop user are US; the rest of each file is kept, and a
+    second run changes nothing."""
+    keyboard, labwc = tmp_path / "keyboard", tmp_path / "home" / ".config" / "labwc"
+    keyboard.write_text(GB_KEYBOARD)
+    labwc.mkdir(parents=True)
+    (labwc / "environment").write_text("XKB_DEFAULT_MODEL=pc105\nXKB_DEFAULT_LAYOUT=gb\n")
+    snippet = f"source {SCRIPT}; KEYBOARD_FILE={keyboard}; LABWC_DIR={labwc}; CROOM_USER=$(id -un); set_keyboard_layout"
+    result = run_bash(snippet)
+    assert result.returncode == 0, result.stderr
+    lines = keyboard.read_text().splitlines()
+    assert 'XKBLAYOUT="us"' in lines and 'XKBVARIANT=""' in lines and 'XKBLAYOUT="gb"' not in lines
+    assert [line for line in lines if line.startswith("XKBLAYOUT=")] == ['XKBLAYOUT="us"']
+    assert 'XKBMODEL="pc105"' in lines and 'XKBOPTIONS=""' in lines and 'BACKSPACE="guess"' in lines   # the rest is kept
+    environment = (labwc / "environment").read_text().splitlines()
+    assert environment == ["XKB_DEFAULT_MODEL=pc105", "XKB_DEFAULT_LAYOUT=us"]
+    first = (keyboard.read_text(), (labwc / "environment").read_text())
+    assert run_bash(snippet).returncode == 0
+    assert (keyboard.read_text(), (labwc / "environment").read_text()) == first                         # idempotent
+
+
+def test_the_keyboard_layout_files_are_made_when_there_are_none(tmp_path):
+    keyboard, labwc = tmp_path / "default" / "keyboard", tmp_path / "labwc"
+    result = run_bash(f"source {SCRIPT}; KEYBOARD_FILE={keyboard}; LABWC_DIR={labwc}; CROOM_USER=$(id -un); set_keyboard_layout")
+    assert result.returncode == 0, result.stderr
+    assert keyboard.read_text().splitlines() == ['XKBLAYOUT="us"', 'XKBVARIANT=""']
+    assert (labwc / "environment").read_text().splitlines() == ["XKB_DEFAULT_LAYOUT=us"]
+
+
+def test_the_keyboard_layout_goes_where_the_system_reads_it_and_is_part_of_every_install():
+    text = SCRIPT.read_text()
+    assert 'KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"' in text
+    assert 'labwc_dir="${LABWC_DIR:-$home/.config/labwc}"' in text
+    assert "set_keyboard_layout" in text.split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_the_completion_text_says_the_layout_is_us_and_applies_after_a_reboot():
+    result = run_bash(f"source {SCRIPT}; hostname() {{ echo room; }}; print_completion")
+    assert result.returncode == 0, result.stderr
+    assert "The keyboard layout is now US (Sign in to Google on the TV types with it): reboot once for the desktop to use it." in result.stdout

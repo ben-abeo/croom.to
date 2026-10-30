@@ -1305,6 +1305,11 @@ def typed(writes):
     return strokes
 
 
+def SIGNING_IN():
+    """The relay's may_type while a sign-in to Google is open."""
+    return True
+
+
 def quick(relay):
     relay.KEY_GAP_S = 0
     relay.FRESH_KEYBOARD_S = 0
@@ -1349,7 +1354,7 @@ def test_the_named_keys(name, key):
 ])
 async def test_what_cannot_be_typed_is_refused_in_words_and_nothing_of_it_is_typed(message, words):
     keyboard, device = a_keyboard()
-    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard))
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN))
     with pytest.raises(TvError) as failure:
         await relay.handle(dict({"target": "pi", "type": "keys"}, **message))
     assert str(failure.value) == words
@@ -1359,7 +1364,7 @@ async def test_what_cannot_be_typed_is_refused_in_words_and_nothing_of_it_is_typ
 async def test_text_and_keys_are_typed_on_the_room_pis_keyboard_in_order():
     keyboard, device = a_keyboard()
     mouse, mouse_device = a_mouse()
-    relay = quick(PointerRelay(None, mouse, keyboard=keyboard))
+    relay = quick(PointerRelay(None, mouse, keyboard=keyboard, may_type=SIGNING_IN))
     await relay.handle({"target": "pi", "type": "keys", "text": "Conf-A@crystalpm.com"})
     await relay.handle({"target": "pi", "type": "keys", "key": "Enter"})
     await relay.handle({"target": "pi", "type": "keys", "key": "Backspace"})
@@ -1372,13 +1377,13 @@ async def test_text_and_keys_are_typed_on_the_room_pis_keyboard_in_order():
 
 async def test_an_empty_text_types_nothing():
     keyboard, device = a_keyboard()
-    await quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard)).handle({"target": "pi", "type": "keys", "text": ""})
+    await quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN)).handle({"target": "pi", "type": "keys", "text": ""})
     assert device.writes == []
 
 
 async def test_keys_leave_a_moment_between_them_and_a_new_keyboard_a_moment_to_be_taken_up(monkeypatch):
     keyboard, device = a_keyboard()
-    relay = PointerRelay(None, a_mouse()[0], keyboard=keyboard)
+    relay = PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN)
     waits = []
     real_sleep = asyncio.sleep
 
@@ -1406,16 +1411,33 @@ async def test_keys_for_the_tv_are_refused_in_words(tmp_path, message):
         assert sent(tv) == [] and device.writes == []
 
 
+@pytest.mark.parametrize("message", [{"text": "a"}, {"key": "Enter"}])
+async def test_keys_are_refused_in_words_unless_a_sign_in_is_open(message):
+    keyboard, device = a_keyboard()
+    signing_in = [False]
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=lambda: signing_in[0]))
+    with pytest.raises(TvError) as failure:
+        await relay.handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert str(failure.value) == "Typing on the TV is only for signing in"
+    assert device.writes == []
+    with pytest.raises(TvError) as failure:                    # (and by default: a relay that is told nothing does not type)
+        await quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard)).handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert str(failure.value) == "Typing on the TV is only for signing in" and device.writes == []
+    signing_in[0] = True
+    await relay.handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert len(typed(device.writes)) == 1
+
+
 async def test_a_relay_with_no_keyboard_says_so():
     with pytest.raises(TvError) as failure:
-        await PointerRelay(None, a_mouse()[0]).handle({"target": "pi", "type": "keys", "text": "a"})
+        await PointerRelay(None, a_mouse()[0], may_type=SIGNING_IN).handle({"target": "pi", "type": "keys", "text": "a"})
     assert str(failure.value) == "The room Pi has no keyboard to type with here"
 
 
 async def test_a_keyboard_that_cannot_be_made_says_why_in_words():
     def failing():
         raise PermissionError(13, "Permission denied", "/dev/uinput")
-    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=PiKeyboard(uinput_factory=failing)))
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=PiKeyboard(uinput_factory=failing), may_type=SIGNING_IN))
     with pytest.raises(TvError) as failure:
         await relay.handle({"target": "pi", "type": "keys", "text": "a"})
     assert str(failure.value).startswith("The room Pi's keyboard is not allowed to use /dev/uinput")
@@ -1428,7 +1450,7 @@ async def test_a_keyboard_that_stops_taking_events_lets_go_and_is_made_again():
         devices.append(FakeUInput())
         return devices[-1]
     keyboard = PiKeyboard(uinput_factory=factory)
-    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard))
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN))
     await relay.handle({"target": "pi", "type": "keys", "text": "a"})
     devices[0].fail = OSError(19, "No such device")
     with pytest.raises(TvError) as failure:

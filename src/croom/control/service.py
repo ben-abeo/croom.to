@@ -28,6 +28,7 @@ from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
+from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
@@ -216,6 +217,8 @@ class ControlService(Service):
             test stands in for it).
         scores: the scores service (current() lists the football scores of the schools that are on), or None.
         laptop: the Laptop service (the room's MeetUp lent to a laptop through the USB switch), or None in a room without the switch.
+        pin_store: the Settings PIN (croom.settings.pin.PinStore), or None to open config's pin_file, which is settings-pin.json beside
+            settings_file when the config names none (from_config puts both in the data directory).
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -233,6 +236,7 @@ class ControlService(Service):
         mouse=None,
         scores=None,
         laptop=None,
+        pin_store=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -266,6 +270,9 @@ class ControlService(Service):
         self._scores = scores
         self._scores_failure: Optional[str] = None
         self._laptop = laptop
+        self._pins = pin_store if pin_store is not None else PinStore(
+            self.config.get("pin_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "settings-pin.json"
+        )
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -287,8 +294,10 @@ class ControlService(Service):
         tv=None,
         scores=None,
         laptop=None,
+        pin_store=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
+        data_dir = config.resolve_data_dir()
         return cls(
             config={
                 "host": config.control.host,
@@ -298,7 +307,8 @@ class ControlService(Service):
                 "room_company": config.room.company,
                 "static_dir": str(STATIC_DIR),
                 "screensaver": config.control.screensaver,
-                "settings_file": str(config.resolve_data_dir() / "control-settings.json"),
+                "settings_file": str(data_dir / "control-settings.json"),
+                "pin_file": str(data_dir / "settings-pin.json"),
             },
             meeting=meeting,
             calendar=calendar,
@@ -307,7 +317,13 @@ class ControlService(Service):
             tv=tv,
             scores=scores,
             laptop=laptop,
+            pin_store=pin_store,
         )
+
+    @property
+    def pin_store(self) -> PinStore:
+        """The Settings PIN: what every Settings route asks before it does anything (_require_unlock)."""
+        return self._pins
 
     @property
     def bound_port(self) -> Optional[int]:
@@ -362,6 +378,11 @@ class ControlService(Service):
         app.router.add_post("/api/tv/forget", self._handle_tv_forget)
         app.router.add_get("/api/tv/discover", self._handle_tv_discover)
         app.router.add_post("/api/laptop", self._handle_laptop)
+        app.router.add_get("/api/settings/pin", self._handle_pin)
+        app.router.add_post("/api/settings/pin/set", self._handle_set_pin)
+        app.router.add_post("/api/settings/unlock", self._handle_unlock)
+        app.router.add_post("/api/settings/lock", self._handle_lock)
+        app.router.add_post("/api/settings/pin/change", self._handle_change_pin)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -1063,6 +1084,118 @@ class ControlService(Service):
         except (LaptopError, BookingError) as e:
             return self._error_response(str(e), e.status)
         return web.json_response({"laptop": state})
+
+    # ------------------------------------------------------------------
+    # Settings and its PIN (spec 2026-10-29, section 2)
+    # ------------------------------------------------------------------
+
+    UNLOCK_HEADER = "X-Croom-Unlock"
+    ENTER_THE_PIN = "Enter the PIN"
+
+    def _token(self, request: web.Request) -> str:
+        return request.headers.get(self.UNLOCK_HEADER, "")
+
+    def _require_unlock(self, request: web.Request) -> Optional[web.Response]:
+        """
+        None when the request carries a token that is unlocked (and has now used it: it lasts five more minutes); otherwise the answer
+        that refuses it. Every Settings route but the PIN's own calls this first, before it reads anything of the request, so that
+        nothing a route does can be reached without the PIN.
+
+        The refusal is 423 with the minutes left while unlocking is locked out after wrong PINs, so that the page says why rather than
+        asking for a PIN it will refuse; otherwise 401 "Enter the PIN". A token that is still unlocked is let through during a lock-out:
+        it was given for the right PIN, and the wrong ones may have been tried at another screen.
+        """
+        if self._pins.check(self._token(request)):
+            return None
+        minutes = self._pins.locked_minutes()
+        if minutes:
+            return self._locked_response(PinLocked(minutes))
+        return web.json_response({"error": self.ENTER_THE_PIN, "locked": False}, status=401)
+
+    @staticmethod
+    def _locked_response(error: PinLocked) -> web.Response:
+        return web.json_response({"error": str(error), "locked": True, "minutes": error.minutes}, status=423)
+
+    def _pin_refusal(self, error: PinError) -> web.Response:
+        if isinstance(error, PinLocked):
+            return self._locked_response(error)
+        return self._error_response(str(error), error.status)
+
+    def _unlocked_answer(self, token: str) -> web.Response:
+        return web.json_response({"token": token, "expires_in": UNLOCK_SECONDS})
+
+    async def _pin_body(self, request: web.Request) -> Tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+        """A PIN route's JSON object, or the answer that refuses the request (415 not JSON, 400 not an object)."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return None, refused
+        data = await self._read_object(request)
+        if data is None:
+            return None, self._error_response("Send a JSON object", 400)
+        return data, None
+
+    async def _handle_pin(self, request: web.Request) -> web.Response:
+        """Whether a PIN is chosen (the pad asks to choose one when not), the minutes left of a lock-out, and whether the token sent,
+        if any, is unlocked (the page goes straight to the Settings menu when it is). Open to all: it reveals nothing of the PIN."""
+        token = self._token(request)
+        return web.json_response({"set": self._pins.is_set(), "locked_minutes": self._pins.locked_minutes(),
+                                  "unlocked": bool(token) and self._pins.check(token)})
+
+    async def _handle_set_pin(self, request: web.Request) -> web.Response:
+        """{"pin"}: choose the first PIN, answered with a token as an unlock is; 409 once a PIN is set (Security changes it)."""
+        data, refused = await self._pin_body(request)
+        if refused is not None:
+            return refused
+        try:
+            self._pins.set_pin(data.get("pin"))
+            token = self._pins.unlock(data.get("pin"))
+        except PinError as e:
+            return self._pin_refusal(e)
+        except OSError as e:
+            logger.error(f"Could not save the Settings PIN to {self._pins.path}: {e}")
+            return self._error_response("The PIN could not be saved on the room's device", 500)
+        logger.info("Settings PIN chosen")
+        return self._unlocked_answer(token)
+
+    async def _handle_unlock(self, request: web.Request) -> web.Response:
+        """{"pin"}: a token and how long it lasts unused, or the refusal in words (403 wrong, 423 locked out, 409 no PIN yet)."""
+        data, refused = await self._pin_body(request)
+        if refused is not None:
+            return refused
+        try:
+            token = self._pins.unlock(data.get("pin"))
+        except PinError as e:
+            if isinstance(e, PinLocked):
+                logger.warning(f"Settings locked for {e.minutes} minutes after too many wrong PINs")
+            return self._pin_refusal(e)
+        return self._unlocked_answer(token)
+
+    async def _handle_lock(self, request: web.Request) -> web.Response:
+        """End the token the request carries (the Settings screen's Lock). Not behind the PIN: ending a token is no harm, and a page whose
+        token has gone already is locked as it asked."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        self._pins.lock(self._token(request))
+        return web.json_response({"locked": True})
+
+    async def _handle_change_pin(self, request: web.Request) -> web.Response:
+        """{"old", "new"}, behind the PIN: the old PIN is asked again, so that a screen left unlocked cannot have its PIN changed."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        data, refused = await self._pin_body(request)
+        if refused is not None:
+            return refused
+        try:
+            self._pins.change(data.get("old"), data.get("new"))
+        except PinError as e:
+            return self._pin_refusal(e)
+        except OSError as e:
+            logger.error(f"Could not save the Settings PIN to {self._pins.path}: {e}")
+            return self._error_response("The PIN could not be saved on the room's device", 500)
+        logger.info("Settings PIN changed")
+        return web.json_response({"changed": True})
 
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
         """The LG and Samsung TVs on the network. It also answers before a TV is configured.

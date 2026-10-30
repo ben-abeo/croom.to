@@ -64,6 +64,8 @@ body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
 body[data-view="door-sign"] .view[data-view="door-sign"],
+body[data-view="settings-pin"] .view[data-view="settings-pin"],
+body[data-view="settings"] .view[data-view="settings"],
 body[data-view="meeting"] .view[data-view="meeting"],
 body[data-view="upcoming"] .view[data-view="upcoming"],
 body[data-view="participants"] .view[data-view="participants"],
@@ -85,12 +87,13 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 .list-box { display: flex; flex-direction: column; width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
 .view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="door-sign"], .view[data-view="upcoming"],
-.view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"] { grid-template-rows: auto 1fr; justify-items: start; }
+.view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"],
+.view[data-view="settings-pin"], .view[data-view="settings"] { grid-template-rows: auto 1fr; justify-items: start; }
 #meeting-detail { margin: 0; max-width: 90ch; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines; a long title keeps to one line at 1280 */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
-.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' four (Camera framing, Screensaver, Door sign and TV) sit two by two, the same height */
+.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' five sit three and two from 1024 px wide (below) */
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
 /* The secondary row, and the reaction row that takes its place: smaller buttons, so that the seven (Captions, the view, Hide self view,
@@ -612,6 +615,9 @@ body.keyboard-open .schedule { display: none; }
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 }
 @media (min-width: 1024px) {
+  /* Options' five (Camera framing, Screensaver, Door sign, TV and Settings) three and two, the same height as when there were four two by two: a
+     third row would not fit the kiosk's 800 px. */
+  .view[data-view="options"] .menu { grid-template-columns: repeat(3, minmax(220px, 380px)); }
   /* Mute and Remove side by side: a person with no Mute leaves its room empty, and the marks end in one column. The room's own row has no buttons and
      leaves all of it empty, in a list that has buttons. Remove keeps the width of its second-tap words, so that nothing in the row moves under a finger
      when it asks (a tap aimed at Mute, a moment after a mis-tap on Remove, would otherwise land on the ask). */
@@ -741,3 +747,33 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 
 /* Laptop mode (spec 2026-10-27): the idle card is the Laptop screen; joining by link waits for the MeetUp to come back. */
 body[data-laptop="on"] .link { display: none; }
+
+/* Settings (spec 2026-10-29, settings.js): the PIN pad, then the menu of pages under a bar with Back, the page's name, the minutes left and Lock. */
+.pin-host { width: 100%; }
+.pin { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 48px; align-items: start; width: 100%; max-width: 1000px; }
+.pin-title { margin: 0; font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
+.pin-hint { margin: 10px 0 0; color: var(--periwinkle-300); max-width: 40ch; }
+.pin-hint:empty { display: none; }
+.pin-dots { display: flex; gap: 14px; min-height: 18px; margin: 28px 0 0; }   /* a dot for each digit typed: the row keeps its height when it has none */
+.pin-dots .dot { width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 108px); gap: 12px; }
+.pin-pad .button { min-height: 76px; padding: 0; font-size: 1.6rem; }
+.pin-pad .button.pin-word { font-size: 1.05rem; }
+.settings-head { display: flex; align-items: center; gap: 20px; width: 100%; }
+.settings-title { margin: 0; flex: 1 1 auto; min-width: 0; font-size: 1.6rem; font-weight: 600; overflow-wrap: anywhere; }
+.settings-time { margin: 0; color: var(--periwinkle-300); white-space: nowrap; font-variant-numeric: tabular-nums; }
+#settings-lock { min-height: 64px; }
+.menu.settings-menu { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }   /* the twelve pages, four by three */
+.settings-menu .button.menu-item { min-height: 112px; font-size: 1.2rem; }
+.menu.settings-menu[hidden], .settings-page[hidden] { display: none; }
+.settings-page { width: 100%; min-height: 0; }
+.settings-soon { margin: 0; font-size: 1.4rem; color: var(--periwinkle-300); }
+@media (max-width: 1023px) {
+  .menu.settings-menu { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .pin { grid-template-columns: minmax(0, 1fr); }
+  .pin-pad { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .menu.settings-menu { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-head { flex-wrap: wrap; row-gap: 12px; }
+}

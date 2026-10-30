@@ -3649,8 +3649,8 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         assert shown_icons(page) == bar + ["#icon-keyboard", "#icon-video"]  # and the keyboard button and Join beside the link box
         settled(page)
         page.click("#open-options")
-        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-door", "#icon-tv", "#icon-volume", "#icon-volume-x"])   # the four menu items, then Key click on and off
-        assert page.locator(".view[data-view=options] .menu-item svg.icon").count() == 4      # each of the four has its icon: Camera framing, Screensaver, Door sign, TV
+        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-door", "#icon-tv", "#icon-settings", "#icon-volume", "#icon-volume-x"])   # the five menu items, then Key click on and off
+        assert page.locator(".view[data-view=options] .menu-item svg.icon").count() == 5      # each of the five has its icon: Camera framing, Screensaver, Door sign, TV, Settings
         settled(page)
         page.click("#open-tv-options")
         assert shown_icons(page) == bar + ["#icon-back", "#icon-locate", "#icon-touchpad"]     # this room has no TV: the card that says so, with Find TVs, and the touchpad for the room Pi's mouse
@@ -4981,9 +4981,9 @@ def test_the_keyboard_group_goes_while_the_room_cannot_be_reached_and_comes_back
 
 
 @pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1200), (800, 1280)])
-def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_kiosk_and_the_screens_either_side(browser, width, height):
+def test_the_options_screen_with_its_five_items_and_its_keyboard_group_fits_the_kiosk_and_the_screens_either_side(browser, width, height):
     """The kiosk's 1280 by 800, the biggest screen's 1920 by 1200 and a portrait tablet's 800 by 1280 keep fits() on the Options screen with
-    its four items (Camera framing, Screensaver, Door sign and TV) and the Key click group on it, the group right under the items."""
+    its five items (Camera framing, Screensaver, Door sign, TV and Settings) and the Key click group on it, the group right under the items."""
     with PageServer() as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
@@ -4991,7 +4991,7 @@ def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_
         page.click("#open-options")
         group = page.locator(".keyboard-section")
         buttons_end = "Math.max(...Array.from(document.querySelectorAll('.view[data-view=options] .menu-item')).map(b => b.getBoundingClientRect().bottom))"
-        assert page.locator(".view[data-view=options] .menu-item").count() == 4
+        assert page.locator(".view[data-view=options] .menu-item").count() == 5
         assert group.is_visible() and fits(page), "the options screen scrolls"
         box = group.bounding_box()
         assert 0 <= box["y"] - page.evaluate(buttons_end) <= 60 and box["y"] + box["height"] <= height   # right under the menu's buttons, on the screen
@@ -4999,8 +4999,9 @@ def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_
 
 
 @pytest.mark.parametrize("width, height", [(1280, 800), (1024, 700), (1920, 1200)])
-def test_the_four_items_of_the_options_screen_sit_two_by_two(browser, width, height):
-    """Three in a row left the TV alone on a second row. Two by two reads as a set, and takes the same height."""
+def test_the_five_items_of_the_options_screen_sit_three_and_two(browser, width, height):
+    """Three in a row once left the TV alone on a second row, and the four sat two by two. Settings makes five (spec 2026-10-29): three and two,
+    in the height the four took, as a third row would not fit the kiosk."""
     with PageServer() as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
@@ -5008,10 +5009,10 @@ def test_the_four_items_of_the_options_screen_sit_two_by_two(browser, width, hei
         page.click("#open-options")
         boxes = page.locator(".view[data-view=options] .menu-item").evaluate_all(
             "bs => bs.map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; })")
-        (x0, y0, w0, h0), (x1, y1, w1, h1), (x2, y2, w2, h2), (x3, y3, w3, h3) = boxes
-        assert y0 == y1 and y2 == y3 and y2 > y0 and x0 == x2 and x1 == x3 and x1 > x0, boxes      # two rows of two
-        assert w0 == w1 == w2 == w3 and h0 == h1 == h2 == h3 == 160, boxes                         # the same size, as before
-        assert y3 + h3 - y0 == 2 * 160 + 24, boxes                                                 # and the height three and one took
+        (x0, y0, w0, h0), (x1, y1, w1, h1), (x2, y2, w2, h2), (x3, y3, w3, h3), (x4, y4, w4, h4) = boxes
+        assert y0 == y1 == y2 and y3 == y4 and y3 > y0 and x0 == x3 and x1 == x4 and x0 < x1 < x2, boxes   # three, then two under the first two
+        assert w0 == w1 == w2 == w3 == w4 and h0 == h1 == h2 == h3 == h4 == 160, boxes                     # the same size, as before
+        assert y4 + h4 - y0 == 2 * 160 + 24, boxes                                                         # and the height the four took
         page.close()
 
 
@@ -5063,7 +5064,7 @@ def test_the_four_items_of_the_options_screen_stack_in_one_column_below_1024_wid
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.click("#open-options")
         boxes = page.locator(".view[data-view=options] .menu-item").evaluate_all("bs => bs.map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; })")
-        assert len({x for x, _ in boxes}) == 1 and [y for _, y in boxes] == sorted(y for _, y in boxes) and len({y for _, y in boxes}) == 4, boxes
+        assert len({x for x, _ in boxes}) == 1 and [y for _, y in boxes] == sorted(y for _, y in boxes) and len({y for _, y in boxes}) == 5, boxes
         page.close()
 
 
@@ -7797,7 +7798,7 @@ def test_the_options_screen_has_the_tv_beside_the_others_and_the_meeting_screen_
         page = open_page(browser, server)
         page.click("#open-options")
         assert page.locator(".view[data-view=options] .menu button").evaluate_all("bs => bs.map(b => b.id)") == \
-            ["open-camera-setup", "open-screensaver", "open-door-sign", "open-tv-options"]
+            ["open-camera-setup", "open-screensaver", "open-door-sign", "open-tv-options", "open-settings"]
         assert page.locator("#open-tv-options").inner_text().strip() == "TV" and page.locator("#open-tv-options svg use").get_attribute("href") == "#icon-tv"
         page.click("#back-from-options")
         join_by_id(page)

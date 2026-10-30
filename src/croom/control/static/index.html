@@ -70,6 +70,7 @@
       <button type="button" id="open-screensaver" class="button quiet menu-item" data-icon="monitor">Screensaver</button>
       <button type="button" id="open-door-sign" class="button quiet menu-item" data-icon="door">Door sign</button>
       <button type="button" id="open-tv-options" class="button quiet menu-item" data-icon="tv">TV</button>
+      <button type="button" id="open-settings" class="button quiet menu-item" data-icon="settings">Settings</button>
     </div>
     <section class="keyboard-section">
       <p class="kicker">Keyboard</p>
@@ -78,6 +79,23 @@
         <button type="button" id="key-click-off" class="button quiet" aria-pressed="false" data-icon="volume-x">Key click off</button>
       </div>
     </section>
+  </section>
+
+  <!-- Settings (spec 2026-10-29, section 3), behind the PIN: the pad, then the menu of pages; settings.js draws both. -->
+  <section class="view" data-view="settings-pin">
+    <button type="button" id="back-from-settings-pin" class="button quiet back">Back</button>
+    <section id="pin-host" class="pin-host" aria-label="Settings PIN"></section>
+  </section>
+
+  <section class="view" data-view="settings">
+    <div class="settings-head">
+      <button type="button" id="back-from-settings" class="button quiet back">Back</button>
+      <h2 id="settings-title" class="settings-title">Settings</h2>
+      <p id="settings-time" class="settings-time" aria-live="polite"></p>
+      <button type="button" id="settings-lock" class="button quiet" data-icon="lock">Lock</button>
+    </div>
+    <div id="settings-menu" class="menu settings-menu"></div>
+    <section id="settings-page" class="settings-page" aria-labelledby="settings-title" hidden></section>
   </section>
 
   <section class="view" data-view="camera">
@@ -420,5 +438,6 @@
 <script src="/static/keyboard.js"></script>
 <script src="/static/touchpad.js"></script>
 <script src="/static/remote.js"></script>
+<script src="/static/settings.js"></script>
 </body>
 </html>

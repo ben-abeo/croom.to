@@ -7,8 +7,9 @@
   const CONFIRM_MS = 5000;
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
   // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
-  // belong to whichever mode showed them, so their Back returns there.
-  const VIEW_MODES = { idle: "idle", booking: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
+  // belong to whichever mode showed them, so their Back returns there. Settings (settings.js) is the PIN pad and the menu of pages, from Options.
+  const VIEW_MODES = { idle: "idle", booking: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", "settings-pin": "idle", settings: "idle",
+                       meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
   const SUB_SCREENS = ["participants", "chat", "host", "tv"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
 

@@ -55,7 +55,7 @@ class PageServer:
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
                  bookings=False, laptop=None, admin=None, config_file=None, find_devices=None, keyboard=None, checks=None, github=None,
-                 registry=None):
+                 registry=None, apks=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -84,6 +84,7 @@ class PageServer:
         self.checks = checks            # Settings > Check's checks (croom.settings.checks.Checks): none is the room's own, on config_file
         self.github = github            # what Settings > Software asks GitHub (croom.settings.github.GitHub on a fake transport): none asks nothing
         self.registry = registry        # the devices that check in (croom.settings.checkin.Registry): none is one beside the server's settings
+        self.apks = apks                # the door sign's releases and APKs (croom.settings.apk.ApkStore on fakes): none is one on `github`
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -125,7 +126,7 @@ class PageServer:
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
             laptop=self.laptop, admin=self.admin, find_devices=self.find_devices, keyboard=self.keyboard, checks=self.checks,
-            github=self.github, registry=self.registry,
+            github=self.github, registry=self.registry, apks=self.apks,
         )
         await service.start()
         self.port = service.bound_port

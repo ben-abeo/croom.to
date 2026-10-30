@@ -1,10 +1,14 @@
 // Settings › Software: the devices that check in with the TV Pi (spec 2026-10-29, sections 3, 6 and 7), drawn under the TV Pi's card
 // through croomSettings.softwareCard (settings-software.js).
 //
-// One card per device that has joined (the touch Pi; the door sign in a later phase): its name, when it last checked in ("Not seen since
+// One card per device that has joined (the touch Pi, the door sign): its name, when it last checked in ("Not seen since
 // <time>" when it has gone quiet: its jobs wait for it), the version it runs, the newest on GitHub and the changes between, Update, Reboot
 // (a second tap) and Forget (a second tap: a device replaced by another), the job under way with the device's own words, and what came
 // of the last one. Then "Devices waiting to join", each with Allow and Refuse (a second tap: a refused device is not listed again).
+//
+// A door sign runs a release of its app (a version code, e.g. "Version 3 (3.0)"), not a commit: its newest is the newest GitHub release
+// door-sign-<versionCode>, its changes the releases between, and Update asks for that version code. A panel whose app is not its device
+// owner says so in its check-ins ("cannot"): the card shows its words, and leaves out what it can't do.
 (function () {
   "use strict";
   const S = window.croomSettings;
@@ -30,6 +34,24 @@
     return b;
   }
   const title = (device) => TITLES[device.kind] || "Device";
+  const isSign = (device) => device.kind === "sign";
+  // What a device says it can't do, each reason once ("The door sign is not the panel's device owner: see its setup guide")
+  const cannotWords = (device) => [...new Set(Object.values(device.cannot || {}))].join(" ");
+  function signVersion(device) {
+    const named = device.version_name && device.version_name !== device.version ? " (" + device.version_name + ")" : "";
+    const date = device.running && W.day(device.running.date) ? ", " + W.day(device.running.date) : "";
+    return device.version ? "Version " + device.version + named + date : "Version unknown";
+  }
+  function newestWords(device) {
+    if (isSign(device)) return "Newest: version " + device.newest.version_code + (W.day(device.newest.date) ? ", " + W.day(device.newest.date) : "");
+    return "Newest: " + W.short(device.newest.commit) + (W.day(device.newest.date) ? ", " + W.day(device.newest.date) : "");
+  }
+  function target(job) {
+    const args = job.args || {};
+    if (job.type !== "update") return "";
+    if (args.version_code) return " to version " + args.version_code;
+    return args.commit ? " to " + W.short(args.commit) : "";
+  }
   // "10:42 AM" today, "28 Oct, 10:42 AM" before
   function when(iso) {
     const d = iso ? new Date(iso) : null;
@@ -93,11 +115,12 @@
       head.append(name, actions);
       const seen = make("p", "device-seen" + (device.online ? " online" : ""),
         device.online ? "Checked in " + (device.seen_ago <= 5 ? "just now" : device.seen_ago + " seconds ago") : "Not seen since " + when(device.last_seen));
-      const version = make("p", "software-version", W.versionWords(device.version, device.running && device.running.date, null));
+      const version = make("p", "software-version", isSign(device) ? signVersion(device)
+        : W.versionWords(device.version, device.running && device.running.date, null));
       const newest = make("p", "software-newest");
       if (device.error) newest.textContent = device.error;
       else if (device.up_to_date) newest.textContent = "Up to date";
-      else if (device.newest) newest.textContent = "Newest: " + W.short(device.newest.commit) + (W.day(device.newest.date) ? ", " + W.day(device.newest.date) : "");
+      else if (device.newest) newest.textContent = newestWords(device);
       newest.classList.toggle("software-current", Boolean(device.up_to_date));
       newest.hidden = !newest.textContent;
       const changes = make("ul", "software-changes");
@@ -106,7 +129,8 @@
       if (device.changes && device.changes.length && !device.up_to_date) {
         for (const change of device.changes) {
           const item = make("li", "software-change");
-          item.append(make("span", "software-change-id", W.short(change.commit)), make("span", "software-change-title", change.title || ""));
+          item.append(make("span", "software-change-id", isSign(device) ? String(change.version_code) : W.short(change.commit)),
+            make("span", "software-change-title", change.title || ""));
           changes.append(item);
         }
         if (device.more) changes.append(make("li", "software-change software-more", "and " + device.more + " more"));
@@ -125,25 +149,30 @@
       job.setAttribute("role", "status");
       if (device.job) {
         const doing = JOB_WORDS[device.job.type] || "Working";
-        const target = device.job.type === "update" && device.job.args && device.job.args.commit ? " to " + W.short(device.job.args.commit) : "";
-        job.textContent = device.job.state === "running" ? doing + target + (device.job.words ? ": " + device.job.words : "")
-          : doing + target + ": waiting for the " + device.label + " to take it" + (device.online ? "" : " (it has not checked in since " + when(device.last_seen) + ")");
+        const to = target(device.job);
+        job.textContent = device.job.state === "running" ? doing + to + (device.job.words ? ": " + device.job.words : "")
+          : doing + to + ": waiting for the " + device.label + " to take it" + (device.online ? "" : " (it has not checked in since " + when(device.last_seen) + ")");
       }
       job.hidden = !device.job;
       const row = make("div", "software-update-row");
       const update = button("Update", "primary software-update device-update", "refresh-cw");
-      update.hidden = !(device.newest && device.up_to_date === false) || Boolean(device.job);
+      const cannot = device.cannot || {};
+      update.hidden = !(device.newest && device.up_to_date === false) || Boolean(device.job) || Boolean(cannot.update);
+      reboot.hidden = Boolean(cannot.reboot);
+      const limits = make("p", "note device-cannot", cannotWords(device));
+      limits.hidden = !limits.textContent;
       const message = make("p", "message software-message");
       message.setAttribute("role", "status");
       row.append(update, message);
       const say = (words) => { message.textContent = words || ""; };
-      card.append(head, seen, version, newest, changes, notice, job, row);
+      card.append(head, seen, version, newest, limits, changes, notice, job, row);
       box.append(card);
       reboot.disabled = forget.disabled = Boolean(device.job);
 
       update.addEventListener("click", () => {
         update.disabled = true;
-        ask("/api/settings/software/update", { device: device.id, commit: device.newest.commit }, say).finally(() => { update.disabled = false; });
+        const body = isSign(device) ? { device: device.id, version_code: device.newest.version_code } : { device: device.id, commit: device.newest.commit };
+        ask("/api/settings/software/update", body, say).finally(() => { update.disabled = false; });
       });
       tidies.push(twoTaps(reboot, "Reboot", "power", "Tap again to reboot",
         () => ask("/api/settings/reboot", { device: device.id }, say)));

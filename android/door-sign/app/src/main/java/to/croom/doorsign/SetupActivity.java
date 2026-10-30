@@ -87,6 +87,15 @@ public class SetupActivity extends Activity {
         row.addView(button("Off", v -> lights.off()));
         page.addView(row);
 
+        page.addView(heading("Room settings"));
+        page.addView(text(DoorSignApp.isOwner()
+                ? "This app is the panel's device owner: Settings on the touch Pi can reboot the panel, change its Wi-Fi and update the app."
+                : "This app is not the panel's device owner, so Settings on the touch Pi can't reboot the panel, change its Wi-Fi or "
+                        + "update the app. The setup guide says how to make it the device owner."));
+        String state = DoorSignApp.checkInState();
+        if (state != null) page.addView(text(state));
+        page.addView(text("Version " + versionName()));
+
         page.addView(heading("Leave the sign"));
         page.addView(text("Opens the tablet's own home screen. Home brings the sign back."));
         page.addView(button("Exit to Android", v -> exitToAndroid()));
@@ -95,6 +104,7 @@ public class SetupActivity extends Activity {
     /** The tablet's own home screen (Launcher3 on the SMT1019), or Android's settings when it has none. */
     private void exitToAndroid() {
         lights.off();
+        Kiosk.leave(this);      // the lock-task kiosk, when the app is the device owner: Home brings it back with the sign
         sendBroadcast(new Intent(MainActivity.SYSTEM_BARS_SHOW));   // Android's own screens need the status bar the sign hid
         Intent home = new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME);
         List<ResolveInfo> homes = getPackageManager().queryIntentActivities(home, 0);
@@ -108,6 +118,15 @@ public class SetupActivity extends Activity {
         }
         startActivity(target.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
         finish();
+    }
+
+    private String versionName() {
+        try {
+            android.content.pm.PackageInfo info = getPackageManager().getPackageInfo(getPackageName(), 0);
+            return Panel.code(info) + (info.versionName == null ? "" : " (" + info.versionName + ")");
+        } catch (android.content.pm.PackageManager.NameNotFoundException e) {
+            return "unknown";
+        }
     }
 
     private LinearLayout page() {

@@ -32,7 +32,8 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
-from croom.settings.checkin import COMMIT_KINDS, KINDS, TOKEN_HEADER, CheckinError, Registry
+from croom.settings.apk import ApkError, ApkStore
+from croom.settings.checkin import APK_KINDS, COMMIT_KINDS, DEVICE_ID_HEADER, KINDS, TOKEN_HEADER, CheckinError, Registry
 from croom.settings.checks import CheckBusy, Checks
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
@@ -249,6 +250,9 @@ class ControlService(Service):
         registry: the devices that check in (croom.settings.checkin.Registry: the touch Pi's agent, the door sign); None opens the
             config's devices_file, devices.json beside settings_file when the config names none (from_config: the data directory), or
             keeps it in memory when the config names neither.
+        apks: the door sign app's releases on GitHub and the APKs the TV Pi keeps for the panels (croom.settings.apk.ApkStore); None
+            makes one on `github` in the config's apk_dir (door-sign/ beside settings_file when the config names none), or has none
+            when there is no GitHub client or no folder ("Can't check for updates right now").
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -273,6 +277,7 @@ class ControlService(Service):
         checks=None,
         github=None,
         registry=None,
+        apks=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -322,6 +327,11 @@ class ControlService(Service):
                 Path(self.config["settings_file"]).parent / "devices.json" if self.config.get("settings_file") else None)
             registry = Registry(devices_file)
         self._registry = registry
+        if apks is None and github is not None:
+            apk_dir = self.config.get("apk_dir") or (
+                Path(self.config["settings_file"]).parent / "door-sign" if self.config.get("settings_file") else None)
+            apks = ApkStore(github, Path(apk_dir)) if apk_dir else None
+        self._apks = apks
         self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
                                                                 discover=discover)
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
@@ -366,6 +376,7 @@ class ControlService(Service):
                 "settings_file": str(data_dir / "control-settings.json"),
                 "pin_file": str(data_dir / "settings-pin.json"),
                 "devices_file": str(data_dir / "devices.json"),
+                "apk_dir": str(data_dir / "door-sign"),
                 "config_file": CONFIG_PATHS[0],
             },
             meeting=meeting,
@@ -474,6 +485,7 @@ class ControlService(Service):
         app.router.add_post("/api/settings/devices/{device}/forget", self._handle_forget_device)
         app.router.add_post("/api/settings/devices/{device}/jobs", self._handle_device_job)
         app.router.add_get("/api/devices/seen-since", self._handle_seen_since)
+        app.router.add_get("/api/devices/apk/{version_code}", self._handle_apk)
         app.router.add_get("/api/settings/network", self._handle_network)
         app.router.add_post("/api/settings/network/{device}/{action}", self._handle_network_action)
         app.router.add_get("/ws/pointer", self._handle_pointer)
@@ -1630,6 +1642,12 @@ class ControlService(Service):
         for a device that runs a commit of main (the touch Pi), what GitHub says of it as for the TV Pi."""
         cards = self._registry.devices()
         for card in cards:
+            if card["kind"] in APK_KINDS:
+                if self._apks is None:
+                    card.update(newest=None, running=None, changes=None, more=0, up_to_date=None, error=CANT_CHECK)
+                else:
+                    card.update(await asyncio.to_thread(self._apks.summary, card["version"]))
+                continue
             if card["kind"] not in COMMIT_KINDS:
                 continue
             if self._github is None:
@@ -1696,6 +1714,31 @@ class ControlService(Service):
         logger.info(f"{job} of the device {device} asked for from Settings")
         return web.json_response(dict(answer, job=queued))
 
+    async def _queue_apk_update(self, device: str, code: Any, commit: Any, answer: Dict[str, Any]) -> web.Response:
+        """Give a door sign the update to release door-sign-<code>: the TV Pi first has the APK (downloaded from GitHub and checked, or
+        kept from before), then the panel is told its version code, size and SHA-256, and fetches it from GET /api/devices/apk/<code>."""
+        if commit is not None:
+            return self._error_response("A door sign is updated to a release of the app (a version code), not to a commit", 400)
+        if not isinstance(code, int) or isinstance(code, bool) or code <= 0:
+            return self._error_response("Send the version of the door sign app to install (its version code)", 400)
+        card = self._registry.get(device)
+        if card["state"] != "allowed":
+            return self._error_response(f"This {card['label']} has not joined yet: allow it first", 409)
+        cannot = (card.get("cannot") or {}).get("update")
+        if cannot:
+            return self._error_response(cannot, 409)
+        if card["job"] is not None:
+            return self._error_response(f"The {card['label']} is busy: wait for it to finish", 409)
+        if card["version"].isdigit() and code <= int(card["version"]):
+            return self._error_response(f"The door sign has version {card['version']} already: Android installs only a newer one", 409)
+        if self._apks is None:
+            return self._error_response(CANT_CHECK, 503)
+        try:
+            apk = await asyncio.to_thread(self._apks.ensure, code)
+        except ApkError as e:
+            return self._error_response(str(e), e.status)
+        return self._queue(device, "update", answer, version_code=code, sha256=apk["sha256"], size=apk["size"])
+
     async def _admin_answer(self, job: str, answer: Dict[str, Any], **args: Any) -> web.Response:
         try:
             await self._admin.call(job, **args)
@@ -1712,11 +1755,16 @@ class ControlService(Service):
         data, refused = await self._software_body(request)
         if refused is not None:
             return refused
+        device = data.get("device", "tv")
+        if device != "tv" and self._registry.get(device)["kind"] in APK_KINDS:
+            return await self._queue_apk_update(device, data.get("version_code"), data.get("commit"), {"updating": True})
         commit = data.get("commit")
         if not is_commit(commit):
             return self._error_response("Send the version to install (a commit)", 400)
-        if data.get("device", "tv") != "tv":
-            return self._queue(data["device"], "update", {"updating": True}, commit=commit)
+        if device != "tv":
+            if "version_code" in data:
+                return self._error_response("A touch Pi is updated to a commit of main, not to a door sign release", 400)
+            return self._queue(device, "update", {"updating": True}, commit=commit)
         response = await self._admin_answer("update", {"updating": True}, commit=commit)
         if response.status == 200:
             logger.info(f"Update of the TV Pi to {commit} asked for from Settings")
@@ -1773,6 +1821,7 @@ class ControlService(Service):
                 updating.append(device["id"])
             except CheckinError as e:
                 errors.append(str(e))
+        await self._update_signs(updating, errors)
         if self._without_helper() is None:
             try:
                 version = (await self._admin.call("version")).get("version")
@@ -1783,6 +1832,28 @@ class ControlService(Service):
                 errors.append(str(e))
         logger.info(f"Update all to {commit} asked for from Settings: {', '.join(updating) or 'nothing to update'}")
         return web.json_response({"updating": updating, "errors": errors, "commit": commit})
+
+    async def _update_signs(self, updating: List[str], errors: List[str]) -> None:
+        """Update all's part for the door signs: each that has joined, can update itself and runs an older release than the newest
+        on GitHub is given the newest (its APK fetched first)."""
+        signs = [d for d in self._registry.devices() if d["kind"] in APK_KINDS and d["job"] is None and d["version"].isdigit()
+                 and not (d.get("cannot") or {}).get("update")]
+        if not signs or self._apks is None:
+            return
+        summary = await asyncio.to_thread(self._apks.summary, None)
+        newest = summary["newest"]
+        if summary["error"] or newest is None:
+            if summary["error"]:
+                errors.append(summary["error"])
+            return
+        for device in signs:
+            if int(device["version"]) >= newest["version_code"]:
+                continue
+            response = await self._queue_apk_update(device["id"], newest["version_code"], None, {})
+            if response.status == 200:
+                updating.append(device["id"])
+            else:
+                errors.append(json.loads(response.body)["error"])
 
     # --- Devices that check in: the touch Pi's agent and the door sign (spec 2026-10-29, section 7)
 
@@ -1803,6 +1874,28 @@ class ControlService(Service):
         except CheckinError as e:
             return self._error_response(str(e), e.status)
         return web.json_response(answer)
+
+    async def _handle_apk(self, request: web.Request) -> web.Response:
+        """GET /api/devices/apk/<versionCode>: the door sign app of that release, for a door sign that has joined (headers
+        X-Croom-Device-Id and X-Croom-Device-Token, as it checks in) to install. The TV Pi has it from GitHub (downloaded and checked
+        when the update was asked for, or now); the panel checks its size and SHA-256 (headers X-Croom-Apk-Size, X-Croom-Apk-Sha256,
+        and the job's), its package, its signature and its version before it installs it."""
+        try:
+            self._registry.authorize(request.headers.get(DEVICE_ID_HEADER), request.headers.get(TOKEN_HEADER), APK_KINDS)
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        code = request.match_info["version_code"]
+        if not code.isdigit() or len(code) > 10 or int(code) <= 0:
+            return self._error_response("Ask for a version of the door sign app (its version code)", 400)
+        if self._apks is None:
+            return self._error_response(CANT_CHECK, 503)
+        try:
+            apk = await asyncio.to_thread(self._apks.ensure, int(code))
+        except ApkError as e:
+            return self._error_response(str(e), e.status)
+        return web.FileResponse(apk["path"], headers={"Content-Type": "application/vnd.android.package-archive",
+                                                      "X-Croom-Apk-Sha256": apk["sha256"], "X-Croom-Apk-Size": str(apk["size"]),
+                                                      "Cache-Control": "no-store"})
 
     async def _handle_devices(self, request: web.Request) -> web.Response:
         """The devices that check in: {"devices": those that have joined, "waiting": those waiting to join}."""
@@ -1850,6 +1943,10 @@ class ControlService(Service):
         job = data.get("type")
         if job in ("reboot", "update", "wifi_connect", "wifi_forget") and self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response(self.LEAVE_FIRST, 409)
+        device = request.match_info["device"]
+        if job == "update" and self._checks_in(device) and self._registry.get(device)["kind"] in APK_KINDS:
+            args = data.get("args") if isinstance(data.get("args"), dict) else {}
+            return await self._queue_apk_update(device, args.get("version_code"), args.get("commit"), {})
         try:
             queued = self._registry.queue(request.match_info["device"], job, data.get("args"))
         except CheckinError as e:

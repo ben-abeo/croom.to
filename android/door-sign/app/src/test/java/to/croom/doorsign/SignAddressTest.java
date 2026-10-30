@@ -38,4 +38,11 @@ public class SignAddressTest {
         assertFalse(SignAddress.sameServer(sign, "http://evil.example.com/"));
         assertFalse(SignAddress.sameServer(sign, "not a url"));
     }
+
+    @Test public void theRoomsAddressIsTheSignsServer() {
+        assertEquals("http://10.0.0.5:8080", SignAddress.server("http://10.0.0.5:8080/sign"));
+        assertEquals("https://rooms.example.com", SignAddress.server("https://rooms.example.com/sign?room=2"));
+        assertNull(SignAddress.server(null));
+        assertNull(SignAddress.server("not a url"));
+    }
 }

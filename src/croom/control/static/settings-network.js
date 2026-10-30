@@ -1,7 +1,7 @@
 // Settings › Network (spec 2026-10-29, sections 3 and 7), behind the PIN as every Settings page is.
 //
-// One card per device: the TV Pi (through the root helper) and each device that checks in (the touch Pi; the door sign's card comes with
-// it in a later phase, drawn the same way). Each says how the device is connected (Wi-Fi or Ethernet, the network, its signal, its
+// One card per device: the TV Pi (through the root helper) and each device that checks in (the touch Pi, the door sign), drawn the same
+// way; a door sign whose app is not the panel's device owner can't change its Wi-Fi, and its card says so in its words. Each says how the device is connected (Wi-Fi or Ethernet, the network, its signal, its
 // address), what came of the last Wi-Fi change in the device's own words, and offers Change Wi-Fi (the networks in range, a password
 // field that the page's keyboard types in, a network that hides its name by its typed name, Join) and Forget (the networks it knows).
 // A change keeps the device's network before it and goes back to it by itself when the device can't do its job on the new one within
@@ -102,6 +102,8 @@
       c.seen = make("p", "device-seen network-seen");
       c.connection = make("p", "software-version network-connection");
       c.address = make("p", "software-newest network-address");
+      c.cannot = make("p", "note network-cannot");
+      c.cannot.hidden = true;
       c.result = make("p", "settings-banner software-notice network-result");
       c.result.setAttribute("role", "status");
       c.job = make("p", "device-job network-job");
@@ -146,7 +148,7 @@
       c.forgets = make("div", "network-forgets");
       c.forgets.hidden = true;
 
-      c.root.append(head, c.seen, c.connection, c.address, c.result, c.job, c.panel, c.forgets, c.message);
+      c.root.append(head, c.seen, c.connection, c.address, c.cannot, c.result, c.job, c.panel, c.forgets, c.message);
       box.append(c.root);
 
       const say = (words, ok) => { c.message.textContent = words || ""; c.message.classList.toggle("ok", Boolean(ok)); };
@@ -338,7 +340,7 @@
       if (!d.available) {
         c.connection.textContent = d.error || "Not available on this device";
         c.connection.classList.add("settings-unavailable");
-        for (const n of [c.change, c.forget, c.address, c.result, c.job, c.panel, c.forgets]) n.hidden = true;
+        for (const n of [c.change, c.forget, c.address, c.result, c.job, c.panel, c.forgets, c.cannot]) n.hidden = true;
         return;
       }
       c.connection.classList.remove("settings-unavailable");
@@ -346,7 +348,9 @@
       c.connection.textContent = connectionWords(n) || "Connection unknown";
       c.address.textContent = n.address ? "Address " + n.address : "";
       c.address.hidden = !n.address;
-      const wifi = n.wifi !== false;
+      const wifi = n.wifi !== false && !d.cannot;
+      c.cannot.textContent = d.cannot || "";
+      c.cannot.hidden = !d.cannot;
       c.change.hidden = !wifi;
       c.forget.hidden = !wifi || !(d.saved && d.saved.length);
       if (!wifi) { c.panel.hidden = true; c.forgets.hidden = true; }
@@ -395,7 +399,9 @@
       else if (change && !UNDER_WAY.includes(change.state)) result = { words: change.words, at: change.at, ok: change.state === "done" };
       return { title: TITLES[d.kind] || "Device", name: d.name, online: d.online, available: true, network: n,
                seen: d.online ? "Checked in " + (d.seen_ago <= 5 ? "just now" : d.seen_ago + " seconds ago") : "Not seen since " + when(d.last_seen),
-               saved: n.saved || [], scan: d.scan, doing: doing, result: result };
+               saved: n.saved || [], scan: d.scan, doing: doing, result: result,
+               // A device that can't change its Wi-Fi (a door sign whose app is not the panel's device owner) says why
+               cannot: (d.cannot || {}).wifi_connect || "" };
     }
 
     function fill(answer) {

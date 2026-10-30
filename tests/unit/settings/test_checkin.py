@@ -10,9 +10,11 @@ import pytest
 
 from croom.settings.checkin import (
     MAX_PENDING,
+    NOT_BACK,
     PENDING_FORGET_S,
     RESEND_S,
     SAVE_EVERY_S,
+    UPDATE_WATCH_S,
     CheckinError,
     Registry,
     check_job,
@@ -318,3 +320,119 @@ def test_known_says_whether_a_device_of_a_kind_has_joined(registry):
     assert not registry.known("touch")                               # waiting is not joined
     registry.allow(TOUCH)
     assert registry.known("touch") and not registry.known("sign")
+
+
+# --- The door sign (Task 11): updated to an APK release, never to a commit (and a touch Pi the reverse); what it says it can't do
+
+SHA = "c" * 64
+NOT_OWNER = "The door sign is not the panel's device owner: see its setup guide"
+
+
+def sign_body(version="2", job=None, **more):
+    return body(SIGN, kind="sign", version=version, job=job, version_name="2.0", **more)
+
+
+def sign_joined(registry, **more):
+    assert registry.checkin(sign_body(**more), TOKEN, "10.0.0.20")["state"] == "pending"
+    registry.allow(SIGN)
+    return registry
+
+
+def test_an_update_is_a_commit_for_a_touch_pi_and_a_version_code_for_a_door_sign():
+    assert check_job("update", {"version_code": 5, "sha256": SHA, "size": 1000}, "sign") == {"version_code": 5, "sha256": SHA, "size": 1000}
+    assert check_job("update", {"version_code": 5}, "sign") == {"version_code": 5}
+    assert check_job("update", {"commit": COMMIT}, "touch") == {"commit": COMMIT}
+    for kind, args in (("sign", {"commit": COMMIT}), ("sign", {"commit": COMMIT, "version_code": 5}), ("sign", {}),
+                       ("sign", {"version_code": 0}), ("sign", {"version_code": "5"}), ("sign", {"version_code": True}),
+                       ("sign", {"version_code": 2_100_000_001}), ("sign", {"version_code": 5, "sha256": "x" * 64, "size": 3}),
+                       ("sign", {"version_code": 5, "sha256": SHA}), ("sign", {"version_code": 5, "sha256": SHA, "size": 0}),
+                       ("touch", {"version_code": 5}), ("touch", {"version_code": 5, "commit": COMMIT})):
+        with pytest.raises(CheckinError) as caught:
+            check_job("update", args, kind)
+        assert caught.value.status == 400, (kind, args)
+    with pytest.raises(CheckinError) as caught:
+        check_job("update", {"commit": COMMIT}, "sign")
+    assert str(caught.value) == "A door sign is updated to a release of the app (a version code), not to a commit"
+    with pytest.raises(CheckinError) as caught:
+        check_job("update", {"version_code": 5}, "touch")
+    assert str(caught.value) == "A touch Pi is updated to a commit of main, not to a door sign release"
+
+
+def test_queue_checks_the_update_by_the_devices_kind(registry):
+    joined(registry)
+    sign_joined(registry)
+    assert refusal(lambda: registry.queue(SIGN, "update", {"commit": COMMIT}))[0] == 400
+    assert refusal(lambda: registry.queue(TOUCH, "update", {"version_code": 5}))[0] == 400
+    job = registry.queue(SIGN, "update", {"version_code": 5, "sha256": SHA, "size": 1000})
+    assert job["args"] == {"version_code": 5, "sha256": SHA, "size": 1000}
+    assert registry.queue(TOUCH, "update", {"commit": COMMIT})["args"] == {"commit": COMMIT}
+
+
+def test_what_a_door_sign_cant_do_is_kept_and_its_jobs_refused_in_its_words(registry):
+    cannot = {"reboot": NOT_OWNER, "update": NOT_OWNER, "wifi_scan": NOT_OWNER, "format_disk": "x", "wifi_forget": 3}
+    sign_joined(registry, cannot=cannot)
+    card = registry.get(SIGN)
+    assert card["cannot"] == {"reboot": NOT_OWNER, "update": NOT_OWNER, "wifi_scan": NOT_OWNER}
+    assert card["version"] == "2" and card["version_name"] == "2.0" and card["label"] == "door sign"
+    assert refusal(lambda: registry.queue(SIGN, "reboot")) == (409, NOT_OWNER)
+    assert registry.queue(SIGN, "wifi_forget", {"ssid": "Office"})["type"] == "wifi_forget"
+    # Made the panel's device owner: it says so at its next check-in, and may be given them
+    registry.checkin(sign_body(), TOKEN)
+    assert registry.get(SIGN)["cannot"] == {}
+
+
+def update_running(registry, clock):
+    sign_joined(registry)
+    job = registry.queue(SIGN, "update", {"version_code": 3, "sha256": SHA, "size": 10})
+    assert registry.checkin(sign_body(), TOKEN)["job"]["id"] == job["id"]
+    registry.checkin(sign_body(job={"id": job["id"], "type": "update", "state": "running", "words": "Installing version 3"}), TOKEN)
+    return job
+
+
+def test_a_door_sign_that_comes_back_with_its_update_reports_it(registry, clock):
+    job = update_running(registry, clock)
+    clock.now += 40      # Android restarts the app with the new version
+    registry.checkin(sign_body(version="3", job={"id": job["id"], "type": "update", "state": "done", "words": "Updated to version 3"}),
+                     TOKEN)
+    card = registry.get(SIGN)
+    assert card["job"] is None and card["last"]["words"] == "Updated to version 3" and card["last"]["state"] == "done"
+    assert card["version"] == "3"
+
+
+def test_a_door_sign_that_does_not_come_back_within_5_minutes_has_failed_its_update(registry, clock):
+    job = update_running(registry, clock)
+    clock.now += UPDATE_WATCH_S - 1
+    assert registry.get(SIGN)["job"]["state"] == "running"
+    clock.now += 1
+    card = registry.get(SIGN)
+    assert card["job"] is None and card["last"]["state"] == "failed" and card["last"]["words"] == NOT_BACK
+    assert NOT_BACK == "Door sign didn't check in after updating"
+    assert "not_back" not in card["last"]
+    assert registry.busy(SIGN) is False
+    # It comes back later after all, with the update done: its own word replaces "didn't check in"
+    clock.now += 600
+    registry.checkin(sign_body(version="3", job={"id": job["id"], "type": "update", "state": "done", "words": "Updated to version 3"}),
+                     TOKEN)
+    assert registry.get(SIGN)["last"]["words"] == "Updated to version 3"
+
+
+def test_the_5_minute_watch_is_only_for_a_door_signs_update(registry, clock):
+    joined(registry)
+    job = registry.queue(TOUCH, "update", {"commit": COMMIT})
+    registry.checkin(body(), TOKEN)
+    registry.checkin(body(job={"id": job["id"], "type": "update", "state": "running", "words": "Rebooting"}), TOKEN)
+    clock.now += UPDATE_WATCH_S + 60
+    assert registry.get(TOUCH)["job"]["state"] == "running"     # the touch Pi's agent goes back by itself and says so
+
+
+def test_authorize_lets_only_a_joined_device_of_the_kind_with_its_token(registry):
+    sign_joined(registry)
+    joined(registry)
+    assert registry.authorize(SIGN, TOKEN, ("sign",))["id"] == SIGN
+    assert refusal(lambda: registry.authorize(SIGN, OTHER, ("sign",)))[0] == 403
+    assert refusal(lambda: registry.authorize(TOUCH, TOKEN, ("sign",)))[0] == 403
+    assert refusal(lambda: registry.authorize("u" * 32, TOKEN, ("sign",)))[0] == 403
+    assert refusal(lambda: registry.authorize(None, TOKEN, ("sign",)))[0] == 401
+    assert refusal(lambda: registry.authorize(SIGN, "", ("sign",)))[0] == 401
+    registry.checkin(body("p" * 32, kind="sign"), TOKEN)      # waiting to join
+    assert refusal(lambda: registry.authorize("p" * 32, TOKEN, ("sign",)))[0] == 403

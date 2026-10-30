@@ -191,7 +191,7 @@
       const devices = answer.devices || [];
       behind = [];
       if (tvCard.available && tvCard.newest && tvCard.up_to_date === false) behind.push("tv");
-      for (const d of devices) if (d.newest && d.up_to_date === false) behind.push(d.id);
+      for (const d of devices) if (d.newest && d.up_to_date === false && !(d.cannot || {}).update) behind.push(d.id);
       const busy = (tvCard.update && UNDER_WAY.includes(tvCard.update.state)) || devices.some((d) => d.job);
       bar.hidden = !devices.length || !(behind.length || allMessage.textContent);   // the TV Pi alone has its own Update
       updateAll.disabled = Boolean(answer.in_meeting) || busy || waiting;

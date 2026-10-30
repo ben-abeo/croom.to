@@ -43,12 +43,16 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 KINDS = {"touch": "touch Pi", "sign": "door sign"}            # a device's kind, and how the page names it
-COMMIT_KINDS = ("touch",)          # the kinds that run a commit of main (updated to one); the door sign runs an APK (Task 11)
+COMMIT_KINDS = ("touch",)          # the kinds that run a commit of main (updated to one: update {commit})
+APK_KINDS = ("sign",)              # the kinds that run an APK of a GitHub release door-sign-<versionCode> (update {version_code})
 DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
 TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
 COMMIT = re.compile(r"[0-9a-f]{40}")
 JOB_ID = re.compile(r"[0-9a-f]{16}")
+SHA256 = re.compile(r"[0-9a-f]{64}")
+MAX_VERSION_CODE = 2_100_000_000    # Android's limit on a versionCode
 TOKEN_HEADER = "X-Croom-Device-Token"
+DEVICE_ID_HEADER = "X-Croom-Device-Id"     # with the token, on a door sign's request for its APK
 INTERVAL_S = 5                    # how often a device checks in (it is told so in each answer)
 ONLINE_S = 20                     # a device that has checked in within this is "online"; otherwise "Not seen since <time>"
 RESEND_S = 15                     # a job handed out that the device has not mentioned since is handed out again
@@ -60,6 +64,8 @@ MAX_WORDS = 300
 MAX_TEXT = 64
 MAX_NETWORK = 4096
 MAX_NETWORKS = 30                 # a wifi_scan's result: the networks kept
+UPDATE_WATCH_S = 5 * 60            # a door sign that has not checked in this long after it started installing an update has failed it
+NOT_BACK = "Door sign didn't check in after updating"
 DONE, FAILED, RUNNING = "done", "failed", "running"
 
 WIFI_PASSWORD = re.compile(r"[\x20-\x7e]{8,63}|[0-9A-Fa-f]{64}")
@@ -92,7 +98,26 @@ def _no_args(args: Dict[str, Any]) -> Dict[str, Any]:
     return {}
 
 
-def _update_args(args: Dict[str, Any]) -> Dict[str, Any]:
+def _update_args(args: Dict[str, Any], kind: str = "touch") -> Dict[str, Any]:
+    """A touch Pi is updated to a commit of main ({"commit"}); a door sign to an APK release ({"version_code"}, with the "sha256" and
+    "size" of the APK the TV Pi holds for it), and never the one with the other's."""
+    if kind in APK_KINDS:
+        if "commit" in args:
+            raise CheckinError("A door sign is updated to a release of the app (a version code), not to a commit", 400)
+        code = args.get("version_code")
+        if not isinstance(code, int) or isinstance(code, bool) or not 0 < code <= MAX_VERSION_CODE:
+            raise CheckinError("Send the version of the door sign app to install (its version code)", 400)
+        clean: Dict[str, Any] = {"version_code": code}
+        sha256, size = args.get("sha256"), args.get("size")
+        if sha256 is not None or size is not None:
+            if not isinstance(sha256, str) or not SHA256.fullmatch(sha256):
+                raise CheckinError("The APK's SHA-256 is 64 characters 0 to 9 and a to f", 400)
+            if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
+                raise CheckinError("The APK's size is a number of bytes", 400)
+            clean.update(sha256=sha256, size=size)
+        return clean
+    if "version_code" in args:
+        raise CheckinError(f"A {label(kind)} is updated to a commit of main, not to a door sign release", 400)
     commit = args.get("commit")
     if not isinstance(commit, str) or not COMMIT.fullmatch(commit):
         raise CheckinError("Send the version to install (a commit)", 400)
@@ -126,15 +151,24 @@ JOBS: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
 SECRET_ARGS = ("password",)       # never shown back on a page
 
 
-def check_job(job: Any, args: Any) -> Dict[str, Any]:
-    """The arguments of `job` as the device is sent them, or CheckinError (400) naming what is wrong."""
+def check_job(job: Any, args: Any, kind: str = "touch") -> Dict[str, Any]:
+    """The arguments of `job` for a device of `kind` as the device is sent them, or CheckinError (400) naming what is wrong."""
     if job not in JOBS:
         raise CheckinError("There is no such job", 400)
     if args is None:
         args = {}
     if not isinstance(args, dict):
         raise CheckinError("Send the job's arguments as an object", 400)
+    if job == "update":
+        return _update_args(args, kind)
     return JOBS[job](args)
+
+
+def _cannot(value: Any) -> Dict[str, str]:
+    """What a device says it can't do ({job: why}, e.g. a door sign that is not the panel's device owner), cleaned."""
+    if not isinstance(value, dict):
+        return {}
+    return {job: _text(words, MAX_WORDS) for job, words in value.items() if job in JOBS and isinstance(words, str) and words.strip()}
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:
@@ -307,6 +341,18 @@ class Registry:
             self._save(force=changed)
             return {"state": "allowed", "job": job, "interval": INTERVAL_S}
 
+    def authorize(self, device_id: Any, token: Any, kinds: tuple = tuple(KINDS)) -> Dict[str, Any]:
+        """Whether a request comes from a device that has joined (its id, and the token it joined with), of one of `kinds`: its card, or
+        CheckinError (401 no id or token, 403 a device that has not joined, is of another kind or carries another token)."""
+        if not isinstance(device_id, str) or not DEVICE_ID.fullmatch(device_id) or not isinstance(token, str) or not TOKEN.fullmatch(token):
+            raise CheckinError("Send the device's id and token", 401)
+        with self._lock:
+            entry = self._devices.get(device_id)
+            if (entry is None or entry["state"] != "allowed" or entry["kind"] not in kinds
+                    or not hmac.compare_digest(entry["token_hash"], hash_token(token))):
+                raise CheckinError("Only a device that has joined this room may ask this", 403)
+            return self._public(device_id, entry, self._clock())
+
     def _make_room(self, now: float) -> None:
         for device_id, entry in list(self._devices.items()):
             if entry["state"] == "pending" and now - entry.get("last_seen", 0) > PENDING_FORGET_S:
@@ -319,8 +365,9 @@ class Registry:
         if not isinstance(network, dict) or len(json.dumps(network)) > MAX_NETWORK:
             network = {}
         fresh = {"version": _text(body.get("version")), "name": _text(body.get("name")), "address": _text(address),
-                 "network": network}
-        changed = any(entry.get(key) != value for key, value in fresh.items() if key != "network")
+                 "network": network, "version_name": _text(body.get("version_name")), "cannot": _cannot(body.get("cannot"))}
+        changed = any(entry.get(key, "" if key == "version_name" else {} if key == "cannot" else None) != value
+                      for key, value in fresh.items() if key != "network")
         entry.update(fresh)
         entry["last_seen"] = now
         return changed
@@ -340,6 +387,8 @@ class Registry:
                         self._scans[device_id] = {"networks": networks, "at": _iso(now)}
                 self._close(device_id, entry, job, state, words, now)
                 return True
+            if job["state"] != RUNNING:
+                job["running_at"] = now
             job["state"] = RUNNING
             job["words"] = words
             return False
@@ -348,17 +397,36 @@ class Registry:
             self._close(device_id, entry, job, FAILED, f"The {label(entry['kind'])} stopped before it finished", now)
             return True
         last = entry.get("last") or {}
+        if report is not None and state in (DONE, FAILED) and last.get("id") == report["id"] and last.get("not_back"):
+            # The door sign came back after UPDATE_WATCH_S after all: its own word on the update replaces "didn't check in"
+            entry["last"] = dict(last, state=state, words=words, at=now, not_back=False)
+            return True
         if report is not None and state in (DONE, FAILED) and JOB_ID.fullmatch(report["id"]) and last.get("id") != report["id"]:
             # A result for a job this TV Pi no longer holds (handed out before it restarted)
             entry["last"] = {"id": report["id"], "type": _text(report.get("type")), "args": {}, "state": state, "words": words, "at": now}
             return True
         return False
 
-    def _close(self, device_id: str, entry: Dict[str, Any], job: Dict[str, Any], state: str, words: str, now: float) -> None:
+    def _close(self, device_id: str, entry: Dict[str, Any], job: Dict[str, Any], state: str, words: str, now: float,
+               not_back: bool = False) -> None:
         """The job has ended: it becomes the device's last result, and the device may be given another."""
         entry["last"] = {"id": job["id"], "type": job["type"], "args": _public_args(job["args"]), "state": state, "words": words,
                          "at": now}
+        if not_back:
+            entry["last"]["not_back"] = True
         self._jobs.pop(device_id, None)
+
+    def _watch_updates(self, now: float) -> None:
+        """A door sign installing an update is restarted by Android with the new version, and checks in again within seconds: one that
+        has not checked in for UPDATE_WATCH_S since it said it was installing has failed it (spec section 6). Android cannot go back to
+        the older version by itself, so the page says so and the person looks at the panel."""
+        for device_id, job in list(self._jobs.items()):
+            entry = self._devices.get(device_id)
+            if (entry is not None and entry["kind"] in APK_KINDS and job["type"] == "update" and job["state"] == RUNNING
+                    and now - max(entry.get("last_seen", 0), job.get("running_at", 0)) >= UPDATE_WATCH_S):
+                self._close(device_id, entry, job, FAILED, NOT_BACK, now, not_back=True)
+                self._save()
+                logger.warning(f"The door sign {entry.get('name') or device_id} did not check in within 5 minutes of installing an update")
 
     def _hand_out(self, device_id: str, now: float) -> Optional[Dict[str, Any]]:
         job = self._jobs.get(device_id)
@@ -412,11 +480,15 @@ class Registry:
     def queue(self, device_id: str, job: str, args: Any = None) -> Dict[str, Any]:
         """Give the device a job ({"type", "args"} checked by check_job). Refused for a device that has not joined, and while it has
         another one."""
-        clean = check_job(job, args)
         with self._lock:
             entry = self._entry(device_id)
+            clean = check_job(job, args, entry["kind"])
             if entry["state"] != "allowed":
                 raise CheckinError(f"This {label(entry['kind'])} has not joined yet: allow it first", 409)
+            cannot = (entry.get("cannot") or {}).get(job)
+            if cannot:
+                raise CheckinError(cannot, 409)
+            self._watch_updates(self._clock())
             if device_id in self._jobs:
                 raise CheckinError(f"The {label(entry['kind'])} is busy: wait for it to finish", 409)
             now = self._clock()
@@ -426,16 +498,19 @@ class Registry:
 
     def busy(self, device_id: str) -> bool:
         with self._lock:
+            self._watch_updates(self._clock())
             return device_id in self._jobs
 
     def get(self, device_id: str) -> Dict[str, Any]:
         with self._lock:
+            self._watch_updates(self._clock())
             return self._public(device_id, self._entry(device_id), self._clock())
 
     def devices(self) -> List[Dict[str, Any]]:
         """The devices allowed in, oldest first, as the page shows them."""
         with self._lock:
             now = self._clock()
+            self._watch_updates(now)
             return [self._public(i, e, now) for i, e in sorted(self._devices.items(), key=lambda p: p[1].get("first_seen", 0))
                     if e["state"] == "allowed"]
 
@@ -468,12 +543,13 @@ class Registry:
         return {
             "id": device_id, "kind": entry["kind"], "label": label(entry["kind"]), "state": entry["state"],
             "name": entry.get("name", ""), "address": entry.get("address", ""), "version": entry.get("version", ""),
+            "version_name": entry.get("version_name", ""), "cannot": dict(entry.get("cannot") or {}),
             "network": copy.deepcopy(entry.get("network") or {}),
             "first_seen": _iso(entry.get("first_seen")), "last_seen": _iso(last_seen),
             "seen_ago": None if last_seen is None else max(0, int(now - last_seen)),
             "online": last_seen is not None and now - last_seen <= ONLINE_S,
             "job": self._public_job(job) if job else None,
-            "last": dict(last, at=_iso(last.get("at"))) if isinstance(last, dict) else None,
+            "last": {k: v for k, v in dict(last, at=_iso(last.get("at"))).items() if k != "not_back"} if isinstance(last, dict) else None,
             "scan": copy.deepcopy(self._scans.get(device_id)),
         }
 

@@ -148,6 +148,25 @@ class GitHub:
                 return False
             raise
 
+    def releases(self) -> list:
+        """The repository's releases as GitHub lists them (the newest 50; the door sign's APKs are attached to them, croom.settings.apk);
+        GitHubError when GitHub can't say."""
+        answer = self._get("releases?per_page=50")
+        if not isinstance(answer, list):
+            raise GitHubError()
+        return answer
+
+    def release(self, tag: str) -> Dict[str, Any]:
+        """The release tagged `tag`; GitHubError (status 404 when there is none)."""
+        answer = self._get(f"releases/tags/{tag}")
+        if not isinstance(answer, dict):
+            raise GitHubError()
+        return answer
+
+    @property
+    def repo(self) -> str:
+        return self._repo
+
     def summary(self, running: Optional[str]) -> Dict[str, Any]:
         """What Settings › Software shows of GitHub for a device that runs `running` (a commit, or "unknown"):
         {"newest": the newest commit or None, "running": that commit's title and date when GitHub knows it, "changes": the commits

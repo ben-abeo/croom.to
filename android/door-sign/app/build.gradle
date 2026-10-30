@@ -2,6 +2,16 @@ plugins {
     id "com.android.application"
 }
 
+// The release key (README, "Release builds and the signing key"): from keystore.properties beside settings.gradle, or from the
+// environment. Never in the repository. Without it a release build is left unsigned; debug builds use the debug key as always.
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("keystore.properties")
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.withInputStream { keystoreProperties.load(it) }
+}
+def signing = { String key, String variable -> keystoreProperties.getProperty(key) ?: System.getenv(variable) }
+def releaseStore = signing("storeFile", "DOOR_SIGN_KEYSTORE")
+
 android {
     namespace "to.croom.doorsign"
     compileSdk 34
@@ -11,10 +21,31 @@ android {
         applicationId "to.croom.doorsign"
         minSdk 26
         targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        // Each release is a GitHub release door-sign-<versionCode> with the signed APK as app-release.apk: raise it for every one
+        versionCode 2
+        versionName "2.0"
         ndk {
             abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+    }
+
+    signingConfigs {
+        release {
+            if (releaseStore) {
+                storeFile rootProject.file(releaseStore)
+                storePassword signing("storePassword", "DOOR_SIGN_KEYSTORE_PASSWORD")
+                keyAlias signing("keyAlias", "DOOR_SIGN_KEY_ALIAS")
+                keyPassword signing("keyPassword", "DOOR_SIGN_KEY_PASSWORD")
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            if (releaseStore) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 
@@ -33,4 +64,6 @@ android {
 
 dependencies {
     testImplementation "junit:junit:4.13.2"
+    // Android's org.json is a stub in unit tests on the JVM: the same API from Maven
+    testImplementation "org.json:json:20231013"
 }

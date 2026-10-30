@@ -31,7 +31,8 @@ import java.util.concurrent.Executors;
 
 /**
  * The door sign, full screen: the room's /sign page, and the light bar round the panel in the colour of the state the page shows
- * (window.CrystalPanel.setLight). Holding the top-left corner for five seconds opens setup, behind the PIN.
+ * (window.CrystalPanel.setLight). Holding the top-left corner for five seconds opens setup, behind the PIN. When the app is the
+ * panel's device owner the sign runs in Android's lock-task kiosk; the check-in with the room (DoorSignApp) runs whatever the sign shows.
  */
 public class MainActivity extends Activity {
 
@@ -77,6 +78,7 @@ public class MainActivity extends Activity {
             startActivity(new Intent(this, SetupActivity.class));
             return;
         }
+        Kiosk.enter(this);     // as the panel's device owner: Android's lock-task kiosk (Setup's Exit to Android ends it)
         if (!url.equals(signUrl)) {
             load(url);
         } else if (lastState != null) {

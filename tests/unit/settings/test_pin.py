@@ -238,3 +238,55 @@ def test_a_store_in_a_folder_that_does_not_exist_yet_makes_it(tmp_path, clock):
     store = PinStore(tmp_path / "data" / "settings-pin.json", clock=clock)
     store.set_pin("1234")
     assert (tmp_path / "data" / "settings-pin.json").is_file()
+
+
+def test_a_change_ends_every_other_token_and_keeps_the_callers(store):
+    """A PIN changed after a suspected leak must lock out whoever held a token for the old one: tokens slide, so one could otherwise be kept
+    alive for good."""
+    store.set_pin("1234")
+    mine, theirs = store.unlock("1234"), store.unlock("1234")
+    store.change("1234", "5678", keep=mine)
+    assert store.check(theirs) is False
+    assert store.check(mine) is True
+
+
+def test_a_change_with_no_token_to_keep_ends_them_all(store):
+    store.set_pin("1234")
+    token = store.unlock("1234")
+    store.change("1234", "5678")
+    assert store.check(token) is False
+
+
+def test_a_refused_change_ends_no_token(store):
+    store.set_pin("1234")
+    mine, theirs = store.unlock("1234"), store.unlock("1234")
+    with pytest.raises(PinError):
+        store.change("9999", "5678", keep=mine)
+    assert store.check(theirs) and store.check(mine)
+
+
+def test_a_pin_reset_at_the_tv_pi_ends_the_old_tokens_and_the_lock_out(store, tmp_path, clock):
+    """The spec's reset is deleting settings-pin.json: what was unlocked with the old PIN, and a lock-out earned against it, go with it."""
+    store.set_pin("1234")
+    token = store.unlock("1234")
+    for _ in range(5):
+        with pytest.raises(PinError):
+            store.unlock("0000")
+    (tmp_path / "settings-pin.json").unlink()
+    assert store.check(token) is False                   # no PIN, no Settings: not even before a new one is chosen
+    store.set_pin("8888")
+    assert store.locked_minutes() == 0
+    assert store.check(store.unlock("8888"))
+    assert store.check(token) is False
+
+
+def test_choosing_a_pin_starts_the_wrong_tries_again(store, tmp_path):
+    store.set_pin("1234")
+    for _ in range(4):
+        with pytest.raises(PinError):
+            store.unlock("0000")
+    (tmp_path / "settings-pin.json").unlink()
+    store.set_pin("8888")
+    with pytest.raises(PinError) as refused:
+        store.unlock("0000")
+    assert str(refused.value) == "Wrong PIN: 4 tries left"

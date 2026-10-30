@@ -178,3 +178,25 @@ def test_from_config_puts_the_pin_in_the_data_directory(tmp_path):
     config.data_dir = str(tmp_path)
     service = ControlService.from_config(config)
     assert service.pin_store.path == tmp_path / "settings-pin.json"
+
+
+async def test_changing_the_pin_ends_another_screens_token_and_keeps_this_ones(client_factory, pins):  # noqa: F811
+    client = await client_factory(make_service(pin_store=pins))
+    mine = await chosen(client)
+    theirs = (await (await client.post("/api/settings/unlock", json={"pin": "1234"})).json())["token"]
+    response = await client.post("/api/settings/pin/change", json={"old": "1234", "new": "5678"}, headers=unlocked(mine))
+    assert response.status == 200
+    refused = await client.post("/api/settings/pin/change", json={"old": "5678", "new": "1111"}, headers=unlocked(theirs))
+    assert refused.status == 401
+    assert (await (await client.get("/api/settings/pin", headers=unlocked(mine))).json())["unlocked"] is True
+
+
+async def test_a_pin_chosen_after_a_reset_during_a_lock_out_answers_a_token(client_factory, pins, tmp_path):  # noqa: F811
+    client = await client_factory(make_service(pin_store=pins))
+    old = await chosen(client)
+    for _ in range(5):
+        await client.post("/api/settings/unlock", json={"pin": "0000"})
+    (tmp_path / "settings-pin.json").unlink()
+    response = await client.post("/api/settings/pin/set", json={"pin": "8888"})
+    assert response.status == 200 and pins.check((await response.json())["token"])
+    assert (await client.post("/api/settings/pin/change", json={"old": "8888", "new": "1111"}, headers=unlocked(old))).status == 401

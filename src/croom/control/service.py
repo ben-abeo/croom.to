@@ -1188,7 +1188,7 @@ class ControlService(Service):
         if refused is not None:
             return refused
         try:
-            self._pins.change(data.get("old"), data.get("new"))
+            self._pins.change(data.get("old"), data.get("new"), keep=self._token(request))   # every other screen's token ends
         except PinError as e:
             return self._pin_refusal(e)
         except OSError as e:

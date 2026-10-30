@@ -119,18 +119,31 @@ class PinStore:
         return self._path.exists()
 
     def set_pin(self, pin: Any) -> None:
-        """Choose the first PIN. PinError when it is not 4 to 8 digits, or when a PIN is set already (change() changes it)."""
+        """Choose the first PIN. PinError when it is not 4 to 8 digits, or when a PIN is set already (change() changes it).
+
+        A PIN is chosen the first time or after a reset at the TV Pi (its file deleted): either way nothing earned against a PIN before it
+        stands. Every token, the count of wrong tries and a lock-out are ended, so a reset starts clean and the new PIN is not refused
+        for the old one's wrong tries."""
         pin = _checked(pin)
         if self.is_set():
             raise PinError(PIN_IS_SET, status=409)
         self._write(_new_record(pin))
+        self._tokens.clear()
+        self._wrong = 0
+        self._locked_until = 0.0
 
-    def change(self, old: Any, new: Any) -> None:
+    def change(self, old: Any, new: Any, keep: Optional[str] = None) -> None:
         """Change the PIN, given the one it is now. The old PIN is tried as unlock() tries one: a wrong one counts towards the lock-out,
-        and while it lasts nothing is changed. The new one is checked before the old one is tried, so a mistyped new PIN costs no try."""
+        and while it lasts nothing is changed. The new one is checked before the old one is tried, so a mistyped new PIN costs no try.
+
+        Every token but `keep` (the token of the screen that changed it, which goes on working) is ended: a PIN changed after a suspected
+        leak must shut out whoever unlocked with the old one, and a token slides, so it could otherwise be kept alive for good."""
         new = _checked(new)
         self._try(old)
         self._write(_new_record(new))
+        kept = {keep: self._tokens[keep]} if keep in self._tokens else {}
+        self._tokens.clear()
+        self._tokens.update(kept)
 
     # --- unlocking
 
@@ -144,7 +157,11 @@ class PinStore:
 
     def check(self, token: Optional[str]) -> bool:
         """Whether `token` is a token that is still unlocked; when it is, this request has used it and it lasts UNLOCK_SECONDS from now.
-        An expired token is forgotten, so a clock that steps back never brings it back."""
+        An expired token is forgotten, so a clock that steps back never brings it back. With no PIN file (a reset at the TV Pi has deleted
+        it) no token is unlocked, and every one is ended: what was unlocked with the old PIN goes with it."""
+        if not self.is_set():
+            self._tokens.clear()
+            return False
         now = self._clock()
         for old in [t for t, used in self._tokens.items() if now - used >= UNLOCK_SECONDS]:
             del self._tokens[old]
@@ -166,7 +183,11 @@ class PinStore:
     # --- inside
 
     def _try(self, pin: Any) -> None:
-        """Pass when `pin` is the PIN; raise the PinError that says why not, counting a wrong one and locking after MAX_TRIES."""
+        """Pass when `pin` is the PIN; raise the PinError that says why not, counting a wrong one and locking after MAX_TRIES.
+
+        The lock-out cannot be raced only because the check, the hash and the count run in one go on the event loop, with no await
+        between them: two tries cannot both pass the check before either is counted. Moving the hash off the loop (a thread, for a slow
+        Pi) needs an asyncio.Lock held across all of it."""
         minutes = self.locked_minutes()
         if minutes:
             raise PinLocked(minutes)

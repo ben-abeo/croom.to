@@ -290,3 +290,25 @@ def test_choosing_a_pin_starts_the_wrong_tries_again(store, tmp_path):
     with pytest.raises(PinError) as refused:
         store.unlock("0000")
     assert str(refused.value) == "Wrong PIN: 4 tries left"
+
+
+def test_the_pin_file_is_on_the_disk_before_it_is_renamed_into_place(store, tmp_path, monkeypatch):
+    """A power cut just after a PIN is chosen must not leave an empty settings-pin.json (a PIN that is set and cannot be checked):
+    the temporary file is synced before the rename."""
+    from croom.settings import pin as module
+    events = []
+    real_fsync, real_replace = os.fsync, os.replace
+
+    def fsync(fd):
+        events.append(("fsync", os.readlink(f"/proc/self/fd/{fd}") if os.path.exists(f"/proc/self/fd/{fd}") else fd))
+        return real_fsync(fd)
+
+    def replace(source, target):
+        events.append(("replace", str(source)))
+        return real_replace(source, target)
+
+    monkeypatch.setattr(module.os, "fsync", fsync)
+    monkeypatch.setattr(module.os, "replace", replace)
+    store.set_pin("1234")
+    assert [kind for kind, _ in events] == ["fsync", "replace"]
+    assert events[0][1] == events[1][1]                     # the file synced is the one renamed into place

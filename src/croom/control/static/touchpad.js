@@ -269,8 +269,10 @@
       key: (name) => sendKeys({ key: name }),
       closed: () => { if (!root.hidden) draw(); },
     };
+    // Each carries the Settings unlock the sign-in screen holds (signIn.token()): the agent types only for a screen that is unlocked.
     function sendKeys(what) {
-      if (link.send(Object.assign({ target: "pi", type: "keys" }, what))) return;
+      const token = signIn && signIn.token ? signIn.token() : null;
+      if (link.send(Object.assign({ target: "pi", type: "keys" }, what, token ? { token: token } : {}))) return;
       said = NOT_TYPED;
       clearTimeout(saidTimer);
       saidTimer = setTimeout(() => { said = ""; draw(); }, WORDS_MS);

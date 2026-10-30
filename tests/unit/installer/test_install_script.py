@@ -478,7 +478,7 @@ def test_the_room_pis_keyboard_layout_is_set_to_us_for_typing_on_the_tv(tmp_path
     keyboard, labwc = tmp_path / "keyboard", tmp_path / "home" / ".config" / "labwc"
     keyboard.write_text(GB_KEYBOARD)
     labwc.mkdir(parents=True)
-    (labwc / "environment").write_text("XKB_DEFAULT_MODEL=pc105\nXKB_DEFAULT_LAYOUT=gb\n")
+    (labwc / "environment").write_text("XKB_DEFAULT_MODEL=pc105\nXKB_DEFAULT_LAYOUT=gb\nXKB_DEFAULT_VARIANT=extd\n")
     snippet = f"source {SCRIPT}; KEYBOARD_FILE={keyboard}; LABWC_DIR={labwc}; CROOM_USER=$(id -un); set_keyboard_layout"
     result = run_bash(snippet)
     assert result.returncode == 0, result.stderr
@@ -487,7 +487,7 @@ def test_the_room_pis_keyboard_layout_is_set_to_us_for_typing_on_the_tv(tmp_path
     assert [line for line in lines if line.startswith("XKBLAYOUT=")] == ['XKBLAYOUT="us"']
     assert 'XKBMODEL="pc105"' in lines and 'XKBOPTIONS=""' in lines and 'BACKSPACE="guess"' in lines   # the rest is kept
     environment = (labwc / "environment").read_text().splitlines()
-    assert environment == ["XKB_DEFAULT_MODEL=pc105", "XKB_DEFAULT_LAYOUT=us"]
+    assert environment == ["XKB_DEFAULT_MODEL=pc105", "XKB_DEFAULT_LAYOUT=us"]          # the GB variant is cleared with the layout
     first = (keyboard.read_text(), (labwc / "environment").read_text())
     assert run_bash(snippet).returncode == 0
     assert (keyboard.read_text(), (labwc / "environment").read_text()) == first                         # idempotent
@@ -512,3 +512,21 @@ def test_the_completion_text_says_the_layout_is_us_and_applies_after_a_reboot():
     result = run_bash(f"source {SCRIPT}; hostname() {{ echo room; }}; print_completion")
     assert result.returncode == 0, result.stderr
     assert "The keyboard layout is now US (Sign in to Google on the TV types with it): reboot once for the desktop to use it." in result.stdout
+
+
+def test_the_installer_keeps_the_config_the_room_starts_with_as_config_yaml_good(tmp_path):
+    """The root helper puts config.yaml.good back when the room does not start with a change made in Settings: the installer writes it
+    at every install and upgrade, a copy of config.yaml, owner the room user, mode 640."""
+    room = tmp_path / "room.yaml"
+    room.write_text("version: 2\nroom:\n  name: Room 9\n")
+    etc = tmp_path / "etc"
+    result = run_bash(f"source {SCRIPT}; CONFIG_DIR={etc}; CROOM_USER=$(id -un); ROOM_CONFIG={room}; create_config; keep_good_config")
+    assert result.returncode == 0, result.stderr
+    good = etc / "config.yaml.good"
+    assert good.read_text() == room.read_text() and oct(good.stat().st_mode & 0o777) == "0o640"
+    assert sorted(p.name for p in etc.iterdir()) == ["config.yaml", "config.yaml.good"]
+    (etc / "config.yaml").write_text("version: 2\nroom:\n  name: Room 10\n")    # an upgrade: the config as it is now
+    assert run_bash(f"source {SCRIPT}; CONFIG_DIR={etc}; CROOM_USER=$(id -un); keep_good_config").returncode == 0
+    assert good.read_text() == "version: 2\nroom:\n  name: Room 10\n"
+    main = SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+    assert main.index("create_config") < main.index("keep_good_config")

@@ -36,7 +36,7 @@ from croom.settings.credentials import CredentialError
 from croom.settings.credentials import parse as parse_credential
 from croom.settings.credentials import summary as credential_summary
 from croom.settings.github import GitHub
-from croom.settings.schema import SettingError, check_config
+from croom.settings.schema import BY_PATH, SettingError, check_config
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ KEEP_VERSIONS = 5                 # config.yaml.1 ... config.yaml.5
 HEALTH_TIMEOUT_S = 2 * 60         # how long a restarted room has to answer GET /api/status
 HEALTH_INTERVAL_S = 5             # how often it is asked
 PROBE_TIMEOUT_S = 4               # one ask: under the interval, so a hanging room does not stretch the watch
-UNDO_WINDOW_S = 10 * 60           # a change written this long before a restart is the change the room may not start with
+ACTIVE_WAIT_S = 5 * 60            # at the helper's start, how long the room software may take to be started before a watch counts
 DEFAULT_CONTROL_PORT = 8080
 LOOPBACK = "127.0.0.1"
 ANY_ADDRESS = ("", "0.0.0.0", "::")   # a room page listening on every address is asked on the loopback
@@ -143,6 +143,12 @@ class Paths:
     @property
     def config(self) -> Path:
         return self.config_dir / "config.yaml"
+
+    @property
+    def good_config(self) -> Path:
+        """config.yaml.good: the config the room last started with (written when a watch sees the room healthy, and by the installer),
+        which the restart watch puts back when the room does not start with a change. Root writes it, owner the room user, mode 640."""
+        return self.config_dir / "config.yaml.good"
 
     @property
     def state(self) -> Path:
@@ -245,6 +251,30 @@ def check_config_yaml(text: Any, current: Optional[Dict[str, Any]] = None) -> Di
     except SettingError as e:
         raise JobError(str(e)) from e
     return data
+
+
+def _leaves(data: Any, prefix: str = "") -> Dict[str, Any]:
+    """A config's settings by dotted path ("calendar.booking_start"): a mapping is looked into, anything else is a value."""
+    if not isinstance(data, dict):
+        return {prefix: data} if prefix else {}
+    found: Dict[str, Any] = {}
+    for key, value in data.items():
+        found.update(_leaves(value, f"{prefix}.{key}" if prefix else str(key)))
+    return found
+
+
+_ABSENT = object()
+
+
+def only_live_changes(old: Optional[Dict[str, Any]], new: Dict[str, Any]) -> bool:
+    """Whether every setting that differs between the config on disk (`old`) and a new one is one the room applies at once (the
+    schema's live settings: the booking hours, the camera preset names). Such a write leaves nothing waiting for a restart. With no
+    config on disk to compare, False."""
+    if not isinstance(old, dict):
+        return False
+    before, after = _leaves(old), _leaves(new)
+    changed = [path for path in before.keys() | after.keys() if before.get(path, _ABSENT) != after.get(path, _ABSENT)]
+    return all(path in BY_PATH and BY_PATH[path].live for path in changed)
 
 
 def _journal_text(message: Any) -> str:
@@ -391,7 +421,8 @@ class Jobs:
 
     def write_config(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """The whole new config: checked, the older versions moved along, written beside the old one and renamed into place (owner the
-        room's, mode 640). A config that fails the check writes nothing."""
+        room's, mode 640). A config that fails the check writes nothing. A write that changes only live settings (which the room applies
+        at once) leaves nothing waiting for a restart (config_waiting); any other marks the config as waiting."""
         _only(args, "yaml")
         text = _text(args, "yaml", MAX_CONFIG)
         # Held through the write, so that a restart cannot begin half way through one. (The watch takes the write lock to undo, and the
@@ -402,11 +433,13 @@ class Jobs:
             if self._watching:   # the watch may yet put config.yaml.1 back: a change now would be the one undone, or undo the wrong one
                 raise JobError(RESTARTING)
             with self._write_lock:
-                check_config_yaml(text, self._current_config())
+                current = self._current_config()
+                data = check_config_yaml(text, current)
                 self._paths.config_dir.mkdir(parents=True, exist_ok=True)
                 self._rotate()
                 self._place(self._paths.config, text.encode("utf-8"), 0o640)
-                self._update_state(last_write=self._host.clock())
+                if not only_live_changes(current, data):
+                    self._update_state(last_write=self._host.clock())
         logger.info("Wrote a new config.yaml")
         return {"path": str(self._paths.config)}
 
@@ -551,11 +584,16 @@ class Jobs:
         finally:
             os.close(folder)
 
-    def _record(self, state: str, undone: bool, why: str = "") -> None:
-        record = {"state": state, "undone": undone, "at": datetime.fromtimestamp(self._host.clock()).astimezone().isoformat(timespec="seconds")}
+    def _record(self, state: str, undone: bool, why: str = "", **more: Any) -> None:
+        record = {"state": state, "undone": undone, "at": self._when(self._host.clock())}
         if why:
             record["why"] = why
+        record.update(more)
         self._update_state(restart=record)
+
+    @staticmethod
+    def _when(seconds: float) -> str:
+        return datetime.fromtimestamp(seconds).astimezone().isoformat(timespec="seconds")
 
     def _room_started(self) -> Optional[float]:
         """When the room software last started (systemd's ActiveEnterTimestamp, Unix seconds); None when systemd does not say."""
@@ -563,12 +601,17 @@ class Jobs:
         match = re.fullmatch(r"@(\d+(?:\.\d+)?)", output.strip()) if code == 0 else None
         return float(match.group(1)) if match else None
 
+    def _last_write(self) -> Optional[float]:
+        """When a config change that waits for a restart was last written; None when none is marked."""
+        last_write = self._read_state().get("last_write")
+        return float(last_write) if isinstance(last_write, (int, float)) and not isinstance(last_write, bool) else None
+
     def config_waiting(self) -> bool:
         """Whether a config the helper wrote has not been started with yet: written after the last restart asked for here and after the
-        room software last started (when systemd says)."""
+        room software last started (when systemd says). A write of live settings only marks nothing (write_config)."""
         state = self._read_state()
-        last_write = state.get("last_write")
-        if not isinstance(last_write, (int, float)) or isinstance(last_write, bool):
+        last_write = self._last_write()
+        if last_write is None:
             return False
         marks = [mark for mark in (state.get("watch_asked_at"), self._room_started())
                  if isinstance(mark, (int, float)) and not isinstance(mark, bool)]
@@ -598,46 +641,102 @@ class Jobs:
             if self._host.monotonic() - started >= limit:
                 return False
 
+    def _wait_active(self) -> None:
+        """At the helper's start (a boot): wait, up to ACTIVE_WAIT_S, for systemd to say the room software has started (it waits for
+        the desktop first), so that a slow boot does not count against what is watched."""
+        started = self._host.monotonic()
+        while self._host.run(["systemctl", "is-active", "--quiet", "croom"])[0] != 0:
+            if self._host.monotonic() - started >= ACTIVE_WAIT_S:
+                logger.warning("The room software has not started in 5 minutes: watching it all the same")
+                return
+            self._host.sleep(HEALTH_INTERVAL_S)
+
     def _restart_room(self) -> None:
         code, output = self._host.run(["systemctl", "restart", "croom"])
         if code != 0:
             logger.warning(f"systemctl restart croom: exit {code}: {output.strip()}")
 
-    def _undo_last_write(self) -> None:
-        """Put config.yaml.1 back as config.yaml, written as any config is. The change is forgotten, so it is undone once only."""
-        with self._write_lock:
-            previous = self._paths.config.with_name(f"{self._paths.config.name}.1").read_bytes()
-            self._place(self._paths.config, previous, 0o640)
-            self._update_state(last_write=None)
+    def _keep_good(self) -> None:
+        """The room answered: the config it started with is kept as config.yaml.good (owner the room's, mode 640), the one an undo puts
+        back. Not while a change waits for a restart (the config on disk is then not the one the room runs). Never raises."""
+        try:
+            if self.config_waiting():
+                return
+            with self._write_lock:
+                content = self._paths.config.read_bytes()
+                good = self._paths.good_config
+                if good.is_file() and good.read_bytes() == content:
+                    return
+                self._place(good, content, 0o640)
+        except OSError as e:
+            logger.warning(f"Could not keep the config the room started with as {self._paths.good_config}: {e}")
 
-    def _watch(self, asked_at: float, restart_first: bool = False) -> None:
-        """After a restart: the room answers within 2 minutes, or, when its config was changed within the 10 minutes before the restart
-        was asked for and the one before it is kept, that one is put back and the room restarted again. With `restart_first`, the
-        restart itself is done here first, in the background: systemctl waits for the room software to stop, and the room software
-        waits for the request that asked for the restart, so the answer must not wait for systemctl. Never raises: it is the last thing
+    def _undo_to_good(self) -> Optional[Dict[str, Any]]:
+        """Put config.yaml.good back as config.yaml, written as any config is: the older versions moved along, so that the config the
+        room did not start with is kept as config.yaml.1. The change is forgotten, so it is undone once only. What was undone, for the
+        record; None when there is nothing to put back (no config.yaml.good, or it is the config on disk already)."""
+        with self._write_lock:
+            good = self._paths.good_config
+            try:
+                content = good.read_bytes()
+            except OSError:
+                return None
+            try:
+                if self._paths.config.read_bytes() == content:
+                    return None
+            except OSError:
+                pass
+            last_write = self._last_write()
+            self._rotate()
+            self._place(self._paths.config, content, 0o640)
+            self._update_state(last_write=None)
+        return {"restored": good.name, "set_aside": f"{self._paths.config.name}.1",
+                "changed_at": self._when(last_write) if last_write is not None else None}
+
+    def _started_since(self, moment: float) -> bool:
+        started = self._room_started()
+        return started is not None and started >= moment
+
+    def _watch(self, asked_at: float, undo: bool, restart_first: bool = False, wait_active: bool = False,
+               restart_unless_started: bool = False) -> None:
+        """After a restart: the room answers within 2 minutes (and the config it started with is kept as config.yaml.good), or, when a
+        config change was waiting for the restart when it was asked for (`undo`), config.yaml.good is put back and the room restarted
+        again. With `restart_first`, the restart itself is done here first, in the background: systemctl waits for the room software to
+        stop, and the room software waits for the request that asked for the restart, so the answer must not wait for systemctl.
+        `wait_active` (the helper's start): first wait for systemd to have started the room software; `restart_unless_started`: then
+        restart it unless it has started since `asked_at` (a restart that was asked for and cut off). Never raises: it is the last thing
         between a bad change and a room that stays down."""
         try:
-            if restart_first:
+            if wait_active:
+                self._wait_active()
+            if restart_first or (restart_unless_started and not self._started_since(asked_at)):
                 self._restart_room()
                 self._record("watching", False)
             if self._comes_back():
+                self._keep_good()
                 self._record("healthy", False)
                 return
-            last_write = self._read_state().get("last_write")
-            previous = self._paths.config.with_name(f"{self._paths.config.name}.1")
-            recent = isinstance(last_write, (int, float)) and asked_at - last_write <= UNDO_WINDOW_S
-            if not (recent and previous.exists()):
-                logger.error("The room did not answer within 2 minutes of a restart, and there is no recent change to undo")
+            if not undo:
+                logger.error("The room did not answer within 2 minutes of a restart, and no settings change was waiting for it")
                 self._record("down", False, "The room did not answer within 2 minutes of a restart")
                 return
-            logger.error("The room did not answer within 2 minutes of a restart: putting back config.yaml.1")
-            self._undo_last_write()
+            undone = self._undo_to_good()
+            if undone is None:
+                logger.error("The room did not answer within 2 minutes of a restart, and there are no other settings it started with")
+                self._record("down", False, "The room did not answer within 2 minutes of a restart, and there are no settings it last "
+                                            "started with to put back")
+                return
+            logger.error("The room did not answer within 2 minutes of a restart with a settings change: putting back config.yaml.good")
             self._restart_room()
-            why = "The room did not answer within 2 minutes of a restart with the new settings: the settings before them are back"
-            self._record("undone", True, why)
+            saved = f" saved {undone['changed_at']}" if undone.get("changed_at") else ""
+            why = (f"The room did not answer within 2 minutes of a restart with the settings{saved}: the settings it last started with "
+                   f"are back ({undone['restored']}), and the ones it did not start with are kept as {undone['set_aside']}")
+            self._record("undone", True, why, **undone)
             if not self._comes_back():
-                logger.error("The room has not answered with the settings before the change either")
-                self._record("undone", True, why + ", but it has not answered since either")
+                logger.error("The room has not answered with the settings it last started with either")
+                self._record("undone", True, why + ", but it has not answered since either", **undone)
+            else:
+                self._keep_good()
         except Exception:
             logger.exception("The health watch failed")
             self._record("down", False, "The helper could not watch the room come back")
@@ -648,7 +747,8 @@ class Jobs:
     def restart(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """Restart the room software and watch it come back, both in the background: the answer goes at once. (systemctl restart waits
         for the room software to stop, and the room software, stopping, waits for the request that asked: answering after systemctl
-        would hold both up until the room software's own stop gave up on that request.)"""
+        would hold both up until the room software's own stop gave up on that request.) Whether a config change is waiting is noted
+        now: it is what the watch undoes if the room does not come back."""
         _only(args)
         with self._watch_lock:
             if self._updating:
@@ -659,10 +759,11 @@ class Jobs:
                 raise JobError(WIFI_UNDER_WAY)
             self._watching = True
         try:
+            undo = self.config_waiting()
             asked_at = self._host.clock()
-            self._update_state(watch_asked_at=asked_at)
+            self._update_state(watch_asked_at=asked_at, watch_undo=undo)
             self._record("restarting", False)
-            self._host.background(lambda: self._watch(asked_at, restart_first=True))
+            self._host.background(lambda: self._watch(asked_at, undo, restart_first=True))
         except BaseException:
             with self._watch_lock:
                 self._watching = False
@@ -670,11 +771,13 @@ class Jobs:
         return {"restarting": True}
 
     def resume(self) -> None:
-        """At the helper's start: a watch that the helper's own stop cut short (the record still says restarting or watching) goes on,
-        from when its restart was asked for, so that a bad change is still undone. The room is given its full 2 minutes again. An
-        update cut short is taken up or closed, and the release folders an update left unfinished are removed (croom.admin.update).
-        The helper's own folder is made, and a record an earlier helper kept in the room user's data folder is removed unread: the
-        room's user could have written anything there."""
+        """At the helper's start. A watch that the helper's own stop cut short (the record still says restarting or watching) goes on,
+        from when its restart was asked for, so that a bad change is still undone: once systemd says the room software has started
+        (a boot), and after restarting it if it has not started since the restart was asked for. And a config change that waits for a
+        restart (a reboot or a power cut after a save starts the room with it) is watched the same way once the room software has
+        started. The room is given its full 2 minutes. An update cut short is taken up or closed, and the release folders an update
+        left unfinished are removed (croom.admin.update). The helper's own folder is made, and a record an earlier helper kept in the
+        room user's data folder is removed unread: the room's user could have written anything there."""
         self._ensure_admin_dir()
         try:
             self._paths.legacy_state.unlink(missing_ok=True)
@@ -687,17 +790,63 @@ class Jobs:
                 resume()
             except Exception:  # noqa: BLE001
                 logger.exception(f"Could not take up the {name} that was under way")
+        try:
+            self._resume_watch()
+        except Exception:  # noqa: BLE001
+            logger.exception("Could not take up the restart watch")
+
+    def _resume_watch(self) -> None:
         state = self._read_state()
         record = state.get("restart")
         asked_at = state.get("watch_asked_at")
-        if not (isinstance(record, dict) and record.get("state") in ("restarting", "watching") and isinstance(asked_at, (int, float))):
+        cut_off = (isinstance(record, dict) and record.get("state") in ("restarting", "watching")
+                   and isinstance(asked_at, (int, float)) and not isinstance(asked_at, bool))
+        last_write = self._last_write()
+        # A change written since the last restart asked for here: whether the room software has started with it since (a reboot, a
+        # power cut; it may have started before the helper did) is for _watch_after_start to find out, once systemd has started it
+        watched = asked_at if isinstance(asked_at, (int, float)) and not isinstance(asked_at, bool) else None
+        pending = last_write is not None and (watched is None or last_write > watched)
+        if not cut_off and not pending:
+            if not self._paths.good_config.exists() and self._paths.config.is_file():
+                # A TV Pi updated to this release from Settings (its installer never wrote one): nothing waits, so the config on disk
+                # is the one the room runs with
+                self._keep_good()
             return
         with self._watch_lock:
-            if self._watching:
+            if self._watching or self._updating:
                 return
             self._watching = True
-        logger.warning("A restart was being watched when the helper stopped: watching again")
-        self._host.background(lambda: self._watch(asked_at))
+        if cut_off:
+            undo = state.get("watch_undo")
+            if not isinstance(undo, bool):   # a record from before watch_undo: the change it was written with is the one to undo
+                undo = last_write is not None
+            logger.warning("A restart was being watched when the helper stopped: watching again")
+            self._host.background(lambda: self._watch(asked_at, undo, wait_active=True, restart_unless_started=True))
+            return
+        logger.warning("A settings change was waiting for a restart when the helper started: watching the room start with it")
+        self._host.background(lambda: self._watch_after_start(last_write))
+
+    def _watch_after_start(self, last_write: float) -> None:
+        """At the helper's start with a config change waiting: once systemd has started the room software, the room is watched as after
+        a restart, and the change undone if it does not answer. A room software that has run since before the change (the helper alone
+        was restarted) has not started with it: the change goes on waiting for Restart now."""
+        try:
+            self._wait_active()
+            started = self._room_started()
+            if started is not None and started < last_write:
+                logger.info("The room software has run since before the last settings change: it waits for a restart")
+                with self._watch_lock:
+                    self._watching = False
+                return
+            asked_at = self._host.clock()
+            self._update_state(watch_asked_at=asked_at, watch_undo=True)
+            self._record("watching", False)
+        except Exception:
+            logger.exception("Could not watch the room start with the settings change")
+            with self._watch_lock:
+                self._watching = False
+            return
+        self._watch(asked_at, True)
 
     def restart_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """How the last restart went: restarting (asked for, systemctl not yet done), watching, healthy, undone (with why) or down (with

@@ -292,3 +292,16 @@ def test_while_the_update_restarts_the_room_the_page_waits_for_it_to_come_back(b
         wait_text(page, ".software-newest", "Up to date")
         assert text(page, ".software-notice") == "Updated to bbbbbbb on 30 Oct 2026"
         page.close()
+
+
+def test_with_no_release_to_switch_back_to_the_card_offers_none(browser):  # noqa: F811
+    """The helper names no release to go back to (none kept, or one whose own helper does not start: a release from before room
+    settings): no Switch back."""
+    helper = ScriptedHelper()
+    helper.previous = None
+    with PageServer(admin=helper, github=github()) as server:
+        page = unlocked_page(browser, server)
+        open_software(page)
+        assert page.locator(".software-update").is_visible()
+        assert not page.locator(".software-back").is_visible()
+        page.close()

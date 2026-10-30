@@ -23,7 +23,11 @@ folder is removed (at once, or at the helper's next start). The record is the he
 {"state", "commit", "from", "lines", "at", "why"?}, where state is one of building, switching, restarting, watching, rolling_back
 (under way), done, failed, rolled_back; and "previous_release".
 
-`rollback` switches to the release kept before the running one, and watches it the same way.
+`rollback` switches to the release kept before the running one, and watches it the same way. A release whose own helper does not start
+(`python -m croom.admin --check` with its Python: a release from before room settings has none) is never offered or switched back to.
+
+Before the switch, the room is asked on the loopback whether a meeting is on (GET /api/devices/busy): the update waits for it to end, for
+up to 30 minutes, and then goes on all the same, saying so in its lines.
 """
 
 import logging
@@ -35,14 +39,16 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from croom.admin.jobs import HEALTH_INTERVAL_S, HEALTH_TIMEOUT_S, UPDATE_UNDER_WAY, WIFI_UNDER_WAY, JobError, Jobs, _only
+from croom.admin.jobs import HEALTH_TIMEOUT_S, UPDATE_UNDER_WAY, WIFI_UNDER_WAY, JobError, Jobs, _only
 from croom.settings.github import CANT_CHECK, GitHubError, is_commit, short
 
 logger = logging.getLogger(__name__)
 
 REPO_URL = "https://github.com/ben-abeo/croom.to.git"
 UPDATE_TIMEOUT_S = 3 * 60         # how long a room on a new release has to answer GET /api/status
-ACTIVE_WAIT_S = 5 * 60            # at the helper's start, how long the room software may take to be started before the watch counts
+MEETING_WAIT_S = 30 * 60          # how long an update waits for a meeting on the room to end before it restarts the room all the same
+MEETING_POLL_S = 30               # how often it asks the room whether the meeting is still on
+BUSY_PATH = "/api/devices/busy"   # the room's loopback-only answer {"busy": whether a meeting is on}
 MAX_LINES = 40                    # the progress lines kept in the record
 MAX_WHY = 300                     # characters of a command's own words in a failure
 # What a release is called: its commit; or what the installer calls one whose commit it does not know: "unknown" (a venv moved in that
@@ -55,6 +61,7 @@ RESTARTING_NOW = "The room is restarting: wait for it to come back"
 RESTART_FIRST = "Restart now first, then update"
 # The commands that check a new release before it is used: the agent imports with its libraries, and the helper starts
 IMPORT_CHECK = "import croom.core.agent, croom.admin.jobs"
+HELPER_CHECK = ["-m", "croom.admin", "--check"]
 
 
 def _words(output: str) -> str:
@@ -103,6 +110,7 @@ class Updater:
     def __init__(self, jobs: Jobs):
         self._jobs = jobs
         self._host = jobs._host
+        self._helper_checked: Dict[tuple, bool] = {}   # (release, its VERSION's inode and time) -> whether its helper starts
 
     @property
     def _paths(self):
@@ -150,9 +158,30 @@ class Updater:
         return name if is_release_name(name) else None
 
     def previous(self) -> Optional[str]:
-        """The release kept before the running one, when it is still there, whole and root's."""
+        """The release kept before the running one, when it is still there, whole and root's, and its own helper starts (a release from
+        before room settings has none: switched back to, the helper would not start again, and only the installer would mend it)."""
+        name = self._kept_whole()
+        return name if name and self.helper_starts(name) else None
+
+    def _kept_whole(self) -> Optional[str]:
+        """The release kept before the running one, when it is still there, whole and root's (whether its helper starts or not)."""
         name = self._kept()
         return name if name and name != self.running() and self._trusted(name) else None
+
+    def helper_starts(self, name: str) -> bool:
+        """Whether release `name`'s own helper starts: `python -m croom.admin --check` with its Python, as an update checks a new
+        release before it switches. The answer is kept for as long as the release is the same (its VERSION is written once)."""
+        try:
+            info = (self._release(name) / "VERSION").stat()
+        except (OSError, JobError):
+            return False
+        key = (name, info.st_ino, info.st_mtime_ns)
+        if key not in self._helper_checked:
+            code, output = self._host.run([str(self._release(name) / "venv" / "bin" / "python"), *HELPER_CHECK])
+            if code != 0:
+                logger.warning(f"The helper of release {name} does not start: {_words(output) or f'it said {code}'}")
+            self._helper_checked[key] = code == 0
+        return self._helper_checked[key]
 
     def version(self) -> Dict[str, Any]:
         """{"version": the running commit or "unknown", "installed": when its release was finished (ISO 8601) or None, "previous"}."""
@@ -317,6 +346,10 @@ class Updater:
             running = self._running_for_a_change()
             previous = self.previous()
             if previous is None:
+                kept = self._kept_whole()
+                if kept:
+                    raise JobError(f"The version kept before, {short(kept)}, can't be switched back to: it has no Settings helper that "
+                                   "starts (only the installer would bring it back)")
                 raise JobError("There is no earlier version kept on this TV Pi")
             self._jobs._update_state(update={"state": "switching", "commit": previous, "from": running, "lines": [], "at": self._now(),
                                              "started": self._now(), "rollback": True})
@@ -333,6 +366,7 @@ class Updater:
         try:
             if build and not self._build(commit, running):
                 return
+            self._wait_for_the_meeting()
             self._record(state="switching")
             self._switch(commit)
             self._line(f"Switched to {short(commit)}", state="restarting")
@@ -381,15 +415,32 @@ class Updater:
         self._jobs._place(release / "VERSION", (commit + "\n").encode("ascii"), 0o644, owner=False)
         return True
 
-    def _wait_active(self) -> None:
-        """At the helper's start (a boot): wait, up to ACTIVE_WAIT_S, for systemd to say the room software has started (it waits for
-        the desktop first), so that a slow boot does not count against the new release."""
+    def _meeting_on(self) -> bool:
+        """Whether the room says a meeting is on (GET /api/devices/busy, which it answers to the TV Pi itself only); a room that does not
+        answer has none on."""
+        host, port = self._jobs._control_address()
+        answer = self._host.ask_room(host, port, BUSY_PATH)
+        return isinstance(answer, dict) and answer.get("busy") is True
+
+    def _wait_for_the_meeting(self) -> None:
+        """Before the switch and the restart: while a meeting is on, wait for it to end, asking every MEETING_POLL_S, for up to
+        MEETING_WAIT_S (on the monotonic clock); then go on all the same. The lines say so either way."""
+        if not self._meeting_on():
+            return
+        self._line("A meeting is on: waiting for it to end before the room restarts (up to 30 minutes)")
         started = self._host.monotonic()
-        while self._host.run(["systemctl", "is-active", "--quiet", "croom"])[0] != 0:
-            if self._host.monotonic() - started >= ACTIVE_WAIT_S:
-                logger.warning("The room software has not started in 5 minutes: watching it all the same")
+        while True:
+            if self._host.monotonic() - started >= MEETING_WAIT_S:
+                self._line("The meeting has gone on for 30 minutes: the room restarts all the same, which ends it")
+                logger.warning("An update went on with a meeting still on after 30 minutes")
                 return
-            self._host.sleep(HEALTH_INTERVAL_S)
+            self._host.sleep(MEETING_POLL_S)
+            if not self._meeting_on():
+                self._line("The meeting has ended")
+                return
+
+    def _wait_active(self) -> None:
+        self._jobs._wait_active()
 
     def _after_switch(self, commit: str, running: str, restart: bool, wait_active: bool = False) -> None:
         """The room software restarted on release `commit` (restart: done here first) and watched for 3 minutes: done, or back to
@@ -404,6 +455,7 @@ class Updater:
         self._line("Waiting for the room to answer (up to 3 minutes)", state="watching")
         if self._jobs._comes_back(UPDATE_TIMEOUT_S):
             self._jobs._update_state(previous_release=running)
+            self._jobs._keep_good()
             self._prune()
             self._line(f"The room is running {short(commit)}", state="done")
             logger.info(f"Updated to {commit}")
@@ -431,18 +483,25 @@ class Updater:
     def _go_back(self, commit: str, running: str, why: str) -> None:
         """Back to release `running`: switched back, the room restarted and watched. The release that failed is removed (unless it is
         one of the two kept). A `running` that is not whole and root's is never switched to: the room stays where it is, and the
-        record says so. Never raises."""
+        record says so. A `running` whose own helper does not start (its --check) is switched back to all the same, because the room
+        must come up; the helper is not restarted on it (nothing here restarts the helper), and the record says that the helper stays
+        on `commit` until it is mended (the installer run again). Never raises."""
         try:
             if self.running() != running and not self._trusted(running):
                 logger.error(f"Cannot go back to {running}: it is not whole on this TV Pi")
                 self._line(f"{why}: the version before ({short(running)}) is not whole on this TV Pi, so the room stays on "
                            f"{short(self.running() or commit)}", state="failed", why=why)
                 return
+            helper_ok = self.running() == running or self.helper_starts(running)
             self._line(f"{why}: going back to {short(running)}", state="rolling_back", why=why)
             if self.running() != running:
                 self._switch(running)
             self._jobs._restart_room()
             self._prune()
+            if not helper_ok:
+                logger.error(f"The helper of {running} does not start: the helper is not restarted on it")
+                self._line(f"The helper of {short(running)} does not start, so it is not restarted on it: the helper stays on "
+                           f"{short(commit)} until this is mended (run the installer again)", helper_stays=commit)
             self._line(f"Back on {short(running)}", state="rolled_back")
             logger.error(f"The update to {commit} was undone: {why}")
             if not self._jobs._comes_back(HEALTH_TIMEOUT_S):
@@ -475,7 +534,7 @@ class Updater:
                     self._jobs._updating = True
                 logger.warning(f"An update to {commit} was under way when the helper stopped: taking it up again")
                 self._host.background(lambda: self._take_up(state, commit, running))
-        if state not in UNDER_WAY and self.previous() is not None:
+        if state not in UNDER_WAY and self._kept_whole() is not None:
             self._prune()   # a third whole release (one an earlier helper could not remove): two are kept. Not after an update that was
                             # cut off: what it left is not judged until another update runs
         self.sweep()

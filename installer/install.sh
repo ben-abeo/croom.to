@@ -207,10 +207,21 @@ set_key_line() {
     mv -f "$tmp" "$file"
 }
 
+# Remove the line that sets KEY from a file of KEY=value lines, when there is one; the rest of the file is kept.
+remove_key_line() {
+    local file="$1" key="$2" tmp
+    [[ -f "$file" ]] || return 0
+    grep -q "^[[:space:]]*$key=" "$file" || return 0
+    tmp=$(mktemp "$file.XXXXXX")
+    grep -v "^[[:space:]]*$key=" "$file" > "$tmp" || true
+    chmod --reference="$file" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+    mv -f "$tmp" "$file"
+}
+
 # Sign in to Google on the TV types on the room Pi through a virtual keyboard that sends US key codes. Raspberry Pi OS starts with a GB
 # layout, where Shift+2 is " and not @: no address could be typed. The room Pi's layout is set to US for the desktop session that shows
-# the TV: the system's (/etc/default/keyboard, which X and the console read) and labwc's environment for the desktop user (Wayland).
-# It applies at the next start of the desktop (a reboot).
+# the TV: the system's (/etc/default/keyboard, which X and the console read) and labwc's environment for the desktop user (Wayland),
+# with no variant (a GB variant such as extd would not go with the US layout). It applies at the next start of the desktop (a reboot).
 set_keyboard_layout() {
     local home labwc_dir
     log "Setting the room Pi's keyboard layout to US (for typing on the TV when signing in to Google)..."
@@ -223,6 +234,7 @@ set_keyboard_layout() {
         chown "$CROOM_USER:" "$home/.config" 2>/dev/null || true
     fi
     set_key_line "$labwc_dir/environment" XKB_DEFAULT_LAYOUT us
+    remove_key_line "$labwc_dir/environment" XKB_DEFAULT_VARIANT
     chown "$CROOM_USER:" "$labwc_dir" "$labwc_dir/environment" 2>/dev/null || true
 }
 
@@ -534,6 +546,17 @@ EOF
     log "Configuration created at $CONFIG_DIR/config.yaml"
 }
 
+# The config the room starts with, kept as config.yaml.good: the root helper puts it back when the room does not start with a change
+# made in Settings (and keeps it up to date each time the room starts healthy). Owner the room user, mode 640, as config.yaml.
+keep_good_config() {
+    [[ -f "$CONFIG_DIR/config.yaml" ]] || return 0
+    cp "$CONFIG_DIR/config.yaml" "$CONFIG_DIR/config.yaml.good.tmp"
+    chown "$CROOM_USER:$CROOM_USER" "$CONFIG_DIR/config.yaml.good.tmp"
+    chmod 640 "$CONFIG_DIR/config.yaml.good.tmp"
+    mv -f "$CONFIG_DIR/config.yaml.good.tmp" "$CONFIG_DIR/config.yaml.good"
+    log "The config the room starts with is kept as $CONFIG_DIR/config.yaml.good"
+}
+
 # Copy a secret file into place for the service user only (mode 600). A reinstall
 # may name the already installed file itself; keep it and fix owner and mode.
 install_private_file() {
@@ -785,6 +808,7 @@ main() {
     install_dependencies
     install_croom
     create_config
+    keep_good_config
     install_credentials
     install_zoom_credentials
     create_service

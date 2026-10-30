@@ -222,12 +222,15 @@ class PinStore:
 
     def _write(self, record: Dict[str, Any]) -> None:
         """Write the record atomically, mode 600 from the start: a half-written file is never what is read, and no other user of the
-        machine can read the hash, even for a moment."""
+        machine can read the hash, even for a moment. The new file is on the disk before it is renamed into place: a power cut just after
+        a PIN is chosen must not leave an empty file in its place (which would read as a PIN that is set and cannot be checked)."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=str(self._path.parent), prefix=f".{self._path.name}-")   # mkstemp makes it 600
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(record, handle)
+                handle.flush()
+                os.fsync(handle.fileno())
             os.chmod(temp, 0o600)
             os.replace(temp, self._path)
         except BaseException:

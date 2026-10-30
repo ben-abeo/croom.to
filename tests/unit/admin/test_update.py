@@ -143,11 +143,19 @@ class Machine:
         self.probe = probe or Probe()
         self.github = github or FakeGitHub()
         self.queued = []
+        self.busy = False          # whether the room says a meeting is on (GET /api/devices/busy): a value, or a function of the clock
+        self.asked = []            # what the room was asked on the loopback
         self.jobs = Jobs(Host(paths=paths, run=self.runner, run_long=self.runner, owner=getpass.getuser(),
                               group=grp.getgrgid(os.getgid()).gr_name, probe=self.probe, clock=self.clock, sleep=self.clock.sleep,
                               monotonic=self.clock, background=background or (lambda work: work()), github=self.github,
-                              python="/usr/bin/python3", sync=self.synced))
+                              python="/usr/bin/python3", sync=self.synced, ask_room=self.ask_room))
         self.syncs = []
+
+    def ask_room(self, host, port, path):
+        self.asked.append((host, port, path))
+        if path != "/api/devices/busy":
+            return None
+        return {"busy": self.busy(self.clock()) if callable(self.busy) else self.busy}
 
     def synced(self):
         self.syncs.append(sorted(p.name for p in self.paths.releases.iterdir() if (p / "VERSION").exists()))
@@ -650,3 +658,93 @@ def test_an_orphaned_third_release_is_pruned_at_start(layout):
     m = Machine(layout)
     m.jobs.resume()
     assert releases(layout) == [A, P]
+
+
+# --- the final review: Switch back only to a release whose helper starts; an update waits for a meeting to end
+
+
+def helper_check(paths, name):
+    return f"{paths.releases / name / 'venv' / 'bin' / 'python'} -m croom.admin --check"
+
+
+def test_a_kept_release_whose_helper_does_not_start_is_not_offered_and_switch_back_to_it_is_refused(layout):
+    """A room upgraded by the installer keeps the release from before room settings: it has no croom.admin, so switched back to, the
+    helper would not start again (systemd would start it over and over). Software does not offer it, and rollback refuses it."""
+    m = Machine(layout)
+    m.runner.answers[helper_check(layout, P)] = (1, "/opt/croom/releases/c/venv/bin/python: No module named croom.admin")
+    assert m.job("version")["previous"] is None
+    with pytest.raises(JobError, match="can't be switched back to: it has no Settings helper that starts"):
+        m.job("rollback")
+    assert m.running() == f"releases/{A}/venv" and m.runner.systemctl() == []
+    assert releases(layout) == [A, P]                                 # still kept: only the offer is gone
+
+
+def test_the_kept_releases_helper_is_checked_once_and_a_good_one_is_offered(layout):
+    m = Machine(layout)
+    for _ in range(3):
+        assert m.job("version")["previous"] == P
+    assert [c for c in m.runner.calls if " ".join(c) == helper_check(layout, P)] == [[str(layout.releases / P / "venv" / "bin" / "python"),
+                                                                                      "-m", "croom.admin", "--check"]]
+    assert m.job("rollback") == {"rolling_back": True} and m.running() == f"releases/{P}/venv"
+
+
+def test_going_back_to_a_release_whose_helper_does_not_start_still_brings_the_room_back_and_leaves_the_helper_as_it_is(layout):
+    """An update taken up at the helper's start (the helper is the new release's), the room silent on it, and the release before it has a
+    helper that does not start: the agent goes back all the same (the room must come up), the helper is not restarted on it, and the
+    record says the helper stays on the new release until it is mended."""
+    release(layout, B)
+    link(layout, B)
+    write_record(layout, state="watching")
+    m = Machine(layout, probe=Probe(up=lambda n: n > UPDATE_TIMEOUT_S // HEALTH_INTERVAL_S))
+    m.runner.answers[helper_check(layout, A)] = (1, "No module named croom.admin")
+    m.jobs.resume()
+    assert m.running() == f"releases/{A}/venv"
+    assert m.runner.systemctl() == [["systemctl", "is-active", "--quiet", "croom"], ["systemctl", "restart", "croom"]]
+    record = m.record()
+    assert record["state"] == "rolled_back" and record["helper_stays"] == B
+    assert "The helper of aaaaaaa does not start, so it is not restarted on it: the helper stays on bbbbbbb until this is mended " \
+           "(run the installer again)" in record["lines"]
+
+
+def test_an_update_waits_for_a_meeting_on_the_room_to_end_before_it_switches(layout):
+    m = Machine(layout)
+    began = m.clock()
+    switched_at = {}
+    m.busy = lambda now: now - began < 10 * 60                        # a meeting that ends ten minutes in
+    m.runner.on_call = lambda args: switched_at.setdefault("at", m.clock() - began) if args == ["systemctl", "restart", "croom"] else None
+    m.job("update", commit=B)
+    assert switched_at["at"] >= 10 * 60 and m.record()["state"] == "done"
+    lines = m.record()["lines"]
+    assert lines[lines.index("Checking that its helper starts") + 1:lines.index("Switched to bbbbbbb")] == [
+        "A meeting is on: waiting for it to end before the room restarts (up to 30 minutes)", "The meeting has ended"]
+    assert {path for _, _, path in m.asked} == {"/api/devices/busy"} and {host for host, _, _ in m.asked} == {"127.0.0.1"}
+
+
+def test_an_update_waits_30_minutes_at_most_for_a_meeting_and_says_so(layout):
+    m = Machine(layout)
+    began = m.clock()
+    m.busy = True
+    m.job("rollback")
+    assert 30 * 60 <= m.clock() - began < 31 * 60 + UPDATE_TIMEOUT_S
+    assert m.running() == f"releases/{P}/venv" and m.record()["state"] == "done"
+    assert "The meeting has gone on for 30 minutes: the room restarts all the same, which ends it" in m.record()["lines"]
+
+
+def test_while_the_update_waits_for_the_meeting_its_record_is_under_way(layout):
+    """The room refuses a join while the update's record says it is under way: no meeting starts in the wait."""
+    m = Machine(layout)
+    states = []
+    m.busy = lambda now: states.append(m.record()["state"]) or len(states) < 3
+    m.job("update", commit=B)
+    assert states and set(states) <= {"building"}
+
+
+def test_a_save_of_live_settings_only_does_not_hold_an_update_up(layout):
+    """The booking hours apply at once: a save of only them leaves nothing waiting for a restart, so Update goes ahead. A save of a
+    setting that waits for a restart is still told to restart first."""
+    m = Machine(layout)
+    m.job("write_config", yaml=GOOD + "calendar:\n  booking_start: '08:00'\n  booking_end: '18:00'\n")
+    assert m.job("update", commit=B) == {"updating": True}
+    m.job("write_config", yaml="room:\n  name: Conference B\ncalendar:\n  booking_start: '08:00'\n  booking_end: '18:00'\n")
+    with pytest.raises(JobError, match="Restart now first, then update"):
+        m.job("rollback")

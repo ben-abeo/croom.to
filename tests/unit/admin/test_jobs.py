@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from datetime import datetime
+
 import pytest
 import yaml
 
@@ -30,13 +32,24 @@ ZOOM = {"sdk_client_id": "abc", "sdk_client_secret": "def"}
 
 
 class FakeRunner:
+    """systemctl and the rest: `codes` maps a whole command to its exit code, `outputs` the start of one to what it prints (each may be
+    a function giving it)."""
+
     def __init__(self):
         self.calls = []
         self.codes = {}
+        self.outputs = {}
 
     def __call__(self, args):
         self.calls.append(list(args))
-        return self.codes.get(" ".join(args), 0), ""
+        line = " ".join(args)
+        output = next((out for start, out in self.outputs.items() if line.startswith(start)), "")
+        code = self.codes.get(line, 0)
+        return code() if callable(code) else code, output() if callable(output) else output
+
+    def restarts(self):
+        """The commands that act (restart, reboot), without systemctl's answers to what it is asked (show, is-active)."""
+        return [c for c in self.calls if c[:2] not in (["systemctl", "show"], ["systemctl", "is-active"])]
 
 
 class Clock:
@@ -291,10 +304,18 @@ def test_read_usb_file_refuses_any_other_path(machine, stick, paths):
 # --- restart, the health watch and its undo
 
 
+CHANGED = "room:\n  name: Changed\ncontrol:\n  port: 8099\n"
+
+
 def write_twice(jobs):
     """A good config, then the change the room may not start with: config.yaml.1 is the good one."""
     jobs.table["write_config"]({"yaml": GOOD})
-    jobs.table["write_config"]({"yaml": "room:\n  name: Changed\ncontrol:\n  port: 8099\n"})
+    jobs.table["write_config"]({"yaml": CHANGED})
+
+
+def started_with(paths, text=GOOD):
+    """config.yaml.good, as the installer or a healthy restart leaves it: the config the room last started with."""
+    paths.good_config.write_text(text)
 
 
 def test_restart_restarts_the_room_and_watches_it_come_back(machine, paths):
@@ -302,11 +323,15 @@ def test_restart_restarts_the_room_and_watches_it_come_back(machine, paths):
     probe.up = lambda calls: calls >= 3
     write_twice(jobs)
     assert jobs.table["restart"]({}) == {"restarting": True}
-    assert runner.calls == [["systemctl", "restart", "croom"]]
+    assert runner.restarts() == [["systemctl", "restart", "croom"]]
     assert set(probe.ports) == {8099}
     status = jobs.table["restart_status"]({})
     assert status["state"] == "healthy" and status["undone"] is False
     assert yaml.safe_load((paths.config_dir / "config.yaml").read_text())["room"]["name"] == "Changed"
+    # the config it started with is kept as the one an undo puts back: root writes it, the room's user owns it, mode 640
+    assert paths.good_config == paths.config_dir / "config.yaml.good" and Paths().good_config == Path("/etc/croom/config.yaml.good")
+    assert paths.good_config.read_text() == CHANGED
+    assert mode(paths.good_config) == 0o640 and paths.good_config.owner() == getpass.getuser()
 
 
 def test_the_watch_asks_every_5_seconds_for_2_minutes(machine):
@@ -317,53 +342,125 @@ def test_the_watch_asks_every_5_seconds_for_2_minutes(machine):
     assert probe.ports[0] == 8080   # no config: the control page's default port
 
 
-def test_a_room_that_does_not_come_back_after_a_recent_change_gets_the_last_config_back(machine, paths):
+def test_a_room_that_does_not_come_back_after_a_change_gets_the_config_it_last_started_with_back(machine, paths):
     jobs, runner, clock, probe = machine
-    write_twice(jobs)
+    jobs.table["write_config"]({"yaml": GOOD})
+    jobs.table["restart"]({})                                    # the room started with GOOD: it is kept as config.yaml.good
+    assert paths.good_config.read_text() == GOOD
+    jobs.table["write_config"]({"yaml": CHANGED})
+    written = clock.now
     clock.sleep(9 * 60)
     # Down with the new config, up again with the one before it.
-    probe.up = lambda calls: calls > HEALTH_TIMEOUT_S // 5
+    calls = len(probe.ports)
+    probe.up = lambda n: n - calls > HEALTH_TIMEOUT_S // 5
     jobs.table["restart"]({})
-    assert runner.calls == [["systemctl", "restart", "croom"], ["systemctl", "restart", "croom"]]
+    assert runner.restarts() == [["systemctl", "restart", "croom"]] * 3
     config = paths.config_dir / "config.yaml"
     assert config.read_text() == GOOD
     assert mode(config) == 0o640 and config.owner() == getpass.getuser()
+    assert (paths.config_dir / "config.yaml.1").read_text() == CHANGED    # the settings it did not start with are kept
     status = jobs.table["restart_status"]({})
     assert status["undone"] is True and status["state"] == "undone"
     assert "2 minutes" in status["why"] and status["at"]
+    # the record names what was undone: the change saved when, put back from where, set aside where
+    when = datetime.fromtimestamp(written).astimezone().isoformat(timespec="seconds")
+    assert status["restored"] == "config.yaml.good" and status["set_aside"] == "config.yaml.1" and status["changed_at"] == when
+    assert f"the settings saved {when}: the settings it last started with are back (config.yaml.good)" in status["why"]
     state = json.loads(paths.state.read_text())
     assert state["restart"]["undone"] is True
 
 
-def test_an_old_change_is_not_undone(machine, paths):
+def test_two_saves_then_restart_now_undoes_both_back_to_the_config_the_room_started_with(machine, paths):
+    """The reviewer's case: Room saved (the change the room cannot start with), then Calendar saved, then Restart now. Each save moved
+    the versions along, so config.yaml.1 holds the bad change too: the undo puts back config.yaml.good."""
+    jobs, runner, clock, probe = machine
+    started_with(paths, "room:\n  name: Original\n")
+    paths.config.write_text("room:\n  name: Original\n")
+    probe.up = False                                                 # the room never answers with the new settings
+    jobs.table["write_config"]({"yaml": "room:\n  name: BadChange\n"})                          # page A
+    jobs.table["write_config"]({"yaml": "room:\n  name: BadChange\n  location: x\n"})           # page B
+    assert "BadChange" in (paths.config_dir / "config.yaml.1").read_text()
+    jobs.table["restart"]({})
+    assert paths.config.read_text() == "room:\n  name: Original\n"
+    assert jobs.table["restart_status"]({})["undone"] is True
+
+
+def test_a_change_saved_an_hour_before_restart_now_is_undone_too(machine, paths):
+    """The reviewer's case: save, a meeting of an hour (Restart now is refused in it), then Restart now. There is no time window: a change
+    that was waiting for the restart is the one undone."""
+    jobs, runner, clock, probe = machine
+    started_with(paths, "room:\n  name: Original\n")
+    paths.config.write_text("room:\n  name: Original\n")
+    probe.up = False
+    jobs.table["write_config"]({"yaml": "room:\n  name: BadChange\n"})
+    clock.sleep(60 * 60)
+    jobs.table["restart"]({})
+    assert paths.config.read_text() == "room:\n  name: Original\n"
+    status = jobs.table["restart_status"]({})
+    assert status["state"] == "undone" and status["undone"] is True
+
+
+def test_a_restart_with_no_change_waiting_undoes_nothing(machine, paths):
     jobs, runner, clock, probe = machine
     write_twice(jobs)
-    clock.sleep(11 * 60)
+    started_with(paths)
+    jobs.table["restart"]({})                                    # the room started with CHANGED
     probe.up = False
-    jobs.table["restart"]({})
-    assert runner.calls == [["systemctl", "restart", "croom"]]
-    assert yaml.safe_load((paths.config_dir / "config.yaml").read_text())["room"]["name"] == "Changed"
+    jobs.table["restart"]({})                                    # down for another reason: nothing was waiting
+    assert paths.config.read_text() == CHANGED
     status = jobs.table["restart_status"]({})
     assert status["undone"] is False and status["state"] == "down" and "did not answer" in status["why"]
+
+
+def test_with_no_config_the_room_started_with_nothing_is_put_back_and_the_record_says_so(machine, paths):
+    jobs, runner, clock, probe = machine
+    write_twice(jobs)
+    probe.up = False
+    jobs.table["restart"]({})
+    assert paths.config.read_text() == CHANGED and runner.restarts() == [["systemctl", "restart", "croom"]]
+    status = jobs.table["restart_status"]({})
+    assert status["state"] == "down" and "no settings it last started with to put back" in status["why"]
 
 
 def test_a_change_is_undone_once_only(machine, paths):
     jobs, runner, clock, probe = machine
     write_twice(jobs)
+    started_with(paths)
     probe.up = False
     jobs.table["restart"]({})
     status = jobs.table["restart_status"]({})
     assert status["undone"] is True and "not answered since" in status["why"]
     jobs.table["restart"]({})
-    # The second restart has no recent change to undo: config.yaml stays the one put back, not config.yaml.1's copy of it.
+    # The second restart has no change waiting to undo: config.yaml stays the one put back.
     assert runner.calls.count(["systemctl", "restart", "croom"]) == 3
     assert (paths.config_dir / "config.yaml").read_text() == GOOD
     assert jobs.table["restart_status"]({})["state"] == "down"
 
 
+def test_a_save_of_live_settings_only_leaves_nothing_waiting(machine, paths):
+    """The booking hours and the camera preset names apply at once: a save of only those does not wait for a restart, so Update is
+    not held up by it, and a restart after it undoes nothing. A save of any other setting does wait."""
+    jobs, runner, clock, probe = machine
+    jobs.table["write_config"]({"yaml": GOOD})
+    jobs.table["restart"]({})
+    assert not jobs.config_waiting()
+    live = "room:\n  name: Conference A\ncontrol:\n  port: 8099\n  camera_presets: [Wide, Table, Door]\n" \
+           "calendar:\n  booking_start: '08:00'\n  booking_end: '18:00'\n"
+    jobs.table["write_config"]({"yaml": live})
+    assert not jobs.config_waiting()
+    jobs.table["write_config"]({"yaml": live})                     # the same again: nothing changed, nothing waits
+    assert not jobs.config_waiting()
+    jobs.table["write_config"]({"yaml": live.replace("Conference A", "Conference B")})
+    assert jobs.config_waiting()
+    # a live save after a change that waits leaves it waiting
+    jobs.table["write_config"]({"yaml": live.replace("Conference A", "Conference B").replace("08:00", "07:00")})
+    assert jobs.config_waiting()
+
+
 def test_a_watch_cut_off_by_the_helper_restarting_goes_on_when_it_starts_again(machine, paths):
     jobs, runner, clock, probe = machine
     write_twice(jobs)
+    started_with(paths)
     jobs._host.background = lambda work: None   # the helper stops before the watch ends
     jobs.table["restart"]({})
     assert jobs.table["restart_status"]({})["state"] == "restarting"
@@ -374,6 +471,114 @@ def test_a_watch_cut_off_by_the_helper_restarting_goes_on_when_it_starts_again(m
     again.resume()
     assert (paths.config_dir / "config.yaml").read_text() == GOOD
     assert again.table["restart_status"]({})["undone"] is True
+
+
+IS_ACTIVE = "systemctl is-active --quiet croom"
+SHOW = "systemctl show croom"
+
+
+def boot(jobs, runner, clock, active_after=60):
+    """The TV Pi starts again: the helper first, the room software `active_after` seconds later (systemd says when it started)."""
+    began = clock.now
+    runner.codes[IS_ACTIVE] = lambda: 0 if clock.now - began >= active_after else 3
+    runner.outputs[SHOW] = lambda: f"@{began + active_after:.0f}\n" if clock.now - began >= active_after else "\n"
+    first_look = {}
+    probe = jobs._host.probe
+
+    def look(host, port):
+        first_look.setdefault("at", clock.now - began)
+        return probe(host, port)
+    again = Jobs(Host(**{**jobs._host.__dict__, "probe": look}))
+    again.resume()
+    return again, first_look
+
+
+def test_a_change_waiting_when_the_tv_pi_starts_is_watched_once_the_room_has_started_and_undone(machine, paths):
+    """Saved, then a reboot (or a power cut) before Restart now: the room starts with the change and nobody asked for a restart. The
+    helper, starting, waits for systemd to start the room software and watches it as after a restart: no answer, the config the room
+    last started with is put back."""
+    jobs, runner, clock, probe = machine
+    started_with(paths)
+    paths.config.write_text(GOOD)
+    jobs.table["write_config"]({"yaml": CHANGED})
+    clock.sleep(30 * 60)
+    probe.up = lambda n: n > HEALTH_TIMEOUT_S // 5                 # down with the change, up with the config put back
+    again, first_look = boot(jobs, runner, clock, active_after=200)
+    assert first_look["at"] >= 200                                  # no look before the room software was active
+    assert paths.config.read_text() == GOOD
+    status = again.table["restart_status"]({})
+    assert status["state"] == "undone" and status["undone"] is True and status["restored"] == "config.yaml.good"
+    assert runner.restarts() == [["systemctl", "restart", "croom"]]  # the restart with the config put back
+    assert not again.config_waiting()
+
+
+def test_a_change_the_room_started_with_before_the_helper_started_is_watched_too(machine, paths):
+    """After the reboot systemd started the room software before the helper: it started with the change, unwatched, so the helper
+    watches it all the same (config_waiting is already False: the room started after the write)."""
+    jobs, runner, clock, probe = machine
+    started_with(paths)
+    paths.config.write_text(GOOD)
+    jobs.table["write_config"]({"yaml": CHANGED})
+    written = clock.now
+    clock.sleep(60)
+    runner.outputs[SHOW] = f"@{written + 30:.0f}\n"
+    assert not jobs.config_waiting()
+    probe.up = lambda n: n > HEALTH_TIMEOUT_S // 5
+    again = Jobs(jobs._host)
+    again.resume()
+    assert paths.config.read_text() == GOOD and again.table["restart_status"]({})["undone"] is True
+
+
+def test_a_change_waiting_when_the_tv_pi_starts_that_the_room_starts_with_is_kept_as_good(machine, paths):
+    jobs, runner, clock, probe = machine
+    started_with(paths)
+    paths.config.write_text(GOOD)
+    jobs.table["write_config"]({"yaml": CHANGED})
+    again, _ = boot(jobs, runner, clock)
+    assert again.table["restart_status"]({})["state"] == "healthy" and runner.restarts() == []
+    assert paths.good_config.read_text() == CHANGED and not again.config_waiting()
+
+
+def test_a_helper_restarted_alone_leaves_a_waiting_change_waiting(machine, paths):
+    """The room software has run since before the change (only the helper started again): it has not started with the change, so
+    there is nothing to watch, and the change still waits for Restart now."""
+    jobs, runner, clock, probe = machine
+    started_with(paths)
+    jobs.table["write_config"]({"yaml": CHANGED})
+    runner.outputs[SHOW] = f"@{clock.now - 3600:.0f}\n"
+    again = Jobs(jobs._host)
+    again.resume()
+    assert probe.ports == [] and runner.restarts() == []
+    assert again.config_waiting() and again.table["restart_status"]({})["state"] == "none"
+    assert paths.good_config.read_text() == GOOD
+
+
+def test_a_watch_taken_up_at_the_helpers_start_waits_for_the_room_software_before_it_counts(machine, paths):
+    jobs, runner, clock, probe = machine
+    write_twice(jobs)
+    started_with(paths)
+    jobs._host.background = lambda work: None
+    jobs.table["restart"]({})                                      # then the TV Pi goes down before the watch ends
+    jobs._host.background = lambda work: work()
+    probe.up = lambda n: n > HEALTH_TIMEOUT_S // 5
+    again, first_look = boot(jobs, runner, clock, active_after=200)
+    assert first_look["at"] >= 200
+    assert runner.restarts() == [["systemctl", "restart", "croom"]]  # started after the restart was asked: only the undo's restart
+    assert paths.config.read_text() == GOOD and again.table["restart_status"]({})["undone"] is True
+
+
+def test_a_helper_starting_with_no_good_config_and_nothing_waiting_keeps_the_config_on_disk_as_good(machine, paths):
+    """A TV Pi updated to this release from Settings: its installer never wrote config.yaml.good. Nothing waits for a restart, so the
+    config on disk is the one the room runs with."""
+    jobs, runner, clock, probe = machine
+    paths.config.write_text(GOOD)
+    Jobs(jobs._host).resume()
+    assert paths.good_config.read_text() == GOOD and mode(paths.good_config) == 0o640
+    paths.good_config.unlink()
+    jobs.table["write_config"]({"yaml": CHANGED})                  # waiting: not the config the room runs with
+    runner.outputs[SHOW] = f"@{clock.now - 3600:.0f}\n"
+    Jobs(jobs._host).resume()
+    assert not paths.good_config.exists()
 
 
 def test_resume_does_nothing_after_a_watch_that_ended(machine):

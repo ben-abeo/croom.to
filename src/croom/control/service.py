@@ -70,6 +70,13 @@ ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invi
 PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
 BAD_PASSCODE = "Passcode must be letters, digits or @-_*, up to 32"
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
+# A join while the root helper's update is under way (croom.admin.update.UNDER_WAY): its restart would cut the meeting off.
+UPDATING = "The room is updating: it restarts in a few minutes"
+UPDATE_UNDER_WAY_STATES = ("building", "switching", "restarting", "watching", "rolling_back")
+UPDATE_LOOK_S = 5.0                    # how long the helper's word on an update is believed before a join asks it again
+UPDATE_ASK_S = 1.0                     # how long a join waits for that word: a helper slow to answer is taken as no update
+# Typing on the TV (the pointer socket's keys) needs the Settings unlock as well as an open sign-in.
+UNLOCK_TO_TYPE = "Enter the Settings PIN again to type on the TV"
 DEFAULT_GOOGLE_PROFILE = "/var/lib/croom/meet-profile"   # the room's Google profile folder, as the installer makes it
 # What a control from the table is told when there is no meeting to carry it out in; the provider says the same in its own RuntimeError.
 NOT_IN_A_MEETING = "Not in a meeting"
@@ -316,6 +323,7 @@ class ControlService(Service):
             self.config.get("pin_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "settings-pin.json"
         )
         self._admin = admin
+        self._update_seen: Optional[Tuple[float, bool]] = None   # (when, whether an update was under way): what _updating last heard
         self._editor = ConfigEditor(
             self.config.get("config_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "config.yaml", admin
         )
@@ -485,6 +493,7 @@ class ControlService(Service):
         app.router.add_post("/api/settings/devices/{device}/forget", self._handle_forget_device)
         app.router.add_post("/api/settings/devices/{device}/jobs", self._handle_device_job)
         app.router.add_get("/api/devices/seen-since", self._handle_seen_since)
+        app.router.add_get("/api/devices/busy", self._handle_busy)
         app.router.add_get("/api/devices/apk/{version_code}", self._handle_apk)
         app.router.add_get("/api/settings/network", self._handle_network)
         app.router.add_post("/api/settings/network/{device}/{action}", self._handle_network_action)
@@ -1415,6 +1424,9 @@ class ControlService(Service):
             return refused
         if self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response(self.LEAVE_FIRST, 409)
+        refusal = self._laptop_refusal()
+        if refusal:
+            return self._error_response(refusal, 409)
         try:
             await self._admin.call("restart")
         except AdminUnavailable as e:
@@ -1692,10 +1704,17 @@ class ControlService(Service):
         if self._meeting_state() in IN_PROGRESS_STATES:
             return None, self._error_response(self.LEAVE_FIRST, 409)
         if device in self.DEVICES:
+            refusal = self._laptop_refusal()    # the TV Pi's update, switch back or reboot would cut the laptop's meeting off
+            if refusal:
+                return None, self._error_response(refusal, 409)
             refused = self._without_helper()
             if refused is not None:
                 return None, refused
         return data, None
+
+    def _laptop_refusal(self) -> Optional[str]:
+        """Why the room software may not restart now, in Laptop mode's words: the laptop has the MeetUp (or it is on its way); None."""
+        return self._laptop.join_refusal() if self._laptop is not None else None
 
     def _checks_in(self, device: Any) -> bool:
         """Whether `device` is one of the devices that check in (the touch Pi, the door sign), joined or waiting."""
@@ -1805,6 +1824,9 @@ class ControlService(Service):
             return refused
         if self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response(self.LEAVE_FIRST, 409)
+        refusal = self._laptop_refusal()
+        if refusal:
+            return self._error_response(refusal, 409)
         if self._github is None:
             return self._error_response(CANT_CHECK, 503)
         try:
@@ -1985,6 +2007,30 @@ class ControlService(Service):
         if kind not in KINDS or not math.isfinite(since):
             return self._error_response("Send kind (touch or sign) and since (Unix seconds)", 400)
         return web.json_response({"seen": self._registry.seen_since(kind, since), "known": self._registry.known(kind)})
+
+    async def _handle_busy(self, request: web.Request) -> web.Response:
+        """GET: {"busy": whether a meeting is on (one joined here, or the laptop's on the MeetUp)}. Answered only to the TV Pi itself (the
+        root helper, before an update restarts the room: it waits for the meeting to end), and it says nothing but that."""
+        if not self._from_this_machine(request):
+            return self._error_response("Only the TV Pi itself may ask this", 403)
+        return web.json_response({"busy": self._meeting_state() in IN_PROGRESS_STATES or bool(self._laptop_refusal())})
+
+    async def _updating(self) -> bool:
+        """Whether the root helper's update is under way (its record, update_status): the update restarts the room. What the helper
+        said is believed for UPDATE_LOOK_S; a helper that does not answer within UPDATE_ASK_S, or refuses, is taken as no update, and that
+        too is believed for as long, so that a slow helper does not hold every join up."""
+        if self._admin is None or not self._admin.available():
+            return False
+        now = asyncio.get_running_loop().time()
+        if self._update_seen is not None and now - self._update_seen[0] < UPDATE_LOOK_S:
+            return self._update_seen[1]
+        try:
+            record = await asyncio.wait_for(self._admin.call("update_status"), UPDATE_ASK_S)
+            under_way = record.get("state") in UPDATE_UNDER_WAY_STATES
+        except (AdminError, AdminUnavailable, asyncio.TimeoutError):
+            under_way = False
+        self._update_seen = (asyncio.get_running_loop().time(), under_way)
+        return under_way
 
     # --- Network: the Wi-Fi of the TV Pi and of the devices that check in (spec 2026-10-29, sections 3 and 7)
 
@@ -2242,6 +2288,11 @@ class ControlService(Service):
             message = json.loads(text)
         except (ValueError, RecursionError):                           # (a parser that is given more brackets than it can count is no better)
             return BAD_MESSAGE
+        if isinstance(message, dict) and message.get("type") == "keys" and self._signing_in():
+            # The room's keyboard is Settings': a key needs the unlock the sign-in screen holds (it sends it), not only an open sign-in
+            token = message.get("token")
+            if not (isinstance(token, str) and self._pins.check(token)):
+                return UNLOCK_TO_TYPE
         try:
             await relay.handle(message)
             if isinstance(message, dict) and message.get("target") == "pi":
@@ -2462,6 +2513,8 @@ class ControlService(Service):
             return self._error_response("A meeting is already in progress", 409)
         if getattr(self._meeting, "signing_in", False):
             return self._error_response(SIGN_IN_FIRST, 409)
+        if await self._updating():
+            return self._error_response(UPDATING, 409)
         self._last_error = None
         self._title = title
         self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode))

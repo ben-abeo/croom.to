@@ -157,14 +157,15 @@ async def test_a_join_is_refused_while_signing_in(client, unlocked, meeting):
     assert response.status == 202
 
 
-async def test_typing_on_the_touch_pi_reaches_the_room_pis_keyboard_and_keeps_the_sign_in_open(client, meeting, keyboard):
+async def test_typing_on_the_touch_pi_reaches_the_room_pis_keyboard_and_keeps_the_sign_in_open(client, meeting, keyboard, unlocked):
     meeting.signing_in = True
+    token = unlocked["X-Croom-Unlock"]
     async with client.ws_connect("/ws/pointer") as ws:
-        await ws.send_json({"target": "pi", "type": "keys", "text": "Room@crystalpm.com"})
-        await ws.send_json({"target": "pi", "type": "keys", "key": "Enter"})
+        await ws.send_json({"target": "pi", "type": "keys", "text": "Room@crystalpm.com", "token": token})
+        await ws.send_json({"target": "pi", "type": "keys", "key": "Enter", "token": token})
         await wait_until(lambda: keyboard.typed() == "Room@crystalpm.com<Enter>")
         await wait_until(lambda: meeting.pointer_uses == 2)          # each message the room Pi took: the sign-in's 15 minutes start again
-        await ws.send_json({"target": "pi", "type": "keys", "text": "ü"})
+        await ws.send_json({"target": "pi", "type": "keys", "text": "ü", "token": token})
         assert (await asyncio.wait_for(ws.receive_json(), 2))["error"].startswith("The TV keyboard types the letters")
     assert keyboard.strokes == keystrokes({"text": "Room@crystalpm.com"}) + keystrokes({"key": "Enter"})
 
@@ -184,7 +185,7 @@ async def test_the_whole_way_with_the_real_meeting_service_on_a_fake_tv(client_f
     rig.clock.advance(14 * 60)
     async with client.ws_connect("/ws/pointer") as ws:
         await ws.send_json({"target": "pi", "type": "move", "dx": 3, "dy": 4})
-        await ws.send_json({"target": "pi", "type": "keys", "text": "pw"})
+        await ws.send_json({"target": "pi", "type": "keys", "text": "pw", "token": unlocked["X-Croom-Unlock"]})
         await wait_until(lambda: keyboard.typed() == "pw")
     assert (await (await client.get(STATE, headers=unlocked)).json())["idle_left_s"] == 15 * 60
     with pytest.raises(RuntimeError, match="Signing in to Google: finish or cancel it first"):
@@ -201,12 +202,31 @@ async def test_typing_is_refused_in_words_unless_a_sign_in_is_open(client, unloc
         await ws.send_json({"target": "pi", "type": "keys", "text": "a"})
         assert (await asyncio.wait_for(ws.receive_json(), 2)) == {"error": "Typing on the TV is only for signing in"}
         await client.post(BEGIN, json={}, headers=unlocked)
-        await ws.send_json({"target": "pi", "type": "keys", "text": "a"})
+        await ws.send_json({"target": "pi", "type": "keys", "text": "a", "token": unlocked["X-Croom-Unlock"]})
         await wait_until(lambda: keyboard.typed() == "a")
         await client.post(CANCEL, json={}, headers=unlocked)
-        await ws.send_json({"target": "pi", "type": "keys", "key": "Enter"})
+        await ws.send_json({"target": "pi", "type": "keys", "key": "Enter", "token": unlocked["X-Croom-Unlock"]})
         assert (await asyncio.wait_for(ws.receive_json(), 2)) == {"error": "Typing on the TV is only for signing in"}
     assert keyboard.typed() == "a"
+
+
+async def test_typing_needs_the_settings_unlock_as_well_as_an_open_sign_in(client, unlocked, meeting, keyboard, pins):
+    """Any page of the room's own may open the pointer socket: with a sign-in open, a key types only with a token that is unlocked (the
+    sign-in screen's, which it sends), not with none, a wrong one or one that was locked."""
+    from croom.control.service import UNLOCK_TO_TYPE
+    await client.post(BEGIN, json={}, headers=unlocked)
+    other = pins.unlock(PIN)
+    pins.lock(other)
+    async with client.ws_connect("/ws/pointer") as ws:
+        for token in (None, "", "not-a-token", other, 7):
+            message = {"target": "pi", "type": "keys", "text": "x"}
+            if token is not None:
+                message["token"] = token
+            await ws.send_json(message)
+            assert (await asyncio.wait_for(ws.receive_json(), 2)) == {"error": UNLOCK_TO_TYPE}, token
+        await ws.send_json({"target": "pi", "type": "keys", "text": "ok", "token": unlocked["X-Croom-Unlock"]})
+        await wait_until(lambda: keyboard.typed() == "ok")
+    assert keyboard.typed() == "ok" and UNLOCK_TO_TYPE == "Enter the Settings PIN again to type on the TV"
 
 
 async def test_the_keyboard_is_made_only_once_a_sign_in_has_begun(client, unlocked, meeting, keyboard):

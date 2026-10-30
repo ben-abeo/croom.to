@@ -401,6 +401,7 @@
 
   window.croomSettings = {
     PAGES: PAGES, api: api, post: post, upload: upload, pinPad: pinPad, open: openSettings,
+    token: heldToken,   // the unlock this screen holds: the sign-in's typing on the TV sends it with each key (touchpad.js)
     // A page built in a file of its own hands its draw over here; its place in the menu is PAGES'.
     define: (key, draw) => {
       const page = PAGES.find((p) => p.key === key);

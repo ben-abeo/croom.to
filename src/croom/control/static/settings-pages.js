@@ -281,7 +281,7 @@
     function openTouchpad() {
       T.surface.show({
         tv: { usable: false, name: "", configured: false }, target: "pi", opener: start,
-        signIn: { title: SIGN_IN_TITLE, line: SIGN_IN_LINE, busy: false, done: () => finish(true), cancel: () => finish(false) },
+        signIn: { title: SIGN_IN_TITLE, line: SIGN_IN_LINE, busy: false, done: () => finish(true), cancel: () => finish(false), token: S.token },
       });
       poll();
     }

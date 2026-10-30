@@ -21,14 +21,17 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, WSMsgType, web
 
+from croom.admin.client import NOT_AVAILABLE, AdminClient, AdminError, AdminUnavailable
 from croom.calendar.bookings import BookingError
 from croom.control.settings import SettingsStore
-from croom.core.config import DEFAULT_COMPANY, Config
+from croom.core.config import CONFIG_PATHS, DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
+from croom.settings.config_edit import ConfigEditor
 from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
+from croom.settings.schema import SettingError
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
@@ -219,6 +222,10 @@ class ControlService(Service):
         laptop: the Laptop service (the room's MeetUp lent to a laptop through the USB switch), or None in a room without the switch.
         pin_store: the Settings PIN (croom.settings.pin.PinStore), or None to open config's pin_file, which is settings-pin.json beside
             settings_file when the config names none (from_config puts both in the data directory).
+        admin: the root helper's client (croom.admin.client.AdminClient), which writes config.yaml and restarts the room; None is a room
+            without it, whose Settings pages that need it say "Not available on this device" (from_config makes the real one). The
+            config's config_file is the config.yaml the Settings pages read (from_config: /etc/croom/config.yaml, the one the helper
+            writes; config.yaml beside settings_file when the config names none).
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -237,6 +244,7 @@ class ControlService(Service):
         scores=None,
         laptop=None,
         pin_store=None,
+        admin=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -273,6 +281,13 @@ class ControlService(Service):
         self._pins = pin_store if pin_store is not None else PinStore(
             self.config.get("pin_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "settings-pin.json"
         )
+        self._admin = admin
+        self._editor = ConfigEditor(
+            self.config.get("config_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "config.yaml", admin
+        )
+        # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
+        self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
+        self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -295,6 +310,7 @@ class ControlService(Service):
         scores=None,
         laptop=None,
         pin_store=None,
+        admin=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         data_dir = config.resolve_data_dir()
@@ -309,6 +325,7 @@ class ControlService(Service):
                 "screensaver": config.control.screensaver,
                 "settings_file": str(data_dir / "control-settings.json"),
                 "pin_file": str(data_dir / "settings-pin.json"),
+                "config_file": CONFIG_PATHS[0],
             },
             meeting=meeting,
             calendar=calendar,
@@ -318,6 +335,7 @@ class ControlService(Service):
             scores=scores,
             laptop=laptop,
             pin_store=pin_store,
+            admin=admin if admin is not None else AdminClient(),
         )
 
     @property
@@ -383,6 +401,10 @@ class ControlService(Service):
         app.router.add_post("/api/settings/unlock", self._handle_unlock)
         app.router.add_post("/api/settings/lock", self._handle_lock)
         app.router.add_post("/api/settings/pin/change", self._handle_change_pin)
+        app.router.add_get("/api/settings/config/{page}", self._handle_config)
+        app.router.add_post("/api/settings/config/{page}", self._handle_save_config)
+        app.router.add_get("/api/settings/restart", self._handle_restart_status)
+        app.router.add_post("/api/settings/restart", self._handle_restart)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -1196,6 +1218,105 @@ class ControlService(Service):
             return self._error_response("The PIN could not be saved on the room's device", 500)
         logger.info("Settings PIN changed")
         return web.json_response({"changed": True})
+
+    # ------------------------------------------------------------------
+    # Settings: config.yaml's pages and the restart (spec 2026-10-29, sections 3 and 4)
+    # ------------------------------------------------------------------
+
+    LEAVE_FIRST = "Leave the meeting first"
+
+    def _without_helper(self) -> Optional[web.Response]:
+        """503 "Not available on this device" in a room without the root helper (a developer's machine); None when it is there."""
+        if self._admin is None or not self._admin.available():
+            return self._error_response(NOT_AVAILABLE, 503)
+        return None
+
+    def _settings_refusal(self, request: web.Request, post: bool) -> Optional[web.Response]:
+        """The answer that refuses a request to a Settings route that needs the root helper, in this order: no PIN (before anything of
+        the request is read), not JSON (a POST), no helper; None when it may go on."""
+        checks = [self._require_unlock] + ([self._require_json] if post else []) + [lambda _: self._without_helper()]
+        for check in checks:
+            refused = check(request)
+            if refused is not None:
+                return refused
+        return None
+
+    def _apply_booking_hours(self, values: Dict[str, Any]) -> None:
+        """New booking hours, at once: the door sign and the room page offer them at their next look (no calendar: nothing to tell)."""
+        if self._bookings is not None:
+            self._bookings.set_hours(values["calendar.booking_start"], values["calendar.booking_end"])
+
+    def _apply_preset_names(self, values: Dict[str, Any]) -> None:
+        """New camera preset names, at once: Camera framing shows them at its next status."""
+        camera = self._camera()
+        if camera is not None:
+            camera.set_preset_names(values["control.camera_presets"])
+
+    async def _handle_config(self, request: web.Request) -> web.Response:
+        """A Settings page's values as config.yaml has them, the fields its form draws, and whether a saved change waits for a restart."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        page = request.match_info["page"]
+        try:
+            values, fields = self._editor.values(page), self._editor.fields(page)
+        except KeyError:
+            return self._error_response(f"There is no Settings page {page}", 404)
+        except SettingError as e:
+            return self._error_response(str(e), 500)
+        return web.json_response({"values": values, "fields": fields, "pending_restart": self._editor.pending_restart})
+
+    async def _handle_save_config(self, request: web.Request) -> web.Response:
+        """{"values": {path: value}}: a page's changes, checked and written through the root helper. The answer is {"saved": [paths],
+        "restart": whether they wait for a restart, "pending_restart"}; a refused value is 400 with {"errors": {path: words}} and nothing
+        is saved."""
+        refused = self._settings_refusal(request, post=True)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        page = request.match_info["page"]
+        try:
+            answer = await self._editor.save(page, data.get("values"))
+        except KeyError:
+            return self._error_response(f"There is no Settings page {page}", 404)
+        except SettingError as e:
+            return web.json_response({"error": str(e), "errors": e.errors}, status=400)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response(answer)
+
+    async def _handle_restart(self, request: web.Request) -> web.Response:
+        """Restart the room software (the root helper restarts it and watches it come back). Never in a meeting."""
+        refused = self._settings_refusal(request, post=True)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        try:
+            await self._admin.call("restart")
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        logger.info("Restart of the room software asked for from Settings")
+        return web.json_response({"restarting": True})
+
+    async def _handle_restart_status(self, request: web.Request) -> web.Response:
+        """How the last restart went: {"state": none | watching | healthy | undone | down, "undone", "at"?, "why"?}."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        try:
+            answer = await self._admin.call("restart_status")
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response({key: value for key, value in answer.items() if key != "ok"})
 
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
         """The LG and Samsung TVs on the network. It also answers before a TV is configured.

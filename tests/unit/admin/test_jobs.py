@@ -53,8 +53,10 @@ class Probe:
     def __init__(self, up=True):
         self.up = up
         self.ports = []
+        self.hosts = []
 
-    def __call__(self, port):
+    def __call__(self, host, port):
+        self.hosts.append(host)
         self.ports.append(port)
         return self.up(len(self.ports)) if callable(self.up) else self.up
 
@@ -72,7 +74,7 @@ def machine(paths):
     """Jobs on the fake machine, and the fakes, to look at afterwards. The background thread is run there and then."""
     runner, clock, probe = FakeRunner(), Clock(), Probe()
     host = Host(paths=paths, run=runner, owner=getpass.getuser(), group=grp.getgrgid(os.getgid()).gr_name, probe=probe, clock=clock,
-                sleep=clock.sleep, background=lambda work: work())
+                sleep=clock.sleep, monotonic=clock, background=lambda work: work())
     return Jobs(host), runner, clock, probe
 
 
@@ -412,3 +414,109 @@ def test_version(machine, paths):
     assert jobs.table["version"]({}) == {"version": "unknown"}
     (paths.install_dir / "VERSION").write_text("fe1c05f\n")
     assert jobs.table["version"]({}) == {"version": "fe1c05f"}
+
+
+# --- Task 3: the schema's check, and the root-context fixes folded in
+
+
+def test_write_config_checks_every_setting_the_schema_knows(machine, paths):
+    jobs, *_ = machine
+    for text, words in (("room:\n  name: ''\n", "can't be blank"),
+                        ("laptop:\n  gpio_pin: 99\n", "from 0 to 27"),
+                        ("calendar:\n  booking_start: '18:00'\n  booking_end: '09:00'\n", "must be after")):
+        with pytest.raises(JobError, match=words):
+            jobs.table["write_config"]({"yaml": text})
+    assert list(paths.config_dir.iterdir()) == []
+
+
+def test_write_config_refuses_turning_the_room_page_off(machine, paths):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match="can't be turned off"):
+        jobs.table["write_config"]({"yaml": "control:\n  enabled: false\n"})
+    assert list(paths.config_dir.iterdir()) == []
+
+
+@pytest.mark.parametrize("change", ["control:\n  port: 9000\n", "room:\n  name: A\n", "control:\n  port: 8099\n  host: 10.0.0.9\n"])
+def test_write_config_refuses_moving_the_room_page_from_the_config_on_disk(machine, paths, change):
+    """GOOD's room page is on 8099 at every address: a config that leaves out the port (8080) or names another host moves it."""
+    jobs, *_ = machine
+    jobs.table["write_config"]({"yaml": GOOD})
+    with pytest.raises(JobError, match="can't be changed from Settings"):
+        jobs.table["write_config"]({"yaml": change})
+    assert (paths.config_dir / "config.yaml").read_text() == GOOD
+
+
+def test_write_config_is_refused_while_a_restart_is_watched(machine, paths):
+    jobs, *_ = machine
+    jobs.table["write_config"]({"yaml": GOOD})
+    jobs._host.background = lambda work: None   # the watch never ends
+    jobs.table["restart"]({})
+    with pytest.raises(JobError, match="The room is restarting: try again in a moment"):
+        jobs.table["write_config"]({"yaml": "room:\n  name: Later\ncontrol:\n  port: 8099\n"})
+    assert (paths.config_dir / "config.yaml").read_text() == GOOD
+
+
+def test_the_state_file_is_mode_644_and_a_failed_write_leaves_no_temporary_file(machine, paths, monkeypatch):
+    jobs, *_ = machine
+    jobs.table["restart"]({})
+    assert mode(paths.data_dir / "admin-state.json") == 0o644
+    before = (paths.data_dir / "admin-state.json").read_text()
+
+    def broken(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("croom.admin.jobs.json.dump", broken)
+    with pytest.raises(OSError):
+        jobs._update_state(last_write=1)
+    assert [p.name for p in paths.data_dir.iterdir()] == ["admin-state.json"]
+    assert (paths.data_dir / "admin-state.json").read_text() == before
+
+
+def test_the_watchs_two_minutes_are_on_the_monotonic_clock(paths):
+    """The wall clock set back an hour at every look (an NTP step, a wrong RTC) neither stretches the watch nor ends it early."""
+    runner, mono, probe = FakeRunner(), Clock(), Probe(up=False)
+    wall = Clock()
+
+    def sleep(seconds):
+        mono.sleep(seconds)
+        wall.now -= 3600
+        assert len(probe.ports) < 100, "the watch did not end"
+
+    host = Host(paths=paths, run=runner, owner=getpass.getuser(), group=grp.getgrgid(os.getgid()).gr_name, probe=probe, clock=wall,
+                sleep=sleep, monotonic=mono, background=lambda work: work())
+    Jobs(host).table["restart"]({})
+    assert len(probe.ports) == HEALTH_TIMEOUT_S // 5
+
+
+@pytest.mark.parametrize("host, asked", [("192.168.1.20", "192.168.1.20"), ("0.0.0.0", "127.0.0.1"), ("::", "127.0.0.1"), ("", "127.0.0.1"),
+                                         (None, "127.0.0.1")])
+def test_the_watch_asks_the_room_page_where_it_listens(machine, paths, host, asked):
+    jobs, runner, clock, probe = machine
+    control = {"port": 8099} if host is None else {"port": 8099, "host": host}
+    (paths.config_dir / "config.yaml").write_text(yaml.safe_dump({"control": control}))
+    jobs.table["restart"]({})
+    assert set(probe.hosts) == {asked} and set(probe.ports) == {8099}
+
+
+def test_status_answers_puts_an_ipv6_host_in_brackets(monkeypatch):
+    from croom.admin import jobs as module
+    asked = []
+
+    def urlopen(url, timeout):
+        asked.append(url)
+        raise OSError("refused")
+
+    monkeypatch.setattr(module.urllib.request, "urlopen", urlopen)
+    assert module.status_answers("fd00::5", 8080) is False
+    assert module.status_answers("10.0.0.2", 8081) is False
+    assert asked == ["http://[fd00::5]:8080/api/status", "http://10.0.0.2:8081/api/status"]
+
+
+def test_read_usb_file_refuses_what_is_not_a_regular_file_without_waiting_on_it(machine, stick, monkeypatch):
+    """A FIFO put in a listed file's place: opened without blocking and refused, not read (a read would hold the helper for good)."""
+    jobs, *_ = machine
+    fifo = stick / "pipe.json"
+    os.mkfifo(fifo)
+    monkeypatch.setattr(jobs, "_usb_listing", lambda: [{"path": str(fifo)}])
+    with pytest.raises(JobError, match="not a key file on a USB stick"):
+        jobs.table["read_usb_file"]({"path": str(fifo)})

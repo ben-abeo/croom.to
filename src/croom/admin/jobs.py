@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import shutil
+import stat
 import subprocess
 import tempfile
 import threading
@@ -30,6 +31,7 @@ from croom.core.config import Config
 from croom.meeting.zoom_auth import PLACEHOLDER as ZOOM_PLACEHOLDER
 from croom.meeting.zoom_auth import S2S_KEYS as ZOOM_S2S_KEYS
 from croom.meeting.zoom_auth import SDK_KEYS as ZOOM_SDK_KEYS
+from croom.settings.schema import SettingError, check_config
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +41,9 @@ HEALTH_INTERVAL_S = 5             # how often it is asked
 PROBE_TIMEOUT_S = 4               # one ask: under the interval, so a hanging room does not stretch the watch
 UNDO_WINDOW_S = 10 * 60           # a change written this long before a restart is the change the room may not start with
 DEFAULT_CONTROL_PORT = 8080
+LOOPBACK = "127.0.0.1"
+ANY_ADDRESS = ("", "0.0.0.0", "::")   # a room page listening on every address is asked on the loopback
+RESTARTING = "The room is restarting: try again in a moment"
 MAX_USB_FILE = 64 * 1024          # a key file is a few KB; anything bigger on a stick is not one
 MAX_CREDENTIAL = 64 * 1024
 MAX_CONFIG = 256 * 1024
@@ -65,10 +70,12 @@ def run_command(args: List[str]) -> Tuple[int, str]:
     return done.returncode, done.stdout if done.returncode == 0 else (done.stderr or done.stdout)
 
 
-def status_answers(port: int) -> bool:
-    """Whether the room's agent answers GET /api/status on this machine: the sign that it started with its config."""
+def status_answers(host: str, port: int) -> bool:
+    """Whether the room's agent answers GET /api/status at the address its room page listens on: the sign that it started with its
+    config."""
+    address = f"[{host}]" if ":" in host else host
     try:
-        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/status", timeout=PROBE_TIMEOUT_S) as response:
+        with urllib.request.urlopen(f"http://{address}:{port}/api/status", timeout=PROBE_TIMEOUT_S) as response:
             return 200 <= response.status < 300
     except (OSError, ValueError):   # refused, timed out, an HTTP error status (HTTPError is an OSError), a bad port
         return False
@@ -111,9 +118,10 @@ class Host:
     run: Runner = run_command
     owner: str = "croom"
     group: str = "croom"
-    probe: Callable[[int], bool] = status_answers
+    probe: Callable[[str, int], bool] = status_answers
     clock: Callable[[], float] = time.time       # wall-clock seconds: the state file's times outlive a reboot
     sleep: Callable[[float], None] = time.sleep
+    monotonic: Callable[[], float] = time.monotonic   # the watch's 2 minutes: a clock set while it waits does not stretch or end them
     background: Callable[[Callable[[], None]], None] = in_background
 
 
@@ -140,12 +148,13 @@ def _text(args: Dict[str, Any], name: str, limit: int) -> str:
     return value
 
 
-def check_config_yaml(text: Any) -> Dict[str, Any]:
+def check_config_yaml(text: Any, current: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """The settings in `text` as a mapping, when the room would start with them; JobError saying why not otherwise.
 
-    Today the check is that the text is YAML, a mapping of sections, and loads with Config.from_dict (a key a section does not know, or
-    a section that is not a mapping, stops the agent: load_config would set the whole file aside). The settings schema adds its range
-    checks here."""
+    The text must be YAML, a mapping of sections, and load with Config.from_dict (a key a section does not know, or a section that is not
+    a mapping, stops the agent: load_config would set the whole file aside); and every setting the settings schema knows must be within
+    its range (croom.settings.schema.check_config). `current` is the config on disk now, when there is one: the room page may not be
+    turned off, nor moved from its port or address, which would lock Settings out of the room."""
     if not isinstance(text, str):
         raise JobError("The settings must be text")
     try:
@@ -160,6 +169,10 @@ def check_config_yaml(text: Any) -> Dict[str, Any]:
         Config.from_dict(data)
     except (TypeError, ValueError, AttributeError, KeyError) as e:
         raise JobError(f"The room would not start with these settings: {e}") from e
+    try:
+        check_config(data, current)
+    except SettingError as e:
+        raise JobError(str(e)) from e
     return data
 
 
@@ -278,14 +291,27 @@ class Jobs:
         room's, mode 640). A config that fails the check writes nothing."""
         _only(args, "yaml")
         text = _text(args, "yaml", MAX_CONFIG)
-        check_config_yaml(text)
-        with self._write_lock:
-            self._paths.config_dir.mkdir(parents=True, exist_ok=True)
-            self._rotate()
-            self._place(self._paths.config, text.encode("utf-8"), 0o640)
-            self._update_state(last_write=self._host.clock())
+        # Held through the write, so that a restart cannot begin half way through one. (The watch takes the write lock to undo, and the
+        # watch lock only after it has let the write lock go: the two are never taken the other way round.)
+        with self._watch_lock:
+            if self._watching:   # the watch may yet put config.yaml.1 back: a change now would be the one undone, or undo the wrong one
+                raise JobError(RESTARTING)
+            with self._write_lock:
+                check_config_yaml(text, self._current_config())
+                self._paths.config_dir.mkdir(parents=True, exist_ok=True)
+                self._rotate()
+                self._place(self._paths.config, text.encode("utf-8"), 0o640)
+                self._update_state(last_write=self._host.clock())
         logger.info("Wrote a new config.yaml")
         return {"path": str(self._paths.config)}
+
+    def _current_config(self) -> Optional[Dict[str, Any]]:
+        """The config on disk now, as a mapping; None when there is none or it can't be read (nothing to compare a new one with)."""
+        try:
+            data = yaml.safe_load(self._paths.config.read_text())
+        except (OSError, ValueError, yaml.YAMLError):
+            return None
+        return data if isinstance(data, dict) else None
 
     def save_credential(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """A Google service-account key or the Zoom credentials, checked to be what they are uploaded as, saved under the config folder
@@ -336,11 +362,21 @@ class Jobs:
         if not isinstance(path, str) or path not in {f["path"] for f in self._usb_listing()}:
             raise JobError("That is not a key file on a USB stick")
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)   # not a link swapped in since the listing
+            # Not a link swapped in since the listing, nor a FIFO or a device that would hold the helper in open() or read()
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        except OSError as e:
+            raise JobError("The USB stick could not be read: was it taken out?") from e
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise JobError("That is not a key file on a USB stick")
             with os.fdopen(fd, "rb") as f:
+                fd = -1
                 raw = f.read(MAX_USB_FILE + 1)
         except OSError as e:
             raise JobError("The USB stick could not be read: was it taken out?") from e
+        finally:
+            if fd >= 0:
+                os.close(fd)
         if len(raw) > MAX_USB_FILE:
             raise JobError("That is not a key file on a USB stick")
         try:
@@ -362,10 +398,20 @@ class Jobs:
         state.update(changes)
         self._paths.data_dir.mkdir(parents=True, exist_ok=True)
         fd, temp = tempfile.mkstemp(dir=self._paths.data_dir, prefix=".admin-state.")
-        with os.fdopen(fd, "w") as f:
-            json.dump(state, f)
-        os.chmod(temp, 0o644)
-        os.replace(temp, self._paths.state)
+        try:
+            os.fchmod(fd, 0o644)   # on the open file, not by its name: a name in the folder can be swapped, the descriptor can't
+            with os.fdopen(fd, "w") as f:
+                fd = -1
+                json.dump(state, f)
+            os.replace(temp, self._paths.state)
+        except BaseException:
+            if fd >= 0:
+                os.close(fd)
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+            raise
 
     def _record(self, state: str, undone: bool, why: str = "") -> None:
         record = {"state": state, "undone": undone, "at": datetime.fromtimestamp(self._host.clock()).astimezone().isoformat(timespec="seconds")}
@@ -373,24 +419,27 @@ class Jobs:
             record["why"] = why
         self._update_state(restart=record)
 
-    def _control_port(self) -> int:
-        """The port of the room page in the config on disk now (the one the room restarted with), 8080 when it says none."""
+    def _control_address(self) -> Tuple[str, int]:
+        """Where the room page listens in the config on disk now (the one the room restarted with): its host, or the loopback when it
+        listens on every address, and its port, 8080 when it says none."""
         try:
-            data = yaml.safe_load(self._paths.config.read_text()) or {}
-            port = (data.get("control") or {}).get("port", DEFAULT_CONTROL_PORT)
+            control = (yaml.safe_load(self._paths.config.read_text()) or {}).get("control") or {}
+            host, port = control.get("host", ""), control.get("port", DEFAULT_CONTROL_PORT)
         except (OSError, yaml.YAMLError, AttributeError):
-            return DEFAULT_CONTROL_PORT
-        return port if isinstance(port, int) and 0 < port < 65536 else DEFAULT_CONTROL_PORT
+            return LOOPBACK, DEFAULT_CONTROL_PORT
+        host = host.strip() if isinstance(host, str) else ""
+        port = port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else DEFAULT_CONTROL_PORT
+        return (LOOPBACK if host in ANY_ADDRESS else host), port
 
     def _comes_back(self) -> bool:
-        """Ask GET /api/status every HEALTH_INTERVAL_S until it answers, for HEALTH_TIMEOUT_S."""
-        port = self._control_port()
-        started = self._host.clock()
+        """Ask GET /api/status every HEALTH_INTERVAL_S until it answers, for HEALTH_TIMEOUT_S on the monotonic clock."""
+        host, port = self._control_address()
+        started = self._host.monotonic()
         while True:
             self._host.sleep(HEALTH_INTERVAL_S)
-            if self._host.probe(port):
+            if self._host.probe(host, port):
                 return True
-            if self._host.clock() - started >= HEALTH_TIMEOUT_S:
+            if self._host.monotonic() - started >= HEALTH_TIMEOUT_S:
                 return False
 
     def _restart_room(self) -> None:

@@ -768,6 +768,40 @@ body[data-laptop="on"] .link { display: none; }
 .menu.settings-menu[hidden], .settings-page[hidden] { display: none; }
 .settings-page { width: 100%; min-height: 0; }
 .settings-soon { margin: 0; font-size: 1.4rem; color: var(--periwinkle-300); }
+/* A Settings page that edits the config (settings-form.js): a row for each setting, its name on the left and its field on the right with
+   a line of help and, when the agent refuses the value, why; then Save, Restart now and what came of it. */
+.settings-form { display: grid; gap: 16px; width: 100%; max-width: 1040px; }
+.settings-banner { margin: 0; padding: 12px 16px; border-radius: var(--radius-sm); background: var(--warn-fill); color: var(--ink-900); border-left: 6px solid var(--warn-bar); }
+.settings-banner[hidden] { display: none; }
+.settings-loading { margin: 0; color: var(--periwinkle-300); }
+.settings-loading.settings-unavailable { font-size: 1.4rem; }
+.setting-rows { display: grid; gap: 14px; }
+.setting-row { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 6px 24px; align-items: start; }
+.setting-label { padding-top: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.setting-body { display: grid; gap: 4px; justify-items: start; min-width: 0; }
+.setting-input {
+  width: 100%; max-width: 560px; min-height: 52px; padding: 10px 12px;
+  color: #fff; background: var(--surface-800); border: 1px solid var(--periwinkle-300); border-radius: var(--radius-sm); font: inherit;
+}
+.setting-input.setting-number, .setting-input.setting-time { max-width: 200px; }
+select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); outline-offset: 2px; }
+.setting-row.refused .setting-input { border-color: #FFD7D5; }
+.setting-help { margin: 0; font-size: 0.9rem; color: var(--periwinkle-300); max-width: 60ch; }
+.setting-error { margin: 0; color: #FFD7D5; font-size: 0.95rem; max-width: 60ch; }
+.setting-error:empty { display: none; }
+.button.setting-switch { min-width: 120px; min-height: 52px; }
+.button.setting-switch[aria-checked="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.setting-choices, .setting-lines { display: flex; flex-wrap: wrap; gap: 10px; }
+.setting-lines { flex-direction: column; width: 100%; max-width: 560px; }
+.setting-line { display: flex; gap: 10px; }
+.button.setting-choice, .button.setting-add, .button.setting-remove { min-height: 52px; padding: 0 18px; }
+.button.setting-choice[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.setting-list { display: grid; gap: 10px; justify-items: start; width: 100%; }
+.setting-credential { margin: 12px 0 0; }
+.settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; }
+.settings-actions .button { min-height: 60px; }
+.settings-actions .message { margin: 0; }
+.settings-actions .message.ok { color: #fff; }   /* Saved, Restarting: the page's pale red is for refusals */
 @media (max-width: 1023px) {
   .menu.settings-menu { grid-template-columns: repeat(3, minmax(0, 1fr)); }
 }
@@ -776,4 +810,6 @@ body[data-laptop="on"] .link { display: none; }
   .pin-pad { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .menu.settings-menu { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .settings-head { flex-wrap: wrap; row-gap: 12px; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); }
+  .setting-label { padding-top: 0; }
 }

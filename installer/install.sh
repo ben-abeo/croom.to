@@ -382,8 +382,9 @@ install_zoom_credentials() {
 # Write the systemd units (separate from create_service so tests can call it)
 write_units() {
     mkdir -p "$SYSTEMD_DIR"
-    local uid
+    local uid group
     uid=$(id -u "$CROOM_USER")
+    group=$(id -gn "$CROOM_USER")   # the user's own primary group, whatever it is called: the helper's socket is that group's
 
     # The agent opens a headed browser, so it must start after the desktop
     # session exists: order after the display manager and wait for the X
@@ -445,7 +446,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=$INSTALL_DIR/venv/bin/python -m croom.admin --owner $CROOM_USER --group $CROOM_USER
+ExecStart=$INSTALL_DIR/venv/bin/python -m croom.admin --owner $CROOM_USER --group $group
 Restart=always
 RestartSec=5
 

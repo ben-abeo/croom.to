@@ -93,9 +93,9 @@
     return { status: response.status, ok: response.ok, data: data };
   }
 
-  // What the Settings pages ask the agent through: the body of the answer, or an Error in the agent's words. A token that is refused
-  // (401, or 423 while unlocking is locked out) takes the page back to the PIN pad, and the Error says so with `locked`, for the page
-  // to say nothing more.
+  // What the Settings pages ask the agent through: the body of the answer, or an Error in the agent's words, with the answer's `status`
+  // and `data`. A token that is refused (401, or 423 while unlocking is locked out) takes the page back to the PIN pad, and the Error
+  // says so with `locked`, for the page to say nothing more.
   async function api(path, options) {
     const answer = await call(path, options);
     if (answer.status === 401 || answer.status === 423) {
@@ -104,7 +104,13 @@
       error.locked = true;
       throw error;
     }
-    if (!answer.ok) throw new Error(answer.data.error || "Request failed (" + answer.status + ")");
+    if (!answer.ok) {
+      used();   // the token was good, and that request used it
+      const error = new Error(answer.data.error || "Request failed (" + answer.status + ")");
+      error.status = answer.status;
+      error.data = answer.data;   // a form's refusals by setting are in data.errors
+      throw error;
+    }
     used();
     return answer.data;
   }

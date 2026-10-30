@@ -54,7 +54,7 @@ class PageServer:
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
-                 bookings=False, laptop=None):
+                 bookings=False, laptop=None, admin=None, config_file=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -74,6 +74,9 @@ class PageServer:
         self.discover = discover if discover is not None else StubSearch()   # Find TVs never puts a search on this network: a test that wants TVs found gives it some
         self.mouse = mouse                                                 # the room Pi's virtual mouse: none is the real one, which the conftest keeps from being made
         self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
+        self.admin = admin              # the root helper's client (Settings): none is a room without the helper, "Not available on this device"
+        # The config.yaml the Settings pages read: in the server's own folder unless a test names one (never /etc/croom)
+        self.config_file = Path(config_file) if config_file is not None else Path(self._settings_dir.name) / "config.yaml"
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -91,7 +94,7 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting(role=self.role, controls=self.controls)
         config = {"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
-                  "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")}
+                  "settings_file": str(Path(self._settings_dir.name) / "control-settings.json"), "config_file": str(self.config_file)}
         if self.room_company is not None:
             config["room_company"] = self.room_company
         store = SettingsStore(config["settings_file"])
@@ -114,7 +117,7 @@ class PageServer:
             config=config,
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
-            laptop=self.laptop,
+            laptop=self.laptop, admin=self.admin,
         )
         await service.start()
         self.port = service.bound_port

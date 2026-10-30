@@ -140,13 +140,27 @@ def test_the_root_helper_runs_as_root_for_the_service_users_files_and_socket(tmp
     result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={tmp_path}; CROOM_USER=$(id -un); write_units")
     assert result.returncode == 0, result.stderr
     me = subprocess.check_output(["id", "-un"], text=True).strip()
+    group = subprocess.check_output(["id", "-gn"], text=True).strip()   # the user's primary group, which need not share its name
     unit = (tmp_path / "croom-admin.service").read_text()
     assert "Description=Crystal Meet root helper (croom-admin)" in unit
     assert "After=network.target" in unit
     assert "User=" not in unit and "Group=" not in unit
-    assert f"ExecStart=/opt/croom/venv/bin/python -m croom.admin --owner {me} --group {me}" in unit
+    assert f"ExecStart=/opt/croom/venv/bin/python -m croom.admin --owner {me} --group {group}" in unit
     assert "Restart=always" in unit
     assert "WantedBy=multi-user.target" in unit
+
+
+def test_the_root_helpers_group_is_the_users_primary_group_by_its_own_name(tmp_path):
+    """The socket's group is the room user's primary group as `id -gn` names it, not a group assumed to share the user's name."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_id = bin_dir / "id"
+    fake_id.write_text('#!/bin/bash\ncase "$1" in -gn) echo staff ;; -u) echo 1000 ;; *) exit 1 ;; esac\n')
+    fake_id.chmod(0o755)
+    units = tmp_path / "units"
+    result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={units}; CROOM_USER=pi; write_units", env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    assert result.returncode == 0, result.stderr
+    assert "-m croom.admin --owner pi --group staff\n" in (units / "croom-admin.service").read_text()
 
 
 def test_the_root_helper_is_enabled_and_started():

@@ -127,6 +127,23 @@ def starts_of(slots):
     return [s.strftime("%H:%M") for s, _ in slots]
 
 
+def test_booking_hours_set_from_settings_apply_at_once_and_a_bad_pair_changes_nothing(tmp_path, clock):
+    """Settings changes the booking hours live (spec 2026-10-29, section 4)."""
+    rooms = make(tmp_path, clock)
+    rooms.set_hours("07:30", "19:00")
+    assert (rooms.start_hour, rooms.end_hour) == (time(7, 30), time(19, 0))
+    for start, end in (("19:00", "07:30"), ("07:10", "19:00"), ("soon", "19:00")):
+        with pytest.raises(ValueError):
+            rooms.set_hours(start, end)
+    assert (rooms.start_hour, rooms.end_hour) == (time(7, 30), time(19, 0))
+
+
+def test_booking_hours_written_unquoted_in_the_config_are_read_as_times(tmp_path, clock):
+    """YAML 1.1 reads an unquoted 9:00 as 540 and 17:30 as 1050 (base 60): what was written was a time."""
+    rooms = make(tmp_path, clock, start=540, end=1050)
+    assert (rooms.start_hour, rooms.end_hour) == (time(9, 0), time(17, 30))
+
+
 def test_a_free_day_offers_every_quarter_hour_of_the_booking_hours():
     slots = open_starts(MONDAY, at(7), [], time(8), time(18))
     assert starts_of(slots)[0] == "08:00" and starts_of(slots)[-1] == "17:45" and len(slots) == 40

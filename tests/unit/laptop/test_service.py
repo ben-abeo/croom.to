@@ -383,3 +383,94 @@ async def test_an_unexpected_failure_in_release_is_the_same(room):
     with pytest.raises(LaptopError, match=NO_ANSWER):
         await room.service.to_laptop(30)
     assert room.google.events == {} and room.devices.calls == ["reclaim"] and room.switch.moves == []
+
+
+# --- Settings' Test the switch (spec 2026-10-29)
+
+
+async def test_test_the_switch_moves_the_meetup_over_and_back_and_leaves_the_room_as_it_was(room):
+    answer = await room.service.test_switch()
+    assert answer["ok"] is True
+    text = "\n".join(answer["lines"])
+    assert "GPIO17" in text and "now on the laptop side" in text and "back on the Pi" in text
+    assert room.switch.moves == ["laptop", "room"] and room.switch.on_pi
+    assert room.devices.calls == ["release", "reclaim"]                # the room's devices let go of the MeetUp, and took it back
+    assert not room.service.camera_away and not room.switch.closed and not room.switch.opened
+    await room.look()
+    await room.look()
+    assert not room.service.camera_away                               # the watch did not take the test for a hand at the switch
+
+
+async def test_test_the_switch_that_does_not_move_says_so_and_takes_the_devices_back(room):
+    room.switch.answers = False
+    answer = await room.service.test_switch()
+    assert answer["ok"] is False and any("did not answer" in line for line in answer["lines"])
+    assert room.devices.calls == ["release", "reclaim"]
+
+
+async def test_test_the_switch_with_no_pin_presses_nothing(tmp_path):
+    room = Room(tmp_path, switch=FakeUsbSwitch(available=False))
+    answer = await room.service.test_switch()
+    assert answer["ok"] is False and any("cannot be pressed" in line for line in answer["lines"])
+    assert room.switch.moves == [] and room.devices.calls == []
+
+
+@pytest.mark.parametrize("state", [MeetingState.JOINING, MeetingState.CONNECTED])
+async def test_test_the_switch_is_refused_in_a_meeting_and_while_the_laptop_has_the_meetup(room, state):
+    room.meeting.state = state
+    with pytest.raises(LaptopError, match=IN_A_MEETING):
+        await room.service.test_switch()
+    room.meeting.state = MeetingState.IDLE
+    await room.service.to_laptop(30)
+    with pytest.raises(LaptopError, match=CAMERA_AWAY):
+        await room.service.test_switch()
+    assert room.switch.moves == ["laptop"]
+
+
+# --- Settings > Check > Laptop switch (spec 2026-10-29): the running service's switch looked at, never pressed
+
+
+def checked_room(tmp_path, switch=None):
+    """A room whose Laptop service has the config it was made from (laptop.enabled, as from_config gives it)."""
+    from croom.core.config import Config
+    room = Room(tmp_path, switch=switch)
+    config = Config()
+    config.laptop.enabled = True
+    room.service = LaptopService(room.switch, SettingsStore(tmp_path / "laptop.json"), calendar=room.calendar, meeting=room.meeting,
+                                 devices=room.devices, tv=room.tv, clock=room.clock, config=config)
+    return room
+
+
+async def test_the_check_says_where_the_meetup_is_and_presses_nothing_even_in_a_meeting(tmp_path):
+    import io
+    room = checked_room(tmp_path)
+    room.meeting.state = MeetingState.CONNECTED                       # a look disturbs no meeting
+    out = io.StringIO()
+    assert await room.service.check(out) == 0
+    assert out.getvalue().splitlines() == [
+        "Pin: GPIO17 (header pin 11), active high, held 200 ms",
+        "GPIO chip: /dev/gpiochip4",
+        "The MeetUp (046d:0866) is on this Pi.",
+        "Laptop mode: off, the room has the MeetUp.",
+    ]
+    assert room.switch.moves == [] and room.devices.calls == [] and not room.switch.opened and not room.switch.closed
+
+
+async def test_the_check_while_the_laptop_has_the_meetup_says_until_when(tmp_path):
+    import io
+    room = checked_room(tmp_path)
+    await room.service.to_laptop(45)
+    out = io.StringIO()
+    assert await room.service.check(out) == 0
+    assert "is not on this Pi: the laptop side has it." in out.getvalue()
+    assert out.getvalue().splitlines()[-1] == "Laptop mode: on, the laptop has the MeetUp until 10:15 AM."
+    assert room.switch.moves == ["laptop"]
+
+
+async def test_the_check_with_no_pin_says_why_and_does_not_tell_to_stop_the_room(tmp_path):
+    import io
+    room = checked_room(tmp_path, switch=FakeUsbSwitch(available=False))
+    out = io.StringIO()
+    assert await room.service.check(out) == 1
+    assert "The switch cannot be pressed: the switch's GPIO pin cannot be used: busy" in out.getvalue()
+    assert "systemctl stop" not in out.getvalue()

@@ -10,8 +10,10 @@ whoever is in the room.
 import asyncio
 import contextlib
 import copy
+import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -21,17 +23,29 @@ from urllib.parse import urlsplit
 
 from aiohttp import WSCloseCode, WSMsgType, web
 
+from croom.admin.client import NOT_AVAILABLE, AdminClient, AdminError, AdminUnavailable
 from croom.calendar.bookings import BookingError
 from croom.control.settings import SettingsStore
-from croom.core.config import DEFAULT_COMPANY, Config
+from croom.core.config import CONFIG_PATHS, DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
+from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
+from croom.settings.apk import ApkError, ApkStore
+from croom.settings.checkin import APK_KINDS, COMMIT_KINDS, DEVICE_ID_HEADER, KINDS, TOKEN_HEADER, CheckinError, Registry
+from croom.settings.checks import CheckBusy, Checks
+from croom.settings.config_edit import ConfigEditor
+from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
+from croom.settings.devices import find_devices as find_room_devices
+from croom.settings.devices import offer
+from croom.settings.github import CANT_CHECK, GitHub, GitHubError, is_commit
+from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
+from croom.settings.schema import BY_PATH, SettingError
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
-from croom.tv.pointer import BAD_MESSAGE, PiMouse, PointerRelay
+from croom.tv.pointer import BAD_MESSAGE, PiKeyboard, PiMouse, PointerRelay
 
 logger = logging.getLogger(__name__)
 
@@ -47,13 +61,23 @@ def _a_bool(label: str) -> Callable[[Any], Any]:
 
 
 STATIC_DIR = Path(__file__).parent / "static"
-MAX_BODY_BYTES = 4096
+MAX_BODY_BYTES = 4096                  # a JSON request, and a pointer message: what every route but Settings' saves reads at most
+MAX_SETTINGS_BODY = 128 * 1024         # a Settings page's save, at the schema's list limits (40 dialogs of 120 characters, escaped)
+MAX_UPLOAD_BYTES = MAX_SETTINGS_BODY   # the app's limit: a key file's upload (64 KB and the form around it) and a Settings save
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
 ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invitations print it: spaces, no-break spaces
 # Zoom's own alphabet for a passcode: letters, digits and @ - _ * (Zoom allows 10 of them; this allows 32).
 PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
 BAD_PASSCODE = "Passcode must be letters, digits or @-_*, up to 32"
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
+# A join while the root helper's update is under way (croom.admin.update.UNDER_WAY): its restart would cut the meeting off.
+UPDATING = "The room is updating: it restarts in a few minutes"
+UPDATE_UNDER_WAY_STATES = ("building", "switching", "restarting", "watching", "rolling_back")
+UPDATE_LOOK_S = 5.0                    # how long the helper's word on an update is believed before a join asks it again
+UPDATE_ASK_S = 1.0                     # how long a join waits for that word: a helper slow to answer is taken as no update
+# Typing on the TV (the pointer socket's keys) needs the Settings unlock as well as an open sign-in.
+UNLOCK_TO_TYPE = "Enter the Settings PIN again to type on the TV"
+DEFAULT_GOOGLE_PROFILE = "/var/lib/croom/meet-profile"   # the room's Google profile folder, as the installer makes it
 # What a control from the table is told when there is no meeting to carry it out in; the provider says the same in its own RuntimeError.
 NOT_IN_A_MEETING = "Not in a meeting"
 # Hosts (and their subdomains) a join link may point the room's browser at.
@@ -214,8 +238,28 @@ class ControlService(Service):
         discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
         mouse: the room Pi's virtual mouse that the touchpad drives (a croom.tv.pointer.PiMouse, made when it is first used, unless a
             test stands in for it).
+        keyboard: the room Pi's virtual keyboard that the touch Pi types on the TV with (a croom.tv.pointer.PiKeyboard, made when a
+            sign-in to Google begins or when it is first typed on, unless a test stands in for it).
         scores: the scores service (current() lists the football scores of the schools that are on), or None.
         laptop: the Laptop service (the room's MeetUp lent to a laptop through the USB switch), or None in a room without the switch.
+        pin_store: the Settings PIN (croom.settings.pin.PinStore), or None to open config's pin_file, which is settings-pin.json beside
+            settings_file when the config names none (from_config puts both in the data directory).
+        admin: the root helper's client (croom.admin.client.AdminClient), which writes config.yaml and restarts the room; None is a room
+            without it, whose Settings pages that need it say "Not available on this device" (from_config makes the real one). The
+            config's config_file is the config.yaml the Settings pages read (from_config: /etc/croom/config.yaml, the one the helper
+            writes; config.yaml beside settings_file when the config names none).
+        find_devices: the room's speakers, microphones and cameras for the Devices page (croom.settings.devices.find_devices, which
+            runs pw-dump and opens /dev/video*, unless a test stands in for it).
+        checks: Settings › Check's checks (croom.settings.checks.Checks), which reach Google, Zoom and the TV; by default the room's
+            own, on config_file and the services given here.
+        github: what Settings › Software asks GitHub (croom.settings.github.GitHub: the newest version and the changes); None asks
+            nothing and says "Can't check for updates right now" (from_config makes the real one).
+        registry: the devices that check in (croom.settings.checkin.Registry: the touch Pi's agent, the door sign); None opens the
+            config's devices_file, devices.json beside settings_file when the config names none (from_config: the data directory), or
+            keeps it in memory when the config names neither.
+        apks: the door sign app's releases on GitHub and the APKs the TV Pi keeps for the panels (croom.settings.apk.ApkStore); None
+            makes one on `github` in the config's apk_dir (door-sign/ beside settings_file when the config names none), or has none
+            when there is no GitHub client or no folder ("Can't check for updates right now").
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -233,6 +277,14 @@ class ControlService(Service):
         mouse=None,
         scores=None,
         laptop=None,
+        pin_store=None,
+        admin=None,
+        find_devices=None,
+        keyboard=None,
+        checks=None,
+        github=None,
+        registry=None,
+        apks=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -261,11 +313,38 @@ class ControlService(Service):
         self._tv_selecting = False
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
         self._mouse = mouse if mouse is not None else PiMouse()
+        self._keyboard = keyboard if keyboard is not None else PiKeyboard()
         self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
         self._mouse_waits: Set[asyncio.Task] = set()         # the sockets' handlers that wait for the room Pi's mouse to be made (stop() ends them)
         self._scores = scores
         self._scores_failure: Optional[str] = None
         self._laptop = laptop
+        self._pins = pin_store if pin_store is not None else PinStore(
+            self.config.get("pin_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "settings-pin.json"
+        )
+        self._admin = admin
+        self._update_seen: Optional[Tuple[float, bool]] = None   # (when, whether an update was under way): what _updating last heard
+        self._editor = ConfigEditor(
+            self.config.get("config_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "config.yaml", admin
+        )
+        self._credentials = Credentials(self._editor, admin)
+        self._find_devices = find_devices or find_room_devices
+        self._github = github
+        if registry is None:
+            devices_file = self.config.get("devices_file") or (
+                Path(self.config["settings_file"]).parent / "devices.json" if self.config.get("settings_file") else None)
+            registry = Registry(devices_file)
+        self._registry = registry
+        if apks is None and github is not None:
+            apk_dir = self.config.get("apk_dir") or (
+                Path(self.config["settings_file"]).parent / "door-sign" if self.config.get("settings_file") else None)
+            apks = ApkStore(github, Path(apk_dir)) if apk_dir else None
+        self._apks = apks
+        self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
+                                                                discover=discover)
+        # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
+        self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
+        self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -287,8 +366,12 @@ class ControlService(Service):
         tv=None,
         scores=None,
         laptop=None,
+        pin_store=None,
+        admin=None,
+        github=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
+        data_dir = config.resolve_data_dir()
         return cls(
             config={
                 "host": config.control.host,
@@ -298,7 +381,11 @@ class ControlService(Service):
                 "room_company": config.room.company,
                 "static_dir": str(STATIC_DIR),
                 "screensaver": config.control.screensaver,
-                "settings_file": str(config.resolve_data_dir() / "control-settings.json"),
+                "settings_file": str(data_dir / "control-settings.json"),
+                "pin_file": str(data_dir / "settings-pin.json"),
+                "devices_file": str(data_dir / "devices.json"),
+                "apk_dir": str(data_dir / "door-sign"),
+                "config_file": CONFIG_PATHS[0],
             },
             meeting=meeting,
             calendar=calendar,
@@ -307,7 +394,15 @@ class ControlService(Service):
             tv=tv,
             scores=scores,
             laptop=laptop,
+            pin_store=pin_store,
+            admin=admin if admin is not None else AdminClient(),
+            github=github if github is not None else GitHub(),
         )
+
+    @property
+    def pin_store(self) -> PinStore:
+        """The Settings PIN: what every Settings route asks before it does anything (_require_unlock)."""
+        return self._pins
 
     @property
     def bound_port(self) -> Optional[int]:
@@ -323,7 +418,8 @@ class ControlService(Service):
     def create_app(self) -> web.Application:
         """The aiohttp application; tests drive it without a listener."""
         _register_font_types()
-        app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[_static_no_cache])
+        # The app's limit is a key file's upload: every JSON route reads at most MAX_BODY_BYTES of it (_read_object), a Settings save more
+        app = web.Application(client_max_size=MAX_UPLOAD_BYTES, middlewares=[_static_no_cache])
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/sign", self._handle_sign)
         app.router.add_get("/tv", self._handle_tv)
@@ -349,6 +445,8 @@ class ControlService(Service):
         app.router.add_post("/api/settings", self._handle_set_settings)
         app.router.add_get("/api/audio/volume", self._handle_volume)
         app.router.add_post("/api/audio/volume", self._handle_set_volume)
+        app.router.add_get("/api/audio/mic", self._handle_mic)
+        app.router.add_post("/api/audio/mic", self._handle_set_mic)
         app.router.add_post("/api/camera/move", self._handle_camera_move)
         app.router.add_post("/api/camera/zoom", self._handle_camera_zoom)
         app.router.add_post("/api/camera/home", self._handle_camera_home)
@@ -362,6 +460,43 @@ class ControlService(Service):
         app.router.add_post("/api/tv/forget", self._handle_tv_forget)
         app.router.add_get("/api/tv/discover", self._handle_tv_discover)
         app.router.add_post("/api/laptop", self._handle_laptop)
+        app.router.add_get("/api/settings/pin", self._handle_pin)
+        app.router.add_post("/api/settings/pin/set", self._handle_set_pin)
+        app.router.add_post("/api/settings/unlock", self._handle_unlock)
+        app.router.add_post("/api/settings/lock", self._handle_lock)
+        app.router.add_post("/api/settings/pin/change", self._handle_change_pin)
+        app.router.add_get("/api/settings/config/{page}", self._handle_config)
+        app.router.add_post("/api/settings/config/{page}", self._handle_save_config)
+        app.router.add_get("/api/settings/restart", self._handle_restart_status)
+        app.router.add_post("/api/settings/restart", self._handle_restart)
+        app.router.add_get("/api/settings/credentials", self._handle_credentials)
+        app.router.add_post("/api/settings/credentials/zoom/typed", self._handle_zoom_typed)
+        app.router.add_post("/api/settings/credentials/{kind}", self._handle_upload_credential)
+        app.router.add_post("/api/settings/credentials/{kind}/usb", self._handle_usb_credential)
+        app.router.add_get("/api/settings/usb-files", self._handle_usb_files)
+        app.router.add_post("/api/settings/laptop/test", self._handle_test_switch)
+        app.router.add_get("/api/settings/google/sign-in/state", self._handle_sign_in_state)
+        app.router.add_post("/api/settings/google/sign-in", self._handle_sign_in)
+        app.router.add_post("/api/settings/google/sign-in/done", self._handle_sign_in_done)
+        app.router.add_post("/api/settings/google/sign-in/cancel", self._handle_sign_in_cancel)
+        app.router.add_post("/api/settings/checks/{name}", self._handle_check)
+        app.router.add_get("/api/settings/logs", self._handle_logs)
+        app.router.add_get("/api/settings/software", self._handle_software)
+        app.router.add_post("/api/settings/software/update", self._handle_software_update)
+        app.router.add_post("/api/settings/software/rollback", self._handle_software_rollback)
+        app.router.add_post("/api/settings/reboot", self._handle_reboot)
+        app.router.add_post("/api/settings/software/update-all", self._handle_update_all)
+        app.router.add_post("/api/devices/checkin", self._handle_checkin)
+        app.router.add_get("/api/settings/devices", self._handle_devices)
+        app.router.add_post("/api/settings/devices/{device}/allow", self._handle_allow_device)
+        app.router.add_post("/api/settings/devices/{device}/refuse", self._handle_refuse_device)
+        app.router.add_post("/api/settings/devices/{device}/forget", self._handle_forget_device)
+        app.router.add_post("/api/settings/devices/{device}/jobs", self._handle_device_job)
+        app.router.add_get("/api/devices/seen-since", self._handle_seen_since)
+        app.router.add_get("/api/devices/busy", self._handle_busy)
+        app.router.add_get("/api/devices/apk/{version_code}", self._handle_apk)
+        app.router.add_get("/api/settings/network", self._handle_network)
+        app.router.add_post("/api/settings/network/{device}/{action}", self._handle_network_action)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -398,6 +533,8 @@ class ControlService(Service):
             self._runner = None
         self._task = self._join_task = self._search = None
         self._mouse.close()
+        self._keyboard.close()
+        self._registry.flush()
         logger.info("Room control page stopped")
 
     async def _end_what_is_open(self, app: web.Application) -> None:
@@ -563,6 +700,7 @@ class ControlService(Service):
             "screensaver": self._screensaver,
             "settings": self._settings_payload(),
             "audio": self._audio_state(),
+            "mic": self._mic_state(),
             "camera": self._camera_state(),
             "tv": self._tv_status(),
             "laptop": self._laptop_status(),
@@ -683,10 +821,13 @@ class ControlService(Service):
     def _camera(self):
         return getattr(self._devices, "camera", None)
 
+    def _mic(self):
+        return getattr(self._devices, "mic", None)
+
     async def _refresh_devices(self) -> None:
         """Cached reads, so a status poll costs nothing most of the time and never raises."""
         camera = self._camera()
-        readers = [("speaker", getattr(self._volume(), "refresh", None))]
+        readers = [("speaker", getattr(self._volume(), "refresh", None)), ("microphone", getattr(self._mic(), "refresh", None))]
         if camera is not None and camera.available:
             # read_zoom() goes through discovery, which globs and opens /dev/video*: not on every poll of a room
             # without a camera. The devices service looks for a missing camera itself, every 30 s.
@@ -712,6 +853,10 @@ class ControlService(Service):
     def _audio_state(self) -> Dict[str, Any]:
         volume = self._volume()
         return volume.state() if volume is not None else dict(self.NO_DEVICES, level=0, muted=False, device=None)
+
+    def _mic_state(self) -> Dict[str, Any]:
+        mic = self._mic()
+        return mic.state() if mic is not None else dict(self.NO_DEVICES, level=0, device_level=0, device=None)
 
     def _camera_state(self) -> Dict[str, Any]:
         camera = self._camera()
@@ -783,6 +928,25 @@ class ControlService(Service):
             return await volume.set_muted(data["muted"])
 
         return await self._device_call(request, volume, action)
+
+    # The microphone's level (spec 2026-10-29, Mic level): an everyday control, outside the Settings PIN. The level chosen here is
+    # kept in the settings by the microphone itself, and the devices service puts it back during a meeting.
+    async def _handle_mic(self, request: web.Request) -> web.Response:
+        await self._refresh_devices()
+        return web.json_response(self._mic_state())
+
+    async def _handle_set_mic(self, request: web.Request) -> web.Response:
+        mic = self._mic()
+
+        async def action(data):
+            named = [key for key in ("level", "step") if key in data]
+            if len(named) != 1:
+                raise ValueError("Send one of level or step")
+            if named[0] == "level":
+                return await mic.set_level(self._int_field(data, "level"))
+            return await mic.step(self._int_field(data, "step"))
+
+        return await self._device_call(request, mic, action)
 
     async def _handle_camera_move(self, request: web.Request) -> web.Response:
         camera = self._camera()
@@ -1064,6 +1228,958 @@ class ControlService(Service):
             return self._error_response(str(e), e.status)
         return web.json_response({"laptop": state})
 
+    # ------------------------------------------------------------------
+    # Settings and its PIN (spec 2026-10-29, section 2)
+    # ------------------------------------------------------------------
+
+    UNLOCK_HEADER = "X-Croom-Unlock"
+    ENTER_THE_PIN = "Enter the PIN"
+
+    def _token(self, request: web.Request) -> str:
+        return request.headers.get(self.UNLOCK_HEADER, "")
+
+    def _require_unlock(self, request: web.Request) -> Optional[web.Response]:
+        """
+        None when the request carries a token that is unlocked (and has now used it: it lasts five more minutes); otherwise the answer
+        that refuses it. Every Settings route but the PIN's own calls this first, before it reads anything of the request, so that
+        nothing a route does can be reached without the PIN.
+
+        The refusal is 423 with the minutes left while unlocking is locked out after wrong PINs, so that the page says why rather than
+        asking for a PIN it will refuse; otherwise 401 "Enter the PIN". A token that is still unlocked is let through during a lock-out:
+        it was given for the right PIN, and the wrong ones may have been tried at another screen.
+        """
+        if self._pins.check(self._token(request)):
+            return None
+        minutes = self._pins.locked_minutes()
+        if minutes:
+            return self._locked_response(PinLocked(minutes))
+        return web.json_response({"error": self.ENTER_THE_PIN, "locked": False}, status=401)
+
+    @staticmethod
+    def _locked_response(error: PinLocked) -> web.Response:
+        return web.json_response({"error": str(error), "locked": True, "minutes": error.minutes}, status=423)
+
+    def _pin_refusal(self, error: PinError) -> web.Response:
+        if isinstance(error, PinLocked):
+            return self._locked_response(error)
+        return self._error_response(str(error), error.status)
+
+    def _unlocked_answer(self, token: str) -> web.Response:
+        return web.json_response({"token": token, "expires_in": UNLOCK_SECONDS})
+
+    async def _pin_body(self, request: web.Request) -> Tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+        """A PIN route's JSON object, or the answer that refuses the request (415 not JSON, 400 not an object)."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return None, refused
+        data = await self._read_object(request)
+        if data is None:
+            return None, self._error_response("Send a JSON object", 400)
+        return data, None
+
+    async def _handle_pin(self, request: web.Request) -> web.Response:
+        """Whether a PIN is chosen (the pad asks to choose one when not), the minutes left of a lock-out, and whether the token sent,
+        if any, is unlocked (the page goes straight to the Settings menu when it is). Open to all: it reveals nothing of the PIN."""
+        token = self._token(request)
+        return web.json_response({"set": self._pins.is_set(), "locked_minutes": self._pins.locked_minutes(),
+                                  "unlocked": bool(token) and self._pins.check(token)})
+
+    async def _handle_set_pin(self, request: web.Request) -> web.Response:
+        """{"pin"}: choose the first PIN, answered with a token as an unlock is; 409 once a PIN is set (Security changes it)."""
+        data, refused = await self._pin_body(request)
+        if refused is not None:
+            return refused
+        try:
+            self._pins.set_pin(data.get("pin"))
+            token = self._pins.unlock(data.get("pin"))
+        except PinError as e:
+            return self._pin_refusal(e)
+        except OSError as e:
+            logger.error(f"Could not save the Settings PIN to {self._pins.path}: {e}")
+            return self._error_response("The PIN could not be saved on the room's device", 500)
+        logger.info("Settings PIN chosen")
+        return self._unlocked_answer(token)
+
+    async def _handle_unlock(self, request: web.Request) -> web.Response:
+        """{"pin"}: a token and how long it lasts unused, or the refusal in words (403 wrong, 423 locked out, 409 no PIN yet)."""
+        data, refused = await self._pin_body(request)
+        if refused is not None:
+            return refused
+        try:
+            token = self._pins.unlock(data.get("pin"))
+        except PinError as e:
+            if isinstance(e, PinLocked):
+                logger.warning(f"Settings locked for {e.minutes} minutes after too many wrong PINs")
+            return self._pin_refusal(e)
+        return self._unlocked_answer(token)
+
+    async def _handle_lock(self, request: web.Request) -> web.Response:
+        """End the token the request carries (the Settings screen's Lock). Not behind the PIN: ending a token is no harm, and a page whose
+        token has gone already is locked as it asked."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        self._pins.lock(self._token(request))
+        return web.json_response({"locked": True})
+
+    async def _handle_change_pin(self, request: web.Request) -> web.Response:
+        """{"old", "new"}, behind the PIN: the old PIN is asked again, so that a screen left unlocked cannot have its PIN changed."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        data, refused = await self._pin_body(request)
+        if refused is not None:
+            return refused
+        try:
+            self._pins.change(data.get("old"), data.get("new"), keep=self._token(request))   # every other screen's token ends
+        except PinError as e:
+            return self._pin_refusal(e)
+        except OSError as e:
+            logger.error(f"Could not save the Settings PIN to {self._pins.path}: {e}")
+            return self._error_response("The PIN could not be saved on the room's device", 500)
+        logger.info("Settings PIN changed")
+        return web.json_response({"changed": True})
+
+    # ------------------------------------------------------------------
+    # Settings: config.yaml's pages and the restart (spec 2026-10-29, sections 3 and 4)
+    # ------------------------------------------------------------------
+
+    LEAVE_FIRST = "Leave the meeting first"
+
+    def _without_helper(self) -> Optional[web.Response]:
+        """503 "Not available on this device" in a room without the root helper (a developer's machine); None when it is there."""
+        if self._admin is None or not self._admin.available():
+            return self._error_response(NOT_AVAILABLE, 503)
+        return None
+
+    def _settings_refusal(
+        self, request: web.Request, post: bool, *more: Callable[[web.Request], Optional[web.Response]]
+    ) -> Optional[web.Response]:
+        """The answer that refuses a request to a Settings route that needs the root helper, in this order: no PIN (before anything of
+        the request is read), not JSON (a POST), no helper, then the route's own `more`; None when it may go on. (Each is looked at
+        with `is not None`: an aiohttp response is a mapping, and an empty one is false.)"""
+        checks = [self._require_unlock] + ([self._require_json] if post else []) + [lambda _: self._without_helper(), *more]
+        for check in checks:
+            refused = check(request)
+            if refused is not None:
+                return refused
+        return None
+
+    def _apply_booking_hours(self, values: Dict[str, Any]) -> None:
+        """New booking hours, at once: the door sign and the room page offer them at their next look (no calendar: nothing to tell)."""
+        if self._bookings is not None:
+            self._bookings.set_hours(values["calendar.booking_start"], values["calendar.booking_end"])
+
+    def _apply_preset_names(self, values: Dict[str, Any]) -> None:
+        """New camera preset names, at once: Camera framing shows them at its next status."""
+        camera = self._camera()
+        if camera is not None:
+            camera.set_preset_names(values["control.camera_presets"])
+
+    async def _handle_config(self, request: web.Request) -> web.Response:
+        """A Settings page's values as config.yaml has them, the fields its form draws, and whether a saved change waits for a restart."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        page = request.match_info["page"]
+        try:
+            values, fields = self._editor.values(page), self._editor.fields(page)
+        except KeyError:
+            return self._error_response(f"There is no Settings page {page}", 404)
+        except SettingError as e:
+            return self._error_response(str(e), 500)
+        if page == "devices":
+            fields = offer(fields, values, await self._room_devices())
+        return web.json_response({"values": values, "fields": fields, "pending_restart": self._editor.pending_restart})
+
+    async def _handle_save_config(self, request: web.Request) -> web.Response:
+        """{"values": {path: value}}: a page's changes, checked and written through the root helper. The answer is {"saved": [paths],
+        "restart": whether they wait for a restart, "pending_restart"}; a refused value is 400 with {"errors": {path: words}} and nothing
+        is saved."""
+        refused = self._settings_refusal(request, post=True)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request, MAX_SETTINGS_BODY)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        page = request.match_info["page"]
+        try:
+            answer = await self._editor.save(page, data.get("values"))
+        except KeyError:
+            return self._error_response(f"There is no Settings page {page}", 404)
+        except SettingError as e:
+            # Each refused setting's page, so that one held on another page (a hand-written value) can be said with where it is
+            pages = {path: BY_PATH[path].page for path in e.errors if path in BY_PATH}
+            return web.json_response({"error": str(e), "errors": e.errors, "pages": pages}, status=400)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response(answer)
+
+    async def _handle_restart(self, request: web.Request) -> web.Response:
+        """Restart the room software (the root helper restarts it and watches it come back). Never in a meeting."""
+        refused = self._settings_refusal(request, post=True)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        refusal = self._laptop_refusal()
+        if refusal:
+            return self._error_response(refusal, 409)
+        try:
+            await self._admin.call("restart")
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        logger.info("Restart of the room software asked for from Settings")
+        return web.json_response({"restarting": True})
+
+    async def _handle_restart_status(self, request: web.Request) -> web.Response:
+        """How the last restart went: {"state": none | restarting | watching | healthy | undone | down, "undone", "at"?, "why"?}."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        try:
+            answer = await self._admin.call("restart_status")
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response({key: value for key, value in answer.items() if key != "ok"})
+
+    async def _room_devices(self) -> Optional[Dict[str, Any]]:
+        """The speakers, microphones and cameras the room has now; None when they can't be listed (the page offers Automatic)."""
+        try:
+            return await self._find_devices()
+        except Exception as e:  # noqa: BLE001 - the Devices page opens whatever the listing does
+            logger.warning(f"Could not list the room's devices: {type(e).__name__}: {e}")
+            return None
+
+    # --- the key files (spec 2026-10-29, section 4)
+
+    def _credential_kind(self, request: web.Request) -> Optional[web.Response]:
+        """404 for a kind of key the room has no use for; None for google or zoom."""
+        kind = request.match_info.get("kind", "")
+        try:
+            self._credentials.kind(kind)
+        except KeyError:
+            return self._error_response(f"There is no key {kind}: the room takes a Google service-account key or Zoom SDK keys", 404)
+        return None
+
+    def _require_multipart(self, request: web.Request) -> Optional[web.Response]:
+        """A key's upload is the one Settings POST that is not JSON: a form upload, behind the PIN's header as every other."""
+        if request.content_type != "multipart/form-data":
+            return self._error_response("Send the key file as a form upload (multipart/form-data)", 415)
+        return None
+
+    async def _credential_answer(self, save: Awaitable[Dict[str, Any]]) -> web.Response:
+        """A key's save, answered: what was saved, or the refusal in words (the helper's check of the file is 400)."""
+        try:
+            answer = await save
+        except CredentialError as e:
+            return self._error_response(str(e), e.status)
+        except SettingError as e:
+            return web.json_response({"error": str(e), "errors": e.errors}, status=400)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 400)
+        logger.info(f"Settings saved the {answer['kind']} key: {answer['summary']}")
+        return web.json_response(answer)
+
+    async def _handle_credentials(self, request: web.Request) -> web.Response:
+        """What the room's key files are: {"google": {"summary", "saved_at", "path"} | {"path", "problem"} | null, "zoom": ...}. Read from
+        the files the config names (the room software's own), never with what is in them; no helper needed."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        try:
+            return web.json_response(self._credentials.status())
+        except SettingError as e:
+            return self._error_response(str(e), 500)
+
+    async def _handle_upload_credential(self, request: web.Request) -> web.Response:
+        """A key file uploaded from a laptop: multipart form-data with the file in the field `file`, at most 64 KB."""
+        refused = self._settings_refusal(request, False, self._require_multipart, self._credential_kind)
+        if refused is not None:
+            return refused
+        too_large = self._error_response("This file is too large for a key file: a key is the few-KB .json file the console downloads", 413)
+        if request.content_length is not None and request.content_length > MAX_UPLOAD_BYTES:
+            return too_large
+        raw: Optional[bytes] = None
+        try:
+            reader = await request.multipart()
+            for _ in range(8):   # a form of a field or two: no more parts are looked through than that
+                part = await reader.next()
+                if part is None:
+                    break
+                if getattr(part, "name", None) != "file":
+                    await part.release()
+                    continue
+                data = bytearray()
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > MAX_KEY_FILE:
+                        return too_large
+                raw = bytes(data)
+                break
+        except Exception as e:  # noqa: BLE001 - a form that is not one (a bad boundary, a body cut off): said in words, whatever raised
+            logger.info(f"A key upload could not be read: {type(e).__name__}: {e}")
+            return self._error_response("The upload could not be read: choose the key file again", 400)
+        if not raw:
+            return self._error_response("Choose a key file to upload", 400)
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._error_response("That file is not text: a key file is the .json file the console downloads", 400)
+        return await self._credential_answer(self._credentials.save(request.match_info["kind"], content))
+
+    async def _handle_usb_credential(self, request: web.Request) -> web.Response:
+        """{"path"}: a key file on a USB stick in the TV Pi (one /api/settings/usb-files listed), read and saved by the helper."""
+        refused = self._settings_refusal(request, True, self._credential_kind)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        return await self._credential_answer(self._credentials.save_from_usb(request.match_info["kind"], data.get("path")))
+
+    async def _handle_zoom_typed(self, request: web.Request) -> web.Response:
+        """{"key", "secret"}: the Zoom Meeting SDK key and secret typed at the page, saved as the Zoom credentials file."""
+        refused = self._settings_refusal(request, post=True)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        return await self._credential_answer(self._credentials.save_typed_zoom(data.get("key"), data.get("secret")))
+
+    async def _handle_usb_files(self, request: web.Request) -> web.Response:
+        """The key files on the USB sticks plugged into the TV Pi: {"files": [{"path", "name", "stick", "size"}]}."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        try:
+            return web.json_response(await self._credentials.usb_files())
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+
+    # --- Laptop switch: Test the switch
+
+    LAPTOP_OFF = "The Laptop switch is off: turn it on, save, and restart the room software to test it"
+
+    async def _handle_test_switch(self, request: web.Request) -> web.Response:
+        """Test the switch: the running Laptop service presses it, the MeetUp goes over and back, and the check's lines are the answer
+        ({"ok", "lines"}). Not in a meeting; in a room whose Laptop switch is off, says to turn it on and restart."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        if self._laptop is None:
+            return self._error_response(self.LAPTOP_OFF, 409)
+        try:
+            return web.json_response(await self._laptop.test_switch())
+        except LaptopError as e:
+            return self._error_response(str(e), e.status)
+
+    # --- Check and Logs (spec 2026-10-29, sections 3 and 5)
+
+    async def _handle_check(self, request: web.Request) -> web.Response:
+        """Run one of Settings › Check's checks (calendar, tv, laptop, google, zoom): {"ok", "text"}, the words the `croom --check-…`
+        command prints, within a minute. 409 "Already running" while that check runs; never refused for a meeting (none disturbs one:
+        croom.settings.checks). Needs no helper."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        name = request.match_info["name"]
+        try:
+            return web.json_response(await self._checks.run(name))
+        except KeyError:
+            return self._error_response(f"There is no check {name}", 404)
+        except CheckBusy as e:
+            return self._error_response(str(e), 409)
+
+    LOG_LEVELS = ("all", "warning")
+    LOG_LINES = 200
+
+    async def _handle_logs(self, request: web.Request) -> web.Response:
+        """The room software's log through the root helper's journal job, newest first: ?level=all|warning (warnings and errors),
+        &before=<cursor> for the page before an earlier answer's cursor. {"entries": [{"time", "level", "text"}], "cursor", "more"}."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        level = request.query.get("level", "all")
+        if level not in self.LOG_LEVELS:
+            return self._error_response('The level is "all" or "warning"', 400)
+        args: Dict[str, Any] = {"lines": self.LOG_LINES, "level": level}
+        if request.query.get("before"):
+            args["before"] = request.query["before"]
+        try:
+            answer = await self._admin.call("journal", **args)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response({"entries": answer.get("entries", []), "cursor": answer.get("cursor"), "more": bool(answer.get("more"))})
+
+    # --- Software: versions, updates and reboot (spec 2026-10-29, sections 3, 6 and 8)
+
+    DEVICES = ("tv",)   # the device the root helper acts on; the others (the touch Pi, the door sign) check in, by their ids (_checks_in)
+
+    async def _handle_software(self, request: web.Request) -> web.Response:
+        """What Settings › Software shows: {"tv": the TV Pi's card, "in_meeting"}. The TV Pi's card is {"available": False, "error"}
+        without the root helper; otherwise its version ("version", "installed", "previous"), its last update ("update": the helper's
+        record), and what GitHub says ("newest", "running", "changes", "more", "up_to_date", "error": "Can't check for updates right
+        now" or None)."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response({"tv": await self._tv_software(), "devices": await self._devices_software(),
+                                  "waiting": self._registry.waiting(), "in_meeting": self._meeting_state() in IN_PROGRESS_STATES})
+
+    async def _devices_software(self) -> List[Dict[str, Any]]:
+        """The cards of the devices that check in: each as the registry has it (version, last seen, its job and its last result), and
+        for a device that runs a commit of main (the touch Pi), what GitHub says of it as for the TV Pi."""
+        cards = self._registry.devices()
+        for card in cards:
+            if card["kind"] in APK_KINDS:
+                if self._apks is None:
+                    card.update(newest=None, running=None, changes=None, more=0, up_to_date=None, error=CANT_CHECK)
+                else:
+                    card.update(await asyncio.to_thread(self._apks.summary, card["version"]))
+                continue
+            if card["kind"] not in COMMIT_KINDS:
+                continue
+            if self._github is None:
+                card.update(newest=None, running=None, changes=None, more=0, up_to_date=None, error=CANT_CHECK)
+            else:
+                card.update(await asyncio.to_thread(self._github.summary, card["version"] or None))
+        return cards
+
+    async def _tv_software(self) -> Dict[str, Any]:
+        if self._without_helper() is not None:
+            return {"available": False, "error": NOT_AVAILABLE}
+        try:
+            version = await self._admin.call("version")
+            update = await self._admin.call("update_status")
+        except AdminUnavailable as e:
+            return {"available": False, "error": str(e)}
+        except AdminError as e:
+            return {"available": False, "error": str(e)}
+        card: Dict[str, Any] = {"available": True, "version": version.get("version", "unknown"), "installed": version.get("installed"),
+                                "previous": version.get("previous"),
+                                "update": {key: value for key, value in update.items() if key != "ok"}}
+        if self._github is None:
+            card.update(newest=None, running=None, changes=None, more=0, up_to_date=None, error=CANT_CHECK)
+        else:
+            card.update(await asyncio.to_thread(self._github.summary, card["version"]))
+        return card
+
+    async def _software_body(self, request: web.Request) -> Tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+        """A Software POST's body and its device, after the PIN and JSON; or the refusal: a body that is not an object, a device the
+        page does not have, a meeting on ("Leave the meeting first"), or (for the TV Pi) no helper."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return None, refused
+        data = await self._read_object(request)
+        if data is None:
+            return None, self._error_response("Send a JSON object", 400)
+        device = data.get("device", "tv")
+        if device not in self.DEVICES and not self._checks_in(device):
+            return None, self._error_response(f"There is no device {device}", 404)
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return None, self._error_response(self.LEAVE_FIRST, 409)
+        if device in self.DEVICES:
+            refusal = self._laptop_refusal()    # the TV Pi's update, switch back or reboot would cut the laptop's meeting off
+            if refusal:
+                return None, self._error_response(refusal, 409)
+            refused = self._without_helper()
+            if refused is not None:
+                return None, refused
+        return data, None
+
+    def _laptop_refusal(self) -> Optional[str]:
+        """Why the room software may not restart now, in Laptop mode's words: the laptop has the MeetUp (or it is on its way); None."""
+        return self._laptop.join_refusal() if self._laptop is not None else None
+
+    def _checks_in(self, device: Any) -> bool:
+        """Whether `device` is one of the devices that check in (the touch Pi, the door sign), joined or waiting."""
+        try:
+            self._registry.get(device)
+        except CheckinError:
+            return False
+        return True
+
+    def _queue(self, device: str, job: str, answer: Dict[str, Any], **args: Any) -> web.Response:
+        """Give a device that checks in a job (it takes it at its next check-in): the answer, or the registry's refusal in words."""
+        try:
+            queued = self._registry.queue(device, job, args)
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        logger.info(f"{job} of the device {device} asked for from Settings")
+        return web.json_response(dict(answer, job=queued))
+
+    async def _queue_apk_update(self, device: str, code: Any, commit: Any, answer: Dict[str, Any]) -> web.Response:
+        """Give a door sign the update to release door-sign-<code>: the TV Pi first has the APK (downloaded from GitHub and checked, or
+        kept from before), then the panel is told its version code, size and SHA-256, and fetches it from GET /api/devices/apk/<code>."""
+        if commit is not None:
+            return self._error_response("A door sign is updated to a release of the app (a version code), not to a commit", 400)
+        if not isinstance(code, int) or isinstance(code, bool) or code <= 0:
+            return self._error_response("Send the version of the door sign app to install (its version code)", 400)
+        card = self._registry.get(device)
+        if card["state"] != "allowed":
+            return self._error_response(f"This {card['label']} has not joined yet: allow it first", 409)
+        cannot = (card.get("cannot") or {}).get("update")
+        if cannot:
+            return self._error_response(cannot, 409)
+        if card["job"] is not None:
+            return self._error_response(f"The {card['label']} is busy: wait for it to finish", 409)
+        if card["version"].isdigit() and code <= int(card["version"]):
+            return self._error_response(f"The door sign has version {card['version']} already: Android installs only a newer one", 409)
+        if self._apks is None:
+            return self._error_response(CANT_CHECK, 503)
+        try:
+            apk = await asyncio.to_thread(self._apks.ensure, code)
+        except ApkError as e:
+            return self._error_response(str(e), e.status)
+        return self._queue(device, "update", answer, version_code=code, sha256=apk["sha256"], size=apk["size"])
+
+    async def _admin_answer(self, job: str, answer: Dict[str, Any], **args: Any) -> web.Response:
+        try:
+            await self._admin.call(job, **args)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response(answer)
+
+    async def _handle_software_update(self, request: web.Request) -> web.Response:
+        """{"device": "tv", "commit"}: install that version (a commit of main on GitHub, as GET /api/settings/software gave it) and move
+        the room to it: the helper builds it beside the running one, switches, restarts and watches, going back by itself if the room
+        does not answer within 3 minutes. Answers {"updating": true} at once; GET /api/settings/software follows it."""
+        data, refused = await self._software_body(request)
+        if refused is not None:
+            return refused
+        device = data.get("device", "tv")
+        if device != "tv" and self._registry.get(device)["kind"] in APK_KINDS:
+            return await self._queue_apk_update(device, data.get("version_code"), data.get("commit"), {"updating": True})
+        commit = data.get("commit")
+        if not is_commit(commit):
+            return self._error_response("Send the version to install (a commit)", 400)
+        if device != "tv":
+            if "version_code" in data:
+                return self._error_response("A touch Pi is updated to a commit of main, not to a door sign release", 400)
+            return self._queue(device, "update", {"updating": True}, commit=commit)
+        response = await self._admin_answer("update", {"updating": True}, commit=commit)
+        if response.status == 200:
+            logger.info(f"Update of the TV Pi to {commit} asked for from Settings")
+        return response
+
+    async def _handle_software_rollback(self, request: web.Request) -> web.Response:
+        """{"device": "tv"}: switch back to the version kept before the running one, watched as an update is."""
+        data, refused = await self._software_body(request)
+        if refused is not None:
+            return refused
+        if data.get("device", "tv") != "tv":
+            return self._error_response(NOT_AVAILABLE, 409)
+        response = await self._admin_answer("rollback", {"rolling_back": True})
+        if response.status == 200:
+            logger.info("Switch back to the TV Pi's previous version asked for from Settings")
+        return response
+
+    async def _handle_reboot(self, request: web.Request) -> web.Response:
+        """{"device": "tv"}: reboot the TV Pi (the helper answers first, then reboots). Never in a meeting."""
+        data, refused = await self._software_body(request)
+        if refused is not None:
+            return refused
+        if data.get("device", "tv") != "tv":
+            return self._queue(data["device"], "reboot", {"rebooting": True})
+        response = await self._admin_answer("reboot", {"rebooting": True})
+        if response.status == 200:
+            logger.info("Reboot of the TV Pi asked for from Settings")
+        return response
+
+    async def _handle_update_all(self, request: web.Request) -> web.Response:
+        """Update every device that is not on the newest version of main: the touch Pis that have joined (each takes its job at its next
+        check-in; one that is busy is left as it is), then the TV Pi (whose update restarts the room software, so it goes last). Never in
+        a meeting. Answers {"updating": the devices asked ("tv" and the ids), "errors": the words of those that refused}."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        refusal = self._laptop_refusal()
+        if refusal:
+            return self._error_response(refusal, 409)
+        if self._github is None:
+            return self._error_response(CANT_CHECK, 503)
+        try:
+            commit = (await asyncio.to_thread(self._github.newest))["commit"]
+        except GitHubError:
+            return self._error_response(CANT_CHECK, 503)
+        updating: List[str] = []
+        errors: List[str] = []
+        for device in self._registry.devices():
+            if device["kind"] not in COMMIT_KINDS or device["version"] == commit or device["job"] is not None:
+                continue
+            try:
+                self._registry.queue(device["id"], "update", {"commit": commit})
+                updating.append(device["id"])
+            except CheckinError as e:
+                errors.append(str(e))
+        await self._update_signs(updating, errors)
+        if self._without_helper() is None:
+            try:
+                version = (await self._admin.call("version")).get("version")
+                if version != commit:
+                    await self._admin.call("update", commit=commit)
+                    updating.append("tv")
+            except (AdminError, AdminUnavailable) as e:
+                errors.append(str(e))
+        logger.info(f"Update all to {commit} asked for from Settings: {', '.join(updating) or 'nothing to update'}")
+        return web.json_response({"updating": updating, "errors": errors, "commit": commit})
+
+    async def _update_signs(self, updating: List[str], errors: List[str]) -> None:
+        """Update all's part for the door signs: each that has joined, can update itself and runs an older release than the newest
+        on GitHub is given the newest (its APK fetched first)."""
+        signs = [d for d in self._registry.devices() if d["kind"] in APK_KINDS and d["job"] is None and d["version"].isdigit()
+                 and not (d.get("cannot") or {}).get("update")]
+        if not signs or self._apks is None:
+            return
+        summary = await asyncio.to_thread(self._apks.summary, None)
+        newest = summary["newest"]
+        if summary["error"] or newest is None:
+            if summary["error"]:
+                errors.append(summary["error"])
+            return
+        for device in signs:
+            if int(device["version"]) >= newest["version_code"]:
+                continue
+            response = await self._queue_apk_update(device["id"], newest["version_code"], None, {})
+            if response.status == 200:
+                updating.append(device["id"])
+            else:
+                errors.append(json.loads(response.body)["error"])
+
+    # --- Devices that check in: the touch Pi's agent and the door sign (spec 2026-10-29, section 7)
+
+    CHECKIN_BYTES = 16 * 1024
+
+    async def _handle_checkin(self, request: web.Request) -> web.Response:
+        """POST /api/devices/checkin from a device on the LAN, every 5 seconds. Not behind the PIN: a device the TV Pi does not know
+        waits to join (Settings › Software's Allow), and one that has joined must carry the token it joined with (header
+        X-Croom-Device-Token). The answer is {"state": "pending"} or {"state": "allowed", "job": its next job or null}."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request, self.CHECKIN_BYTES)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        try:
+            answer = self._registry.checkin(data, request.headers.get(TOKEN_HEADER, ""), request.remote or "")
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response(answer)
+
+    async def _handle_apk(self, request: web.Request) -> web.Response:
+        """GET /api/devices/apk/<versionCode>: the door sign app of that release, for a door sign that has joined (headers
+        X-Croom-Device-Id and X-Croom-Device-Token, as it checks in) to install. The TV Pi has it from GitHub (downloaded and checked
+        when the update was asked for, or now); the panel checks its size and SHA-256 (headers X-Croom-Apk-Size, X-Croom-Apk-Sha256,
+        and the job's), its package, its signature and its version before it installs it."""
+        try:
+            self._registry.authorize(request.headers.get(DEVICE_ID_HEADER), request.headers.get(TOKEN_HEADER), APK_KINDS)
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        code = request.match_info["version_code"]
+        if not code.isdigit() or len(code) > 10 or int(code) <= 0:
+            return self._error_response("Ask for a version of the door sign app (its version code)", 400)
+        if self._apks is None:
+            return self._error_response(CANT_CHECK, 503)
+        try:
+            apk = await asyncio.to_thread(self._apks.ensure, int(code))
+        except ApkError as e:
+            return self._error_response(str(e), e.status)
+        return web.FileResponse(apk["path"], headers={"Content-Type": "application/vnd.android.package-archive",
+                                                      "X-Croom-Apk-Sha256": apk["sha256"], "X-Croom-Apk-Size": str(apk["size"]),
+                                                      "Cache-Control": "no-store"})
+
+    async def _handle_devices(self, request: web.Request) -> web.Response:
+        """The devices that check in: {"devices": those that have joined, "waiting": those waiting to join}."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response({"devices": self._registry.devices(), "waiting": self._registry.waiting()})
+
+    async def _device_change(self, request: web.Request, change: Callable[[str], Any], answer: Dict[str, Any]) -> web.Response:
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        try:
+            change(request.match_info["device"])
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response(answer)
+
+    async def _handle_allow_device(self, request: web.Request) -> web.Response:
+        """Let a device that waits to join in: its check-ins are answered with its jobs from now on."""
+        return await self._device_change(request, self._registry.allow, {"allowed": True})
+
+    async def _handle_refuse_device(self, request: web.Request) -> web.Response:
+        """Remove a device and refuse its check-ins from now on."""
+        return await self._device_change(request, self._registry.refuse, {"refused": True})
+
+    async def _handle_forget_device(self, request: web.Request) -> web.Response:
+        """Remove a device (one replaced by another): if it is still there, it waits to join again."""
+        return await self._device_change(request, self._registry.forget, {"forgotten": True})
+
+    async def _handle_device_job(self, request: web.Request) -> web.Response:
+        """{"type", "args"}: give a device that has joined a job (reboot, update {commit}, wifi_scan, wifi_connect {ssid, password},
+        wifi_forget {ssid}); it takes it at its next check-in, and GET /api/settings/devices follows it. A reboot or an update is never
+        given in a meeting."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        job = data.get("type")
+        if job in ("reboot", "update", "wifi_connect", "wifi_forget") and self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        device = request.match_info["device"]
+        if job == "update" and self._checks_in(device) and self._registry.get(device)["kind"] in APK_KINDS:
+            args = data.get("args") if isinstance(data.get("args"), dict) else {}
+            return await self._queue_apk_update(device, args.get("version_code"), args.get("commit"), {})
+        try:
+            queued = self._registry.queue(request.match_info["device"], job, data.get("args"))
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response({"job": queued})
+
+    @staticmethod
+    def _from_this_machine(request: web.Request) -> bool:
+        """Whether the request came from the TV Pi itself: over the loopback, or from the very address it was made to (a connection
+        to one of the machine's own addresses from that address). The peer is the socket's, never a header."""
+        transport = request.transport
+        peer = transport.get_extra_info("peername") if transport is not None else None
+        local = transport.get_extra_info("sockname") if transport is not None else None
+        if not peer or not isinstance(peer, (tuple, list)):
+            return False
+        try:
+            address = ipaddress.ip_address(str(peer[0]).split("%")[0])
+        except ValueError:
+            return False
+        mapped = getattr(address, "ipv4_mapped", None)
+        if address.is_loopback or (mapped is not None and mapped.is_loopback):
+            return True
+        return bool(local) and isinstance(local, (tuple, list)) and str(local[0]) == str(peer[0])
+
+    async def _handle_seen_since(self, request: web.Request) -> web.Response:
+        """GET ?kind=touch&since=<Unix seconds>: whether a device of that kind that has joined checked in at or after `since`, and
+        whether one has joined at all: {"seen", "known"}. Answered only to the TV Pi itself (the root helper, checking a new Wi-Fi
+        network: it has no PIN), and it says nothing but that."""
+        if not self._from_this_machine(request):
+            return self._error_response("Only the TV Pi itself may ask this", 403)
+        kind = request.query.get("kind")
+        try:
+            since = float(request.query.get("since", ""))
+        except ValueError:
+            since = math.nan
+        if kind not in KINDS or not math.isfinite(since):
+            return self._error_response("Send kind (touch or sign) and since (Unix seconds)", 400)
+        return web.json_response({"seen": self._registry.seen_since(kind, since), "known": self._registry.known(kind)})
+
+    async def _handle_busy(self, request: web.Request) -> web.Response:
+        """GET: {"busy": whether a meeting is on (one joined here, or the laptop's on the MeetUp)}. Answered only to the TV Pi itself (the
+        root helper, before an update restarts the room: it waits for the meeting to end), and it says nothing but that."""
+        if not self._from_this_machine(request):
+            return self._error_response("Only the TV Pi itself may ask this", 403)
+        return web.json_response({"busy": self._meeting_state() in IN_PROGRESS_STATES or bool(self._laptop_refusal())})
+
+    async def _updating(self) -> bool:
+        """Whether the root helper's update is under way (its record, update_status): the update restarts the room. What the helper
+        said is believed for UPDATE_LOOK_S; a helper that does not answer within UPDATE_ASK_S, or refuses, is taken as no update, and that
+        too is believed for as long, so that a slow helper does not hold every join up."""
+        if self._admin is None or not self._admin.available():
+            return False
+        now = asyncio.get_running_loop().time()
+        if self._update_seen is not None and now - self._update_seen[0] < UPDATE_LOOK_S:
+            return self._update_seen[1]
+        try:
+            record = await asyncio.wait_for(self._admin.call("update_status"), UPDATE_ASK_S)
+            under_way = record.get("state") in UPDATE_UNDER_WAY_STATES
+        except (AdminError, AdminUnavailable, asyncio.TimeoutError):
+            under_way = False
+        self._update_seen = (asyncio.get_running_loop().time(), under_way)
+        return under_way
+
+    # --- Network: the Wi-Fi of the TV Pi and of the devices that check in (spec 2026-10-29, sections 3 and 7)
+
+    NETWORK_ACTIONS = ("scan", "connect", "forget")
+
+    async def _handle_network(self, request: web.Request) -> web.Response:
+        """What Settings › Network shows: {"tv": the TV Pi's connection ({"available": False, "error"} without the helper; otherwise
+        the helper's wifi_status: "wifi", "connection", "ssid", "signal", "address", "saved", "change"), "devices": the devices that
+        have joined, each with its "network" (what it says in its check-ins), its Wi-Fi job and last result, and "scan" (its last
+        wifi_scan's networks), "in_meeting"}."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response({"tv": await self._tv_network(), "devices": self._registry.devices(),
+                                  "in_meeting": self._meeting_state() in IN_PROGRESS_STATES})
+
+    async def _tv_network(self) -> Dict[str, Any]:
+        if self._without_helper() is not None:
+            return {"available": False, "error": NOT_AVAILABLE}
+        try:
+            status = await self._admin.call("wifi_status")
+        except (AdminUnavailable, AdminError) as e:
+            return {"available": False, "error": str(e)}
+        return dict({key: value for key, value in status.items() if key != "ok"}, available=True)
+
+    async def _handle_network_action(self, request: web.Request) -> web.Response:
+        """POST /api/settings/network/{device}/scan | connect {ssid, password, hidden} | forget {ssid}. For the TV Pi ("tv") the root
+        helper does it: scan answers {"networks", "at"}, connect {"changing": true} (GET /api/settings/network follows the change), forget
+        {"words"}. A device that checks in is given the job (it takes it at its next check-in): {"queued": true, "job"}. A change (connect,
+        forget) is never made in a meeting."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        device, action = request.match_info["device"], request.match_info["action"]
+        if action not in self.NETWORK_ACTIONS:
+            return self._error_response(f"There is no Network action {action}", 404)
+        if device != "tv" and not self._checks_in(device):
+            return self._error_response(f"There is no device {device}", 404)
+        if action != "scan" and self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        args: Dict[str, Any] = {}
+        if action in ("connect", "forget"):
+            args["ssid"] = data.get("ssid")
+        if action == "connect":
+            args["password"] = data.get("password") or ""
+            args["hidden"] = data.get("hidden", False)
+        if device != "tv":
+            return self._queue(device, f"wifi_{action}", {"queued": True}, **args)
+        refused = self._without_helper()
+        if refused is not None:
+            return refused
+        try:
+            answer = await self._admin.call(f"wifi_{action}", **args)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        if action == "connect":
+            logger.info(f"Wi-Fi change of the TV Pi to {args['ssid']!r} asked for from Settings")
+        return web.json_response({key: value for key, value in answer.items() if key != "ok"})
+
+    # --- Meetings: Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
+
+    def _sign_in_refusal(self, request: web.Request, post: bool = True) -> Optional[web.Response]:
+        """The PIN first, then JSON for a POST, then a room with no meeting service; None when the request may go on."""
+        refused = self._require_unlock(request)
+        if refused is None and post:
+            refused = self._require_json(request)
+        if refused is None and self._meeting is None:
+            refused = self._error_response("Meeting service not available", 503)
+        return refused
+
+    async def _sign_in_answer(self) -> Dict[str, Any]:
+        """The sign-in's state as the Meetings page draws it (MeetingService.sign_in_state: the profile is read in a thread), and the
+        folder the room offers when it has none."""
+        state = await asyncio.to_thread(self._meeting.sign_in_state)
+        return dict(state, default_profile_dir=DEFAULT_GOOGLE_PROFILE)
+
+    async def _handle_sign_in_state(self, request: web.Request) -> web.Response:
+        """Whether the room is signed in to Google and as whom, whether a sign-in is on (and how long it has left without a touch), and
+        how the last one ended."""
+        refused = self._sign_in_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        return web.json_response(await self._sign_in_answer())
+
+    async def _handle_sign_in(self, request: web.Request) -> web.Response:
+        """Sign in to Google: the TV's meeting browser closes and Google's sign-in page fills the TV, for the touchpad (the room Pi's mouse)
+        and the keyboard (typed on the TV). Not in a meeting, nor while the laptop has the camera. A sign-in that is on already is
+        answered with its state."""
+        refused = self._sign_in_refusal(request)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        refusal = self._laptop.join_refusal() if self._laptop is not None else None
+        if refusal:
+            return self._error_response(refusal, 409)
+        try:
+            await self._meeting.begin_sign_in()
+        except SignInError as e:
+            return self._error_response(str(e), e.status)
+        await self._make_the_keyboard()
+        logger.info("Sign in to Google on the TV asked for from Settings")
+        return web.json_response(await self._sign_in_answer())
+
+    def _signing_in(self) -> bool:
+        """Whether a sign-in to Google has the TV: the only time the touch Pi types on the room Pi."""
+        return bool(getattr(self._meeting, "signing_in", False))
+
+    async def _make_the_keyboard(self) -> None:
+        """Make the room Pi's virtual keyboard as the sign-in begins, so that the desktop has taken it up by the first key (as the mouse is
+        made as a pointer socket opens). One that cannot be made is no reason to refuse the sign-in: the first key says why, in words."""
+        try:
+            await self._off_the_loop(self._keyboard.open)
+        except TvError:
+            pass
+        except Exception:  # noqa: BLE001 - a bug in making it: the first key makes it, or says why not
+            logger.warning("The room Pi's keyboard could not be made as the sign-in began", exc_info=True)
+
+    async def _handle_sign_in_done(self, request: web.Request) -> web.Response:
+        """Done: the sign-in browser closes, the room's Google session is looked for, and the TV has its browser back. {"signed_in",
+        "address", "words"}: "Signed in as <address>", or words that say Google kept none."""
+        refused = self._sign_in_refusal(request)
+        if refused is not None:
+            return refused
+        try:
+            address = await self._meeting.end_sign_in(True)
+        except SignInError as e:
+            return self._error_response(str(e), e.status)
+        words = SIGNED_IN_AS.format(address=address) if address else NO_SESSION
+        return web.json_response({"signed_in": address is not None, "address": address, "words": words})
+
+    async def _handle_sign_in_cancel(self, request: web.Request) -> web.Response:
+        """Cancel: the sign-in browser closes, nothing changes, and the TV has its browser back."""
+        refused = self._sign_in_refusal(request)
+        if refused is not None:
+            return refused
+        try:
+            await self._meeting.end_sign_in(False)
+        except SignInError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response({"signed_in": None, "address": None, "words": ENDED_WORDS[CANCELLED]})
+
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
         """The LG and Samsung TVs on the network. It also answers before a TV is configured.
 
@@ -1109,7 +2225,7 @@ class ControlService(Service):
             return self._error_response("The pointer is for the room's own page", 403)
         ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
         await ws.prepare(request)
-        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop)
+        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop, keyboard=self._keyboard, may_type=self._signing_in)
         self._pointers[ws] = _Pointer(request, relay)
         try:
             await self._make_the_mouse()
@@ -1172,6 +2288,11 @@ class ControlService(Service):
             message = json.loads(text)
         except (ValueError, RecursionError):                           # (a parser that is given more brackets than it can count is no better)
             return BAD_MESSAGE
+        if isinstance(message, dict) and message.get("type") == "keys" and self._signing_in():
+            # The room's keyboard is Settings': a key needs the unlock the sign-in screen holds (it sends it), not only an open sign-in
+            token = message.get("token")
+            if not (isinstance(token, str) and self._pins.check(token)):
+                return UNLOCK_TO_TYPE
         try:
             await relay.handle(message)
             if isinstance(message, dict) and message.get("target") == "pi":
@@ -1336,12 +2457,17 @@ class ControlService(Service):
         return None
 
     @staticmethod
-    async def _read_object(request: web.Request) -> Optional[Dict[str, Any]]:
-        """The request body as a JSON object, or None when it is not one."""
+    async def _read_object(request: web.Request, limit: int = MAX_BODY_BYTES) -> Optional[Dict[str, Any]]:
+        """The request body as a JSON object, or None when it is not one (or is longer than `limit` bytes)."""
         if not request.can_read_body:
             return {}
+        if request.content_length is not None and request.content_length > limit:
+            return None
         try:
-            data = await request.json()
+            body = await request.read()
+            if len(body) > limit:
+                return None
+            data = json.loads(body.decode(request.charset or "utf-8"))
         except Exception:
             return None
         return data if isinstance(data, dict) else None
@@ -1385,6 +2511,10 @@ class ControlService(Service):
             return self._error_response(refusal, 409)
         if self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response("A meeting is already in progress", 409)
+        if getattr(self._meeting, "signing_in", False):
+            return self._error_response(SIGN_IN_FIRST, 409)
+        if await self._updating():
+            return self._error_response(UPDATING, 409)
         self._last_error = None
         self._title = title
         self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode))

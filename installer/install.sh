@@ -20,18 +20,26 @@ CROOM_VERSION="2.0.0-dev"
 INSTALL_DIR="/opt/croom"
 CONFIG_DIR="/etc/croom"
 DATA_DIR="/var/lib/croom"
+# The root helper's own record (which release was kept before, restarts, updates): root's alone, never the room user's to write
+ADMIN_DIR="${ADMIN_DIR:-/var/lib/croom-admin}"
 LOG_DIR="/var/log/croom"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 # The agent runs as the desktop user that invoked sudo, so Chromium can use the
 # screen and audio of the signed-in session. Override the source with CROOM_REPO.
 CROOM_USER="${SUDO_USER:-}"
 CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"
+DEFAULT_REPO="git+https://github.com/ben-abeo/croom.to.git"
+# The TV Pi's releases (room settings spec 2026-10-29, section 6): $INSTALL_DIR/releases/<commit>/venv, with $INSTALL_DIR/venv a link to
+# the running one. They are root's (the root helper runs from them, and updates them), readable by all; the tests name their own user.
+RELEASE_OWNER="${RELEASE_OWNER:-root:root}"
 ROOM_CONFIG=""
 CREDENTIALS_FILE=""
 ZOOM_CREDENTIALS_FILE=""
 # Where the touchpad's virtual mouse is given to the input group, and where the module that makes it is set to load at boot
 UDEV_RULES_DIR="${UDEV_RULES_DIR:-/etc/udev/rules.d}"
 MODULES_LOAD_DIR="${MODULES_LOAD_DIR:-/etc/modules-load.d}"
+# The room Pi's keyboard layout (Sign in to Google on the TV types US key codes): the system's, and labwc's for the desktop user
+KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"
 
 # Log function
 log() {
@@ -186,6 +194,50 @@ install_virtual_mouse() {
     udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
 }
 
+# Set KEY=value in a file of KEY=value lines: the line that sets KEY is replaced, or the line added; the rest of the file is kept.
+# Running it again changes nothing.
+set_key_line() {
+    local file="$1" key="$2" value="$3" tmp
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+    tmp=$(mktemp "$file.XXXXXX")
+    grep -v "^[[:space:]]*$key=" "$file" > "$tmp" || true
+    printf '%s=%s\n' "$key" "$value" >> "$tmp"
+    chmod --reference="$file" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+    mv -f "$tmp" "$file"
+}
+
+# Remove the line that sets KEY from a file of KEY=value lines, when there is one; the rest of the file is kept.
+remove_key_line() {
+    local file="$1" key="$2" tmp
+    [[ -f "$file" ]] || return 0
+    grep -q "^[[:space:]]*$key=" "$file" || return 0
+    tmp=$(mktemp "$file.XXXXXX")
+    grep -v "^[[:space:]]*$key=" "$file" > "$tmp" || true
+    chmod --reference="$file" "$tmp" 2>/dev/null || chmod 644 "$tmp"
+    mv -f "$tmp" "$file"
+}
+
+# Sign in to Google on the TV types on the room Pi through a virtual keyboard that sends US key codes. Raspberry Pi OS starts with a GB
+# layout, where Shift+2 is " and not @: no address could be typed. The room Pi's layout is set to US for the desktop session that shows
+# the TV: the system's (/etc/default/keyboard, which X and the console read) and labwc's environment for the desktop user (Wayland),
+# with no variant (a GB variant such as extd would not go with the US layout). It applies at the next start of the desktop (a reboot).
+set_keyboard_layout() {
+    local home labwc_dir
+    log "Setting the room Pi's keyboard layout to US (for typing on the TV when signing in to Google)..."
+    set_key_line "$KEYBOARD_FILE" XKBLAYOUT '"us"'
+    set_key_line "$KEYBOARD_FILE" XKBVARIANT '""'
+    home=$(getent passwd "$CROOM_USER" | cut -d: -f6)
+    labwc_dir="${LABWC_DIR:-$home/.config/labwc}"
+    if [[ -z "${LABWC_DIR:-}" && ! -d "$home/.config" ]]; then
+        mkdir -p "$home/.config"
+        chown "$CROOM_USER:" "$home/.config" 2>/dev/null || true
+    fi
+    set_key_line "$labwc_dir/environment" XKB_DEFAULT_LAYOUT us
+    remove_key_line "$labwc_dir/environment" XKB_DEFAULT_VARIANT
+    chown "$CROOM_USER:" "$labwc_dir" "$labwc_dir/environment" 2>/dev/null || true
+}
+
 # Create directory structure
 create_directories() {
     log "Creating directories..."
@@ -194,36 +246,182 @@ create_directories() {
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
-    mkdir -p "$INSTALL_DIR/models"
+    mkdir -p "$INSTALL_DIR/models" "$INSTALL_DIR/browsers"
     # The room's signed-in Google Meet profile: the service user's alone (spec 2026-10-07, section 4.6)
     mkdir -p "$DATA_DIR/meet-profile"
     chmod 700 "$DATA_DIR/meet-profile"
 
-    chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR"
+    # The install folder holds the code root runs (the helper, from the venv link): root's, so that the room's user can't change it
+    # (room settings spec 2026-10-29, section 6). What the room software keeps there (its models, the meeting browser) stays the user's.
+    chown "$RELEASE_OWNER" "$INSTALL_DIR"
+    chmod 755 "$INSTALL_DIR"
+    chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/models" "$INSTALL_DIR/browsers"
     chown -R "$CROOM_USER:$CROOM_USER" "$DATA_DIR"
+    make_admin_dir
     chown -R "$CROOM_USER:$CROOM_USER" "$LOG_DIR"
 }
 
-# Install Croom Python package
+# --- The releases (room settings spec 2026-10-29, section 6). Settings > Software updates the TV Pi the same way (croom.admin.update):
+# a release is built beside the running one and the venv link moved to it in one step.
+
+# The commit a venv's croom was installed from, as pip recorded it (direct_url.json), or "unknown"
+venv_commit() {
+    local file commit
+    file=$(ls "$1"/lib/python3*/site-packages/croom-*.dist-info/direct_url.json 2>/dev/null | head -n 1 || true)
+    if [[ -n "$file" ]]; then
+        commit=$(python3 -c 'import json, sys; print((json.load(open(sys.argv[1])).get("vcs_info") or {}).get("commit_id", ""))' "$file" 2>/dev/null || true)
+    fi
+    if [[ "${commit:-}" =~ ^[0-9a-f]{40}$ ]]; then echo "$commit"; else echo "unknown"; fi
+}
+
+# The release the venv link points at, or nothing (no link yet)
+running_release() {
+    local target
+    target=$(readlink "$INSTALL_DIR/venv" 2>/dev/null || true)
+    if [[ "$target" =~ ^releases/([^/]+)/venv$ ]]; then echo "${BASH_REMATCH[1]}"; fi
+}
+
+# The newest commit of main on GitHub when installing from it; "unknown" for any other source (or when GitHub does not answer)
+main_commit() {
+    local commit=""
+    if [[ "$CROOM_REPO" == "$DEFAULT_REPO" ]]; then
+        commit=$(git ls-remote "${CROOM_REPO#git+}" refs/heads/main 2>/dev/null | cut -f1 || true)
+    fi
+    if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "$commit"; else echo "unknown"; fi
+}
+
+# A release folder is root's and readable by all: the room's user can read and run its code, and not change it
+seal_release() {
+    chown -R "$RELEASE_OWNER" "$1"
+    chmod -R go-w,a+rX "$1"
+}
+
+# Point the venv link at releases/$1/venv in one step (a new link renamed over it), and copy its VERSION beside the link
+switch_release() {
+    local name="$1" tmp="$INSTALL_DIR/.venv-$1.$$"
+    ln -sfn "releases/$name/venv" "$tmp"
+    mv -Tf "$tmp" "$INSTALL_DIR/venv"
+    cp "$INSTALL_DIR/releases/$name/VERSION" "$INSTALL_DIR/.VERSION.$$"
+    chmod 644 "$INSTALL_DIR/.VERSION.$$"
+    mv -f "$INSTALL_DIR/.VERSION.$$" "$INSTALL_DIR/VERSION"
+}
+
+# The root helper's own folder: root's, mode 700 (the helper acts on what its record says, so the room's user may not write it)
+make_admin_dir() {
+    mkdir -p "$ADMIN_DIR"
+    chown "$RELEASE_OWNER" "$ADMIN_DIR"
+    chmod 700 "$ADMIN_DIR"
+}
+
+# The helper's record of the release kept before the running one (Switch back goes to it, and an update never removes it), in the
+# helper's own folder, mode 600
+record_previous_release() {
+    make_admin_dir
+    python3 - "$ADMIN_DIR/admin-state.json" "$1" << 'PYTHON'
+import json, os, sys
+path, name = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        state = json.load(f)
+except (OSError, ValueError):
+    state = {}
+if not isinstance(state, dict):
+    state = {}
+state["previous_release"] = name
+fd = os.open(path + ".installer", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump(state, f)
+os.chmod(path + ".installer", 0o600)
+os.replace(path + ".installer", path)
+PYTHON
+    chown "$RELEASE_OWNER" "$ADMIN_DIR/admin-state.json"
+}
+
+# A venv this installer made before releases (a folder, the room user's) becomes the first release, root's, under the commit pip
+# recorded (or "unknown"), and the venv a link to it. The services' paths ($INSTALL_DIR/venv/bin/python) stay as they are.
+migrate_venv() {
+    local venv="$INSTALL_DIR/venv" name release
+    if [[ ! -d "$venv" || -L "$venv" ]]; then
+        return 0
+    fi
+    name=$(venv_commit "$venv")
+    release="$INSTALL_DIR/releases/$name"
+    log "Moving the installed venv into $release (the release folders Settings > Software updates)"
+    mkdir -p "$INSTALL_DIR/releases"
+    rm -rf "$release"
+    mkdir -p "$release"
+    mv "$venv" "$release/venv"
+    echo "$name" > "$release/VERSION"
+    seal_release "$release"
+    switch_release "$name"
+}
+
+# Build release $1 (a commit of main, or a local- name for another source) beside the running one: a venv with that version installed
+build_release() {
+    local name="$1" release="$INSTALL_DIR/releases/$1" source="$CROOM_REPO" version="$1"
+    if [[ "$name" =~ ^[0-9a-f]{40}$ ]]; then
+        source="$CROOM_REPO@$name"
+    fi
+    rm -rf "$release"
+    mkdir -p "$release"
+    python3 -m venv "$release/venv"
+    "$release/venv/bin/pip" install --upgrade pip
+    log "Installing from $source"
+    "$release/venv/bin/pip" install "$source"
+    if [[ ! "$name" =~ ^[0-9a-f]{40}$ ]]; then
+        version=$(venv_commit "$release/venv")
+    fi
+    echo "$version" > "$release/VERSION"
+    seal_release "$release"
+}
+
+# Keep two releases: the running one and $1, the one it replaced
+prune_releases() {
+    local keep="$1" running folder
+    running=$(running_release)
+    for folder in "$INSTALL_DIR"/releases/*; do
+        [[ -e "$folder" ]] || continue
+        case "$(basename "$folder")" in
+            "$running"|"$keep") ;;
+            *) rm -rf "$folder" ;;
+        esac
+    done
+}
+
+# Install Croom Python package: the newest of main as a release (unless it runs already), the venv link moved to it
 install_croom() {
+    local commit current
     log "Installing Croom..."
+    mkdir -p "$INSTALL_DIR/releases"
+    chown "$RELEASE_OWNER" "$INSTALL_DIR/releases"
+    chmod 755 "$INSTALL_DIR/releases"
+    migrate_venv
 
-    # Create virtual environment
-    python3 -m venv "$INSTALL_DIR/venv"
-
-    # Install package from the configured repository
-    "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-    log "Installing from $CROOM_REPO"
-    "$INSTALL_DIR/venv/bin/pip" install "$CROOM_REPO"
+    commit=$(main_commit)
+    if [[ "$commit" == "unknown" ]]; then
+        commit="local-$(date +%s)"   # a source other than main on GitHub: a release of its own
+    fi
+    current=$(running_release)
+    if [[ -n "$current" && "$current" == "$commit" ]]; then
+        log "This device runs $commit already"
+    else
+        build_release "$commit"
+        switch_release "$commit"
+        if [[ -n "$current" ]]; then
+            record_previous_release "$current"
+            prune_releases "$current"
+        fi
+    fi
+    # Every release root's and writable by root alone, the one moved in included: the helper runs only such a release
+    seal_release "$INSTALL_DIR/releases"
 
     # Install the browser where the service user can find it: under sudo the
     # default would be root's ~/.cache, invisible to the desktop user at runtime.
     export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"
-    "$INSTALL_DIR/venv/bin/pip" install playwright
     "$INSTALL_DIR/venv/bin/playwright" install chromium
     chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/browsers"
 
-    log "Croom installed"
+    log "Croom installed: $(cat "$INSTALL_DIR/VERSION")"
 }
 
 # Create default configuration
@@ -348,6 +546,17 @@ EOF
     log "Configuration created at $CONFIG_DIR/config.yaml"
 }
 
+# The config the room starts with, kept as config.yaml.good: the root helper puts it back when the room does not start with a change
+# made in Settings (and keeps it up to date each time the room starts healthy). Owner the room user, mode 640, as config.yaml.
+keep_good_config() {
+    [[ -f "$CONFIG_DIR/config.yaml" ]] || return 0
+    cp "$CONFIG_DIR/config.yaml" "$CONFIG_DIR/config.yaml.good.tmp"
+    chown "$CROOM_USER:$CROOM_USER" "$CONFIG_DIR/config.yaml.good.tmp"
+    chmod 640 "$CONFIG_DIR/config.yaml.good.tmp"
+    mv -f "$CONFIG_DIR/config.yaml.good.tmp" "$CONFIG_DIR/config.yaml.good"
+    log "The config the room starts with is kept as $CONFIG_DIR/config.yaml.good"
+}
+
 # Copy a secret file into place for the service user only (mode 600). A reinstall
 # may name the already installed file itself; keep it and fix owner and mode.
 install_private_file() {
@@ -382,8 +591,9 @@ install_zoom_credentials() {
 # Write the systemd units (separate from create_service so tests can call it)
 write_units() {
     mkdir -p "$SYSTEMD_DIR"
-    local uid
+    local uid group
     uid=$(id -u "$CROOM_USER")
+    group=$(id -gn "$CROOM_USER")   # the user's own primary group, whatever it is called: the helper's socket is that group's
 
     # The agent opens a headed browser, so it must start after the desktop
     # session exists: order after the display manager and wait for the X
@@ -397,7 +607,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$CROOM_USER
-Group=$CROOM_USER
+Group=$group
 WorkingDirectory=$INSTALL_DIR
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until [ -S /tmp/.X11-unix/X0 ]; do sleep 2; done'
 ExecStart=$INSTALL_DIR/venv/bin/python -m croom.core.agent -c $CONFIG_DIR/config.yaml
@@ -421,7 +631,7 @@ Wants=croom.service
 [Service]
 Type=simple
 User=$CROOM_USER
-Group=$CROOM_USER
+Group=$group
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/venv/bin/python -m croom_ui.main -c $CONFIG_DIR/config.yaml --fullscreen
 Restart=always
@@ -433,6 +643,24 @@ Environment=QT_QPA_PLATFORM=eglfs
 
 [Install]
 WantedBy=graphical.target
+EOF
+
+    # The root helper (room settings spec 2026-10-29, section 5): the fixed list of privileged jobs the room page's Settings ask for
+    # (the config, the keys, restart). It runs as root, so no User= line; what it writes is the service user's, and the service user's
+    # group is its socket's (/run/croom-admin.sock, mode 660), so that the room software, and only it and root, can ask.
+    cat > "$SYSTEMD_DIR/croom-admin.service" << EOF
+[Unit]
+Description=Crystal Meet root helper (croom-admin)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$INSTALL_DIR/venv/bin/python -m croom.admin --owner $CROOM_USER --group $group
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 EOF
 }
 
@@ -449,6 +677,8 @@ enable_services() {
     log "Enabling services..."
 
     systemctl enable croom.service
+    # Started now as well: it needs no desktop, and Settings can use it from the room's first start
+    systemctl enable --now croom-admin.service
 
     # Only enable UI service if touch display is detected
     if [[ -e /dev/input/touchscreen* ]] || [[ "$ENABLE_UI" == "yes" ]]; then
@@ -470,6 +700,7 @@ print_completion() {
     echo "Room page: http://$(hostname).local:8080/  (or use this device's IP address)"
     echo ""
     echo "If the service ever stops, the Start Crystal Meet icon on this device's desktop (over VNC) starts it again."
+    echo "The keyboard layout is now US (Sign in to Google on the TV types with it): reboot once for the desktop to use it."
     echo ""
     if [[ -n "$ROOM_CONFIG" ]]; then
         echo "Next steps:"
@@ -572,10 +803,12 @@ main() {
     check_platform
     create_user
     install_virtual_mouse
+    set_keyboard_layout
     create_directories
     install_dependencies
     install_croom
     create_config
+    keep_good_config
     install_credentials
     install_zoom_credentials
     create_service

@@ -7,6 +7,11 @@
 # the browser was ever closed. The page is opened with ?keyboard=1 so it shows its own
 # on-screen keyboard, because the Pi's keyboard is hidden under a kiosk window.
 #
+# It also installs the touch Pi's agent (tools/kiosk_agent), which checks in with the room's
+# TV Pi so that Settings there can update and reboot this Pi: a root systemd service run
+# from a root-owned copy of this checkout's commit in /opt/croom-kiosk/releases. The Pi
+# waits to join until Allow is tapped in Settings > Software on the room page.
+#
 # Usage: sudo bash installer/install-kiosk.sh --url http://<room device>:8080/
 #
 set -e
@@ -16,6 +21,17 @@ KIOSK_USER="${KIOSK_USER:-${SUDO_USER:-}}"
 BIN_DIR="${BIN_DIR:-/usr/local/bin}"
 SKIP_PACKAGES="${SKIP_PACKAGES:-}"
 SKIP_RASPI_CONFIG="${SKIP_RASPI_CONFIG:-}"
+# The agent (room settings spec 2026-10-29, section 7)
+SKIP_AGENT="${SKIP_AGENT:-}"
+KIOSK_FROM_AGENT="${KIOSK_FROM_AGENT:-}"      # set by the agent when it runs this from a new release: the agent stays as it is
+KIOSK_SOURCE="${KIOSK_SOURCE:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+KIOSK_REPO_URL="${KIOSK_REPO_URL:-https://github.com/ben-abeo/croom.to.git}"
+AGENT_DIR="${AGENT_DIR:-/opt/croom-kiosk}"
+AGENT_STATE="${AGENT_STATE:-/var/lib/croom-kiosk}"
+AGENT_PYTHON="${AGENT_PYTHON:-/usr/bin/python3}"
+UNIT_DIR="${UNIT_DIR:-/etc/systemd/system}"
+RELEASE_OWNER="${RELEASE_OWNER:-root:root}"
+AGENT_UNIT="croom-kiosk-agent.service"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -135,6 +151,115 @@ disable_blanking() {
     fi
 }
 
+# --- The touch Pi's agent ---------------------------------------------------------------
+
+# git on this checkout, which belongs to the desktop user while this runs as root.
+source_git() {
+    git -c safe.directory="$KIOSK_SOURCE" -c safe.directory="$KIOSK_SOURCE/.git" -C "$KIOSK_SOURCE" "$@"
+}
+
+# releases/<commit>: the commit's files, root's and read-only to the others, VERSION written last,
+# then renamed into place (a folder without VERSION is unfinished, and the agent removes it).
+build_agent_release() {
+    local commit="$1" release partial tarball
+    release="$AGENT_DIR/releases/$commit"
+    if [[ -f "$release/VERSION" && "$(cat "$release/VERSION")" == "$commit" ]]; then
+        chown -R "$RELEASE_OWNER" "$release"
+        chmod -R go-w,a+rX "$release"
+        return 0
+    fi
+    partial="$AGENT_DIR/releases/.partial-$commit"
+    tarball="$AGENT_DIR/.$commit.tar"
+    rm -rf "$partial"
+    mkdir -p "$partial"
+    source_git archive --format=tar -o "$tarball" "$commit"
+    tar -xf "$tarball" -C "$partial" --no-same-owner --no-same-permissions
+    rm -f "$tarball"
+    echo "$commit" > "$partial/VERSION"
+    chown -R "$RELEASE_OWNER" "$partial"
+    chmod -R go-w,a+rX "$partial"
+    sync
+    rm -rf "$release"
+    mv "$partial" "$release"
+}
+
+# A link in AGENT_DIR pointed at releases/<commit> in one step.
+point_agent_link() {
+    local name="$1" commit="$2"
+    ln -sfn "releases/$commit" "$AGENT_DIR/.$name-new"
+    mv -Tf "$AGENT_DIR/.$name-new" "$AGENT_DIR/$name"
+}
+
+# What the agent needs to know: the room page, and the desktop user the kiosk setup is for.
+write_agent_config() {
+    install -d -m 700 "$AGENT_STATE"
+    python3 - "$AGENT_STATE/config.json" "$KIOSK_URL" "$KIOSK_USER" << 'AGENT_CONFIG'
+import json, os, sys
+path, url, user = sys.argv[1:4]
+fd = os.open(path + ".new", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
+    json.dump({"url": url, "user": user}, f)
+os.replace(path + ".new", path)
+AGENT_CONFIG
+}
+
+# The agent's unit runs it from the good release (the last one that checked in), as root.
+write_agent_unit() {
+    mkdir -p "$UNIT_DIR"
+    cat > "$UNIT_DIR/$AGENT_UNIT" << AGENT_UNIT_FILE
+[Unit]
+Description=Crystal Meet table screen agent: checks in with the room's TV Pi for updates and reboots
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$AGENT_PYTHON $AGENT_DIR/good/tools/kiosk_agent/croom_kiosk_agent.py --base $AGENT_DIR --state $AGENT_STATE
+Restart=always
+RestartSec=5
+UMask=0022
+
+[Install]
+WantedBy=multi-user.target
+AGENT_UNIT_FILE
+    chmod 644 "$UNIT_DIR/$AGENT_UNIT"
+}
+
+install_agent() {
+    [[ -n "$SKIP_AGENT" ]] && return 0
+    if [[ -n "$KIOSK_FROM_AGENT" ]]; then
+        # Run by the agent from a new release: its unit is brought up to date, and the agent is not restarted (it reboots next)
+        write_agent_unit
+        systemctl daemon-reload || warn "systemctl daemon-reload failed"
+        systemctl enable "$AGENT_UNIT" >/dev/null 2>&1 || warn "Could not enable $AGENT_UNIT"
+        return 0
+    fi
+    if [[ -z "$SKIP_PACKAGES" ]] && ! command -v git >/dev/null 2>&1; then
+        apt-get install -y -qq git
+    fi
+    local commit
+    commit=$(source_git rev-parse HEAD 2>/dev/null) || error "Run this from a clone of the repository (git clone https://github.com/ben-abeo/croom.to.git)"
+    [[ "$commit" =~ ^[0-9a-f]{40}$ ]] || error "Could not tell which version this clone is: $commit"
+    log "Installing the touch Pi agent (version ${commit:0:7})..."
+    install -d -m 755 "$AGENT_DIR" "$AGENT_DIR/releases"
+    chown "$RELEASE_OWNER" "$AGENT_DIR" "$AGENT_DIR/releases"
+    if [[ ! -d "$AGENT_DIR/repo.git" ]]; then
+        git -c safe.directory="$KIOSK_SOURCE" -c safe.directory="$KIOSK_SOURCE/.git" clone --quiet --bare "$KIOSK_SOURCE" "$AGENT_DIR/repo.git"
+    fi
+    git -C "$AGENT_DIR/repo.git" remote set-url origin "$KIOSK_REPO_URL"
+    chown -R "$RELEASE_OWNER" "$AGENT_DIR/repo.git"
+    build_agent_release "$commit"
+    point_agent_link current "$commit"
+    point_agent_link good "$commit"
+    write_agent_config
+    rm -f "$AGENT_STATE/update.json" "$AGENT_STATE/trial-ok"   # this run is the version now: no update of before is under way
+    write_agent_unit
+    systemctl daemon-reload
+    systemctl enable "$AGENT_UNIT" >/dev/null 2>&1
+    systemctl restart "$AGENT_UNIT"
+    log "Agent running: open Settings > Software on the room page and tap Allow under Devices waiting to join"
+}
+
 print_completion() {
     echo ""
     echo -e "${GREEN}Crystal Meet table screen set up.${NC}"
@@ -142,6 +267,10 @@ print_completion() {
     echo "It opens full screen at every login; the Room controls icon on the desktop reopens it."
     echo "Open it now:  sudo -u $KIOSK_USER $BIN_DIR/crystal-meet-kiosk &"
     echo "To change the address later, run this installer again with the new --url."
+    if [[ -z "$SKIP_AGENT" && -z "$KIOSK_FROM_AGENT" ]]; then
+        echo "This Pi now asks to join the room: on the room page open Options > Settings > Software and tap Allow"
+        echo "under Devices waiting to join. From then on Settings updates and reboots it."
+    fi
     echo ""
 }
 
@@ -153,6 +282,7 @@ main() {
     write_autostart
     write_desktop_icon
     disable_blanking
+    install_agent
     print_completion
 }
 

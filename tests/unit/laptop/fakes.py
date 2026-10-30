@@ -5,6 +5,8 @@ from croom.laptop.switch import LAPTOP, ROOM
 class FakeUsbSwitch:
     """The switch with the MeetUp on this Pi to begin with. `answers = False` makes a move that does not happen."""
 
+    chip = "/dev/gpiochip4"
+
     def __init__(self, available=True):
         self._available, self.on_pi, self.answers, self.moves, self.opened, self.closed = available, True, True, [], False, False
 

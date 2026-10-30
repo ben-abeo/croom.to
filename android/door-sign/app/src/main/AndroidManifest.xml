@@ -3,6 +3,15 @@
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Settings on the touch Pi (room settings, as the panel's device owner): Wi-Fi, silent self-updates. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+
     <!-- Exit to Android opens the panel's own home screen, so the app has to see the other home apps. -->
     <queries>
         <intent>
@@ -12,6 +21,7 @@
     </queries>
 
     <application
+        android:name=".DoorSignApp"
         android:allowBackup="false"
         android:icon="@drawable/ic_sign"
         android:label="@string/app_name"
@@ -40,5 +50,32 @@
             android:exported="false"
             android:theme="@android:style/Theme.DeviceDefault"
             android:windowSoftInputMode="adjustResize" />
+
+        <!-- The panel's device owner: adb shell dpm set-device-owner to.croom.doorsign/.AdminReceiver -->
+        <receiver
+            android:name=".AdminReceiver"
+            android:exported="true"
+            android:permission="android.permission.BIND_DEVICE_ADMIN">
+            <meta-data
+                android:name="android.app.device_admin"
+                android:resource="@xml/device_admin" />
+            <intent-filter>
+                <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- Android's word on an update's install (PackageInstaller): only the app's own PendingIntent reaches it. -->
+        <receiver
+            android:name=".InstallReceiver"
+            android:exported="false" />
+
+        <!-- The app replaced by its update: the sign comes back at once. -->
+        <receiver
+            android:name=".UpdatedReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

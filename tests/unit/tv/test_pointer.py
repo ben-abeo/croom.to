@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 from croom.tv.errors import TvError
 from croom.tv.keystore import KeyStore
-from croom.tv.pointer import CODES, PiMouse, PointerRelay
+from croom.tv.pointer import BAD_KEYS, CHARACTERS, CODES, KEY_CODES, NAMED_KEYS, PiKeyboard, PiMouse, PointerRelay, keystrokes
 from tests.unit.scores.schedules import Clock
 from tests.unit.tv.fake_client import FakeTvClient
 from tests.unit.tv.helpers import WebOsTvCommandError, build_service, forgetful_tv, running, silent_tv, until, within
@@ -1272,16 +1272,224 @@ async def test_a_delta_is_made_whole_and_kept_to_a_sane_range(value, written):
     assert device.writes == ([(EV_REL, REL_X, written), (EV_REL, REL_Y, written), "syn"] if written else [])
 
 
-@pytest.mark.parametrize("target", ["tv", "pi"])
-async def test_keys_are_refused_in_words(tmp_path, target):
+# Typing on the room Pi (spec 2026-10-29, section 3: Sign in to Google on the TV)
+
+SHIFT = KEY_CODES["KEY_LEFTSHIFT"]
+
+
+def a_keyboard():
+    """A virtual keyboard on a fake device, and the device."""
+    device = FakeUInput()
+    return PiKeyboard(uinput_factory=lambda: device), device
+
+
+def typed(writes):
+    """What a keyboard's events type, as (key code, with Shift) per key pressed, checking that every key is let go of and each change is
+    reported on its own (a syn after each)."""
+    strokes, shift, held = [], False, set()
+    for index, event in enumerate(writes):
+        if event == "syn":
+            continue
+        assert writes[index + 1] == "syn", writes                  # one change per report, as a keyboard does
+        kind, code, value = event
+        assert kind == EV_KEY
+        if code == SHIFT:
+            shift = bool(value)
+            continue
+        if value:
+            held.add(code)
+            strokes.append((code, shift))
+        else:
+            held.discard(code)
+    assert not held and not shift, writes                          # nothing left down
+    return strokes
+
+
+def SIGNING_IN():
+    """The relay's may_type while a sign-in to Google is open."""
+    return True
+
+
+def quick(relay):
+    relay.KEY_GAP_S = 0
+    relay.FRESH_KEYBOARD_S = 0
+    return relay
+
+
+@pytest.mark.parametrize("char, key, shift", [
+    ("a", "KEY_A", False), ("A", "KEY_A", True), ("z", "KEY_Z", False), ("Q", "KEY_Q", True), ("0", "KEY_0", False), ("7", "KEY_7", False),
+    ("@", "KEY_2", True), ("!", "KEY_1", True), ("#", "KEY_3", True), ("$", "KEY_4", True), ("%", "KEY_5", True), ("^", "KEY_6", True),
+    ("&", "KEY_7", True), ("*", "KEY_8", True), ("(", "KEY_9", True), (")", "KEY_0", True), ("-", "KEY_MINUS", False),
+    ("_", "KEY_MINUS", True), ("=", "KEY_EQUAL", False), ("+", "KEY_EQUAL", True), ("[", "KEY_LEFTBRACE", False),
+    ("{", "KEY_LEFTBRACE", True), ("]", "KEY_RIGHTBRACE", False), ("}", "KEY_RIGHTBRACE", True), (";", "KEY_SEMICOLON", False),
+    (":", "KEY_SEMICOLON", True), ("'", "KEY_APOSTROPHE", False), ('"', "KEY_APOSTROPHE", True), ("`", "KEY_GRAVE", False),
+    ("~", "KEY_GRAVE", True), ("\\", "KEY_BACKSLASH", False), ("|", "KEY_BACKSLASH", True), (",", "KEY_COMMA", False),
+    ("<", "KEY_COMMA", True), (".", "KEY_DOT", False), (">", "KEY_DOT", True), ("/", "KEY_SLASH", False), ("?", "KEY_SLASH", True),
+    (" ", "KEY_SPACE", False), ("\n", "KEY_ENTER", False), ("\t", "KEY_TAB", False),
+])
+def test_each_character_is_its_key_on_a_us_keyboard_with_shift_as_needed(char, key, shift):
+    assert CHARACTERS[char] == (KEY_CODES[key], shift)
+    assert keystrokes({"text": char}) == [(KEY_CODES[key], shift)]
+
+
+def test_every_printable_ascii_character_can_be_typed_and_nothing_else_is_in_the_map():
+    printable = {chr(code) for code in range(32, 127)}
+    assert printable <= set(CHARACTERS) and set(CHARACTERS) - printable == {"\n", "\t"}
+
+
+@pytest.mark.parametrize("name, key", [("Enter", "KEY_ENTER"), ("Backspace", "KEY_BACKSPACE"), ("Tab", "KEY_TAB"), ("Escape", "KEY_ESC"),
+                                       ("ArrowLeft", "KEY_LEFT"), ("ArrowRight", "KEY_RIGHT"), ("ArrowUp", "KEY_UP"),
+                                       ("ArrowDown", "KEY_DOWN"), ("Delete", "KEY_DELETE"), ("Home", "KEY_HOME"), ("End", "KEY_END")])
+def test_the_named_keys(name, key):
+    assert keystrokes({"key": name}) == [(KEY_CODES[key], False)]
+
+
+@pytest.mark.parametrize("message, words", [
+    ({"text": "café"}, 'The TV keyboard types the letters, digits and symbols of a US keyboard: "é" is not one of them'),
+    ({"text": "€5"}, 'The TV keyboard types the letters, digits and symbols of a US keyboard: "€" is not one of them'),
+    ({"text": "a\x00"}, "The TV keyboard types the letters, digits and symbols of a US keyboard: U+0000 is not one of them"),
+    ({"text": "x" * 201}, "That is too much to type at once: 200 characters at most"),
+    ({}, BAD_KEYS), ({"text": "a", "key": "Enter"}, BAD_KEYS), ({"key": "F1"}, BAD_KEYS), ({"key": 13}, BAD_KEYS),
+    ({"text": 5}, BAD_KEYS), ({"text": None, "key": None}, BAD_KEYS),
+])
+async def test_what_cannot_be_typed_is_refused_in_words_and_nothing_of_it_is_typed(message, words):
+    keyboard, device = a_keyboard()
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN))
+    with pytest.raises(TvError) as failure:
+        await relay.handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert str(failure.value) == words
+    assert device.writes == []
+
+
+async def test_text_and_keys_are_typed_on_the_room_pis_keyboard_in_order():
+    keyboard, device = a_keyboard()
+    mouse, mouse_device = a_mouse()
+    relay = quick(PointerRelay(None, mouse, keyboard=keyboard, may_type=SIGNING_IN))
+    await relay.handle({"target": "pi", "type": "keys", "text": "Conf-A@crystalpm.com"})
+    await relay.handle({"target": "pi", "type": "keys", "key": "Enter"})
+    await relay.handle({"target": "pi", "type": "keys", "key": "Backspace"})
+    assert typed(device.writes) == keystrokes({"text": "Conf-A@crystalpm.com"}) + [(KEY_CODES["KEY_ENTER"], False),
+                                                                                  (KEY_CODES["KEY_BACKSPACE"], False)]
+    assert typed(device.writes)[0] == (KEY_CODES["KEY_C"], True) and typed(device.writes)[5] == (KEY_CODES["KEY_A"], True)
+    assert mouse_device.writes == []                                                    # (the mouse is not the keyboard)
+    assert relay.KEY_GAP_S == 0 and PointerRelay.KEY_GAP_S > 0                          # (the real one leaves a moment between keys)
+
+
+async def test_an_empty_text_types_nothing():
+    keyboard, device = a_keyboard()
+    await quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN)).handle({"target": "pi", "type": "keys", "text": ""})
+    assert device.writes == []
+
+
+async def test_keys_leave_a_moment_between_them_and_a_new_keyboard_a_moment_to_be_taken_up(monkeypatch):
+    keyboard, device = a_keyboard()
+    relay = PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN)
+    waits = []
+    real_sleep = asyncio.sleep
+
+    async def sleep(seconds, *args):
+        waits.append(seconds)
+        await real_sleep(0)
+    monkeypatch.setattr("croom.tv.pointer.asyncio.sleep", sleep)
+    await relay.handle({"target": "pi", "type": "keys", "text": "abc"})
+    assert waits == [PointerRelay.FRESH_KEYBOARD_S, PointerRelay.KEY_GAP_S, PointerRelay.KEY_GAP_S]
+    waits.clear()
+    await relay.handle({"target": "pi", "type": "keys", "text": "de"})          # made already: no wait for it
+    assert waits == [PointerRelay.KEY_GAP_S]
+    assert len(typed(device.writes)) == 5
+
+
+@pytest.mark.parametrize("message", [{"text": "a"}, {"key": "Enter"}])
+async def test_keys_for_the_tv_are_refused_in_words(tmp_path, message):
     service = build_service(tmp_path, PointerTv)
-    mouse, device = a_mouse()
+    keyboard, device = a_keyboard()
     async with running(service) as tv:
-        relay = PointerRelay(service, mouse)
+        relay = PointerRelay(service, a_mouse()[0], keyboard=keyboard)
         with pytest.raises(TvError) as failure:
-            await relay.handle({"target": target, "type": "keys", "text": "a"})
-        assert str(failure.value) == "Typing into the room Pi comes in a later version"
+            await relay.handle(dict({"target": "tv", "type": "keys"}, **message))
+        assert str(failure.value) == "Typing goes to the room Pi: the TV's cursor has no keyboard"
         assert sent(tv) == [] and device.writes == []
+
+
+@pytest.mark.parametrize("message", [{"text": "a"}, {"key": "Enter"}])
+async def test_keys_are_refused_in_words_unless_a_sign_in_is_open(message):
+    keyboard, device = a_keyboard()
+    signing_in = [False]
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=lambda: signing_in[0]))
+    with pytest.raises(TvError) as failure:
+        await relay.handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert str(failure.value) == "Typing on the TV is only for signing in"
+    assert device.writes == []
+    with pytest.raises(TvError) as failure:                    # (and by default: a relay that is told nothing does not type)
+        await quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard)).handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert str(failure.value) == "Typing on the TV is only for signing in" and device.writes == []
+    signing_in[0] = True
+    await relay.handle(dict({"target": "pi", "type": "keys"}, **message))
+    assert len(typed(device.writes)) == 1
+
+
+async def test_a_relay_with_no_keyboard_says_so():
+    with pytest.raises(TvError) as failure:
+        await PointerRelay(None, a_mouse()[0], may_type=SIGNING_IN).handle({"target": "pi", "type": "keys", "text": "a"})
+    assert str(failure.value) == "The room Pi has no keyboard to type with here"
+
+
+async def test_a_keyboard_that_cannot_be_made_says_why_in_words():
+    def failing():
+        raise PermissionError(13, "Permission denied", "/dev/uinput")
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=PiKeyboard(uinput_factory=failing), may_type=SIGNING_IN))
+    with pytest.raises(TvError) as failure:
+        await relay.handle({"target": "pi", "type": "keys", "text": "a"})
+    assert str(failure.value).startswith("The room Pi's keyboard is not allowed to use /dev/uinput")
+
+
+async def test_a_keyboard_that_stops_taking_events_lets_go_and_is_made_again():
+    devices = []
+
+    def factory():
+        devices.append(FakeUInput())
+        return devices[-1]
+    keyboard = PiKeyboard(uinput_factory=factory)
+    relay = quick(PointerRelay(None, a_mouse()[0], keyboard=keyboard, may_type=SIGNING_IN))
+    await relay.handle({"target": "pi", "type": "keys", "text": "a"})
+    devices[0].fail = OSError(19, "No such device")
+    with pytest.raises(TvError) as failure:
+        await relay.handle({"target": "pi", "type": "keys", "text": "B"})
+    assert str(failure.value) == "The room Pi's keyboard stopped taking events: [Errno 19] No such device"
+    assert devices[0].closed == 1 and not keyboard.ready
+    await relay.handle({"target": "pi", "type": "keys", "text": "c"})
+    assert typed(devices[1].writes) == [(KEY_CODES["KEY_C"], False)]
+
+
+def test_the_real_keyboard_is_evdevs_uinput_with_the_keys_it_types(monkeypatch):
+    made = []
+
+    class UInput(FakeUInput):
+        def __init__(self, capabilities, name):
+            super().__init__()
+            made.append((capabilities, name, self))
+    monkeypatch.setitem(sys.modules, "evdev", SimpleNamespace(UInput=UInput))
+    keyboard = PiKeyboard()
+    assert made == []
+    keyboard.type("Hi!")
+    capabilities, name, device = made[0]
+    assert name == "Crystal Meet keyboard" and list(capabilities) == [EV_KEY]
+    assert {code for code, _ in CHARACTERS.values()} | set(NAMED_KEYS.values()) | {SHIFT} <= set(capabilities[EV_KEY])
+    assert typed(device.writes) == [(KEY_CODES["KEY_H"], True), (KEY_CODES["KEY_I"], False), (KEY_CODES["KEY_1"], True)]
+
+
+def test_without_evdev_the_keyboard_says_so(monkeypatch):
+    monkeypatch.setitem(sys.modules, "evdev", None)
+    with pytest.raises(TvError) as failure:
+        PiKeyboard().type("a")
+    assert "keyboard needs the evdev library" in str(failure.value) and "pip install evdev" in str(failure.value)
+
+
+@pytest.mark.skipif(not KERNEL_HEADER.is_file(), reason="the kernel's input header is not on this machine")
+def test_the_key_codes_are_the_kernels():
+    defined = dict(re.findall(r"^#define\s+(\w+)\s+(0x[0-9a-fA-F]+|\d+)\b", KERNEL_HEADER.read_text(), re.M))
+    for name, value in KEY_CODES.items():
+        assert int(defined[name], 0) == value, name
 
 
 # The seam on the TV service

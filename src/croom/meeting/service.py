@@ -7,6 +7,7 @@ meeting lifecycle.
 
 import asyncio
 import logging
+from pathlib import Path
 from typing import Optional, Dict, Any, List, Callable, Awaitable
 
 from croom.core.config import Config
@@ -20,8 +21,14 @@ from croom.meeting.providers.base import (
 )
 from croom.meeting.providers import build_provider, get_all_providers
 from croom.meeting.display import TvDisplay
+from croom.meeting.signin_session import (
+    CANCELLED, DONE, LEAVE_FIRST, SET_UP_FIRST, SIGN_IN_FIRST, SignInError, SignInSession, google_account,
+)
 
 logger = logging.getLogger(__name__)
+
+# A meeting that has the TV's browser: Settings' sign-in to Google waits for it to end
+IN_PROGRESS = (MeetingState.JOINING, MeetingState.IN_LOBBY, MeetingState.CONNECTED, MeetingState.LEAVING)
 
 
 class MeetingService(Service):
@@ -34,11 +41,14 @@ class MeetingService(Service):
 
     BEFORE_JOIN_TIMEOUT_S = 30.0   # a before-join hook that takes longer than this is given up on, and the join goes on
 
-    def __init__(self, config: Config, display: Optional[TvDisplay] = None):
+    def __init__(self, config: Config, display: Optional[TvDisplay] = None, sign_in: Optional[SignInSession] = None):
         super().__init__("meeting")
         self.config = config
         # The TV: one browser page shared by every provider (spec 2026-10-07 TV, section 4.3).
         self._display = display
+        # Settings' Sign in to Google on the TV (spec 2026-10-29, section 3): made at the first sign-in, on the display's profile
+        self._sign_in = sign_in
+        self._courtesies: set = set()   # the before-join hooks run for a sign-in (the TV is woken), held until they are done
 
         self._providers: Dict[str, MeetingProvider] = {}
         self._active_provider: Optional[MeetingProvider] = None
@@ -50,9 +60,82 @@ class MeetingService(Service):
         self._starting = 0
 
     def pointer_in_use(self) -> None:
-        """The table's touchpad drove the room Pi's mouse: the TV shows its pointer for a moment (TvDisplay.pointer_in_use)."""
+        """The table's touchpad drove the room Pi's mouse (or typed on its keyboard): the TV shows its pointer for a moment
+        (TvDisplay.pointer_in_use), and a sign-in to Google that is on starts its 15 minutes again."""
+        if self._sign_in is not None:
+            self._sign_in.touch()
         if self._display is not None:
             self._display.pointer_in_use()
+
+    # ------------------------------------------------------------------
+    # Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
+    # ------------------------------------------------------------------
+
+    @property
+    def signing_in(self) -> bool:
+        """Whether a sign-in to Google has the TV: a join is refused meanwhile."""
+        return self._sign_in is not None and self._sign_in.active
+
+    def google_profile_dir(self) -> Optional[Path]:
+        """The room's Google profile folder, as the TV's browser uses it (the config's, until the room restarts); None when there is none."""
+        if self._display is not None:
+            return self._display.profile_dir
+        return Path(self.config.meeting.google_profile_dir) if self.config.meeting.google_profile_dir else None
+
+    def _session(self, profile: Path) -> SignInSession:
+        if self._sign_in is None:
+            self._sign_in = SignInSession(self._display, profile)
+        return self._sign_in
+
+    async def begin_sign_in(self) -> Dict[str, Any]:
+        """Close the TV's meeting browser and open Google's sign-in page there, on the room's profile. The answer is sign_in_state(). A
+        sign-in that is on already is left as it is. SignInError, in words: in a meeting ("Leave the meeting first"), a room with no
+        Google profile folder ("Set up Google Meet first"), or a browser that could not be opened (the TV has its browser back)."""
+        if self.signing_in:
+            return self.sign_in_state()
+        if self.state in IN_PROGRESS:
+            raise SignInError(LEAVE_FIRST)
+        profile = self.google_profile_dir()
+        if profile is None:
+            raise SignInError(SET_UP_FIRST)
+        session = self._session(profile)
+        self._wake_the_tv()            # (tasks: they run once begin() first waits, and it has said it is on by then)
+        await session.begin()          # (on from its first line, before it awaits anything: a join from here on is refused)
+        return self.sign_in_state()
+
+    async def end_sign_in(self, done: bool) -> Optional[str]:
+        """Done (`done`): the address the room is signed in as now, or None when Google kept no sign-in; Cancel: None, and nothing
+        changed. The TV has its browser back either way. SignInError when no sign-in is on."""
+        if self._sign_in is None:
+            raise SignInError("The sign-in has ended already")
+        return await self._sign_in.end(DONE if done else CANCELLED)
+
+    def sign_in_state(self) -> Dict[str, Any]:
+        """For Settings' Meetings page: {"configured", "profile_dir", "active", "idle_left_s" (while on), "signed_in", "address"
+        (while off: what the profile holds now), "last" (how the last sign-in ended: {"outcome", "words", "at", "address"})}."""
+        profile = self.google_profile_dir()
+        answer: Dict[str, Any] = {"configured": profile is not None, "profile_dir": str(profile) if profile else None,
+                                  "active": False, "last": None, "signed_in": False, "address": None}
+        if self._sign_in is not None:
+            answer.update(self._sign_in.state())
+        if profile is not None and not answer["active"]:
+            answer.update(google_account(profile))
+        return answer
+
+    def _wake_the_tv(self) -> None:
+        """The before-join hooks, as a courtesy to the sign-in (the TV is woken and put on the room Pi's input): not waited for."""
+        async def courtesy(hook):
+            name = getattr(hook, "__qualname__", None) or repr(hook)
+            try:
+                await asyncio.wait_for(hook(), self.BEFORE_JOIN_TIMEOUT_S)
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:  # noqa: BLE001 - the sign-in goes on without the TV's answer
+                logger.warning(f"Before-join hook {name} failed for the sign-in ({type(e).__name__}: {e})")
+        for hook in self._before_join:
+            task = asyncio.ensure_future(courtesy(hook))
+            self._courtesies.add(task)
+            task.add_done_callback(self._courtesies.discard)
 
     async def start(self) -> None:
         """Start the TV display and the configured providers on it."""
@@ -87,6 +170,15 @@ class MeetingService(Service):
 
     async def stop(self) -> None:
         """Stop meeting service."""
+        # A sign-in to Google that is on ends (nothing changes); its browser goes, and the TV's browser stops below with the rest
+        for task in list(self._courtesies):
+            task.cancel()
+        if self._sign_in is not None:
+            try:
+                await self._sign_in.close()
+            except Exception as e:  # noqa: BLE001 - the agent stops whatever
+                logger.error(f"The sign-in to Google did not end cleanly: {e}")
+
         # Leave any active meeting
         if self._active_provider and self._active_provider.state == MeetingState.CONNECTED:
             await self.leave_meeting()
@@ -172,6 +264,9 @@ class MeetingService(Service):
         Returns:
             MeetingInfo with connection details
         """
+        if self.signing_in:
+            raise RuntimeError(SIGN_IN_FIRST)
+
         # Apply defaults from config
         if display_name is None:
             display_name = self.config.room.name or "Conference Room"

@@ -144,6 +144,15 @@ def test_from_config_reads_the_device_travel_time_and_preset_names(tmp_path):
     assert camera._device_pref == "/dev/video2" and camera._travel_s == 6.0
 
 
+def test_preset_names_set_from_settings_apply_at_once():
+    """Settings changes control.camera_presets live (spec 2026-10-29, section 4): the next state has the new names."""
+    camera, _, _ = camera_for(names=["Wide", "Table", "Whiteboard"])
+    camera.set_preset_names(["Door", "Screen"])
+    assert [p["name"] for p in camera.state()["presets"]] == ["Door", "Screen", "Preset 3"]
+    camera.set_preset_names("nonsense")
+    assert [p["name"] for p in camera.state()["presets"]] == ["Wide", "Table", "Whiteboard"]
+
+
 # --- control calls are serialised ---
 
 async def test_control_writes_never_interleave():

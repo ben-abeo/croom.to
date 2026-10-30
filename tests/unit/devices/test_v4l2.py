@@ -79,3 +79,32 @@ def test_set_many_raises_what_the_driver_raises(monkeypatch):
     with pytest.raises(OSError) as failure:
         V4l2Controls().set_many(7, {V4L2_CID_PAN_SPEED: 1})
     assert failure.value.errno == 22
+
+
+def test_camera_name_is_none_for_what_is_not_a_video_node(tmp_path):
+    # The Devices page lists /dev/video* by this: a node that can't be opened, or answers no VIDIOC_QUERYCAP, is not offered
+    plain = tmp_path / "video9"
+    plain.write_text("")
+    assert V4l2Controls().camera_name(str(plain)) is None
+    assert V4l2Controls().camera_name(str(tmp_path / "missing")) is None
+
+
+@pytest.mark.parametrize("bus, caps, name", [
+    (b"usb-xhci-hcd.1-1", 0x84A00001, "Logitech MeetUp"),        # a USB camera's capture node: its card name
+    (b"usb-xhci-hcd.1-1", 0x84A00000 | 0x00800000, None),        # its metadata node: no video capture
+    (b"platform:bcm2835-codec", 0x84204001, None),               # the Pi's own (a codec, the ISP)
+])
+def test_camera_name_offers_capture_nodes_off_the_pis_own_devices(monkeypatch, bus, caps, name):
+    from croom.devices import v4l2 as module
+
+    def query(fd, request, cap):
+        cap.card = b"Logitech MeetUp"
+        cap.bus_info = bus
+        cap.capabilities = 0x80000000 | 0x1
+        cap.device_caps = caps & 0x7FFFFFFF
+        return 0
+
+    monkeypatch.setattr(module.os, "open", lambda path, flags: 99)
+    monkeypatch.setattr(module.os, "close", lambda fd: None)
+    monkeypatch.setattr(module.fcntl, "ioctl", query)
+    assert V4l2Controls().camera_name("/dev/video0") == name

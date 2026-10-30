@@ -3,7 +3,8 @@
 // change in place, so nothing under a finger is ever replaced; the keys never take the focus, and hide only for a tap
 // elsewhere, Hide, Join or a view change. The kiosk (?keyboard=1) opens it when a field is tapped; the button beside
 // the link field toggles it on any device. Each key a finger lands on can click (spec 2026-10-13, 3.3), as the room's
-// setting says (Options > Keyboard).
+// setting says (Options > Keyboard). Sign in to Google (Settings, Meetings) points the keys at the TV instead of a field: typeOn(sink)
+// hands every key to the sink, which sends it to the room Pi's keyboard, and Join is Enter there.
 (function () {
   "use strict";
   const P = window.croomPage;
@@ -57,6 +58,8 @@
   let previewTimer = null;
   let clickOn = true;                // the room's setting (the page hands it over with every status); on until it says otherwise
   let audio = null;                  // made by the first key, not before: a tap has led to a key, and a browser starts audio made earlier silent
+  let remote = null;                 // while the keys type on the TV: { text(characters), key(name), closed() }
+  let remoteLayer = "letters";
 
   const field = () => (input.hidden ? link : input);
   const inTray = (t) => Boolean(t && t.closest && t.closest(".key, .keyboard"));   // a key may be on the shelf: its row is not under the tray then
@@ -65,8 +68,8 @@
   // Done sends its form, a MAC address's only puts the keys away.
   const extraField = (target) => Boolean(target && target.matches && target.matches("input[data-keyboard]"));
   const inView = (target) => { const v = target.closest(".view"); return Boolean(v) && v.dataset.view === P.view(); };
-  const layer = () => layers.get(field()) || "letters";
-  const label = (key) => (key === "join" && extraField(field()) ? "Done" :
+  const layer = () => (remote ? remoteLayer : layers.get(field()) || "letters");
+  const label = (key) => (key === "join" && remote ? "Enter" : key === "join" && extraField(field()) ? "Done" :
     LABELS[key] || (shift !== "off" && layer() === "letters" ? key.toUpperCase() : key));
 
   function keyButton(key) {
@@ -120,15 +123,16 @@
     else document.removeEventListener("touchstart", cancelTrayTouch, true);
   }
   function show() {
-    if (open || !(extraField(field()) ? inView(field()) : P.view() === "idle")) return;
+    if (open || !(remote || (extraField(field()) ? inView(field()) : P.view() === "idle"))) return;
     open = true;
     trayTouches(true);
     place(layer());
     relabel();
     box.hidden = false;
-    document.body.classList.add("keyboard-open");
+    // (typing on the TV: the full-screen touchpad is under the keys, and the page behind it is not made room in)
+    if (!remote) document.body.classList.add("keyboard-open");
     toggle.setAttribute("aria-pressed", "true");
-    field().scrollIntoView({ block: "center" });
+    if (!remote) field().scrollIntoView({ block: "center" });
   }
   function hide() {
     if (!open) return;
@@ -141,9 +145,22 @@
     // listener has to cancel it, or the tap's click lands on whatever is beneath. A tick is time enough; keys that are back
     // by then keep the listener.
     setTimeout(() => { if (!open) trayTouches(false); }, 0);
+    if (remote && remote.closed) remote.closed();
+  }
+  // The keys type on the TV (sink: what Sign in to Google sends them through), or, with none, go back to the page's fields. The keys
+  // come up for the TV at once; Hide puts them away and keeps the TV as their target, for the next time they are shown.
+  function typeOn(sink) {
+    hide();
+    remote = sink || null;
+    box.classList.toggle("remote", Boolean(remote));
+    if (!remote) return;
+    remoteLayer = "letters";
+    shift = "off";
+    show();
   }
   function switchLayer(name) {
-    layers.set(field(), name);
+    if (remote) remoteLayer = name;
+    else layers.set(field(), name);
     shift = "off";
     // A held letter's pop would stay over keys that are not its: it goes with its layer, and the lift that comes later finds nothing to do.
     // Only when the layer changes: a press that gives the focus back to the field comes here too, with the layer it has.
@@ -180,6 +197,16 @@
     }
     if (key.startsWith("layer:")) { switchLayer(key.slice(6)); return; }
     if (key === "hide") { hide(); return; }
+    if (remote) {
+      if (key === "join") remote.key("Enter");
+      else if (key === "backspace") remote.key("Backspace");
+      else if (key === "space") remote.text(" ");
+      else {
+        remote.text(label(key));
+        if (shift === "once") { shift = "off"; relabel(); }
+      }
+      return;
+    }
     if (key === "join") {
       const target = field();
       hide();
@@ -312,5 +339,7 @@
   // Nothing in the page calls this: it is the tests' hold on the keyboard. open and hide bring the keys up and put them away as a
   // view change or Join does; press, onPress and setClick exist for the tests alone (a key pressed from code, a hook on every press,
   // and the room's setting handed over by hand).
-  window.croomKeyboard = { open: show, hide: hide, press: act, onPress: (fn) => listeners.push(fn), setClick: setClick };
+  // typeOn and isOpen are Sign in to Google's (touchpad.js): the keys pointed at the TV, and whether they are up.
+  window.croomKeyboard = { open: show, hide: hide, press: act, onPress: (fn) => listeners.push(fn), setClick: setClick, typeOn: typeOn,
+    isOpen: () => open };
 })();

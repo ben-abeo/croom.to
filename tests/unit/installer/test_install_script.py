@@ -135,6 +135,44 @@ def test_units_run_as_the_desktop_user_with_the_bundled_browser(tmp_path):
     assert f"User={me}" in ui and "Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers" in ui
 
 
+def test_the_root_helper_runs_as_root_for_the_service_users_files_and_socket(tmp_path):
+    """croom-admin (spec 2026-10-29, section 5): root, so no User= line; the room's user owns what it writes and is the socket's group."""
+    result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={tmp_path}; CROOM_USER=$(id -un); write_units")
+    assert result.returncode == 0, result.stderr
+    me = subprocess.check_output(["id", "-un"], text=True).strip()
+    group = subprocess.check_output(["id", "-gn"], text=True).strip()   # the user's primary group, which need not share its name
+    unit = (tmp_path / "croom-admin.service").read_text()
+    assert "Description=Crystal Meet root helper (croom-admin)" in unit
+    assert "After=network.target" in unit
+    assert "User=" not in unit and "Group=" not in unit
+    assert f"ExecStart=/opt/croom/venv/bin/python -m croom.admin --owner {me} --group {group}" in unit
+    assert "Restart=always" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_the_root_helpers_group_is_the_users_primary_group_by_its_own_name(tmp_path):
+    """The socket's group is the room user's primary group as `id -gn` names it, not a group assumed to share the user's name."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_id = bin_dir / "id"
+    fake_id.write_text('#!/bin/bash\ncase "$1" in -gn) echo staff ;; -u) echo 1000 ;; *) exit 1 ;; esac\n')
+    fake_id.chmod(0o755)
+    units = tmp_path / "units"
+    result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={units}; CROOM_USER=pi; write_units", env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
+    assert result.returncode == 0, result.stderr
+    assert "-m croom.admin --owner pi --group staff\n" in (units / "croom-admin.service").read_text()
+    # The agent runs in that group too, so that it can always reach the helper's socket
+    for unit in ("croom.service", "croom-ui.service"):
+        text = (units / unit).read_text()
+        assert "User=pi\n" in text and "Group=staff\n" in text, unit
+
+
+def test_the_root_helper_is_enabled_and_started():
+    script = SCRIPT.read_text()
+    enable = script[script.index("enable_services() {"):]
+    assert "systemctl enable --now croom-admin.service" in enable[:enable.index("\n}")]
+
+
 def test_browser_is_installed_for_the_service_user():
     install = SCRIPT.read_text().split("install_croom() {")[1].split("\n}\n")[0]
     assert 'export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"' in install
@@ -254,7 +292,7 @@ def test_completion_message_names_the_zoom_check_when_zoom_credentials_were_inst
 def test_profile_folder_is_private_to_the_service_user(tmp_path):
     result = run_bash(
         f"source {SCRIPT}; INSTALL_DIR={tmp_path / 'opt'}; CONFIG_DIR={tmp_path / 'etc'}; DATA_DIR={tmp_path / 'lib'}; "
-        f"LOG_DIR={tmp_path / 'log'}; CROOM_USER=$(id -un); create_directories"
+        f"LOG_DIR={tmp_path / 'log'}; CROOM_USER=$(id -un); RELEASE_OWNER=$(id -un):$(id -gn); ADMIN_DIR={tmp_path / 'admin'}; create_directories"
     )
     assert result.returncode == 0, result.stderr
     profile = tmp_path / "lib" / "meet-profile"
@@ -418,3 +456,77 @@ def test_the_virtual_mouse_step_can_be_run_on_its_own_from_an_installed_device(t
     assert 'KERNEL=="uinput", GROUP="input", MODE="0660"' in rule_file.read_text().splitlines()
     (module_file,) = modules.iterdir()
     assert module_file.read_text().split() == ["uinput"]
+
+
+GB_KEYBOARD = '''# KEYBOARD CONFIGURATION FILE
+
+# Consult the keyboard(5) manual page.
+
+XKBMODEL="pc105"
+XKBLAYOUT="gb"
+XKBVARIANT=""
+XKBOPTIONS=""
+
+BACKSPACE="guess"
+'''
+
+
+def test_the_room_pis_keyboard_layout_is_set_to_us_for_typing_on_the_tv(tmp_path):
+    """Sign in to Google on the TV types US key codes through the room Pi's virtual keyboard; Raspberry Pi OS starts in GB, where Shift+2
+    is " and no address can be typed. The system's layout and labwc's for the desktop user are US; the rest of each file is kept, and a
+    second run changes nothing."""
+    keyboard, labwc = tmp_path / "keyboard", tmp_path / "home" / ".config" / "labwc"
+    keyboard.write_text(GB_KEYBOARD)
+    labwc.mkdir(parents=True)
+    (labwc / "environment").write_text("XKB_DEFAULT_MODEL=pc105\nXKB_DEFAULT_LAYOUT=gb\nXKB_DEFAULT_VARIANT=extd\n")
+    snippet = f"source {SCRIPT}; KEYBOARD_FILE={keyboard}; LABWC_DIR={labwc}; CROOM_USER=$(id -un); set_keyboard_layout"
+    result = run_bash(snippet)
+    assert result.returncode == 0, result.stderr
+    lines = keyboard.read_text().splitlines()
+    assert 'XKBLAYOUT="us"' in lines and 'XKBVARIANT=""' in lines and 'XKBLAYOUT="gb"' not in lines
+    assert [line for line in lines if line.startswith("XKBLAYOUT=")] == ['XKBLAYOUT="us"']
+    assert 'XKBMODEL="pc105"' in lines and 'XKBOPTIONS=""' in lines and 'BACKSPACE="guess"' in lines   # the rest is kept
+    environment = (labwc / "environment").read_text().splitlines()
+    assert environment == ["XKB_DEFAULT_MODEL=pc105", "XKB_DEFAULT_LAYOUT=us"]          # the GB variant is cleared with the layout
+    first = (keyboard.read_text(), (labwc / "environment").read_text())
+    assert run_bash(snippet).returncode == 0
+    assert (keyboard.read_text(), (labwc / "environment").read_text()) == first                         # idempotent
+
+
+def test_the_keyboard_layout_files_are_made_when_there_are_none(tmp_path):
+    keyboard, labwc = tmp_path / "default" / "keyboard", tmp_path / "labwc"
+    result = run_bash(f"source {SCRIPT}; KEYBOARD_FILE={keyboard}; LABWC_DIR={labwc}; CROOM_USER=$(id -un); set_keyboard_layout")
+    assert result.returncode == 0, result.stderr
+    assert keyboard.read_text().splitlines() == ['XKBLAYOUT="us"', 'XKBVARIANT=""']
+    assert (labwc / "environment").read_text().splitlines() == ["XKB_DEFAULT_LAYOUT=us"]
+
+
+def test_the_keyboard_layout_goes_where_the_system_reads_it_and_is_part_of_every_install():
+    text = SCRIPT.read_text()
+    assert 'KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"' in text
+    assert 'labwc_dir="${LABWC_DIR:-$home/.config/labwc}"' in text
+    assert "set_keyboard_layout" in text.split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+
+
+def test_the_completion_text_says_the_layout_is_us_and_applies_after_a_reboot():
+    result = run_bash(f"source {SCRIPT}; hostname() {{ echo room; }}; print_completion")
+    assert result.returncode == 0, result.stderr
+    assert "The keyboard layout is now US (Sign in to Google on the TV types with it): reboot once for the desktop to use it." in result.stdout
+
+
+def test_the_installer_keeps_the_config_the_room_starts_with_as_config_yaml_good(tmp_path):
+    """The root helper puts config.yaml.good back when the room does not start with a change made in Settings: the installer writes it
+    at every install and upgrade, a copy of config.yaml, owner the room user, mode 640."""
+    room = tmp_path / "room.yaml"
+    room.write_text("version: 2\nroom:\n  name: Room 9\n")
+    etc = tmp_path / "etc"
+    result = run_bash(f"source {SCRIPT}; CONFIG_DIR={etc}; CROOM_USER=$(id -un); ROOM_CONFIG={room}; create_config; keep_good_config")
+    assert result.returncode == 0, result.stderr
+    good = etc / "config.yaml.good"
+    assert good.read_text() == room.read_text() and oct(good.stat().st_mode & 0o777) == "0o640"
+    assert sorted(p.name for p in etc.iterdir()) == ["config.yaml", "config.yaml.good"]
+    (etc / "config.yaml").write_text("version: 2\nroom:\n  name: Room 10\n")    # an upgrade: the config as it is now
+    assert run_bash(f"source {SCRIPT}; CONFIG_DIR={etc}; CROOM_USER=$(id -un); keep_good_config").returncode == 0
+    assert good.read_text() == "version: 2\nroom:\n  name: Room 10\n"
+    main = SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+    assert main.index("create_config") < main.index("keep_good_config")

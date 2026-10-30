@@ -67,9 +67,11 @@
     <button type="button" id="back-from-options" class="button quiet back">Back</button>
     <div class="menu">
       <button type="button" id="open-camera-setup" class="button quiet menu-item" data-icon="move">Camera framing</button>
+      <button type="button" id="open-mic-options" class="button quiet menu-item" data-icon="mic">Mic level</button>
       <button type="button" id="open-screensaver" class="button quiet menu-item" data-icon="monitor">Screensaver</button>
       <button type="button" id="open-door-sign" class="button quiet menu-item" data-icon="door">Door sign</button>
       <button type="button" id="open-tv-options" class="button quiet menu-item" data-icon="tv">TV</button>
+      <button type="button" id="open-settings" class="button quiet menu-item" data-icon="settings">Settings</button>
     </div>
     <section class="keyboard-section">
       <p class="kicker">Keyboard</p>
@@ -78,6 +80,23 @@
         <button type="button" id="key-click-off" class="button quiet" aria-pressed="false" data-icon="volume-x">Key click off</button>
       </div>
     </section>
+  </section>
+
+  <!-- Settings (spec 2026-10-29, section 3), behind the PIN: the pad, then the menu of pages; settings.js draws both. -->
+  <section class="view" data-view="settings-pin">
+    <button type="button" id="back-from-settings-pin" class="button quiet back">Back</button>
+    <section id="pin-host" class="pin-host" aria-label="Settings PIN"></section>
+  </section>
+
+  <section class="view" data-view="settings">
+    <div class="settings-head">
+      <button type="button" id="back-from-settings" class="button quiet back">Back</button>
+      <h2 id="settings-title" class="settings-title">Settings</h2>
+      <p id="settings-time" class="settings-time" aria-live="polite"></p>
+      <button type="button" id="settings-lock" class="button quiet" data-icon="lock">Lock</button>
+    </div>
+    <div id="settings-menu" class="menu settings-menu"></div>
+    <section id="settings-page" class="settings-page" aria-labelledby="settings-title" hidden></section>
   </section>
 
   <section class="view" data-view="camera">
@@ -118,6 +137,28 @@
             </div>
           </div>
         </div>
+      </div>
+    </section>
+  </section>
+
+  <!-- Mic level (spec 2026-10-29): the room microphone's level, 0 to 150 where 100 is the device's normal level; from Options, and from the meeting
+       screen's dock. The room keeps the level chosen here during every meeting (the devices service puts it back). devices.js draws it. -->
+  <section class="view" data-view="mic">
+    <button type="button" id="back-from-mic" class="button quiet back">Back</button>
+    <section class="mic-section">
+      <p class="kicker">Mic level</p>
+      <p id="mic-note" class="note"></p>
+      <div id="mic-panel" class="sound" hidden>
+        <p id="mic-device" class="device"></p>
+        <label class="visually-hidden" for="mic-slider">Mic level</label>
+        <input id="mic-slider" type="range" min="0" max="150" step="1" value="100">
+        <div class="sound-buttons">
+          <button type="button" id="mic-quieter" class="button quiet" data-icon="mic">Quieter</button>
+          <span id="mic-level" class="level" aria-live="polite"></span>
+          <button type="button" id="mic-louder" class="button quiet" data-icon="mic">Louder</button>
+        </div>
+        <p class="note mic-help">100 is the microphone's normal level. Turn it up when the people in the call cannot hear the room; the room keeps
+          it there in every meeting.</p>
       </div>
     </section>
   </section>
@@ -177,6 +218,8 @@
             </div>
           </div>
         </section>
+        <!-- Mic level (spec 2026-10-29): its own screen, as the camera's: the dock has no height to spare at the table's 1280 by 800 -->
+        <button type="button" id="open-mic" class="button quiet menu-item" data-icon="mic" aria-label="Mic level">Mic</button>
         <div class="menu">
           <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
           <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>
@@ -409,6 +452,8 @@
       <button type="button" id="touchpad-tv" class="button" aria-pressed="false" data-icon="tv">TV</button>
       <button type="button" id="touchpad-pi" class="button" aria-pressed="true" data-icon="monitor">Room Pi</button>
     </div>
+    <button type="button" id="touchpad-keys" class="button touchpad-keys" data-icon="keyboard" aria-pressed="false" hidden>Type on the TV</button>
+    <button type="button" id="touchpad-cancel" class="button touchpad-cancel" hidden>Cancel</button>
     <button type="button" id="touchpad-done" class="button" data-icon="check">Done</button>
   </div>
   <div id="touchpad-surface" class="touchpad-surface"><p id="touchpad-how" class="touchpad-how"></p></div>
@@ -420,5 +465,12 @@
 <script src="/static/keyboard.js"></script>
 <script src="/static/touchpad.js"></script>
 <script src="/static/remote.js"></script>
+<script src="/static/settings.js"></script>
+<script src="/static/settings-form.js"></script>
+<script src="/static/settings-pages.js"></script>
+<script src="/static/settings-tools.js"></script>
+<script src="/static/settings-software.js"></script>
+<script src="/static/settings-devices.js"></script>
+<script src="/static/settings-network.js"></script>
 </body>
 </html>

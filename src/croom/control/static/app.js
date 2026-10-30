@@ -6,11 +6,12 @@
   const EVENTS_EVERY_MS = 30000;
   const CONFIRM_MS = 5000;
   const IN_MEETING = ["joining", "in_lobby", "connected", "leaving"];   // the meeting states in which the room is taken
-  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera and TV views
-  // belong to whichever mode showed them, so their Back returns there.
-  const VIEW_MODES = { idle: "idle", booking: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
+  // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera, Mic level and TV views
+  // belong to whichever mode showed them, so their Back returns there. Settings (settings.js) is the PIN pad and the menu of pages, from Options.
+  const VIEW_MODES = { idle: "idle", booking: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", "settings-pin": "idle", settings: "idle",
+                       meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
-  const SUB_SCREENS = ["participants", "chat", "host", "tv"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
+  const SUB_SCREENS = ["participants", "chat", "host", "tv", "mic"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
 
   const el = (id) => document.getElementById(id);
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
@@ -25,6 +26,7 @@
   const renderHooks = [];   // devices.js and remote.js register their rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js, keyboard.js and remote.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
+  let micMode = "idle";     // the mode that opened Mic level (Options, or the meeting screen's dock)
   let tvMode = "idle";      // the mode that opened the TV view
   let tvReturnView = "options";
   let lastMeetingState = null;   // the meeting state the last render saw: a landing on the error screen happens once, on the change
@@ -83,11 +85,12 @@
 
   const view = () => document.body.dataset.view;
   const mode = () => (model.status && IN_MEETING.includes(model.status.meeting.state) ? "meeting" : "idle");
-  const viewMode = (name) => (name === "camera" ? cameraMode : name === "tv" ? tvMode : VIEW_MODES[name]);
+  const viewMode = (name) => (name === "camera" ? cameraMode : name === "mic" ? micMode : name === "tv" ? tvMode : VIEW_MODES[name]);
 
   function applyView(name, automatic) {
     const was = view();
     if (name === "camera") cameraMode = mode();
+    if (name === "mic") micMode = mode();
     if (name === "tv") { tvMode = mode(); tvReturnView = was; }
     document.body.dataset.view = name;
     if (was !== name) leftView(was);
@@ -137,7 +140,7 @@
   let lastPickerKey = null;
   let lastDoorSignKey = null;
   let lastUpcomingKey = null;
-  const deviceEpoch = { audio: 0, camera: 0, meeting: 0, tv: 0 };   // counts each device's answers, the meeting's and the TV's, so a poll already on its way cannot undo one
+  const deviceEpoch = { audio: 0, mic: 0, camera: 0, meeting: 0, tv: 0 };   // counts each device's answers, the meeting's and the TV's, so a poll already on its way cannot undo one
 
   // The TV's idle styles, in the order the service lists them (spec 2026-10-07 TV, section 4.2).
   const STYLE_LABELS = { info: "Information", quiet: "Quiet", brand: "Brand", bounce: "Bounce" };
@@ -1369,6 +1372,9 @@
   el("back-from-camera").addEventListener("click", () => setView(cameraMode === "meeting" ? "meeting" : "options"));
   el("open-camera-live").addEventListener("click", () => setView("camera"));
   el("open-upcoming").addEventListener("click", () => setView("upcoming"));
+  el("open-mic").addEventListener("click", () => setView("mic"));
+  el("open-mic-options").addEventListener("click", () => setView("mic"));
+  el("back-from-mic").addEventListener("click", () => setView(micMode === "meeting" ? "meeting" : "options"));
   // Touchpad, in the top bar in a meeting: the room Pi's mouse in one tap, for a dialog on the TV in a call (Ben, 2026-10-25), without going by
   // the TV's remote (remote.js); Done brings the meeting screen back.
   el("open-touchpad").addEventListener("click", () => { if (window.croomRemote) window.croomRemote.openTouchpad("pi", el("open-touchpad")); });

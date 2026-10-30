@@ -62,8 +62,11 @@ body[data-view="idle"] .view[data-view="idle"],
 body[data-view="booking"] .view[data-view="booking"],
 body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
+body[data-view="mic"] .view[data-view="mic"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
 body[data-view="door-sign"] .view[data-view="door-sign"],
+body[data-view="settings-pin"] .view[data-view="settings-pin"],
+body[data-view="settings"] .view[data-view="settings"],
 body[data-view="meeting"] .view[data-view="meeting"],
 body[data-view="upcoming"] .view[data-view="upcoming"],
 body[data-view="participants"] .view[data-view="participants"],
@@ -84,13 +87,14 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 .upcoming-box { display: flex; flex-direction: column; width: 100%; }
 .list-box { display: flex; flex-direction: column; width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
-.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="door-sign"], .view[data-view="upcoming"],
-.view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"] { grid-template-rows: auto 1fr; justify-items: start; }
+.view[data-view="options"], .view[data-view="camera"], .view[data-view="mic"], .view[data-view="screensaver"], .view[data-view="door-sign"],
+.view[data-view="upcoming"], .view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"],
+.view[data-view="settings-pin"], .view[data-view="settings"] { grid-template-rows: auto 1fr; justify-items: start; }
 #meeting-detail { margin: 0; max-width: 90ch; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines; a long title keeps to one line at 1280 */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
-.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' four (Camera framing, Screensaver, Door sign and TV) sit two by two, the same height */
+.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' six sit three and three from 1024 px wide (below) */
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
 /* The secondary row, and the reaction row that takes its place: smaller buttons, so that the seven (Captions, the view, Hide self view,
@@ -359,7 +363,9 @@ body.keyboard-open .schedule { display: none; }
 
 /* Sound and Camera panels (spec 2026-10-08). The Sound strip is the speaker's name over one line: the slider, then the buttons. */
 .device { margin: 0 0 10px; color: var(--periwinkle-300); overflow-wrap: anywhere; }
-.sound-section .note, .camera-section .note { overflow-wrap: anywhere; }   /* a refusal can quote a long file path */
+.sound-section .note, .camera-section .note, .mic-section .note { overflow-wrap: anywhere; }   /* a refusal can quote a long file path */
+.mic-section { width: 100%; max-width: 900px; }   /* Mic level's screen (spec 2026-10-29): the Sound strip's slider and buttons, with room to read */
+.mic-section .mic-help { flex: 1 1 100%; margin-top: 12px; }
 .sound { display: flex; flex-wrap: wrap; align-items: center; column-gap: 28px; }
 .sound[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 .sound .device { flex: 1 1 100%; margin-bottom: 4px; }
@@ -580,6 +586,12 @@ body.keyboard-open .schedule { display: none; }
 .touchpad .touchpad-switch .button[aria-pressed="true"] { background: var(--blue-600); }
 .touchpad #touchpad-done { flex: 0 0 auto; min-height: 56px; background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
 .touchpad #touchpad-done:hover { background: var(--blue-700); border-color: var(--blue-700); }
+/* Sign in to Google (Settings, Meetings): the room Pi alone, Type on the TV, Cancel and Done. The keyboard comes up over the surface. */
+.touchpad .touchpad-keys, .touchpad .touchpad-cancel { flex: 0 0 auto; min-height: 56px; background: transparent; border-color: var(--periwinkle-300); color: #fff; }
+.touchpad .touchpad-keys[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.touchpad .touchpad-keys[hidden], .touchpad .touchpad-cancel[hidden], .touchpad-switch[hidden] { display: none; }
+.touchpad .button:disabled { opacity: 0.55; }
+.keyboard.remote { z-index: 80; }   /* typing on the TV: over the full-screen touchpad, which keeps the screen above it */
 .touchpad-surface {
   flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; background: var(--tray);
   touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
@@ -610,8 +622,16 @@ body.keyboard-open .schedule { display: none; }
   /* A title can run to a hundred characters: three lines of headline at most, so the link box stays on the screen.
      The full title is in the Today list, and in the detail line when the booking is the next one. */
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+  /* A Settings page longer than the screen (Meetings, with its lists) scrolls in its own box under the head, as the bookings do */
+  .view[data-view="settings"] .settings-page { height: 100%; min-height: 0; overflow-y: auto; padding-right: 8px; }
+  /* Check and Logs fill the page, and their block takes what the screen has left: the lines scroll inside it */
+  .tool-page { height: 100%; }
+  .tool-output { max-height: none; }
 }
 @media (min-width: 1024px) {
+  /* Options' six (Camera framing, Mic level, Screensaver, Door sign, TV and Settings) three and three, the same height as when there were four two
+     by two: a third row would not fit the kiosk's 800 px. */
+  .view[data-view="options"] .menu { grid-template-columns: repeat(3, minmax(220px, 380px)); }
   /* Mute and Remove side by side: a person with no Mute leaves its room empty, and the marks end in one column. The room's own row has no buttons and
      leaves all of it empty, in a list that has buttons. Remove keeps the width of its second-tap words, so that nothing in the row moves under a finger
      when it asks (a tap aimed at Mute, a moment after a mis-tap on Remove, would otherwise land on the ask). */
@@ -641,6 +661,7 @@ body.keyboard-open .schedule { display: none; }
   .participant .marks { flex: 1 1 auto; justify-content: flex-start; }
   .view[data-view="idle"] { grid-template-columns: 1fr; grid-template-rows: auto; grid-template-areas: "now" "link" "schedule"; }
   .menu { grid-template-columns: 1fr; }
+  .view[data-view="options"] .button.menu-item { min-height: 120px; }   /* six in one column: a portrait tablet's 1280 px still holds them and Key click */
   .camera-grid { grid-template-columns: 1fr; gap: 24px; }   /* the pad, then the presets: two columns need about 800 px */
   .camera-left { flex-wrap: wrap; }
   /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, so its width is not left to what a
@@ -714,7 +735,7 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 .meeting-main #reaction-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
 /* The dock: the device's name (or why there is no sound) with Camera and Upcoming meetings beside it, then the volume slider and its buttons. The
    Sound strip's parts take their places in the dock's grid (display: contents), so the strip keeps its markup and its script (devices.js). */
-.meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "device device menu" "slider buttons buttons";
+.meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; grid-template-areas: "device device mic-open menu" "slider buttons buttons buttons";
                 align-items: center; gap: 10px 18px; padding: 14px 18px; border-radius: 20px; background: var(--surface-800); }
 .meeting-dock .sound-section, .meeting-dock .sound:not([hidden]) { display: contents; }
 .meeting-dock .sound-section > .kicker { display: none; }   /* the device's name says what the strip is */
@@ -724,6 +745,9 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 .meeting-dock .sound-buttons { grid-area: buttons; flex-wrap: nowrap; margin: 0; }
 .meeting-dock .menu { grid-area: menu; display: flex; justify-content: flex-end; gap: 12px; width: auto; }
 .view[data-view="meeting"] .meeting-dock .button.menu-item { min-height: 56px; font-size: 1rem; padding: 0 18px; }
+/* Mic level's way in (spec 2026-10-29): on the speaker's line, before Camera and Upcoming meetings, which keep the dock's right */
+.meeting-dock #open-mic { grid-area: mic-open; }
+.view[data-view="meeting"] .meeting-dock #open-mic { min-height: 56px; font-size: 1rem; padding: 0 18px; }
 @media (max-width: 900px) {
   .view[data-view="meeting"] { grid-template-columns: minmax(0, 1fr); }   /* a tablet stood up, or a phone: the card over the controls */
   .meeting-clock { font-size: 2.6rem; }
@@ -731,9 +755,10 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 @media (max-width: 640px) {
   .meeting-main .actions.meeting-secondary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .meeting-main .meeting-secondary .button { white-space: normal; }
-  .meeting-dock { grid-template-columns: minmax(0, 1fr); grid-template-areas: "device" "slider" "buttons" "menu"; }
+  .meeting-dock { grid-template-columns: minmax(0, 1fr); grid-template-areas: "device" "slider" "buttons" "mic-open" "menu"; }
   .meeting-dock .sound-buttons, .meeting-dock .menu { flex-wrap: wrap; justify-content: flex-start; }
   .meeting-dock .sound-buttons .button, .meeting-dock .menu .button { flex: 1 1 auto; justify-content: center; }
+  .meeting-dock #open-mic { justify-content: center; }
   /* A tile on a phone is a button like the others, its symbol beside its words, one to a row: a label that wraps under a symbol grows the tile. */
   .meeting-main .actions.meeting-actions { grid-template-columns: minmax(0, 1fr); }
   .meeting-main .meeting-actions .button { min-height: 64px; padding: 0 20px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
@@ -741,3 +766,219 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 
 /* Laptop mode (spec 2026-10-27): the idle card is the Laptop screen; joining by link waits for the MeetUp to come back. */
 body[data-laptop="on"] .link { display: none; }
+
+/* Settings (spec 2026-10-29, settings.js): the PIN pad, then the menu of pages under a bar with Back, the page's name, the minutes left and Lock. */
+.pin-host { width: 100%; }
+.pin { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 24px 48px; align-items: start; width: 100%; max-width: 1000px; }
+.pin-title { margin: 0; font-size: clamp(1.5rem, 3vw, 2.2rem); font-weight: 600; line-height: 1.15; overflow-wrap: anywhere; }
+.pin-hint { margin: 10px 0 0; color: var(--periwinkle-300); max-width: 40ch; }
+.pin-hint:empty { display: none; }
+.pin-dots { display: flex; gap: 14px; min-height: 18px; margin: 28px 0 0; }   /* a dot for each digit typed: the row keeps its height when it has none */
+.pin-dots .dot { width: 18px; height: 18px; border-radius: 50%; background: #fff; }
+.pin-pad { display: grid; grid-template-columns: repeat(3, 108px); gap: 12px; }
+.pin-pad .button { min-height: 76px; padding: 0; font-size: 1.6rem; }
+.pin-pad .button.pin-word { font-size: 1.05rem; }
+.settings-head { display: flex; align-items: center; gap: 20px; width: 100%; }
+.settings-title { margin: 0; flex: 1 1 auto; min-width: 0; font-size: 1.6rem; font-weight: 600; overflow-wrap: anywhere; }
+.settings-time { margin: 0; color: var(--periwinkle-300); white-space: nowrap; font-variant-numeric: tabular-nums; }
+#settings-lock { min-height: 64px; }
+.menu.settings-menu { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }   /* the twelve pages, four by three */
+.settings-menu .button.menu-item { min-height: 112px; font-size: 1.2rem; }
+.menu.settings-menu[hidden], .settings-page[hidden] { display: none; }
+.settings-page { width: 100%; min-height: 0; }
+.settings-soon { margin: 0; font-size: 1.4rem; color: var(--periwinkle-300); }
+/* A Settings page that edits the config (settings-form.js): a row for each setting, its name on the left and its field on the right with
+   a line of help and, when the agent refuses the value, why; then Save, Restart now and what came of it. */
+.settings-form { display: grid; gap: 16px; width: 100%; max-width: 1040px; }
+.settings-banner { margin: 0; padding: 12px 16px; border-radius: var(--radius-sm); background: var(--warn-fill); color: var(--ink-900); border-left: 6px solid var(--warn-bar); }
+.settings-banner[hidden] { display: none; }
+.settings-loading { margin: 0; color: var(--periwinkle-300); }
+.settings-loading.settings-unavailable { font-size: 1.4rem; }
+.setting-rows { display: grid; gap: 14px; }
+.setting-row { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 6px 24px; align-items: start; }
+.setting-label { padding-top: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.setting-body { display: grid; gap: 4px; justify-items: start; min-width: 0; }
+.setting-input {
+  width: 100%; max-width: 560px; min-height: 52px; padding: 10px 12px;
+  color: #fff; background: var(--surface-800); border: 1px solid var(--periwinkle-300); border-radius: var(--radius-sm); font: inherit;
+}
+.setting-input.setting-number, .setting-input.setting-time { max-width: 200px; }
+select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); outline-offset: 2px; }
+.setting-row.refused .setting-input { border-color: #FFD7D5; }
+.setting-help { margin: 0; font-size: 0.9rem; color: var(--periwinkle-300); max-width: 60ch; }
+.setting-error { margin: 0; color: #FFD7D5; font-size: 0.95rem; max-width: 60ch; }
+.setting-error:empty { display: none; }
+.button.setting-switch { min-width: 120px; min-height: 52px; }
+.button.setting-switch[aria-checked="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.setting-choices, .setting-lines { display: flex; flex-wrap: wrap; gap: 10px; }
+.setting-lines { flex-direction: column; width: 100%; max-width: 560px; }
+.setting-line { display: flex; gap: 10px; }
+.button.setting-choice, .button.setting-add, .button.setting-remove { min-height: 52px; padding: 0 18px; }
+.button.setting-choice[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.setting-list { display: grid; gap: 10px; justify-items: start; width: 100%; }
+/* A key file's row (settings-pages.js): what the key is, then Upload, From USB stick (and Type the keys), the stick's files or the typed
+   keys under them when asked for, and a refusal last. */
+.setting-credential { position: relative; display: grid; gap: 10px; justify-items: start; width: 100%; }   /* relative: its hidden file field stays inside it, not at the screen's foot */
+.credential-summary { margin: 12px 0 0; overflow-wrap: anywhere; }
+.setting-credential.credential-problem .credential-summary { color: #FFD7D5; }
+.credential-actions, .credential-list { display: flex; flex-wrap: wrap; gap: 10px; }
+.credential-list[hidden], .credential-typed[hidden] { display: none; }
+.credential-list .note { margin: 0; max-width: 60ch; }
+.credential-typed { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 10px; width: 100%; max-width: 720px; }
+.button.credential-upload, .button.credential-usb, .button.credential-type, .button.credential-pick,
+.button.credential-save-typed { min-height: 52px; padding: 0 18px; }
+.button.credential-pick { max-width: 100%; overflow-wrap: anywhere; }
+/* The Google sign-in's row (settings-pages.js): signed in as whom, then Sign in to Google (or the room's folder to use, when it has none). */
+.setting-signin { display: grid; gap: 10px; justify-items: start; width: 100%; }
+.signin-status { margin: 12px 0 0; overflow-wrap: anywhere; }
+.signin-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.button.signin-start, .button.signin-setup { min-height: 52px; padding: 0 18px; }
+.button.signin-start[hidden], .button.signin-setup[hidden] { display: none; }
+.signin-message.ok { color: #fff; }   /* "Signed in as …": the row's pale red is for what went wrong */
+/* Under a page's form (the Laptop switch's Test the switch) */
+.settings-after { margin-top: 28px; gap: 10px; justify-items: start; }
+.settings-after .kicker, .settings-after .setting-help { margin: 0; }
+.button.laptop-test { min-height: 60px; }
+.laptop-test-result p { margin: 0; overflow-wrap: anywhere; }
+.laptop-test-result .laptop-test-verdict { font-weight: 600; }
+.laptop-test-result.failed .laptop-test-verdict { color: #FFD7D5; }
+.laptop-test-line { color: var(--periwinkle-300); font-size: 0.95rem; }
+/* Settings › Check and Logs (settings-tools.js): a row of buttons over a block that scrolls inside itself, so the page fits the screen */
+.tool-page { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 1180px; min-height: 0; }
+.tool-bar { display: flex; flex-wrap: wrap; gap: 10px; flex: 0 0 auto; }
+.tool-bar .button { min-height: 60px; padding: 0 18px; }
+.tool-bar .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.tool-note { margin: 0; color: var(--periwinkle-300); }
+.check-verdict { margin: 0; min-height: 1.5em; font-weight: 600; overflow-wrap: anywhere; }
+.check-verdict.failed { color: #FFD7D5; }
+.tool-output {
+  flex: 1 1 auto; min-height: 120px; max-height: 60vh; overflow: auto; margin: 0; padding: 12px 14px;
+  color: #fff; background: var(--surface-800); border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+  font-family: ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace; font-size: 0.9rem; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tool-output[hidden] { display: none; }
+.logs-list { display: grid; align-content: start; gap: 2px; white-space: normal; }
+.log-entry { display: grid; grid-template-columns: max-content 6.5em minmax(0, 1fr); gap: 0 14px; padding: 3px 0; border-bottom: 1px solid var(--line-soft); }
+.log-time { color: var(--periwinkle-300); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.log-level { color: var(--periwinkle-300); }
+.log-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.log-entry[data-level="warning"] .log-level { color: var(--warn-bar); }
+.log-entry[data-level="error"] .log-level, .log-entry[data-level="critical"] .log-level,
+.log-entry[data-level="error"] .log-text, .log-entry[data-level="critical"] .log-text { color: #FFD7D5; }
+.logs-list .button.logs-more { justify-self: start; min-height: 52px; margin-top: 10px; padding: 0 18px; font-family: var(--font); }
+.logs-list .tool-note, .logs-list .setting-error { margin: 10px 0 0; font-family: var(--font); }
+@media (max-width: 699px) {
+  .log-entry { grid-template-columns: max-content minmax(0, 1fr); }
+  .log-text { grid-column: 1 / -1; }
+}
+/* Settings › Software (settings-software.js): a card per device. The TV Pi's: its name with Restart room software and Reboot, the version,
+   the newest and the changes between (a list that scrolls inside itself), what came of the last update, Update, and its progress lines. */
+.software-page { gap: 16px; }
+.software-card { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 16px 18px; border: 1px solid var(--line-soft);
+                 border-radius: var(--radius-sm); background: var(--surface-800); }
+.software-card[hidden], .software-card [hidden], .software-devices[hidden] { display: none; }
+.software-card:not(.unavailable) { flex: 1 1 auto; }
+.software-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.software-title { margin: 0; flex: 1 1 auto; font-size: 1.3rem; font-weight: 600; }
+.software-actions, .software-update-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.software-actions .button, .software-update-row .button { min-height: 60px; padding: 0 18px; }
+.button.software-reboot.confirm { background: var(--warn-fill); border-color: var(--warn-bar); color: var(--ink-900); }
+.software-version, .software-newest { margin: 0; overflow-wrap: anywhere; }
+.software-version { font-weight: 600; }
+.software-version.settings-unavailable { font-size: 1.4rem; font-weight: 400; color: var(--periwinkle-300); }
+.software-newest { color: var(--periwinkle-300); }
+.software-newest.software-current { color: #fff; }
+.software-changes, .software-progress { flex: 0 1 auto; min-height: 48px; max-height: 26vh; overflow-y: auto; margin: 0; padding: 8px 12px;
+                                        border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-900); }
+.software-changes { list-style: none; display: grid; align-content: start; gap: 4px; }
+.software-change { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 12px; overflow-wrap: anywhere; }
+.software-change-id { color: var(--periwinkle-300); font-family: ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace; }
+.software-change.software-more { display: block; color: var(--periwinkle-300); }
+.software-progress { padding-left: 2.2em; max-height: 20vh; }
+.software-line { overflow-wrap: anywhere; }
+.software-notice { overflow-wrap: anywhere; }
+.software-notice.ok { background: var(--surface-900); color: #fff; border-left-color: var(--blue-600); }
+.software-update-row .message { margin: 0; }
+.software-update-row .message.ok { color: #fff; }
+.software-devices { display: grid; gap: 16px; }
+/* Update all over the cards; the devices that check in (settings-devices.js): their cards as the TV Pi's, a line for when each last
+   checked in and one for the job under way; Devices waiting to join, each with Allow and Refuse */
+.software-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; flex: 0 0 auto; }
+.software-bar[hidden], .software-device[hidden] { display: none; }
+.software-bar .button { min-height: 60px; padding: 0 18px; }
+.software-bar .message { margin: 0; }
+.software-bar .message.ok { color: #fff; }
+.software-device { display: grid; gap: 16px; }
+.software-stopped { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; flex: 0 0 auto; }
+.software-stopped[hidden] { display: none; }
+.software-stopped .note { margin: 0; }
+.software-stopped .button { min-height: 60px; padding: 0 18px; }
+.software-page:has(.device-card, .software-waiting) .software-card:not(.unavailable) { flex: 0 0 auto; }   /* several cards: the page scrolls, no card squeezed */
+.software-page:has(.device-card, .software-waiting) { height: auto; }
+.device-name { margin-left: 12px; font-size: 1rem; font-weight: 400; color: var(--periwinkle-300); }
+.device-seen, .device-job { margin: 0; overflow-wrap: anywhere; }
+.device-seen { color: var(--warn-bar); }
+.device-seen.online { color: var(--periwinkle-300); }
+.device-job { color: #fff; }
+.button.device-reboot.confirm, .button.device-forget.confirm, .button.waiting-refuse.confirm { background: var(--warn-fill); border-color: var(--warn-bar); color: var(--ink-900); }
+.software-waiting .note { margin: 0; }
+.waiting-list { display: grid; gap: 10px; margin: 0; padding: 0; list-style: none; }
+.waiting-device { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; padding: 10px 0; border-top: 1px solid var(--line-soft); }
+.waiting-what { display: grid; flex: 1 1 260px; min-width: 0; overflow-wrap: anywhere; }
+.waiting-title { font-weight: 600; }
+.waiting-detail { color: var(--periwinkle-300); }
+.waiting-device .button { min-height: 60px; padding: 0 18px; }
+/* Settings › Network (settings-network.js): a card per device, as Software's: how it is connected, the last change, Change Wi-Fi (the
+   networks in range, a password, Join) and Forget (the networks it knows). The page scrolls inside its box; no card is squeezed. */
+.network-page { gap: 16px; height: auto; }
+.network-cards { display: grid; gap: 16px; }
+.network-card.software-card { flex: 0 0 auto; }
+.network-card .software-version.settings-unavailable { font-size: 1.4rem; font-weight: 400; color: var(--periwinkle-300); }
+.network-stopped { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.network-stopped[hidden], .network-card [hidden] { display: none; }
+.network-stopped .note { margin: 0; }
+.network-stopped .button { min-height: 60px; padding: 0 18px; }
+.network-panel, .network-forgets { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+                                   background: var(--surface-900); }
+.network-panel-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.network-panel-bar .button, .network-join .button, .network-forgets .button { min-height: 60px; padding: 0 18px; }
+.network-scan-note { margin: 0; }
+.network-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: 30vh; overflow-y: auto; }
+.network-list.network-saved { max-height: none; }
+.network-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.network-saved .network-item { justify-content: space-between; padding: 4px 0; border-top: 1px solid var(--line-soft); }
+.button.network-choice { display: flex; flex: 1 1 auto; justify-content: space-between; align-items: center; gap: 4px 16px; min-height: 56px;
+                         padding: 0 16px; text-align: left; flex-wrap: wrap; }
+.button.network-choice.chosen { background: var(--blue-600); border-color: var(--blue-600); }
+.network-name { font-weight: 600; overflow-wrap: anywhere; }
+.network-detail { color: var(--periwinkle-300); font-weight: 400; }
+.network-choice.chosen .network-detail { color: #fff; }
+.network-join { display: grid; gap: 10px; }
+.network-join-title { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.network-label { display: grid; gap: 6px; }
+.network-password-row { display: flex; gap: 10px; align-items: center; }
+.network-password-row .setting-input { flex: 1 1 auto; min-width: 0; }
+.network-warning { margin: 0; padding: 10px 14px; border-radius: var(--radius-sm); background: var(--warn-fill); color: var(--ink-900);
+                   border-left: 6px solid var(--warn-bar); }
+.network-card .message { margin: 0; }
+.network-card .message.ok { color: #fff; }
+.button.network-forget-one.confirm { background: var(--warn-fill); border-color: var(--warn-bar); color: var(--ink-900); }
+/* Save stays in sight at the foot of a long page (Meetings) as the rows scroll under it */
+.settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; position: sticky; bottom: 0; z-index: 1;
+                    padding: 10px 0; background: var(--surface-900); }
+.settings-actions .button { min-height: 60px; }
+.settings-actions .message { margin: 0; }
+.settings-actions .message.ok { color: #fff; }   /* Saved, Restarting: the page's pale red is for refusals */
+@media (max-width: 1023px) {
+  .menu.settings-menu { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+@media (max-width: 640px) {
+  .pin { grid-template-columns: minmax(0, 1fr); }
+  .pin-pad { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .menu.settings-menu { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .settings-head { flex-wrap: wrap; row-gap: 12px; }
+  .setting-row { grid-template-columns: minmax(0, 1fr); }
+  .setting-label { padding-top: 0; }
+  .credential-typed { grid-template-columns: minmax(0, 1fr); }
+}

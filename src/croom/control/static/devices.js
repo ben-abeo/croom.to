@@ -13,6 +13,7 @@
 
   const SLIDE_OFF_PX = 16;   // how far outside a pressed pad button a finger may drift before that counts as letting go
   let lastSoundKey = null;
+  let lastMicKey = null;
   let lastCameraKey = null;
   let presetSaveMode = false;
   let setupOpen = false;
@@ -25,7 +26,8 @@
   // call the page makes on its own (the preview's renewal): its answer is applied, but it neither clears the note the
   // user last got nor writes one, and a refusal of it is not shown or scrolled to.
   const INTERRUPTED = "the camera move was interrupted";
-  const deviceNotes = { audio: "", camera: "" };
+  const deviceNotes = { audio: "", mic: "", camera: "" };
+  const NOTE_OF = { audio: "sound-note", mic: "mic-note", camera: "camera-note" };
 
   async function deviceCall(kind, path, body, options) {
     const long = Boolean(options && options.long);
@@ -43,10 +45,11 @@
     } catch (e) {
       if (!background && e.message !== INTERRUPTED) {
         deviceNotes[kind] = e.message;
-        if (kind === "audio") lastSoundKey = null; else lastCameraKey = null;   // drawn again from the model: a slider the finger moved goes back
+        // drawn again from the model: a slider the finger moved goes back
+        if (kind === "audio") lastSoundKey = null; else if (kind === "mic") lastMicKey = null; else lastCameraKey = null;
         render();
         // The note sits above its panel: if the controls have scrolled it out of sight, bring it back, and no further.
-        el(kind === "audio" ? "sound-note" : "camera-note").scrollIntoView({ block: "nearest" });
+        el(NOTE_OF[kind]).scrollIntoView({ block: "nearest" });
       }
       return false;
     }
@@ -85,6 +88,31 @@
     const muted = el("speaker-mute").getAttribute("aria-pressed") === "true";
     setVolume({ muted: !muted });
   });
+
+  // --- Mic level (spec 2026-10-29): its own screen, from Options and from the meeting screen's dock. The room microphone, 0 to 150 where 100
+  // is the device's normal level, Quieter / Louder 5 at a time. The level shown is the one the room keeps: the devices service puts it back
+  // during a meeting, whatever the call's gain control does. ---
+  function renderMic(mic) {
+    const key = JSON.stringify([mic && mic.available, mic && mic.device, mic && mic.level, deviceNotes.mic]);
+    if (key === lastMicKey) return;
+    lastMicKey = key;
+    const panel = el("mic-panel");
+    if (!mic || !mic.available) {
+      panel.hidden = true;
+      el("mic-note").textContent = "No microphone found";
+      return;
+    }
+    panel.hidden = false;
+    el("mic-note").textContent = deviceNotes.mic;
+    el("mic-device").textContent = mic.device;
+    el("mic-slider").value = mic.level;
+    el("mic-level").textContent = String(mic.level);
+  }
+
+  const setMic = (body) => deviceCall("mic", "/api/audio/mic", body);
+  el("mic-slider").addEventListener("change", (e) => setMic({ level: Number(e.target.value) }));
+  el("mic-quieter").addEventListener("click", () => setMic({ step: -5 }));
+  el("mic-louder").addEventListener("click", () => setMic({ step: 5 }));
 
   // --- Camera ---
   let previewTimer = null;
@@ -229,6 +257,7 @@
 
   P.onRender((s) => {
     renderSound(s.audio);
+    renderMic(s.mic);
     renderCamera(s.camera);
   });
 })();

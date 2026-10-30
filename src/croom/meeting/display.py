@@ -136,6 +136,11 @@ class TvDisplay:
     def parked(self) -> bool:
         return self._parked
 
+    @property
+    def started(self) -> bool:
+        """From start() to stop(): the TV is meant to have this browser (Settings' sign-in to Google gives it back only if so)."""
+        return self._wanted
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

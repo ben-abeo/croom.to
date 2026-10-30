@@ -51,7 +51,9 @@ def test_readme_names_the_setup_pieces():
         ":8080/tv",
         "**Options**, then **Screensaver**",
         "install-kiosk.sh --url",
-        "pull the repository on the table Pi too, run the install-kiosk command again and reboot it so the new scale takes effect",
+        # Settings updates the table Pi through its agent now; a table Pi set up before has none, and takes the old steps once
+        "From then on **Settings** updates the table Pi with the TV Pi: its agent runs the install-kiosk setup of the new version and reboots it",
+        "once, pull the repository on the table Pi too, run the install-kiosk command again and reboot it",
         "?keyboard=1",
         "Start Crystal Meet",
         "audio.output_device",
@@ -340,7 +342,7 @@ def test_readme_describes_the_tv_remote_and_the_touchpad_on_the_room_page():
     text = README.read_text(encoding="utf-8")
     for needle in (
         # the remote's place: the idle screen's Options, the meeting screen's top bar beside the Touchpad; it belongs to the screen that opened it
-        "the **TV** remote and the keyboard's **Key click**",
+        "the **TV** remote, the keyboard's **Key click** and **Settings**",
         "**Chat** and **Host** (only while the room is host or co-host), and at the foot a dock of the room's volume",
         "The TV remote opens from **Options**, then **TV** on the idle screen and from **TV** in the top bar on the meeting screen, beside **Touchpad**",
         "**Back** returns to the screen that opened it",
@@ -432,19 +434,61 @@ def test_readme_names_the_tv_check_the_routes_the_pointer_socket_the_wake_up_and
     assert "sudo -u croom" not in text          # (there is no croom user: the service runs as the desktop user who ran the installer)
 
 
-def test_readme_says_how_to_update_a_room_device_for_the_virtual_mouse():
-    """The update recipe, in its order: the build tools, the new software, the installer's virtual-mouse step on its own, the restart."""
+def test_readme_says_how_to_update_a_room_device_now_that_settings_does_it():
+    """Settings > Software updates the devices; a room from before room settings is upgraded once by hand, in the README's own section;
+    the installer re-run is the by-hand route, and the old pip recipe (which would leave a release's recorded version wrong) is gone."""
     text = README.read_text(encoding="utf-8")
-    steps = ("sudo apt-get install -y python3-dev gcc libc6-dev",
-             "sudo /opt/croom/venv/bin/pip install -q --force-reinstall --no-deps git+https://github.com/ben-abeo/croom.to.git",
-             "sudo /opt/croom/venv/bin/pip install -q git+https://github.com/ben-abeo/croom.to.git",
-             "cd ~/croom.to && git pull && sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
-             "sudo systemctl restart croom`; the room guide's section Updating a room device walks through it")
-    assert "To update a room device that is already installed, type these on it in this order:" in text
-    positions = [text.index(step) for step in steps]
-    assert positions == sorted(positions)
-    # why the third package: the compiler's own package only recommends the C library's headers that evdev's build reads
-    assert "(the room Pi's virtual mouse needs `evdev`, which pip compiles: it reads the kernel's headers, which `libc6-dev` brings and `gcc` only recommends)" in text
+    for needle in (
+        "To update a room device, open **Options**, then **Settings**, then **Software** on the table screen",
+        "A room set up before room settings is moved to them once by hand, in the order [Upgrade a room to room settings](#upgrade-a-room-to-room-settings) gives",
+        "`cd ~/croom.to && git pull && sudo bash installer/install.sh`, then `sudo reboot`",
+        "## Upgrade a room to room settings",
+    ):
+        assert needle in text, needle
+    assert "sudo /opt/croom/venv/bin/pip install -q --force-reinstall" not in text
+    # the upgrade: the TV Pi, then the table Pi, then the door sign panel, each in its order
+    upgrade = text.split("## Upgrade a room to room settings", 1)[1].split("\n## ", 1)[0]
+    steps = ("sudo systemctl stop croom", "git checkout main && git pull", "sudo bash installer/install.sh", "sudo reboot",
+             "sudo bash installer/install-kiosk.sh --url http://<TV Pi address>:8080/", "**Allow** beside the Touch Pi",
+             "**Erase all data**", "adb install -r app-release.apk", "adb shell dpm set-device-owner to.croom.doorsign/.AdminReceiver",
+             "adb shell cmd package set-home-activity to.croom.doorsign/.MainActivity", "**Allow** beside the door sign")
+    positions = [upgrade.index(step) for step in steps]
+    assert positions == sorted(positions), upgrade
+    # the installer's names for what the upgrade runs are the installer's own
+    install = (REPO / "installer" / "install.sh").read_text(encoding="utf-8")
+    for name in ("migrate_venv", "set_keyboard_layout", "croom-admin.service", 'ADMIN_DIR="${ADMIN_DIR:-/var/lib/croom-admin}"'):
+        assert name in install, name
+
+
+def test_readme_describes_settings_the_pin_and_its_reset():
+    """The Settings section: the PIN's rules as the PIN store has them, the reset at the TV Pi, the root helper's job list as its table has it."""
+    from croom.settings import pin
+    text = " ".join(README.read_text(encoding="utf-8").split())
+    assert pin.UNLOCK_SECONDS == 5 * 60 and pin.MAX_TRIES == 5 and pin.LOCKOUT_SECONDS == 10 * 60
+    for needle in (
+        "## Settings on the table screen",
+        "choose a PIN of 4 to 8 digits",
+        "stays unlocked for 5 minutes after the last thing done in it",
+        "Five wrong PINs lock the pad for 10 minutes",
+        "**A forgotten PIN is reset only at the TV Pi**: over SSH, `sudo rm /var/lib/croom/settings-pin.json`",
+        "`/run/croom-admin.sock`",
+        "`/var/lib/croom-admin`",
+        "Your last change was undone: the room did not start with it",
+        "Not available on this device",
+        "Can't check for updates right now",
+        "Leave the meeting first",
+        "A device cannot be moved to a separate LAN through the page",
+        "The TV Pi's Wi-Fi cannot change while its joined table Pi is offline",
+        "`nmcli` is run with `LC_ALL=C` and its words are matched in English",
+        "[android/door-sign/README.md](android/door-sign/README.md)",
+    ):
+        assert needle in text, needle
+    table = re.search(r"self\.table[^=]*= \{(.*?)\}", (REPO / "src" / "croom" / "admin" / "jobs.py").read_text(encoding="utf-8"), re.S)
+    names = re.findall(r'"(\w+)": self\.', table.group(1)) if table else []
+    assert names, "the helper's job table"
+    helper = text.split("### The root helper", 1)[1].split("###", 1)[0]
+    for name in names:
+        assert f"`{name}`" in helper, name
 
 
 def test_readme_says_the_python_floor_the_package_asks_for():
@@ -480,7 +524,7 @@ def test_readme_describes_the_redesigned_door_sign():
     text = README.read_text(encoding="utf-8")
     for needle in (
         "over a photograph of Austin under a navy overlay (nine backgrounds, chosen on the room page under **Options**, then **Door sign**)",
-        "and an **Options** button for **Camera framing**, the **Screensaver**, the **Door sign**, the **TV** remote and the keyboard's **Key click**)",      # the Room page row lists the Door sign, the TV remote and the Key click among the Options
+        "and an **Options** button for **Camera framing**, **Mic level**, the **Screensaver**, the **Door sign**, the **TV** remote, the keyboard's **Key click** and **Settings**, behind a PIN)",      # the Room page row lists every Options item
         "The status is a coloured rail down the left edge, a solid chip under the room's name and a ring round the booking in progress: green when free, amber ten minutes before a booking, red while in use or booked.",
         "**This week** shows the next seven days.",
         "A strip of football scores for Texas, Michigan, Texas A&M and Missouri can run along the bottom (off by default; the device reads ESPN's public schedule feed for it).",
@@ -510,3 +554,23 @@ def test_readme_describes_the_redesigned_door_sign():
     assert "a room name that takes three lines of the smaller type (31 characters or more" not in text                   # and the one before a name stepped down
     for gone in ("tinted Austin scenery", "four backgrounds chosen from the table", "Longhorns scoreboard", "chosen from the table"):
         assert gone not in text, gone
+
+
+def test_readme_after_the_final_review_new_panels_the_upgrades_way_back_the_release_apk_and_the_good_config():
+    """New door sign panels follow android/door-sign/README.md's device-owner section (the PDF guide is out of date); the upgrade says
+    how to bring the room back when the installer stops, and where the panel's APK comes from; the undo puts back config.yaml.good."""
+    text = " ".join(README.read_text(encoding="utf-8").split())
+    for needle in (
+        "[android/door-sign/README.md](android/door-sign/README.md#room-settings-the-app-as-the-panels-device-owner)",
+        "is out of date until it is redone",
+        "If the installer stops with an error, `sudo systemctl start croom` brings the room back on its old version",
+        "`app-release.apk` from the `door-sign-2` release on GitHub",
+        "(android/door-sign/README.md#build-a-release)",
+        "`/etc/croom/config.yaml.good`, the config the room last started with",
+        "keeps the room's config as `/etc/croom/config.yaml.good`",
+    ):
+        assert needle in text, needle
+    upgrade = text.split("## Upgrade a room to room settings", 1)[1].split(" ## ", 1)[0]
+    assert upgrade.index("sudo reboot") < upgrade.index("If the installer stops with an error") < upgrade.index("**2. The table Pi**")
+    door = (REPO / "android" / "door-sign" / "README.md").read_text(encoding="utf-8")
+    assert "## Room settings: the app as the panel's device owner" in door and "### Build a release" in door

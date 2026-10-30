@@ -84,20 +84,71 @@ async def check_tv(config: Config, out: TextIO = sys.stdout, service_factory: Op
             return 1
         if KeyStore(service.key_path).read() != key_before:       # (a look that fails has not got as far as a new key)
             print("The TV issued a new key (its pairing prompt was accepted during the check), which is kept.", file=out)
-        shown = service.status()
-        state = ("power state unavailable" if shown.get("power_known") is False
-                 else "on" if shown["on"] else "in standby (its screen is off)")
-        print(f"The TV answers: {shown['name'] or 'it gives no name'}, {state}.", file=out)
-        inputs = shown["inputs"]
-        if inputs:
-            print("Inputs: " + ", ".join(_input_words(inputs, item["id"]) for item in inputs) + ".", file=out)
-        else:
-            print("The TV lists no inputs.", file=out)
-        _check_input(tv, shown, out, warn)
+        _report_answer(tv, service.status(), out, warn)
         print("The TV answers, with the warnings above." if warnings else "Ready: the TV answers.", file=out)
         return 0
     finally:
         await _let_go(service)
+
+
+def check_running_tv(service: TvService, out: TextIO = sys.stdout) -> int:
+    """Settings › Check › TV, inside the running agent: what the agent's own TV service knows now, in check_tv's words. It opens no
+    connection of its own (a second one beside the agent's could show the TV's pairing prompt, or take the place of the agent's): the
+    agent stays connected to a TV that answers and keeps trying one that does not, so its status is a look of a few seconds ago at most.
+    Exit 0 when the TV answers the room, 1 otherwise."""
+    tv = service.tv_config
+    shown = service.status()
+    host = str(tv.host or "").strip()
+    if not host:
+        print("No TV is configured. On the table use Options > TV > Find TVs and select yours.", file=out)
+        return 1
+    warnings = 0
+
+    def warn(words: str) -> None:
+        nonlocal warnings
+        warnings += 1
+        print(f"Warning: {words}", file=out)
+
+    mac_text, problem = _mac(tv.mac)
+    print(f"TV: {host}, MAC {mac_text}", file=out)
+    if problem:
+        warn(problem)
+    if not tv.enabled:
+        print("The TV is switched off in the config (tv.enabled is false), so the agent leaves it alone: set tv.enabled to true.",
+              file=out)
+        return 1
+    if not shown["paired"]:
+        print("The TV is not paired with the room: pair it under Options > TV.", file=out)
+        return 1
+    print(f"The TV is paired with the room (its key is in {service.key_path}).", file=out)
+    print("Looked at through the room's own connection to the TV: the check opens no second one.", file=out)
+    if shown["refused"]:
+        print(REFUSED, file=out)
+        return 1
+    if shown["prompting"]:
+        print("The TV is showing a prompt to allow the room: it no longer knows the room. Forget TV, then Pair, under Options > TV.",
+              file=out)
+        return 1
+    if not shown["reachable"]:
+        print(f"The TV at {host} is not answering the room now.", file=out)
+        print("Check that the TV is on and that tv.host is its address: a TV that is fully off does not answer.", file=out)
+        return 1
+    _report_answer(tv, shown, out, warn)
+    print("The TV answers, with the warnings above." if warnings else "Ready: the TV answers.", file=out)
+    return 0
+
+
+def _report_answer(tv: Any, shown: Dict[str, Any], out: TextIO, warn: Callable[[str], None]) -> None:
+    """What a TV that answers shows: its name and power, its inputs, and the room Pi's input against them."""
+    state = ("power state unavailable" if shown.get("power_known") is False
+             else "on" if shown["on"] else "in standby (its screen is off)")
+    print(f"The TV answers: {shown['name'] or 'it gives no name'}, {state}.", file=out)
+    inputs = shown["inputs"]
+    if inputs:
+        print("Inputs: " + ", ".join(_input_words(inputs, item["id"]) for item in inputs) + ".", file=out)
+    else:
+        print("The TV lists no inputs.", file=out)
+    _check_input(tv, shown, out, warn)
 
 
 def _mac(mac: Any) -> Tuple[str, Optional[str]]:

@@ -38,7 +38,7 @@ from croom.scores.espn import ScheduleUnavailable
 from croom.scores.service import ScoresService
 from croom.tv.errors import TvError
 from tests.unit.control.test_service import (
-    BOARDROOM, STUB_PEOPLE, StubCalendar, StubDevices, StubMeeting, StubMouse, StubSearch, StubTv, event, skip_if_day_ends_within,
+    BOARDROOM, STUB_PEOPLE, StubCalendar, StubDevices, StubMeeting, StubMouse, StubSearch, StubTv, event, no_room_devices, skip_if_day_ends_within,
 )
 from tests.unit.calendar.test_bookings import ROOM_CAL, FakeGoogle
 from tests.unit.control.test_bookings_api import BookingCalendar
@@ -54,7 +54,8 @@ class PageServer:
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
-                 bookings=False, laptop=None):
+                 bookings=False, laptop=None, admin=None, config_file=None, find_devices=None, keyboard=None, checks=None, github=None,
+                 registry=None, apks=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -73,7 +74,17 @@ class PageServer:
         self.tv = tv                                                       # the room's TV service: none is a room with no TV set up
         self.discover = discover if discover is not None else StubSearch()   # Find TVs never puts a search on this network: a test that wants TVs found gives it some
         self.mouse = mouse                                                 # the room Pi's virtual mouse: none is the real one, which the conftest keeps from being made
+        self.keyboard = keyboard                                           # the room Pi's virtual keyboard (Sign in to Google's typing): likewise
         self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
+        self.admin = admin              # the root helper's client (Settings): none is a room without the helper, "Not available on this device"
+        # The config.yaml the Settings pages read: in the server's own folder unless a test names one (never /etc/croom)
+        self.config_file = Path(config_file) if config_file is not None else Path(self._settings_dir.name) / "config.yaml"
+        # The Devices page's listing of the room's speakers, microphones and cameras: never pw-dump or /dev/video* in a test
+        self.find_devices = find_devices or no_room_devices
+        self.checks = checks            # Settings > Check's checks (croom.settings.checks.Checks): none is the room's own, on config_file
+        self.github = github            # what Settings > Software asks GitHub (croom.settings.github.GitHub on a fake transport): none asks nothing
+        self.registry = registry        # the devices that check in (croom.settings.checkin.Registry): none is one beside the server's settings
+        self.apks = apks                # the door sign's releases and APKs (croom.settings.apk.ApkStore on fakes): none is one on `github`
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -91,7 +102,7 @@ class PageServer:
     async def _main(self):
         self.meeting = StubMeeting(role=self.role, controls=self.controls)
         config = {"host": "127.0.0.1", "port": self.port_arg, "room_name": self.room_name, "room_location": self.room_location,
-                  "settings_file": str(Path(self._settings_dir.name) / "control-settings.json")}
+                  "settings_file": str(Path(self._settings_dir.name) / "control-settings.json"), "config_file": str(self.config_file)}
         if self.room_company is not None:
             config["room_company"] = self.room_company
         store = SettingsStore(config["settings_file"])
@@ -114,7 +125,8 @@ class PageServer:
             config=config,
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
-            laptop=self.laptop,
+            laptop=self.laptop, admin=self.admin, find_devices=self.find_devices, keyboard=self.keyboard, checks=self.checks,
+            github=self.github, registry=self.registry, apks=self.apks,
         )
         await service.start()
         self.port = service.bound_port
@@ -3649,8 +3661,13 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         assert shown_icons(page) == bar + ["#icon-keyboard", "#icon-video"]  # and the keyboard button and Join beside the link box
         settled(page)
         page.click("#open-options")
-        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-monitor", "#icon-door", "#icon-tv", "#icon-volume", "#icon-volume-x"])   # the four menu items, then Key click on and off
-        assert page.locator(".view[data-view=options] .menu-item svg.icon").count() == 4      # each of the four has its icon: Camera framing, Screensaver, Door sign, TV
+        assert_includes(shown_icons(page), bar + ["#icon-back", "#icon-move", "#icon-mic", "#icon-monitor", "#icon-door", "#icon-tv", "#icon-settings", "#icon-volume", "#icon-volume-x"])   # the six menu items, then Key click on and off
+        assert page.locator(".view[data-view=options] .menu-item svg.icon").count() == 6      # each of the six has its icon: Camera framing, Mic level, Screensaver, Door sign, TV, Settings
+        settled(page)
+        page.click("#open-mic-options")
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-mic", "#icon-mic"]             # Mic level (spec 2026-10-29): its Quieter and Louder
+        settled(page)
+        page.click("#back-from-mic")
         settled(page)
         page.click("#open-tv-options")
         assert shown_icons(page) == bar + ["#icon-back", "#icon-locate", "#icon-touchpad"]     # this room has no TV: the card that says so, with Find TVs, and the touchpad for the room Pi's mouse
@@ -3669,7 +3686,7 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         page.click("#back-from-screensaver")
         page.click("#back-from-options")
         join_by_id(page)
-        assert_includes(shown_icons(page), meeting_bar + ["#icon-phone-off", "#icon-mic", "#icon-video", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-move", "#icon-calendar"])   # the Touchpad and the TV in the top bar, Leave on the meeting's card, then the tiles and the dock
+        assert_includes(shown_icons(page), meeting_bar + ["#icon-phone-off", "#icon-mic", "#icon-video", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-mic", "#icon-move", "#icon-calendar"])   # the Touchpad and the TV in the top bar, Leave on the meeting's card, then the tiles and the dock
         settled(page)
         page.click("#open-camera-live")
         assert shown_icons(page) == meeting_bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in"]    # a meeting's camera screen has no Save or Set up (the top bar keeps the Touchpad and the TV)
@@ -4981,9 +4998,9 @@ def test_the_keyboard_group_goes_while_the_room_cannot_be_reached_and_comes_back
 
 
 @pytest.mark.parametrize("width, height", [(1280, 800), (1920, 1200), (800, 1280)])
-def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_kiosk_and_the_screens_either_side(browser, width, height):
+def test_the_options_screen_with_its_six_items_and_its_keyboard_group_fits_the_kiosk_and_the_screens_either_side(browser, width, height):
     """The kiosk's 1280 by 800, the biggest screen's 1920 by 1200 and a portrait tablet's 800 by 1280 keep fits() on the Options screen with
-    its four items (Camera framing, Screensaver, Door sign and TV) and the Key click group on it, the group right under the items."""
+    its six items (Camera framing, Mic level, Screensaver, Door sign, TV and Settings) and the Key click group on it, the group right under the items."""
     with PageServer() as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
@@ -4991,7 +5008,7 @@ def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_
         page.click("#open-options")
         group = page.locator(".keyboard-section")
         buttons_end = "Math.max(...Array.from(document.querySelectorAll('.view[data-view=options] .menu-item')).map(b => b.getBoundingClientRect().bottom))"
-        assert page.locator(".view[data-view=options] .menu-item").count() == 4
+        assert page.locator(".view[data-view=options] .menu-item").count() == 6
         assert group.is_visible() and fits(page), "the options screen scrolls"
         box = group.bounding_box()
         assert 0 <= box["y"] - page.evaluate(buttons_end) <= 60 and box["y"] + box["height"] <= height   # right under the menu's buttons, on the screen
@@ -4999,8 +5016,9 @@ def test_the_options_screen_with_its_four_items_and_its_keyboard_group_fits_the_
 
 
 @pytest.mark.parametrize("width, height", [(1280, 800), (1024, 700), (1920, 1200)])
-def test_the_four_items_of_the_options_screen_sit_two_by_two(browser, width, height):
-    """Three in a row left the TV alone on a second row. Two by two reads as a set, and takes the same height."""
+def test_the_six_items_of_the_options_screen_sit_three_and_three(browser, width, height):
+    """Three in a row once left the TV alone on a second row, and the four sat two by two. Settings made five (spec 2026-10-29): three and two,
+    in the height the four took, as a third row would not fit the kiosk. Mic level makes six: three and three, in that same height."""
     with PageServer() as server:
         page = browser.new_page(viewport={"width": width, "height": height})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
@@ -5008,10 +5026,10 @@ def test_the_four_items_of_the_options_screen_sit_two_by_two(browser, width, hei
         page.click("#open-options")
         boxes = page.locator(".view[data-view=options] .menu-item").evaluate_all(
             "bs => bs.map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top), Math.round(r.width), Math.round(r.height)]; })")
-        (x0, y0, w0, h0), (x1, y1, w1, h1), (x2, y2, w2, h2), (x3, y3, w3, h3) = boxes
-        assert y0 == y1 and y2 == y3 and y2 > y0 and x0 == x2 and x1 == x3 and x1 > x0, boxes      # two rows of two
-        assert w0 == w1 == w2 == w3 and h0 == h1 == h2 == h3 == 160, boxes                         # the same size, as before
-        assert y3 + h3 - y0 == 2 * 160 + 24, boxes                                                 # and the height three and one took
+        (x0, y0, w0, h0), (x1, y1, w1, h1), (x2, y2, w2, h2), (x3, y3, w3, h3), (x4, y4, w4, h4), (x5, y5, w5, h5) = boxes
+        assert y0 == y1 == y2 and y3 == y4 == y5 and y3 > y0 and x0 == x3 and x1 == x4 and x2 == x5 and x0 < x1 < x2, boxes   # three, then three under them
+        assert w0 == w1 == w2 == w3 == w4 == w5 and h0 == h1 == h2 == h3 == h4 == h5 == 160, boxes                      # the same size, as before
+        assert y5 + h5 - y0 == 2 * 160 + 24, boxes                                                                     # and the height the four took
         page.close()
 
 
@@ -5056,14 +5074,14 @@ def test_the_control_deck_is_the_meetings_card_beside_the_tiles_the_second_row_a
         page.close()
 
 
-def test_the_four_items_of_the_options_screen_stack_in_one_column_below_1024_wide(browser):
+def test_the_items_of_the_options_screen_stack_in_one_column_below_1024_wide(browser):
     with PageServer() as server:
         page = browser.new_page(viewport={"width": 800, "height": 1280})
         page.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
         page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
         page.click("#open-options")
         boxes = page.locator(".view[data-view=options] .menu-item").evaluate_all("bs => bs.map(b => { const r = b.getBoundingClientRect(); return [Math.round(r.left), Math.round(r.top)]; })")
-        assert len({x for x, _ in boxes}) == 1 and [y for _, y in boxes] == sorted(y for _, y in boxes) and len({y for _, y in boxes}) == 4, boxes
+        assert len({x for x, _ in boxes}) == 1 and [y for _, y in boxes] == sorted(y for _, y in boxes) and len({y for _, y in boxes}) == 6, boxes
         page.close()
 
 
@@ -7797,7 +7815,7 @@ def test_the_options_screen_has_the_tv_beside_the_others_and_the_meeting_screen_
         page = open_page(browser, server)
         page.click("#open-options")
         assert page.locator(".view[data-view=options] .menu button").evaluate_all("bs => bs.map(b => b.id)") == \
-            ["open-camera-setup", "open-screensaver", "open-door-sign", "open-tv-options"]
+            ["open-camera-setup", "open-mic-options", "open-screensaver", "open-door-sign", "open-tv-options", "open-settings"]   # Mic level (spec 2026-10-29)
         assert page.locator("#open-tv-options").inner_text().strip() == "TV" and page.locator("#open-tv-options svg use").get_attribute("href") == "#icon-tv"
         page.click("#back-from-options")
         join_by_id(page)

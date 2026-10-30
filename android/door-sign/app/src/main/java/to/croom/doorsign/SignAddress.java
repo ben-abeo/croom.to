@@ -34,6 +34,18 @@ final class SignAddress {
         return scheme + "://" + uri.getHost() + port + path + query;
     }
 
+    /** The room's address for the sign's: its scheme, host and port ("http://10.0.0.5:8080"), where the check-in goes; null for none. */
+    static String server(String sign) {
+        if (sign == null) return null;
+        try {
+            URI uri = new URI(sign);
+            if (uri.getScheme() == null || uri.getHost() == null || uri.getHost().isEmpty()) return null;
+            return uri.getScheme() + "://" + uri.getHost() + (uri.getPort() == -1 ? "" : ":" + uri.getPort());
+        } catch (URISyntaxException e) {
+            return null;
+        }
+    }
+
     /** Whether `url` is on the sign's own server (scheme, host and port): the only place the page, and the light bar's hook, may go. */
     static boolean sameServer(String sign, String url) {
         try {

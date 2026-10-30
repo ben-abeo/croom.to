@@ -351,6 +351,11 @@ class TvService(Service):
         return bool(self._config.enabled and self._config.host)
 
     @property
+    def tv_config(self) -> TvConfig:
+        """The TV the service is set up for: the config's, or the one selected on the table (Settings › Check reads it)."""
+        return self._config
+
+    @property
     def key_path(self) -> Path:
         """Where the key the TV handed out is kept."""
         return self._keys.path

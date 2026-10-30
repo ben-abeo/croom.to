@@ -65,6 +65,8 @@ def local(day: date, at: time) -> datetime:
 
 
 def parse_hour(text: str) -> time:
+    if isinstance(text, int) and not isinstance(text, bool) and 0 <= text < 24 * 60:
+        text = f"{text // 60:02d}:{text % 60:02d}"   # YAML 1.1 reads an unquoted 18:00 as 1080 (base 60): what was written was a time
     try:
         parsed = time.fromisoformat(str(text).strip())
     except ValueError:
@@ -215,10 +217,7 @@ class RoomBookings:
         self.store_path = Path(store_path)
         self.cache_path = Path(cache_path)
         self.room_name = room_name
-        self.start_hour = parse_hour(booking_start)
-        self.end_hour = parse_hour(booking_end)
-        if self.end_hour <= self.start_hour:
-            raise ValueError(f"booking hours end ({booking_end}) before they start ({booking_start})")
+        self.set_hours(booking_start, booking_end)
         self.clock = clock or (lambda: datetime.now().astimezone())
         self._provider = None
         self._calendar_id = ""
@@ -228,6 +227,14 @@ class RoomBookings:
         self._revision = 0       # counts the changes to what the room shows: a screen reads the day again when it moves
         self._records: List[Booking] = self._load()
         self._google, self._saved_at = self.cached()
+
+    def set_hours(self, booking_start: str, booking_end: str) -> None:
+        """The booking hours, "HH:MM" on the quarter hour: at start, and when Settings changes them (spec 2026-10-29, section 4: they
+        apply at once). ValueError, with nothing changed, when they are not times or end before they start."""
+        start, end = parse_hour(booking_start), parse_hour(booking_end)
+        if end <= start:
+            raise ValueError(f"booking hours end ({booking_end}) before they start ({booking_start})")
+        self.start_hour, self.end_hour = start, end
 
     # -- files
 

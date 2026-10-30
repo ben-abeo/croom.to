@@ -42,6 +42,7 @@ def no_hardware():
          patch("croom.calendar.service.CalendarService.initialize", new=AsyncMock(return_value=False)), \
          patch("croom.meeting.service.build_provider", return_value=None), \
          patch("croom.devices.volume.RoomVolume.refresh", new=AsyncMock(return_value=None)), \
+         patch("croom.devices.mic.RoomMic.refresh", new=AsyncMock(return_value=None)), \
          patch("croom.devices.camera.RoomCamera.discover", new=AsyncMock(return_value=False)):
         yield
 

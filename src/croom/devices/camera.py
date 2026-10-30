@@ -75,13 +75,7 @@ class RoomCamera:
             logger.warning(f"video.ptz_travel_seconds must be a number of seconds above 0, not {travel_s!r}: "
                            f"using {DEFAULT_TRAVEL_S:g}")
             self._travel_s = DEFAULT_TRAVEL_S
-        if preset_names is not None and not (isinstance(preset_names, (list, tuple))
-                                             and all(isinstance(name, str) for name in preset_names)):
-            logger.warning(f"control.camera_presets must be a list of names, not {preset_names!r}: "
-                           f"using {', '.join(DEFAULT_PRESET_NAMES)}")
-            preset_names = DEFAULT_PRESET_NAMES
-        names = list(preset_names or [])[:self.SLOTS]
-        self._names = names + [f"Preset {i}" for i in range(len(names) + 1, self.SLOTS + 1)]
+        self.set_preset_names(preset_names)
         self._store = store
         self._v4l2 = v4l2 or V4l2Controls()
         self._clock = clock
@@ -134,6 +128,17 @@ class RoomCamera:
                 self._presets[str(slot)] = dict(preset)
             else:
                 logger.debug(f"Ignoring the saved camera preset {slot}: {preset!r}")
+
+    def set_preset_names(self, preset_names: Optional[List[str]]) -> None:
+        """The three slots' names (control.camera_presets): at start, and when Settings changes them, which applies at once. Slots past
+        the names given are Preset 2, Preset 3; anything but a list of names is the defaults, with a warning."""
+        if preset_names is not None and not (isinstance(preset_names, (list, tuple))
+                                             and all(isinstance(name, str) for name in preset_names)):
+            logger.warning(f"control.camera_presets must be a list of names, not {preset_names!r}: "
+                           f"using {', '.join(DEFAULT_PRESET_NAMES)}")
+            preset_names = DEFAULT_PRESET_NAMES
+        names = list(preset_names or [])[:self.SLOTS]
+        self._names = names + [f"Preset {i}" for i in range(len(names) + 1, self.SLOTS + 1)]
 
     @classmethod
     def from_config(cls, config, store) -> "RoomCamera":

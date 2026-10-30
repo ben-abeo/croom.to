@@ -718,12 +718,13 @@ async def no_room_devices():
 
 
 def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, laptop=None, pin_store=None,
-                 admin=None, find_devices=no_room_devices, keyboard=None, checks=None, github=None, **config):
+                 admin=None, find_devices=no_room_devices, keyboard=None, checks=None, github=None, registry=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
     return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse,
                           scores=scores, laptop=laptop, pin_store=pin_store, admin=admin, find_devices=find_devices,
-                          keyboard=keyboard if keyboard is not None else StubKeyboard(), checks=checks, github=github)
+                          keyboard=keyboard if keyboard is not None else StubKeyboard(), checks=checks, github=github,
+                          registry=registry)
 
 
 @pytest.fixture(autouse=True)

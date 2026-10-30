@@ -30,12 +30,13 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
+from croom.settings.checkin import COMMIT_KINDS, TOKEN_HEADER, CheckinError, Registry
 from croom.settings.checks import CheckBusy, Checks
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
 from croom.settings.devices import find_devices as find_room_devices
 from croom.settings.devices import offer
-from croom.settings.github import CANT_CHECK, GitHub, is_commit
+from croom.settings.github import CANT_CHECK, GitHub, GitHubError, is_commit
 from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
 from croom.settings.schema import BY_PATH, SettingError
 from croom.tv.discover import discover_tvs
@@ -243,6 +244,9 @@ class ControlService(Service):
             own, on config_file and the services given here.
         github: what Settings › Software asks GitHub (croom.settings.github.GitHub: the newest version and the changes); None asks
             nothing and says "Can't check for updates right now" (from_config makes the real one).
+        registry: the devices that check in (croom.settings.checkin.Registry: the touch Pi's agent, the door sign); None opens the
+            config's devices_file, devices.json beside settings_file when the config names none (from_config: the data directory), or
+            keeps it in memory when the config names neither.
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -266,6 +270,7 @@ class ControlService(Service):
         keyboard=None,
         checks=None,
         github=None,
+        registry=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -310,6 +315,11 @@ class ControlService(Service):
         self._credentials = Credentials(self._editor, admin)
         self._find_devices = find_devices or find_room_devices
         self._github = github
+        if registry is None:
+            devices_file = self.config.get("devices_file") or (
+                Path(self.config["settings_file"]).parent / "devices.json" if self.config.get("settings_file") else None)
+            registry = Registry(devices_file)
+        self._registry = registry
         self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
                                                                 discover=discover)
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
@@ -353,6 +363,7 @@ class ControlService(Service):
                 "screensaver": config.control.screensaver,
                 "settings_file": str(data_dir / "control-settings.json"),
                 "pin_file": str(data_dir / "settings-pin.json"),
+                "devices_file": str(data_dir / "devices.json"),
                 "config_file": CONFIG_PATHS[0],
             },
             meeting=meeting,
@@ -453,6 +464,13 @@ class ControlService(Service):
         app.router.add_post("/api/settings/software/update", self._handle_software_update)
         app.router.add_post("/api/settings/software/rollback", self._handle_software_rollback)
         app.router.add_post("/api/settings/reboot", self._handle_reboot)
+        app.router.add_post("/api/settings/software/update-all", self._handle_update_all)
+        app.router.add_post("/api/devices/checkin", self._handle_checkin)
+        app.router.add_get("/api/settings/devices", self._handle_devices)
+        app.router.add_post("/api/settings/devices/{device}/allow", self._handle_allow_device)
+        app.router.add_post("/api/settings/devices/{device}/refuse", self._handle_refuse_device)
+        app.router.add_post("/api/settings/devices/{device}/forget", self._handle_forget_device)
+        app.router.add_post("/api/settings/devices/{device}/jobs", self._handle_device_job)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -490,6 +508,7 @@ class ControlService(Service):
         self._task = self._join_task = self._search = None
         self._mouse.close()
         self._keyboard.close()
+        self._registry.flush()
         logger.info("Room control page stopped")
 
     async def _end_what_is_open(self, app: web.Application) -> None:
@@ -1588,7 +1607,7 @@ class ControlService(Service):
 
     # --- Software: versions, updates and reboot (spec 2026-10-29, sections 3, 6 and 8)
 
-    DEVICES = ("tv",)   # the devices the Software page acts on (the touch Pi and the door sign check in: Task 9 adds them)
+    DEVICES = ("tv",)   # the device the root helper acts on; the others (the touch Pi, the door sign) check in, by their ids (_checks_in)
 
     async def _handle_software(self, request: web.Request) -> web.Response:
         """What Settings › Software shows: {"tv": the TV Pi's card, "in_meeting"}. The TV Pi's card is {"available": False, "error"}
@@ -1598,7 +1617,21 @@ class ControlService(Service):
         refused = self._require_unlock(request)
         if refused is not None:
             return refused
-        return web.json_response({"tv": await self._tv_software(), "in_meeting": self._meeting_state() in IN_PROGRESS_STATES})
+        return web.json_response({"tv": await self._tv_software(), "devices": await self._devices_software(),
+                                  "waiting": self._registry.waiting(), "in_meeting": self._meeting_state() in IN_PROGRESS_STATES})
+
+    async def _devices_software(self) -> List[Dict[str, Any]]:
+        """The cards of the devices that check in: each as the registry has it (version, last seen, its job and its last result), and
+        for a device that runs a commit of main (the touch Pi), what GitHub says of it as for the TV Pi."""
+        cards = self._registry.devices()
+        for card in cards:
+            if card["kind"] not in COMMIT_KINDS:
+                continue
+            if self._github is None:
+                card.update(newest=None, running=None, changes=None, more=0, up_to_date=None, error=CANT_CHECK)
+            else:
+                card.update(await asyncio.to_thread(self._github.summary, card["version"] or None))
+        return cards
 
     async def _tv_software(self) -> Dict[str, Any]:
         if self._without_helper() is not None:
@@ -1631,14 +1664,32 @@ class ControlService(Service):
         if data is None:
             return None, self._error_response("Send a JSON object", 400)
         device = data.get("device", "tv")
-        if device not in self.DEVICES:
+        if device not in self.DEVICES and not self._checks_in(device):
             return None, self._error_response(f"There is no device {device}", 404)
         if self._meeting_state() in IN_PROGRESS_STATES:
             return None, self._error_response(self.LEAVE_FIRST, 409)
-        refused = self._without_helper()
-        if refused is not None:
-            return None, refused
+        if device in self.DEVICES:
+            refused = self._without_helper()
+            if refused is not None:
+                return None, refused
         return data, None
+
+    def _checks_in(self, device: Any) -> bool:
+        """Whether `device` is one of the devices that check in (the touch Pi, the door sign), joined or waiting."""
+        try:
+            self._registry.get(device)
+        except CheckinError:
+            return False
+        return True
+
+    def _queue(self, device: str, job: str, answer: Dict[str, Any], **args: Any) -> web.Response:
+        """Give a device that checks in a job (it takes it at its next check-in): the answer, or the registry's refusal in words."""
+        try:
+            queued = self._registry.queue(device, job, args)
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        logger.info(f"{job} of the device {device} asked for from Settings")
+        return web.json_response(dict(answer, job=queued))
 
     async def _admin_answer(self, job: str, answer: Dict[str, Any], **args: Any) -> web.Response:
         try:
@@ -1659,6 +1710,8 @@ class ControlService(Service):
         commit = data.get("commit")
         if not is_commit(commit):
             return self._error_response("Send the version to install (a commit)", 400)
+        if data.get("device", "tv") != "tv":
+            return self._queue(data["device"], "update", {"updating": True}, commit=commit)
         response = await self._admin_answer("update", {"updating": True}, commit=commit)
         if response.status == 200:
             logger.info(f"Update of the TV Pi to {commit} asked for from Settings")
@@ -1669,6 +1722,8 @@ class ControlService(Service):
         data, refused = await self._software_body(request)
         if refused is not None:
             return refused
+        if data.get("device", "tv") != "tv":
+            return self._error_response(NOT_AVAILABLE, 409)
         response = await self._admin_answer("rollback", {"rolling_back": True})
         if response.status == 200:
             logger.info("Switch back to the TV Pi's previous version asked for from Settings")
@@ -1679,10 +1734,122 @@ class ControlService(Service):
         data, refused = await self._software_body(request)
         if refused is not None:
             return refused
+        if data.get("device", "tv") != "tv":
+            return self._queue(data["device"], "reboot", {"rebooting": True})
         response = await self._admin_answer("reboot", {"rebooting": True})
         if response.status == 200:
             logger.info("Reboot of the TV Pi asked for from Settings")
         return response
+
+    async def _handle_update_all(self, request: web.Request) -> web.Response:
+        """Update every device that is not on the newest version of main: the touch Pis that have joined (each takes its job at its next
+        check-in; one that is busy is left as it is), then the TV Pi (whose update restarts the room software, so it goes last). Never in
+        a meeting. Answers {"updating": the devices asked ("tv" and the ids), "errors": the words of those that refused}."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        if self._github is None:
+            return self._error_response(CANT_CHECK, 503)
+        try:
+            commit = (await asyncio.to_thread(self._github.newest))["commit"]
+        except GitHubError:
+            return self._error_response(CANT_CHECK, 503)
+        updating: List[str] = []
+        errors: List[str] = []
+        for device in self._registry.devices():
+            if device["kind"] not in COMMIT_KINDS or device["version"] == commit or device["job"] is not None:
+                continue
+            try:
+                self._registry.queue(device["id"], "update", {"commit": commit})
+                updating.append(device["id"])
+            except CheckinError as e:
+                errors.append(str(e))
+        if self._without_helper() is None:
+            try:
+                version = (await self._admin.call("version")).get("version")
+                if version != commit:
+                    await self._admin.call("update", commit=commit)
+                    updating.append("tv")
+            except (AdminError, AdminUnavailable) as e:
+                errors.append(str(e))
+        logger.info(f"Update all to {commit} asked for from Settings: {', '.join(updating) or 'nothing to update'}")
+        return web.json_response({"updating": updating, "errors": errors, "commit": commit})
+
+    # --- Devices that check in: the touch Pi's agent and the door sign (spec 2026-10-29, section 7)
+
+    CHECKIN_BYTES = 16 * 1024
+
+    async def _handle_checkin(self, request: web.Request) -> web.Response:
+        """POST /api/devices/checkin from a device on the LAN, every 5 seconds. Not behind the PIN: a device the TV Pi does not know
+        waits to join (Settings › Software's Allow), and one that has joined must carry the token it joined with (header
+        X-Croom-Device-Token). The answer is {"state": "pending"} or {"state": "allowed", "job": its next job or null}."""
+        refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request, self.CHECKIN_BYTES)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        try:
+            answer = self._registry.checkin(data, request.headers.get(TOKEN_HEADER, ""), request.remote or "")
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response(answer)
+
+    async def _handle_devices(self, request: web.Request) -> web.Response:
+        """The devices that check in: {"devices": those that have joined, "waiting": those waiting to join}."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response({"devices": self._registry.devices(), "waiting": self._registry.waiting()})
+
+    async def _device_change(self, request: web.Request, change: Callable[[str], Any], answer: Dict[str, Any]) -> web.Response:
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        try:
+            change(request.match_info["device"])
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response(answer)
+
+    async def _handle_allow_device(self, request: web.Request) -> web.Response:
+        """Let a device that waits to join in: its check-ins are answered with its jobs from now on."""
+        return await self._device_change(request, self._registry.allow, {"allowed": True})
+
+    async def _handle_refuse_device(self, request: web.Request) -> web.Response:
+        """Remove a device and refuse its check-ins from now on."""
+        return await self._device_change(request, self._registry.refuse, {"refused": True})
+
+    async def _handle_forget_device(self, request: web.Request) -> web.Response:
+        """Remove a device (one replaced by another): if it is still there, it waits to join again."""
+        return await self._device_change(request, self._registry.forget, {"forgotten": True})
+
+    async def _handle_device_job(self, request: web.Request) -> web.Response:
+        """{"type", "args"}: give a device that has joined a job (reboot, update {commit}, wifi_scan, wifi_connect {ssid, password},
+        wifi_forget {ssid}); it takes it at its next check-in, and GET /api/settings/devices follows it. A reboot or an update is never
+        given in a meeting."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        job = data.get("type")
+        if job in ("reboot", "update") and self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        try:
+            queued = self._registry.queue(request.match_info["device"], job, data.get("args"))
+        except CheckinError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response({"job": queued})
 
     # --- Meetings: Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
 

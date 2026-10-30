@@ -7,8 +7,12 @@
 // Pi's card.
 //
 // The other devices' cards (the touch Pi, the door sign, which check in with the TV Pi) go in the box under it: a file of their own
-// hands a draw over with croomSettings.softwareCard(draw), and draw(box, answer) is called with GET /api/settings/software's answer
-// each time the page reads it; it may give back a function that tidies up when the page is left or read again.
+// hands a draw over with croomSettings.softwareCard(draw), and draw(box, answer, again) is called with GET /api/settings/software's
+// answer each time the page reads it (again() reads it once more, after a change); it may give back a function that tidies up when the
+// page is left or read again. While a device has a job under way the page reads again every 2 seconds, as while the TV Pi updates.
+//
+// Update all, over the cards, updates every device that is not on the newest version (the TV Pi last: its update restarts the room
+// software); it waits while a meeting is on ("Leave the meeting first") and while anything is under way.
 (function () {
   "use strict";
   const S = window.croomSettings;
@@ -59,11 +63,17 @@
     let waiting = false;                     // waiting for the room to come back (a restart, a reboot, an update's restart)
     const root = make("div", "tool-page software-page");
     const loading = make("p", "note settings-loading", "Loading");
+    const bar = make("div", "software-bar");
+    const updateAll = button("Update all", "primary software-update-all", "refresh-cw");
+    const allMessage = make("p", "message software-all-message");
+    allMessage.setAttribute("role", "status");
+    bar.append(updateAll, allMessage);
+    bar.hidden = true;
     const tv = make("section", "software-card");
     tv.dataset.device = "tv";
     tv.hidden = true;
     const others = make("div", "software-devices");   // the touch Pi's and the door sign's cards
-    root.append(loading, tv, others);
+    root.append(loading, bar, tv, others);
     host.append(root);
 
     // --- the TV Pi's card: built once, filled at each reading
@@ -162,6 +172,24 @@
       else if (!busy && !waiting && WORKING.test(message.textContent)) say("");
     }
 
+    // Update all: shown when a device is behind the newest; waits while a meeting is on or anything is under way
+    let behind = [];
+    let devicesRead = [];
+    function fillBar(answer) {
+      devicesRead = answer.devices || [];
+      const tvCard = answer.tv || {};
+      const devices = answer.devices || [];
+      behind = [];
+      if (tvCard.available && tvCard.newest && tvCard.up_to_date === false) behind.push("tv");
+      for (const d of devices) if (d.newest && d.up_to_date === false) behind.push(d.id);
+      const busy = (tvCard.update && UNDER_WAY.includes(tvCard.update.state)) || devices.some((d) => d.job);
+      bar.hidden = !devices.length || !(behind.length || allMessage.textContent);   // the TV Pi alone has its own Update
+      updateAll.disabled = Boolean(answer.in_meeting) || busy || waiting;
+      if (answer.in_meeting) allMessage.textContent = "Leave the meeting first";
+      else if (allMessage.textContent === "Leave the meeting first") allMessage.textContent = "";
+    }
+    const deviceBusy = (answer) => (answer.devices || []).some((d) => d.job);
+
     function drawOthers(answer) {
       for (const tidy of tidyCards) { try { tidy(); } catch (e) { console.warn("A Software card did not tidy up:", e); } }
       tidyCards = [];
@@ -169,7 +197,7 @@
       for (const draw of cards) {
         const box = make("div", "software-device");
         others.append(box);
-        const tidy = draw(box, answer);
+        const tidy = draw(box, answer, () => { if (!gone && !waiting) read(); });
         if (typeof tidy === "function") tidyCards.push(tidy);
       }
       others.hidden = !others.children.length;
@@ -193,8 +221,10 @@
       if (gone) return;
       loading.hidden = true;
       fill(answer);
+      fillBar(answer);
       drawOthers(answer);
-      if (card.available && card.update && UNDER_WAY.includes(card.update.state) && !waiting) timer = setTimeout(read, POLL_MS);
+      const tvBusy = card.available && card.update && UNDER_WAY.includes(card.update.state);
+      if ((tvBusy || deviceBusy(answer)) && !waiting) timer = setTimeout(read, POLL_MS);
     }
 
     // The room software (or the whole TV Pi) goes away and comes back: ask whether it answers until it has been away and is back, then
@@ -235,6 +265,27 @@
       if (!gone) then();
       return true;
     }
+
+    updateAll.addEventListener("click", async () => {
+      updateAll.disabled = true;
+      allMessage.textContent = "";
+      let answer = null;
+      try {
+        answer = await S.post("/api/settings/software/update-all", {});
+      } catch (e) {
+        if (gone || e.locked) return;
+        if (e.status) { allMessage.textContent = e.message; updateAll.disabled = false; return; }
+      }
+      if (gone) return;
+      if (answer) {
+        const title = (id) => { const d = devicesRead.find((x) => x.id === id); return d ? d.label.replace(/^touch/, "Touch").replace(/^door/, "Door") : id; };
+        const names = answer.updating.map((id) => id === "tv" ? "TV Pi" : title(id));
+        allMessage.textContent = (names.length ? "Updating " + names.join(", ") : "Nothing to update") +
+          (answer.errors && answer.errors.length ? ". " + answer.errors.join(". ") : "");
+        allMessage.classList.toggle("ok", !(answer.errors && answer.errors.length));
+      }
+      read();
+    });
 
     update.addEventListener("click", async () => {
       if (!update.dataset.commit) return;
@@ -280,6 +331,8 @@
   }
 
   S.define("software", drawSoftware);
-  // The other devices' Software cards: draw(box, answer) at each reading of the page (see the top of this file)
+  // The other devices' Software cards: draw(box, answer, again) at each reading of the page (see the top of this file)
   S.softwareCard = (draw) => { cards.push(draw); };
+  // What those cards say as the TV Pi's does
+  S.softwareWords = { short: short, day: day, versionWords: versionWords, UNDER_WAY: UNDER_WAY };
 })();

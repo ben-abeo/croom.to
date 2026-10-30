@@ -75,8 +75,9 @@ def test_guide_sets_up_the_table_pi_and_names_the_desktop_icons():
     assert "install-kiosk.sh --url" in html
     assert "Room controls" in html and "Start Crystal Meet" in html
     assert "on-screen keyboard" in html
-    # the scale lives in the kiosk command, and nothing relaunches the browser: a table Pi set up before needs both steps again
-    assert "pull the repository on the table Pi too, run the install-kiosk command again and reboot it so the new scale takes effect" in html
+    # Settings updates the table Pi through its agent (the new version's kiosk command, then a reboot); one set up before has no agent
+    assert "an update runs the new version's install-kiosk command on it and reboots it" in html
+    assert "A table Pi set up before room settings has no agent: once, pull the repository on the table Pi too, run the install-kiosk command again and reboot it" in html
 
 
 def test_guide_sets_up_the_camera_and_the_sound():
@@ -526,35 +527,44 @@ def test_guide_troubleshoots_the_tv_not_found_not_waking_not_accepted_and_the_mo
     assert "so the Pi's own pointer shows on the TV from then on" not in text
 
 
-def test_guide_updates_every_room_device_in_the_order_the_virtual_mouse_needs():
-    """The update recipe is for every room device, with an LG TV or not (evdev is a hard dependency), so it follows the TV section and is
-    not part of it: the build tools first (pip compiles the mouse library), then the software, then the installer's virtual-mouse step on
-    its own, then the restart."""
+def test_guide_updates_from_settings_and_upgrades_a_room_from_before_in_order():
+    """Updates come from Settings > Software now; a room set up before room settings is upgraded once by hand: the room device (croom
+    stopped, the installer again with no --config, a reboot), then the table Pi (the install-kiosk command, a reboot, Allow), then the door
+    sign panel (the factory reset, the device owner, Allow). The section stays after the TV's, for every room device."""
     html = (GUIDE / "index.html").read_text(encoding="utf-8")
     recipe = visible_text(html.split("<h2>Updating a room device</h2>", 1)[1].split("</section>", 1)[0])
-    steps = ("sudo apt-get install -y python3-dev gcc libc6-dev",
-             "sudo /opt/croom/venv/bin/pip install -q --force-reinstall --no-deps git+https://github.com/ben-abeo/croom.to.git",
-             "sudo /opt/croom/venv/bin/pip install -q git+https://github.com/ben-abeo/croom.to.git",
-             "cd ~/croom.to && git pull",
-             "sudo bash -c 'source installer/install.sh && install_virtual_mouse'",
-             "sudo systemctl restart croom")
+    steps = ("Options, then Settings, then Software",
+             "sudo systemctl stop croom",
+             "cd ~/croom.to && git checkout main && git pull",
+             "sudo bash installer/install.sh (with no --config",
+             "sudo reboot",
+             "sudo bash installer/install-kiosk.sh --url http://<device address>:8080/",
+             "Allow beside the Touch Pi",
+             "factory reset, which erases everything on the panel",
+             "adb shell dpm set-device-owner to.croom.doorsign/.AdminReceiver")
     positions = [recipe.index(step) for step in steps]
     assert positions == sorted(positions), recipe
-    for needle in (
-        "Update a device that already runs Crystal Meet in the order below.",
-        "Every room device needs these steps, with an LG TV or not, because the library behind the touchpad's mouse is a hard dependency "
-        "and is compiled on the device",
-        "The first and third steps are needed once and do no harm when repeated",
-        "Without them the update stops with an error while it builds the mouse library",
-        "the compiler's package only recommends libc6-dev, which has the C headers the build reads",
-        "That is the installer's virtual-mouse step on its own",
-        "a udev rule hands /dev/uinput to the input group, the uinput module is set to load at every boot, and your user joins the input group",
-        "a new group only reaches a service that starts afresh",
-    ):
-        assert needle in recipe, needle
+    assert "--force-reinstall" not in html
     # The update recipe is outside the optional TV section.
     tv_section_end = html.index("</section>", html.index('<p class="kicker">Optional, for an LG or Samsung TV</p>'))
     assert tv_section_end < html.index('<h2>Updating a room device</h2>')
+
+
+def test_guide_says_what_settings_does_and_how_a_forgotten_pin_is_reset():
+    html = (GUIDE / "index.html").read_text(encoding="utf-8")
+    text = visible_text(html)
+    for needle in (
+        "Choose the Settings PIN. On the room page tap Options, then Settings. The first time it asks you to choose a PIN of 4 to 8 digits",
+        "Settings stays open for 5 minutes after your last tap in it",
+        "Five wrong PINs lock it for 10 minutes",
+        "Your last change was undone: the room did not start with it",
+        "Leave the meeting first",
+        "It cannot move a device to a separate network the room device is not on",
+        '<div class="card"><h3>The Settings PIN is forgotten</h3>',
+        "sudo rm /var/lib/croom/settings-pin.json",
+        "sudo systemctl status croom-admin",
+    ):
+        assert needle in (html if needle.startswith("<") else text), needle
 
 
 def test_the_marketplace_checklist_updates_a_room_device_in_the_same_order():

@@ -174,3 +174,49 @@ Unit tests replace everything privileged with stand-ins (the socket server runs 
 `nmcli`, `pip`, `git`, GitHub, `/media`, uinput are injected), so nothing needs root or touches the machine running the tests. The
 browser tests cover the PIN, every page, uploads and the sign-in screen. The door sign app gets Java unit tests for check-in and its
 jobs. Each phase ends with a hands-on checklist for the rooms (in the README's section for it).
+
+## 11. As built (2026-10-30)
+
+Built on `room-settings` in twelve tasks; the plan's deviations, and the rulings that change what people see:
+
+- **The PIN.** Leaving the Settings area (the idle return, a meeting, any Options screen but TV, a reload) locks it, stricter than the 5
+  minutes alone, for a shared screen. The wrong-try count and the lock-out live in memory: a restart of the room software clears them.
+  Changing the PIN, or deleting `settings-pin.json`, ends every other screen's unlock. **Restart now**'s wait renews the unlock while it
+  watches (up to about 10 minutes), so its answer is not lost to the lock.
+- **Options** has six items, three and three: Mic level and Settings joined it.
+- **Mic level is a screen of its own** (from Options, and from a **Mic** button on the meeting dock's volume line), not a slider under
+  the speaker's: a third dock row overflowed the 1280 by 800 meeting screen. Its level is put back at join and every 5 seconds as §3 says,
+  but not while the laptop has the MeetUp.
+- **Saving.** A hand-written value the schema refuses blocks every save until it is put right on its own page; the message names it.
+  `control.enabled`, `control.host` and `control.port` are refused (the room page would be lost). The device fields offer what the TV Pi
+  finds plus the value in the file, and accept any one line (the helper cannot see the devices). `ai.backend` is auto, hailo, coral, intel,
+  nvidia or cpu.
+- **The helper** answers restart and reboot first and acts after (a restart waited on its own answer and stalled 60 s); its record
+  (restarts, the last write, updates, the release kept before, Wi-Fi) is in `/var/lib/croom-admin`, root's alone, not the data directory.
+  Releases are root's, and the helper runs or switches to a release only when it is root's and writable by root alone.
+- **Credentials.** Typing the Zoom SDK key and secret is offered beside upload and USB, keeping the room's server-to-server values.
+- **Sign in to Google.** Cancel, the timeout, the browser closing by itself and the agent stopping put the profile's cookies back as they
+  were. Typing on the room Pi is accepted only while a sign-in is open. The installer sets the room Pi's keyboard layout to US (Pi OS
+  starts with GB, where the US key codes cannot type `@`); a reboot applies it.
+- **Check** is not refused in a meeting (no check disturbs one); the TV check reads the room's own connection, the calendar and Zoom checks
+  read the config file on disk. The agent now writes each journal line with its priority, so **Warnings and errors** works.
+- **Updates.** The helper installs only a commit on `main` (it asks GitHub's compare API) and proves the new release's helper starts before
+  the switch; it restarts itself after a successful update; after a reboot its watch waits for croom to be active first. An update is
+  refused while a saved config waits for a restart ("Restart now first, then update"). **Update all** queues the devices first and the TV
+  Pi last. **Test the switch** moves the MeetUp over and back.
+- **Check-in.** The device makes its own token and sends it from its first check-in; **Allow** approves that id and token (no token crosses
+  the LAN from the TV Pi). **Refuse** is remembered (403 from then on) and **Forget** was added, removing a device without remembering it;
+  undoing a Refuse means a new identity on the device (or emptying `refused` in `devices.json`). The registry module is
+  `croom.settings.checkin` (`croom.settings.devices` was the Devices page's).
+- **Wi-Fi.** The Pis write NetworkManager's keyfile and `connection load` it rather than `nmcli device wifi connect`, so the password is
+  never on a command line; the profile on trial has autoconnect off (a power cut comes back on the old network) and the trial counts only
+  while the device stays on it; a proven network gets autoconnect on. The network left stays saved. nmcli runs with `LC_ALL=C`. The TV
+  Pi's check is its gateway and a table Pi check-in after the switch (the gateway alone on Ethernet or with no table Pi joined), asked of
+  the room page through `GET /api/devices/seen-since`, answered only to the TV Pi itself. Wi-Fi changes are refused in a meeting (looking
+  is not). Neither limit is lifted: a device cannot be moved to a separate LAN through the page, and the TV Pi's Wi-Fi cannot change
+  while its table Pi is offline.
+- **The door sign** refuses a new password for the network it is on or another it has saved (Android saves it over the old one, which an
+  app cannot read back); a wrong password shows as "Could not join … within 90 seconds". Updates from Settings need Android 12 or newer.
+  Jobs a panel cannot do (not the device owner) are reported by the panel and not offered.
+- **Moving a room from the release before** is by hand, once: the installer again on the TV Pi, `install-kiosk.sh` again on the table Pi,
+  and a factory reset with the device owner command on each door sign panel (README, "Upgrade a room to room settings").

@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
+from functools import partial
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
@@ -33,6 +34,7 @@ from croom.settings.credentials import KINDS as CREDENTIAL_KINDS
 from croom.settings.credentials import CredentialError
 from croom.settings.credentials import parse as parse_credential
 from croom.settings.credentials import summary as credential_summary
+from croom.settings.github import GitHub
 from croom.settings.schema import SettingError, check_config
 
 logger = logging.getLogger(__name__)
@@ -51,6 +53,8 @@ MAX_USB_FILE = 64 * 1024          # a key file is a few KB; anything bigger on a
 MAX_CREDENTIAL = 64 * 1024
 MAX_CONFIG = 256 * 1024
 COMMAND_TIMEOUT_S = 90            # systemctl restart waits for the agent to stop, which can take a while
+BUILD_TIMEOUT_S = 40 * 60         # an update's pip install on a Pi: the libraries come as wheels, but evdev compiles
+UPDATE_UNDER_WAY = "An update is under way: wait for it to finish"
 
 # The journal job (Settings > Logs): the room software's log, newest first
 JOURNAL_UNIT = "croom"
@@ -78,13 +82,13 @@ class JobError(Exception):
     """A job's refusal or failure, in words for the person at the screen: the server answers with them as they are."""
 
 
-def run_command(args: List[str]) -> Tuple[int, str]:
+def run_command(args: List[str], timeout: float = COMMAND_TIMEOUT_S) -> Tuple[int, str]:
     """Run a command (an argument list: never a shell): (exit code, its output, or its errors when it failed). A timeout is code 124
     and a missing command 127; neither raises."""
     try:
-        done = subprocess.run(args, capture_output=True, text=True, timeout=COMMAND_TIMEOUT_S)
+        done = subprocess.run(args, capture_output=True, text=True, timeout=timeout)
     except subprocess.TimeoutExpired:
-        return 124, f"{args[0]} timed out after {COMMAND_TIMEOUT_S} s"
+        return 124, f"{args[0]} timed out after {timeout:g} s"
     except OSError as e:
         return 127, str(e)
     return done.returncode, done.stdout if done.returncode == 0 else (done.stderr or done.stdout)
@@ -128,7 +132,24 @@ class Paths:
 
     @property
     def version_file(self) -> Path:
+        """The running release's commit, kept beside the link for a person reading it over SSH (the release's own VERSION is the
+        one the helper goes by)."""
         return self.install_dir / "VERSION"
+
+    @property
+    def releases(self) -> Path:
+        """The TV Pi's releases (spec section 6): releases/<commit>/venv and releases/<commit>/VERSION, root's, readable by all."""
+        return self.install_dir / "releases"
+
+    @property
+    def venv_link(self) -> Path:
+        """The link to the running release's venv, which croom.service and croom-admin.service run from."""
+        return self.install_dir / "venv"
+
+    @property
+    def browsers(self) -> Path:
+        """Playwright's browsers, the room user's (PLAYWRIGHT_BROWSERS_PATH in croom.service)."""
+        return self.install_dir / "browsers"
 
 
 @dataclass
@@ -143,6 +164,9 @@ class Host:
     sleep: Callable[[float], None] = time.sleep
     monotonic: Callable[[], float] = time.monotonic   # the watch's 2 minutes: a clock set while it waits does not stretch or end them
     background: Callable[[Callable[[], None]], None] = in_background
+    run_long: Runner = partial(run_command, timeout=BUILD_TIMEOUT_S)   # an update's build: python -m venv, pip install
+    python: str = "/usr/bin/python3"             # what a release's venv is made with
+    github: Any = field(default_factory=GitHub)  # whether a version to install is on main (croom.settings.github.GitHub)
 
 
 # --- checks
@@ -266,6 +290,9 @@ class Jobs:
         self._write_lock = threading.Lock()     # one config write (or undo) at a time: the rotation is several renames
         self._watch_lock = threading.Lock()
         self._watching = False
+        self._updating = False                  # an update (or a switch back) from its check to its end: guarded by _watch_lock
+        from croom.admin.update import Updater  # (here: croom.admin.update imports this module)
+        self._updater = Updater(self)
         self.table: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
             "write_config": self.write_config,
             "save_credential": self.save_credential,
@@ -276,6 +303,9 @@ class Jobs:
             "reboot": self.reboot,
             "version": self.version,
             "journal": self.journal,
+            "update": self._updater.update,
+            "update_status": self._updater.update_status,
+            "rollback": self._updater.rollback,
         }
 
     @property
@@ -284,13 +314,15 @@ class Jobs:
 
     # --- writing files
 
-    def _place(self, target: Path, content: bytes, mode: int) -> None:
+    def _place(self, target: Path, content: bytes, mode: int, owner: bool = True) -> None:
         """Write `content` beside `target` and rename it into place: the room never reads half a file. The temporary file is made with
-        its final owner and mode before a byte of a key goes into it, and is removed when anything fails."""
+        its final owner (the room's; with owner=False the helper's own, root) and mode before a byte of a key goes into it, and is
+        removed when anything fails."""
         fd, temp = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.")
         try:
             os.fchmod(fd, mode)
-            shutil.chown(temp, user=self._host.owner, group=self._host.group)
+            if owner:
+                shutil.chown(temp, user=self._host.owner, group=self._host.group)
             with os.fdopen(fd, "wb") as f:
                 fd = -1
                 f.write(content)
@@ -330,6 +362,8 @@ class Jobs:
         # Held through the write, so that a restart cannot begin half way through one. (The watch takes the write lock to undo, and the
         # watch lock only after it has let the write lock go: the two are never taken the other way round.)
         with self._watch_lock:
+            if self._updating:   # the update's restart would bring it in, and a room that does not start would be put down to the update
+                raise JobError(UPDATE_UNDER_WAY)
             if self._watching:   # the watch may yet put config.yaml.1 back: a change now would be the one undone, or undo the wrong one
                 raise JobError(RESTARTING)
             with self._write_lock:
@@ -464,15 +498,16 @@ class Jobs:
         port = port if isinstance(port, int) and not isinstance(port, bool) and 0 < port < 65536 else DEFAULT_CONTROL_PORT
         return (LOOPBACK if host in ANY_ADDRESS else host), port
 
-    def _comes_back(self) -> bool:
-        """Ask GET /api/status every HEALTH_INTERVAL_S until it answers, for HEALTH_TIMEOUT_S on the monotonic clock."""
+    def _comes_back(self, limit: float = HEALTH_TIMEOUT_S) -> bool:
+        """Ask GET /api/status every HEALTH_INTERVAL_S until it answers, for `limit` seconds (2 minutes after a restart; an update's
+        3) on the monotonic clock."""
         host, port = self._control_address()
         started = self._host.monotonic()
         while True:
             self._host.sleep(HEALTH_INTERVAL_S)
             if self._host.probe(host, port):
                 return True
-            if self._host.monotonic() - started >= HEALTH_TIMEOUT_S:
+            if self._host.monotonic() - started >= limit:
                 return False
 
     def _restart_room(self) -> None:
@@ -528,6 +563,8 @@ class Jobs:
         would hold both up until the room software's own stop gave up on that request.)"""
         _only(args)
         with self._watch_lock:
+            if self._updating:
+                raise JobError(UPDATE_UNDER_WAY)
             if self._watching:
                 raise JobError("The room is restarting: wait for it to come back")
             self._watching = True
@@ -544,7 +581,9 @@ class Jobs:
 
     def resume(self) -> None:
         """At the helper's start: a watch that the helper's own stop cut short (the record still says restarting or watching) goes on,
-        from when its restart was asked for, so that a bad change is still undone. The room is given its full 2 minutes again."""
+        from when its restart was asked for, so that a bad change is still undone. The room is given its full 2 minutes again. An
+        update cut short is taken up or closed, and the release folders an update left unfinished are removed (croom.admin.update)."""
+        self._updater.resume()
         state = self._read_state()
         record = state.get("restart")
         asked_at = state.get("watch_asked_at")
@@ -565,8 +604,12 @@ class Jobs:
         return record if isinstance(record, dict) else {"state": "none", "undone": False}
 
     def reboot(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Reboot the TV Pi a moment after answering: the answer would otherwise wait on a machine that is going down."""
+        """Reboot the TV Pi a moment after answering: the answer would otherwise wait on a machine that is going down. Not during an
+        update (one cut off is safe, but the person would only have to start it again)."""
         _only(args)
+        with self._watch_lock:
+            if self._updating:
+                raise JobError(UPDATE_UNDER_WAY)
         self._host.background(self._reboot_soon)
         return {"rebooting": True}
 
@@ -580,13 +623,10 @@ class Jobs:
             logger.exception("The reboot failed")
 
     def version(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """The commit this TV Pi runs, as the installer or an update wrote it; unknown when nothing did."""
+        """The commit this TV Pi runs, as the installer or an update wrote it in the running release (unknown when nothing did), when
+        that release was installed, and the release kept before it (the one Switch back goes to), if any."""
         _only(args)
-        try:
-            version = self._paths.version_file.read_text().strip()
-        except OSError:
-            version = ""
-        return {"version": version or "unknown"}
+        return self._updater.version()
 
     def journal(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """The room software's log, newest first (Settings > Logs): {"entries": [{"time", "level", "text"}], "cursor": where the next page

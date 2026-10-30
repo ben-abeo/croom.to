@@ -188,9 +188,9 @@ def test_a_page_that_is_unlocked_opens_settings_without_the_pin_again(browser): 
 def test_a_page_not_built_yet_says_coming_soon_and_back_returns_to_the_menu(browser):  # noqa: F811
     with PageServer() as server:
         page = unlocked_page(browser, server)
-        page.click("#settings-menu .menu-item:has-text('Software')")
+        page.click("#settings-menu .menu-item:has-text('Network')")
         assert page.locator("#settings-page").is_visible() and page.locator("#settings-menu").is_hidden()
-        assert page.locator("#settings-title").inner_text() == "Software"
+        assert page.locator("#settings-title").inner_text() == "Network"
         assert "Coming soon" in page.locator("#settings-page").inner_text()
         page.click("#back-from-settings")
         assert view(page) == "settings" and page.locator("#settings-menu").is_visible()

@@ -88,7 +88,7 @@ def mode(path):
 def test_the_table_lists_this_tasks_jobs_and_nothing_else(machine):
     jobs, *_ = machine
     assert set(jobs.table) == {"write_config", "save_credential", "usb_files", "read_usb_file", "restart", "restart_status", "reboot",
-                               "version", "journal"}
+                               "version", "journal", "update", "update_status", "rollback"}
 
 
 def test_a_job_refuses_an_argument_it_does_not_take(machine):
@@ -482,9 +482,10 @@ def test_a_restart_cut_off_before_systemctl_ran_is_watched_again(machine, paths)
 
 def test_version(machine, paths):
     jobs, *_ = machine
-    assert jobs.table["version"]({}) == {"version": "unknown"}
-    (paths.install_dir / "VERSION").write_text("fe1c05f\n")
-    assert jobs.table["version"]({}) == {"version": "fe1c05f"}
+    assert jobs.table["version"]({}) == {"version": "unknown", "installed": None, "previous": None}
+    (paths.install_dir / "VERSION").write_text("fe1c05f\n")   # a TV Pi from before the release folders (croom.admin.update)
+    answer = jobs.table["version"]({})
+    assert answer["version"] == "fe1c05f" and answer["previous"] is None
 
 
 # --- Task 3: the schema's check, and the root-context fixes folded in

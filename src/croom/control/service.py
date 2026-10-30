@@ -35,6 +35,7 @@ from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
 from croom.settings.devices import find_devices as find_room_devices
 from croom.settings.devices import offer
+from croom.settings.github import CANT_CHECK, GitHub, is_commit
 from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
 from croom.settings.schema import BY_PATH, SettingError
 from croom.tv.discover import discover_tvs
@@ -240,6 +241,8 @@ class ControlService(Service):
             runs pw-dump and opens /dev/video*, unless a test stands in for it).
         checks: Settings › Check's checks (croom.settings.checks.Checks), which reach Google, Zoom and the TV; by default the room's
             own, on config_file and the services given here.
+        github: what Settings › Software asks GitHub (croom.settings.github.GitHub: the newest version and the changes); None asks
+            nothing and says "Can't check for updates right now" (from_config makes the real one).
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -262,6 +265,7 @@ class ControlService(Service):
         find_devices=None,
         keyboard=None,
         checks=None,
+        github=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -305,6 +309,7 @@ class ControlService(Service):
         )
         self._credentials = Credentials(self._editor, admin)
         self._find_devices = find_devices or find_room_devices
+        self._github = github
         self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
                                                                 discover=discover)
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
@@ -333,6 +338,7 @@ class ControlService(Service):
         laptop=None,
         pin_store=None,
         admin=None,
+        github=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         data_dir = config.resolve_data_dir()
@@ -358,6 +364,7 @@ class ControlService(Service):
             laptop=laptop,
             pin_store=pin_store,
             admin=admin if admin is not None else AdminClient(),
+            github=github if github is not None else GitHub(),
         )
 
     @property
@@ -442,6 +449,10 @@ class ControlService(Service):
         app.router.add_post("/api/settings/google/sign-in/cancel", self._handle_sign_in_cancel)
         app.router.add_post("/api/settings/checks/{name}", self._handle_check)
         app.router.add_get("/api/settings/logs", self._handle_logs)
+        app.router.add_get("/api/settings/software", self._handle_software)
+        app.router.add_post("/api/settings/software/update", self._handle_software_update)
+        app.router.add_post("/api/settings/software/rollback", self._handle_software_rollback)
+        app.router.add_post("/api/settings/reboot", self._handle_reboot)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -1574,6 +1585,104 @@ class ControlService(Service):
         except AdminError as e:
             return self._error_response(str(e), 409)
         return web.json_response({"entries": answer.get("entries", []), "cursor": answer.get("cursor"), "more": bool(answer.get("more"))})
+
+    # --- Software: versions, updates and reboot (spec 2026-10-29, sections 3, 6 and 8)
+
+    DEVICES = ("tv",)   # the devices the Software page acts on (the touch Pi and the door sign check in: Task 9 adds them)
+
+    async def _handle_software(self, request: web.Request) -> web.Response:
+        """What Settings › Software shows: {"tv": the TV Pi's card, "in_meeting"}. The TV Pi's card is {"available": False, "error"}
+        without the root helper; otherwise its version ("version", "installed", "previous"), its last update ("update": the helper's
+        record), and what GitHub says ("newest", "running", "changes", "more", "up_to_date", "error": "Can't check for updates right
+        now" or None)."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response({"tv": await self._tv_software(), "in_meeting": self._meeting_state() in IN_PROGRESS_STATES})
+
+    async def _tv_software(self) -> Dict[str, Any]:
+        if self._without_helper() is not None:
+            return {"available": False, "error": NOT_AVAILABLE}
+        try:
+            version = await self._admin.call("version")
+            update = await self._admin.call("update_status")
+        except AdminUnavailable as e:
+            return {"available": False, "error": str(e)}
+        except AdminError as e:
+            return {"available": False, "error": str(e)}
+        card: Dict[str, Any] = {"available": True, "version": version.get("version", "unknown"), "installed": version.get("installed"),
+                                "previous": version.get("previous"),
+                                "update": {key: value for key, value in update.items() if key != "ok"}}
+        if self._github is None:
+            card.update(newest=None, running=None, changes=None, more=0, up_to_date=None, error=CANT_CHECK)
+        else:
+            card.update(await asyncio.to_thread(self._github.summary, card["version"]))
+        return card
+
+    async def _software_body(self, request: web.Request) -> Tuple[Optional[Dict[str, Any]], Optional[web.Response]]:
+        """A Software POST's body and its device, after the PIN and JSON; or the refusal: a body that is not an object, a device the
+        page does not have, a meeting on ("Leave the meeting first"), or (for the TV Pi) no helper."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return None, refused
+        data = await self._read_object(request)
+        if data is None:
+            return None, self._error_response("Send a JSON object", 400)
+        device = data.get("device", "tv")
+        if device not in self.DEVICES:
+            return None, self._error_response(f"There is no device {device}", 404)
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return None, self._error_response(self.LEAVE_FIRST, 409)
+        refused = self._without_helper()
+        if refused is not None:
+            return None, refused
+        return data, None
+
+    async def _admin_answer(self, job: str, answer: Dict[str, Any], **args: Any) -> web.Response:
+        try:
+            await self._admin.call(job, **args)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response(answer)
+
+    async def _handle_software_update(self, request: web.Request) -> web.Response:
+        """{"device": "tv", "commit"}: install that version (a commit of main on GitHub, as GET /api/settings/software gave it) and move
+        the room to it: the helper builds it beside the running one, switches, restarts and watches, going back by itself if the room
+        does not answer within 3 minutes. Answers {"updating": true} at once; GET /api/settings/software follows it."""
+        data, refused = await self._software_body(request)
+        if refused is not None:
+            return refused
+        commit = data.get("commit")
+        if not is_commit(commit):
+            return self._error_response("Send the version to install (a commit)", 400)
+        response = await self._admin_answer("update", {"updating": True}, commit=commit)
+        if response.status == 200:
+            logger.info(f"Update of the TV Pi to {commit} asked for from Settings")
+        return response
+
+    async def _handle_software_rollback(self, request: web.Request) -> web.Response:
+        """{"device": "tv"}: switch back to the version kept before the running one, watched as an update is."""
+        data, refused = await self._software_body(request)
+        if refused is not None:
+            return refused
+        response = await self._admin_answer("rollback", {"rolling_back": True})
+        if response.status == 200:
+            logger.info("Switch back to the TV Pi's previous version asked for from Settings")
+        return response
+
+    async def _handle_reboot(self, request: web.Request) -> web.Response:
+        """{"device": "tv"}: reboot the TV Pi (the helper answers first, then reboots). Never in a meeting."""
+        data, refused = await self._software_body(request)
+        if refused is not None:
+            return refused
+        response = await self._admin_answer("reboot", {"rebooting": True})
+        if response.status == 200:
+            logger.info("Reboot of the TV Pi asked for from Settings")
+        return response
 
     # --- Meetings: Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
 

@@ -872,6 +872,36 @@ select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); o
   .log-entry { grid-template-columns: max-content minmax(0, 1fr); }
   .log-text { grid-column: 1 / -1; }
 }
+/* Settings › Software (settings-software.js): a card per device. The TV Pi's: its name with Restart room software and Reboot, the version,
+   the newest and the changes between (a list that scrolls inside itself), what came of the last update, Update, and its progress lines. */
+.software-page { gap: 16px; }
+.software-card { display: flex; flex-direction: column; gap: 10px; min-height: 0; padding: 16px 18px; border: 1px solid var(--line-soft);
+                 border-radius: var(--radius-sm); background: var(--surface-800); }
+.software-card[hidden], .software-card [hidden], .software-devices[hidden] { display: none; }
+.software-card:not(.unavailable) { flex: 1 1 auto; }
+.software-head { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.software-title { margin: 0; flex: 1 1 auto; font-size: 1.3rem; font-weight: 600; }
+.software-actions, .software-update-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.software-actions .button, .software-update-row .button { min-height: 60px; padding: 0 18px; }
+.button.software-reboot.confirm { background: var(--warn-fill); border-color: var(--warn-bar); color: var(--ink-900); }
+.software-version, .software-newest { margin: 0; overflow-wrap: anywhere; }
+.software-version { font-weight: 600; }
+.software-version.settings-unavailable { font-size: 1.4rem; font-weight: 400; color: var(--periwinkle-300); }
+.software-newest { color: var(--periwinkle-300); }
+.software-newest.software-current { color: #fff; }
+.software-changes, .software-progress { flex: 0 1 auto; min-height: 48px; max-height: 26vh; overflow-y: auto; margin: 0; padding: 8px 12px;
+                                        border: 1px solid var(--line-soft); border-radius: var(--radius-sm); background: var(--surface-900); }
+.software-changes { list-style: none; display: grid; align-content: start; gap: 4px; }
+.software-change { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 12px; overflow-wrap: anywhere; }
+.software-change-id { color: var(--periwinkle-300); font-family: ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace; }
+.software-change.software-more { display: block; color: var(--periwinkle-300); }
+.software-progress { padding-left: 2.2em; max-height: 20vh; }
+.software-line { overflow-wrap: anywhere; }
+.software-notice { overflow-wrap: anywhere; }
+.software-notice.ok { background: var(--surface-900); color: #fff; border-left-color: var(--blue-600); }
+.software-update-row .message { margin: 0; }
+.software-update-row .message.ok { color: #fff; }
+.software-devices { display: grid; gap: 16px; }
 /* Save stays in sight at the foot of a long page (Meetings) as the rows scroll under it */
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; position: sticky; bottom: 0; z-index: 1;
                     padding: 10px 0; background: var(--surface-900); }

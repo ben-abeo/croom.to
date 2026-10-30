@@ -26,6 +26,10 @@ SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 # screen and audio of the signed-in session. Override the source with CROOM_REPO.
 CROOM_USER="${SUDO_USER:-}"
 CROOM_REPO="${CROOM_REPO:-git+https://github.com/ben-abeo/croom.to.git}"
+DEFAULT_REPO="git+https://github.com/ben-abeo/croom.to.git"
+# The TV Pi's releases (room settings spec 2026-10-29, section 6): $INSTALL_DIR/releases/<commit>/venv, with $INSTALL_DIR/venv a link to
+# the running one. They are root's (the root helper runs from them, and updates them), readable by all; the tests name their own user.
+RELEASE_OWNER="${RELEASE_OWNER:-root:root}"
 ROOM_CONFIG=""
 CREDENTIALS_FILE=""
 ZOOM_CREDENTIALS_FILE=""
@@ -228,36 +232,169 @@ create_directories() {
     mkdir -p "$CONFIG_DIR"
     mkdir -p "$DATA_DIR"
     mkdir -p "$LOG_DIR"
-    mkdir -p "$INSTALL_DIR/models"
+    mkdir -p "$INSTALL_DIR/models" "$INSTALL_DIR/browsers"
     # The room's signed-in Google Meet profile: the service user's alone (spec 2026-10-07, section 4.6)
     mkdir -p "$DATA_DIR/meet-profile"
     chmod 700 "$DATA_DIR/meet-profile"
 
-    chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR"
+    # The install folder holds the code root runs (the helper, from the venv link): root's, so that the room's user can't change it
+    # (room settings spec 2026-10-29, section 6). What the room software keeps there (its models, the meeting browser) stays the user's.
+    chown "$RELEASE_OWNER" "$INSTALL_DIR"
+    chmod 755 "$INSTALL_DIR"
+    chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/models" "$INSTALL_DIR/browsers"
     chown -R "$CROOM_USER:$CROOM_USER" "$DATA_DIR"
     chown -R "$CROOM_USER:$CROOM_USER" "$LOG_DIR"
 }
 
-# Install Croom Python package
+# --- The releases (room settings spec 2026-10-29, section 6). Settings > Software updates the TV Pi the same way (croom.admin.update):
+# a release is built beside the running one and the venv link moved to it in one step.
+
+# The commit a venv's croom was installed from, as pip recorded it (direct_url.json), or "unknown"
+venv_commit() {
+    local file commit
+    file=$(ls "$1"/lib/python3*/site-packages/croom-*.dist-info/direct_url.json 2>/dev/null | head -n 1 || true)
+    if [[ -n "$file" ]]; then
+        commit=$(python3 -c 'import json, sys; print((json.load(open(sys.argv[1])).get("vcs_info") or {}).get("commit_id", ""))' "$file" 2>/dev/null || true)
+    fi
+    if [[ "${commit:-}" =~ ^[0-9a-f]{40}$ ]]; then echo "$commit"; else echo "unknown"; fi
+}
+
+# The release the venv link points at, or nothing (no link yet)
+running_release() {
+    local target
+    target=$(readlink "$INSTALL_DIR/venv" 2>/dev/null || true)
+    if [[ "$target" =~ ^releases/([^/]+)/venv$ ]]; then echo "${BASH_REMATCH[1]}"; fi
+}
+
+# The newest commit of main on GitHub when installing from it; "unknown" for any other source (or when GitHub does not answer)
+main_commit() {
+    local commit=""
+    if [[ "$CROOM_REPO" == "$DEFAULT_REPO" ]]; then
+        commit=$(git ls-remote "${CROOM_REPO#git+}" refs/heads/main 2>/dev/null | cut -f1 || true)
+    fi
+    if [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then echo "$commit"; else echo "unknown"; fi
+}
+
+# A release folder is root's and readable by all: the room's user can read and run its code, and not change it
+seal_release() {
+    chown -R "$RELEASE_OWNER" "$1"
+    chmod -R go-w,a+rX "$1"
+}
+
+# Point the venv link at releases/$1/venv in one step (a new link renamed over it), and copy its VERSION beside the link
+switch_release() {
+    local name="$1" tmp="$INSTALL_DIR/.venv-$1.$$"
+    ln -sfn "releases/$name/venv" "$tmp"
+    mv -Tf "$tmp" "$INSTALL_DIR/venv"
+    cp "$INSTALL_DIR/releases/$name/VERSION" "$INSTALL_DIR/.VERSION.$$"
+    chmod 644 "$INSTALL_DIR/.VERSION.$$"
+    mv -f "$INSTALL_DIR/.VERSION.$$" "$INSTALL_DIR/VERSION"
+}
+
+# The helper's record of the release kept before the running one (Switch back goes to it, and an update never removes it)
+record_previous_release() {
+    mkdir -p "$DATA_DIR"
+    python3 - "$DATA_DIR/admin-state.json" "$1" << 'PYTHON'
+import json, os, sys
+path, name = sys.argv[1], sys.argv[2]
+try:
+    with open(path) as f:
+        state = json.load(f)
+except (OSError, ValueError):
+    state = {}
+if not isinstance(state, dict):
+    state = {}
+state["previous_release"] = name
+with open(path + ".installer", "w") as f:
+    json.dump(state, f)
+os.chmod(path + ".installer", 0o644)
+os.replace(path + ".installer", path)
+PYTHON
+}
+
+# A venv this installer made before releases (a folder, the room user's) becomes the first release, root's, under the commit pip
+# recorded (or "unknown"), and the venv a link to it. The services' paths ($INSTALL_DIR/venv/bin/python) stay as they are.
+migrate_venv() {
+    local venv="$INSTALL_DIR/venv" name release
+    if [[ ! -d "$venv" || -L "$venv" ]]; then
+        return 0
+    fi
+    name=$(venv_commit "$venv")
+    release="$INSTALL_DIR/releases/$name"
+    log "Moving the installed venv into $release (the release folders Settings > Software updates)"
+    mkdir -p "$INSTALL_DIR/releases"
+    rm -rf "$release"
+    mkdir -p "$release"
+    mv "$venv" "$release/venv"
+    echo "$name" > "$release/VERSION"
+    seal_release "$release"
+    switch_release "$name"
+}
+
+# Build release $1 (a commit of main, or a local- name for another source) beside the running one: a venv with that version installed
+build_release() {
+    local name="$1" release="$INSTALL_DIR/releases/$1" source="$CROOM_REPO" version="$1"
+    if [[ "$name" =~ ^[0-9a-f]{40}$ ]]; then
+        source="$CROOM_REPO@$name"
+    fi
+    rm -rf "$release"
+    mkdir -p "$release"
+    python3 -m venv "$release/venv"
+    "$release/venv/bin/pip" install --upgrade pip
+    log "Installing from $source"
+    "$release/venv/bin/pip" install "$source"
+    if [[ ! "$name" =~ ^[0-9a-f]{40}$ ]]; then
+        version=$(venv_commit "$release/venv")
+    fi
+    echo "$version" > "$release/VERSION"
+    seal_release "$release"
+}
+
+# Keep two releases: the running one and $1, the one it replaced
+prune_releases() {
+    local keep="$1" running folder
+    running=$(running_release)
+    for folder in "$INSTALL_DIR"/releases/*; do
+        [[ -e "$folder" ]] || continue
+        case "$(basename "$folder")" in
+            "$running"|"$keep") ;;
+            *) rm -rf "$folder" ;;
+        esac
+    done
+}
+
+# Install Croom Python package: the newest of main as a release (unless it runs already), the venv link moved to it
 install_croom() {
+    local commit current
     log "Installing Croom..."
+    mkdir -p "$INSTALL_DIR/releases"
+    chown "$RELEASE_OWNER" "$INSTALL_DIR/releases"
+    chmod 755 "$INSTALL_DIR/releases"
+    migrate_venv
 
-    # Create virtual environment
-    python3 -m venv "$INSTALL_DIR/venv"
-
-    # Install package from the configured repository
-    "$INSTALL_DIR/venv/bin/pip" install --upgrade pip
-    log "Installing from $CROOM_REPO"
-    "$INSTALL_DIR/venv/bin/pip" install "$CROOM_REPO"
+    commit=$(main_commit)
+    if [[ "$commit" == "unknown" ]]; then
+        commit="local-$(date +%s)"   # a source other than main on GitHub: a release of its own
+    fi
+    current=$(running_release)
+    if [[ -n "$current" && "$current" == "$commit" ]]; then
+        log "This device runs $commit already"
+    else
+        build_release "$commit"
+        switch_release "$commit"
+        if [[ -n "$current" ]]; then
+            record_previous_release "$current"
+            prune_releases "$current"
+        fi
+    fi
 
     # Install the browser where the service user can find it: under sudo the
     # default would be root's ~/.cache, invisible to the desktop user at runtime.
     export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"
-    "$INSTALL_DIR/venv/bin/pip" install playwright
     "$INSTALL_DIR/venv/bin/playwright" install chromium
     chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/browsers"
 
-    log "Croom installed"
+    log "Croom installed: $(cat "$INSTALL_DIR/VERSION")"
 }
 
 # Create default configuration

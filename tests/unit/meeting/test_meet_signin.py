@@ -9,7 +9,7 @@ import sys
 from types import SimpleNamespace
 
 from croom.meeting.browser_env import ensure_browsers_path
-from croom.meeting.meet_signin import SIGN_IN_URL, sign_in_meet
+from croom.meeting.meet_signin import SIGN_IN_URL, sign_in_command, sign_in_meet
 
 
 def test_refuses_without_a_display(tmp_path):
@@ -39,6 +39,14 @@ def test_runs_the_bundled_chromium_plainly_and_reports_success(tmp_path):
     assert oct(profile.stat().st_mode & 0o777) == "0o700"
     text = out.getvalue()
     assert "Sign in there as the room's Google user" in text and "Profile saved" in text and "--check-meet" in text
+
+
+def test_sign_in_stays_in_the_rooms_profile(tmp_path):
+    """A managed Workspace account is otherwise moved to a new "Profile 1" (Chromium's work-profile split), and the next start opens
+    that one: the session lands where neither the check nor the TV looks."""
+    for kiosk in (False, True):
+        cmd = sign_in_command("/opt/chrome", tmp_path / "profile", kiosk=kiosk)
+        assert "--profile-directory=Default" in cmd and "--allow-browser-signin=false" in cmd
 
 
 def test_reports_when_no_session_was_saved(tmp_path):

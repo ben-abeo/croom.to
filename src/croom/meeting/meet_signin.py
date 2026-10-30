@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Callable, List, Optional, TextIO
 
-from croom.meeting.browser_env import ensure_browsers_path, profile_holder
+from croom.meeting.browser_env import ROOM_PROFILE_ARGS, ensure_browsers_path, profile_holder
 
 SIGN_IN_URL = "https://accounts.google.com/"
 # Google sets these only once someone has signed in; the sign-in page itself sets others.
@@ -31,7 +31,7 @@ def chromium_executable() -> str:
 def sign_in_command(executable: str, profile_dir: Path, kiosk: bool = False) -> List[str]:
     """The bundled Chromium, plainly (no automation), on the room's profile, opening Google's sign-in page: what `croom --sign-in-meet`
     runs, and the touch Pi's Sign in to Google on the TV (with kiosk, the page fills the TV)."""
-    return [executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
+    return [executable, f"--user-data-dir={profile_dir}", *ROOM_PROFILE_ARGS, "--no-first-run", "--no-default-browser-check",
             "--password-store=basic", "--window-size=1920,1080", *(["--kiosk"] if kiosk else []), SIGN_IN_URL]
 
 

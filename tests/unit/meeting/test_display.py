@@ -482,6 +482,12 @@ def test_browser_args_hide_the_crash_restore_bubble():
     assert "--disable-session-crashed-bubble" in args and "--hide-crash-restore-bubble" in args
 
 
+def test_browser_args_open_the_rooms_profile_not_the_last_used_one():
+    """A sign-in that made a "Profile 1" also made it Chromium's last used; the TV and the Meet check stay on Default."""
+    for args in (TvDisplay("about:blank").browser_args(), TvDisplay.BASE_ARGS):
+        assert "--profile-directory=Default" in args and "--allow-browser-signin=false" in args
+
+
 def test_context_options_do_not_fix_the_viewport():
     """The page fills the TV at whatever resolution the Pi drives it; nothing is emulated."""
     options = TvDisplay.context_options()

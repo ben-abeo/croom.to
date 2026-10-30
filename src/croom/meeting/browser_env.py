@@ -10,6 +10,9 @@ from pathlib import Path
 from typing import MutableMapping, Optional
 
 DEFAULT_BROWSERS_PATH = Path("/opt/croom/browsers")
+# Every Chromium on the room's profile folder opens its Default profile, not the last used one, and signs in to the web only: with
+# browser sign-in on, a managed Workspace account is moved to a new "Profile 1" (the work-profile split), which then becomes the last used.
+ROOM_PROFILE_ARGS = ["--profile-directory=Default", "--allow-browser-signin=false"]
 
 
 def ensure_browsers_path(env: MutableMapping[str, str] = os.environ,

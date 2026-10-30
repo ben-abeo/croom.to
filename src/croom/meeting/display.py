@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlsplit
 
-from croom.meeting.browser_env import profile_holder
+from croom.meeting.browser_env import ROOM_PROFILE_ARGS, profile_holder
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +63,7 @@ def _alive_pid(pid: int) -> bool:
 class TvDisplay:
     POINTER_SHOWN_S = 5.0   # how long the pointer stays after the touchpad last moved the room Pi's mouse
     BASE_ARGS = [
+        *ROOM_PROFILE_ARGS,
         "--use-fake-ui-for-media-stream",
         "--autoplay-policy=no-user-gesture-required",
         "--disable-infobars",

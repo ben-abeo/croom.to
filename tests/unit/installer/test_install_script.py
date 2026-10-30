@@ -135,6 +135,26 @@ def test_units_run_as_the_desktop_user_with_the_bundled_browser(tmp_path):
     assert f"User={me}" in ui and "Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers" in ui
 
 
+def test_the_root_helper_runs_as_root_for_the_service_users_files_and_socket(tmp_path):
+    """croom-admin (spec 2026-10-29, section 5): root, so no User= line; the room's user owns what it writes and is the socket's group."""
+    result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={tmp_path}; CROOM_USER=$(id -un); write_units")
+    assert result.returncode == 0, result.stderr
+    me = subprocess.check_output(["id", "-un"], text=True).strip()
+    unit = (tmp_path / "croom-admin.service").read_text()
+    assert "Description=Crystal Meet root helper (croom-admin)" in unit
+    assert "After=network.target" in unit
+    assert "User=" not in unit and "Group=" not in unit
+    assert f"ExecStart=/opt/croom/venv/bin/python -m croom.admin --owner {me} --group {me}" in unit
+    assert "Restart=always" in unit
+    assert "WantedBy=multi-user.target" in unit
+
+
+def test_the_root_helper_is_enabled_and_started():
+    script = SCRIPT.read_text()
+    enable = script[script.index("enable_services() {"):]
+    assert "systemctl enable --now croom-admin.service" in enable[:enable.index("\n}")]
+
+
 def test_browser_is_installed_for_the_service_user():
     install = SCRIPT.read_text().split("install_croom() {")[1].split("\n}\n")[0]
     assert 'export PLAYWRIGHT_BROWSERS_PATH="$INSTALL_DIR/browsers"' in install

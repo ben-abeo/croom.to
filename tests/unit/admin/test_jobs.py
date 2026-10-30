@@ -1,0 +1,414 @@
+"""The helper's jobs (spec 2026-10-29, sections 4 and 5) against a fake machine: a temporary folder stands in for /etc/croom, /var/lib/croom,
+/media and /opt/croom, a fake runner for systemctl, a fake probe for GET /api/status, and a fake clock whose sleep moves it."""
+
+import getpass
+import grp
+import json
+import os
+import stat
+
+import pytest
+import yaml
+
+from croom.admin.jobs import (
+    HEALTH_TIMEOUT_S,
+    MAX_USB_FILE,
+    Host,
+    JobError,
+    Jobs,
+    Paths,
+    check_config_yaml,
+)
+
+GOOD = "room:\n  name: Conference A\ncontrol:\n  port: 8099\n"
+GOOGLE_KEY = {"type": "service_account", "project_id": "croom", "client_email": "room@croom.iam.gserviceaccount.com",
+              "private_key": "-----BEGIN PRIVATE KEY-----\nMII...\n-----END PRIVATE KEY-----\n"}
+ZOOM = {"sdk_client_id": "abc", "sdk_client_secret": "def"}
+
+
+class FakeRunner:
+    def __init__(self):
+        self.calls = []
+        self.codes = {}
+
+    def __call__(self, args):
+        self.calls.append(list(args))
+        return self.codes.get(" ".join(args), 0), ""
+
+
+class Clock:
+    def __init__(self):
+        self.now = 1_800_000_000.0
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.now += seconds
+
+
+class Probe:
+    """GET /api/status: answers once `up` is true; `up` may be a function of the calls so far."""
+
+    def __init__(self, up=True):
+        self.up = up
+        self.ports = []
+
+    def __call__(self, port):
+        self.ports.append(port)
+        return self.up(len(self.ports)) if callable(self.up) else self.up
+
+
+@pytest.fixture
+def paths(tmp_path):
+    p = Paths(config_dir=tmp_path / "etc", data_dir=tmp_path / "var", media_root=tmp_path / "media", install_dir=tmp_path / "opt")
+    for folder in (p.config_dir, p.data_dir, p.media_root, p.install_dir):
+        folder.mkdir()
+    return p
+
+
+@pytest.fixture
+def machine(paths):
+    """Jobs on the fake machine, and the fakes, to look at afterwards. The background thread is run there and then."""
+    runner, clock, probe = FakeRunner(), Clock(), Probe()
+    host = Host(paths=paths, run=runner, owner=getpass.getuser(), group=grp.getgrgid(os.getgid()).gr_name, probe=probe, clock=clock,
+                sleep=clock.sleep, background=lambda work: work())
+    return Jobs(host), runner, clock, probe
+
+
+def mode(path):
+    return stat.S_IMODE(os.stat(path).st_mode)
+
+
+# --- the job table
+
+
+def test_the_table_lists_this_tasks_jobs_and_nothing_else(machine):
+    jobs, *_ = machine
+    assert set(jobs.table) == {"write_config", "save_credential", "usb_files", "read_usb_file", "restart", "restart_status", "reboot",
+                               "version"}
+
+
+def test_a_job_refuses_an_argument_it_does_not_take(machine):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match="does not take"):
+        jobs.table["version"]({"command": "rm -rf /"})
+
+
+# --- write_config
+
+
+def test_check_config_yaml_gives_the_mapping():
+    assert check_config_yaml(GOOD)["room"]["name"] == "Conference A"
+
+
+@pytest.mark.parametrize("text, words", [
+    ("room: [unclosed", "not valid YAML"),
+    ("- a list\n- of things\n", "mapping"),
+    ("", "mapping"),
+    ("room:\n  colour: blue\n", "would not start"),
+    ("meeting: [zoom]\n", "would not start"),
+    (42, "text"),
+])
+def test_check_config_yaml_refuses_in_words(text, words):
+    with pytest.raises(JobError, match=words):
+        check_config_yaml(text)
+
+
+def test_write_config_writes_the_text_owned_by_the_room_mode_640(machine, paths):
+    jobs, *_ = machine
+    jobs.table["write_config"]({"yaml": GOOD})
+    config = paths.config_dir / "config.yaml"
+    assert config.read_text() == GOOD
+    assert mode(config) == 0o640
+    assert config.owner() == getpass.getuser()
+    assert [p.name for p in paths.config_dir.iterdir()] == ["config.yaml"]   # no temporary file left behind, no .1 for a first write
+
+
+def test_write_config_keeps_five_older_versions(machine, paths):
+    jobs, *_ = machine
+    for n in range(8):
+        jobs.table["write_config"]({"yaml": f"room:\n  name: Version {n}\n"})
+    config = paths.config_dir / "config.yaml"
+    assert yaml.safe_load(config.read_text())["room"]["name"] == "Version 7"
+    for back in range(1, 6):
+        older = paths.config_dir / f"config.yaml.{back}"
+        assert yaml.safe_load(older.read_text())["room"]["name"] == f"Version {7 - back}"
+    assert not (paths.config_dir / "config.yaml.6").exists()
+
+
+def test_write_config_refuses_a_bad_config_and_writes_nothing(machine, paths):
+    jobs, *_ = machine
+    jobs.table["write_config"]({"yaml": GOOD})
+    before = sorted(p.name for p in paths.config_dir.iterdir())
+    with pytest.raises(JobError, match="would not start"):
+        jobs.table["write_config"]({"yaml": "room:\n  colour: blue\n"})
+    assert sorted(p.name for p in paths.config_dir.iterdir()) == before
+    assert (paths.config_dir / "config.yaml").read_text() == GOOD
+
+
+def test_a_key_with_text_that_cannot_be_written_is_refused_in_words(machine, paths):
+    """A lone surrogate (JSON's \\ud800) reaches the helper as a str that has no UTF-8 form."""
+    jobs, *_ = machine
+    content = json.dumps(dict(GOOGLE_KEY, client_email="room\ud800@croom.iam.gserviceaccount.com"), ensure_ascii=False)
+    with pytest.raises(JobError, match="must be text"):
+        jobs.table["save_credential"]({"kind": "google", "content": content})
+    assert list(paths.config_dir.iterdir()) == []
+
+
+def test_write_config_needs_its_yaml(machine):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match="text"):
+        jobs.table["write_config"]({})
+
+
+# --- save_credential
+
+
+def test_a_google_key_is_saved_mode_600_and_summarised(machine, paths):
+    jobs, *_ = machine
+    answer = jobs.table["save_credential"]({"kind": "google", "content": json.dumps(GOOGLE_KEY)})
+    saved = paths.config_dir / "google-service-account.json"
+    assert answer == {"path": str(saved), "summary": "Key for room@croom.iam.gserviceaccount.com"}
+    assert json.loads(saved.read_text()) == GOOGLE_KEY
+    assert mode(saved) == 0o600
+    assert saved.owner() == getpass.getuser()
+
+
+def test_zoom_credentials_are_saved_mode_600(machine, paths):
+    jobs, *_ = machine
+    answer = jobs.table["save_credential"]({"kind": "zoom", "content": json.dumps(ZOOM)})
+    saved = paths.config_dir / "zoom-credentials.json"
+    assert answer["path"] == str(saved) and answer["summary"] == "Zoom Meeting SDK keys"
+    assert mode(saved) == 0o600
+
+
+def test_zoom_credentials_with_a_room_user_say_so(machine):
+    jobs, *_ = machine
+    full = dict(ZOOM, account_id="acc", s2s_client_id="id", s2s_client_secret="secret", room_user="room-a@crystalpm.com")
+    answer = jobs.table["save_credential"]({"kind": "zoom", "content": json.dumps(full)})
+    assert answer["summary"] == "Zoom Meeting SDK keys, joining as room-a@crystalpm.com"
+
+
+def test_a_zoom_file_uploaded_as_the_google_key_is_refused_naming_what_it_is(machine, paths):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match="Zoom credentials file, not a Google service-account key"):
+        jobs.table["save_credential"]({"kind": "google", "content": json.dumps(ZOOM)})
+    assert not (paths.config_dir / "google-service-account.json").exists()
+
+
+def test_a_google_key_uploaded_as_zoom_credentials_is_refused_naming_what_it_is(machine):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match="Google service-account key, not Zoom credentials"):
+        jobs.table["save_credential"]({"kind": "zoom", "content": json.dumps(GOOGLE_KEY)})
+
+
+@pytest.mark.parametrize("kind, content, words", [
+    ("google", "not json at all", "not a JSON file"),
+    ("google", "[1, 2]", "not a JSON file"),
+    ("google", json.dumps(dict(GOOGLE_KEY, private_key="")), "private_key"),
+    ("google", json.dumps({k: v for k, v in GOOGLE_KEY.items() if k != "client_email"}), "client_email"),
+    ("google", json.dumps({"installed": {"client_id": "x"}}), "OAuth client file"),
+    ("zoom", json.dumps({"sdk_client_id": "abc", "sdk_client_secret": "REPLACE_ME"}), "sdk_client_secret"),
+    ("zoom", json.dumps(dict(ZOOM, account_id="acc")), "go together"),
+    ("zoom", json.dumps({"hello": "world"}), "sdk_client_id"),
+    ("aws", json.dumps(ZOOM), "Google service-account key or Zoom credentials"),
+])
+def test_save_credential_refusals(machine, paths, kind, content, words):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match=words):
+        jobs.table["save_credential"]({"kind": kind, "content": content})
+    assert list(paths.config_dir.iterdir()) == []
+
+
+def test_a_saved_key_replaces_the_one_before(machine, paths):
+    jobs, *_ = machine
+    jobs.table["save_credential"]({"kind": "google", "content": json.dumps(GOOGLE_KEY)})
+    other = dict(GOOGLE_KEY, client_email="other@croom.iam.gserviceaccount.com")
+    jobs.table["save_credential"]({"kind": "google", "content": json.dumps(other)})
+    assert json.loads((paths.config_dir / "google-service-account.json").read_text())["client_email"] == other["client_email"]
+    assert [p.name for p in paths.config_dir.iterdir()] == ["google-service-account.json"]
+
+
+# --- the USB stick
+
+
+@pytest.fixture
+def stick(paths):
+    """A stick mounted the way the desktop mounts one: /media/<user>/<label>/."""
+    root = paths.media_root / "pi" / "KEYS"
+    root.mkdir(parents=True)
+    (root / "google.json").write_text(json.dumps(GOOGLE_KEY))
+    (root / "notes.txt").write_text("not a key")
+    (root / "big.json").write_text("x" * (MAX_USB_FILE + 1))
+    (root / "deeper").mkdir()
+    (root / "deeper" / "zoom.json").write_text(json.dumps(ZOOM))
+    (paths.media_root / "pi" / "loose.json").write_text("{}")
+    outside = paths.config_dir / "secret.json"
+    outside.write_text('{"secret": true}')
+    (root / "link.json").symlink_to(outside)
+    return root
+
+
+def test_usb_files_lists_only_json_files_at_the_top_of_a_stick(machine, stick):
+    jobs, *_ = machine
+    answer = jobs.table["usb_files"]({})
+    assert answer == {"files": [{"path": str(stick / "google.json"), "name": "google.json", "stick": "KEYS",
+                                 "size": len(json.dumps(GOOGLE_KEY))}]}
+
+
+def test_usb_files_with_no_media_is_an_empty_list(machine, paths):
+    jobs, *_ = machine
+    paths.media_root.rmdir()
+    assert jobs.table["usb_files"]({}) == {"files": []}
+
+
+def test_read_usb_file_reads_a_listed_file(machine, stick):
+    jobs, *_ = machine
+    assert jobs.table["read_usb_file"]({"path": str(stick / "google.json")}) == {"content": json.dumps(GOOGLE_KEY)}
+
+
+@pytest.mark.parametrize("name", ["link.json", "big.json", "notes.txt", "deeper/zoom.json", "../loose.json", "../../../etc/secret.json"])
+def test_read_usb_file_refuses_what_usb_files_does_not_list(machine, stick, name):
+    jobs, *_ = machine
+    with pytest.raises(JobError, match="not a key file on a USB stick"):
+        jobs.table["read_usb_file"]({"path": str(stick / name)})
+
+
+def test_read_usb_file_refuses_any_other_path(machine, stick, paths):
+    jobs, *_ = machine
+    for path in ("/etc/shadow", str(paths.config_dir / "secret.json"), "", 7):
+        with pytest.raises(JobError):
+            jobs.table["read_usb_file"]({"path": path})
+
+
+# --- restart, the health watch and its undo
+
+
+def write_twice(jobs):
+    """A good config, then the change the room may not start with: config.yaml.1 is the good one."""
+    jobs.table["write_config"]({"yaml": GOOD})
+    jobs.table["write_config"]({"yaml": "room:\n  name: Changed\ncontrol:\n  port: 8099\n"})
+
+
+def test_restart_restarts_the_room_and_watches_it_come_back(machine, paths):
+    jobs, runner, clock, probe = machine
+    probe.up = lambda calls: calls >= 3
+    write_twice(jobs)
+    assert jobs.table["restart"]({}) == {"watching": True}
+    assert runner.calls == [["systemctl", "restart", "croom"]]
+    assert set(probe.ports) == {8099}
+    status = jobs.table["restart_status"]({})
+    assert status["state"] == "healthy" and status["undone"] is False
+    assert yaml.safe_load((paths.config_dir / "config.yaml").read_text())["room"]["name"] == "Changed"
+
+
+def test_the_watch_asks_every_5_seconds_for_2_minutes(machine):
+    jobs, runner, clock, probe = machine
+    probe.up = False
+    jobs.table["restart"]({})
+    assert len(probe.ports) == HEALTH_TIMEOUT_S // 5 == 24
+    assert probe.ports[0] == 8080   # no config: the control page's default port
+
+
+def test_a_room_that_does_not_come_back_after_a_recent_change_gets_the_last_config_back(machine, paths):
+    jobs, runner, clock, probe = machine
+    write_twice(jobs)
+    clock.sleep(9 * 60)
+    # Down with the new config, up again with the one before it.
+    probe.up = lambda calls: calls > HEALTH_TIMEOUT_S // 5
+    jobs.table["restart"]({})
+    assert runner.calls == [["systemctl", "restart", "croom"], ["systemctl", "restart", "croom"]]
+    config = paths.config_dir / "config.yaml"
+    assert config.read_text() == GOOD
+    assert mode(config) == 0o640 and config.owner() == getpass.getuser()
+    status = jobs.table["restart_status"]({})
+    assert status["undone"] is True and status["state"] == "undone"
+    assert "2 minutes" in status["why"] and status["at"]
+    state = json.loads((paths.data_dir / "admin-state.json").read_text())
+    assert state["restart"]["undone"] is True
+
+
+def test_an_old_change_is_not_undone(machine, paths):
+    jobs, runner, clock, probe = machine
+    write_twice(jobs)
+    clock.sleep(11 * 60)
+    probe.up = False
+    jobs.table["restart"]({})
+    assert runner.calls == [["systemctl", "restart", "croom"]]
+    assert yaml.safe_load((paths.config_dir / "config.yaml").read_text())["room"]["name"] == "Changed"
+    status = jobs.table["restart_status"]({})
+    assert status["undone"] is False and status["state"] == "down" and "did not answer" in status["why"]
+
+
+def test_a_change_is_undone_once_only(machine, paths):
+    jobs, runner, clock, probe = machine
+    write_twice(jobs)
+    probe.up = False
+    jobs.table["restart"]({})
+    status = jobs.table["restart_status"]({})
+    assert status["undone"] is True and "not answered since" in status["why"]
+    jobs.table["restart"]({})
+    # The second restart has no recent change to undo: config.yaml stays the one put back, not config.yaml.1's copy of it.
+    assert runner.calls.count(["systemctl", "restart", "croom"]) == 3
+    assert (paths.config_dir / "config.yaml").read_text() == GOOD
+    assert jobs.table["restart_status"]({})["state"] == "down"
+
+
+def test_a_watch_cut_off_by_the_helper_restarting_goes_on_when_it_starts_again(machine, paths):
+    jobs, runner, clock, probe = machine
+    write_twice(jobs)
+    jobs._host.background = lambda work: None   # the helper stops before the watch ends
+    jobs.table["restart"]({})
+    assert jobs.table["restart_status"]({})["state"] == "watching"
+    host = jobs._host
+    host.background = lambda work: work()
+    probe.up = lambda calls: calls > HEALTH_TIMEOUT_S // 5
+    again = Jobs(host)
+    again.resume()
+    assert (paths.config_dir / "config.yaml").read_text() == GOOD
+    assert again.table["restart_status"]({})["undone"] is True
+
+
+def test_resume_does_nothing_after_a_watch_that_ended(machine):
+    jobs, runner, clock, probe = machine
+    jobs.table["restart"]({})
+    calls = len(probe.ports)
+    Jobs(jobs._host).resume()
+    assert len(probe.ports) == calls and runner.calls == [["systemctl", "restart", "croom"]]
+
+
+def test_restart_status_before_any_restart(machine):
+    jobs, *_ = machine
+    assert jobs.table["restart_status"]({}) == {"state": "none", "undone": False}
+
+
+def test_a_restart_while_one_is_being_watched_is_refused(machine, paths):
+    jobs, runner, clock, probe = machine
+    jobs._host.background = lambda work: None   # the watch never ends
+    jobs.table["restart"]({})
+    with pytest.raises(JobError, match="restarting"):
+        jobs.table["restart"]({})
+
+
+# --- reboot and version
+
+
+def test_reboot(machine):
+    jobs, runner, *_ = machine
+    assert jobs.table["reboot"]({}) == {}
+    assert runner.calls == [["systemctl", "reboot"]]
+
+
+def test_a_reboot_systemctl_refuses_is_said(machine):
+    jobs, runner, *_ = machine
+    runner.codes["systemctl reboot"] = 1
+    with pytest.raises(JobError, match="did not reboot"):
+        jobs.table["reboot"]({})
+
+
+def test_version(machine, paths):
+    jobs, *_ = machine
+    assert jobs.table["version"]({}) == {"version": "unknown"}
+    (paths.install_dir / "VERSION").write_text("fe1c05f\n")
+    assert jobs.table["version"]({}) == {"version": "fe1c05f"}

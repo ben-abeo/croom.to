@@ -434,6 +434,24 @@ Environment=QT_QPA_PLATFORM=eglfs
 [Install]
 WantedBy=graphical.target
 EOF
+
+    # The root helper (room settings spec 2026-10-29, section 5): the fixed list of privileged jobs the room page's Settings ask for
+    # (the config, the keys, restart). It runs as root, so no User= line; what it writes is the service user's, and the service user's
+    # group is its socket's (/run/croom-admin.sock, mode 660), so that the room software, and only it and root, can ask.
+    cat > "$SYSTEMD_DIR/croom-admin.service" << EOF
+[Unit]
+Description=Crystal Meet root helper (croom-admin)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=$INSTALL_DIR/venv/bin/python -m croom.admin --owner $CROOM_USER --group $CROOM_USER
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
 }
 
 # Create systemd service
@@ -449,6 +467,8 @@ enable_services() {
     log "Enabling services..."
 
     systemctl enable croom.service
+    # Started now as well: it needs no desktop, and Settings can use it from the room's first start
+    systemctl enable --now croom-admin.service
 
     # Only enable UI service if touch display is detected
     if [[ -e /dev/input/touchscreen* ]] || [[ "$ENABLE_UI" == "yes" ]]; then

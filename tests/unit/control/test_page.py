@@ -54,7 +54,7 @@ class PageServer:
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
-                 bookings=False, laptop=None, admin=None, config_file=None, find_devices=None):
+                 bookings=False, laptop=None, admin=None, config_file=None, find_devices=None, keyboard=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -73,6 +73,7 @@ class PageServer:
         self.tv = tv                                                       # the room's TV service: none is a room with no TV set up
         self.discover = discover if discover is not None else StubSearch()   # Find TVs never puts a search on this network: a test that wants TVs found gives it some
         self.mouse = mouse                                                 # the room Pi's virtual mouse: none is the real one, which the conftest keeps from being made
+        self.keyboard = keyboard                                           # the room Pi's virtual keyboard (Sign in to Google's typing): likewise
         self._settings_dir = tempfile.TemporaryDirectory()   # the screensaver choice must not land in the repo
         self.admin = admin              # the root helper's client (Settings): none is a room without the helper, "Not available on this device"
         # The config.yaml the Settings pages read: in the server's own folder unless a test names one (never /etc/croom)
@@ -119,7 +120,7 @@ class PageServer:
             config=config,
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
-            laptop=self.laptop, admin=self.admin, find_devices=self.find_devices,
+            laptop=self.laptop, admin=self.admin, find_devices=self.find_devices, keyboard=self.keyboard,
         )
         await service.start()
         self.port = service.bound_port

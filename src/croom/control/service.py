@@ -29,6 +29,7 @@ from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
+from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
 from croom.settings.devices import find_devices as find_room_devices
@@ -38,7 +39,7 @@ from croom.settings.schema import BY_PATH, SettingError
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
-from croom.tv.pointer import BAD_MESSAGE, PiMouse, PointerRelay
+from croom.tv.pointer import BAD_MESSAGE, PiKeyboard, PiMouse, PointerRelay
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,7 @@ ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invi
 PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
 BAD_PASSCODE = "Passcode must be letters, digits or @-_*, up to 32"
 IN_PROGRESS_STATES = {"joining", "in_lobby", "connected", "leaving"}
+DEFAULT_GOOGLE_PROFILE = "/var/lib/croom/meet-profile"   # the room's Google profile folder, as the installer makes it
 # What a control from the table is told when there is no meeting to carry it out in; the provider says the same in its own RuntimeError.
 NOT_IN_A_MEETING = "Not in a meeting"
 # Hosts (and their subdomains) a join link may point the room's browser at.
@@ -223,6 +225,8 @@ class ControlService(Service):
         discover: the search for TVs on the network (croom.tv.discover.discover_tvs unless a test stands in for it).
         mouse: the room Pi's virtual mouse that the touchpad drives (a croom.tv.pointer.PiMouse, made when it is first used, unless a
             test stands in for it).
+        keyboard: the room Pi's virtual keyboard that the touch Pi types on the TV with (a croom.tv.pointer.PiKeyboard, made when a
+            sign-in to Google begins or when it is first typed on, unless a test stands in for it).
         scores: the scores service (current() lists the football scores of the schools that are on), or None.
         laptop: the Laptop service (the room's MeetUp lent to a laptop through the USB switch), or None in a room without the switch.
         pin_store: the Settings PIN (croom.settings.pin.PinStore), or None to open config's pin_file, which is settings-pin.json beside
@@ -253,6 +257,7 @@ class ControlService(Service):
         pin_store=None,
         admin=None,
         find_devices=None,
+        keyboard=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -281,6 +286,7 @@ class ControlService(Service):
         self._tv_selecting = False
         self._tv_requests: Set[asyncio.Task] = set()         # the requests that are with the TV service or wait for their turn
         self._mouse = mouse if mouse is not None else PiMouse()
+        self._keyboard = keyboard if keyboard is not None else PiKeyboard()
         self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
         self._mouse_waits: Set[asyncio.Task] = set()         # the sockets' handlers that wait for the room Pi's mouse to be made (stop() ends them)
         self._scores = scores
@@ -424,6 +430,10 @@ class ControlService(Service):
         app.router.add_post("/api/settings/credentials/{kind}/usb", self._handle_usb_credential)
         app.router.add_get("/api/settings/usb-files", self._handle_usb_files)
         app.router.add_post("/api/settings/laptop/test", self._handle_test_switch)
+        app.router.add_get("/api/settings/google/sign-in/state", self._handle_sign_in_state)
+        app.router.add_post("/api/settings/google/sign-in", self._handle_sign_in)
+        app.router.add_post("/api/settings/google/sign-in/done", self._handle_sign_in_done)
+        app.router.add_post("/api/settings/google/sign-in/cancel", self._handle_sign_in_cancel)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -460,6 +470,7 @@ class ControlService(Service):
             self._runner = None
         self._task = self._join_task = self._search = None
         self._mouse.close()
+        self._keyboard.close()
         logger.info("Room control page stopped")
 
     async def _end_what_is_open(self, app: web.Application) -> None:
@@ -1514,6 +1525,85 @@ class ControlService(Service):
         except LaptopError as e:
             return self._error_response(str(e), e.status)
 
+    # --- Meetings: Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
+
+    def _sign_in_refusal(self, request: web.Request, post: bool = True) -> Optional[web.Response]:
+        """The PIN first, then JSON for a POST, then a room with no meeting service; None when the request may go on."""
+        refused = self._require_unlock(request)
+        if refused is None and post:
+            refused = self._require_json(request)
+        if refused is None and self._meeting is None:
+            refused = self._error_response("Meeting service not available", 503)
+        return refused
+
+    async def _sign_in_answer(self) -> Dict[str, Any]:
+        """The sign-in's state as the Meetings page draws it (MeetingService.sign_in_state: the profile is read in a thread), and the
+        folder the room offers when it has none."""
+        state = await asyncio.to_thread(self._meeting.sign_in_state)
+        return dict(state, default_profile_dir=DEFAULT_GOOGLE_PROFILE)
+
+    async def _handle_sign_in_state(self, request: web.Request) -> web.Response:
+        """Whether the room is signed in to Google and as whom, whether a sign-in is on (and how long it has left without a touch), and
+        how the last one ended."""
+        refused = self._sign_in_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        return web.json_response(await self._sign_in_answer())
+
+    async def _handle_sign_in(self, request: web.Request) -> web.Response:
+        """Sign in to Google: the TV's meeting browser closes and Google's sign-in page fills the TV, for the touchpad (the room Pi's mouse)
+        and the keyboard (typed on the TV). Not in a meeting, nor while the laptop has the camera. A sign-in that is on already is
+        answered with its state."""
+        refused = self._sign_in_refusal(request)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        refusal = self._laptop.join_refusal() if self._laptop is not None else None
+        if refusal:
+            return self._error_response(refusal, 409)
+        await self._make_the_keyboard()
+        try:
+            await self._meeting.begin_sign_in()
+        except SignInError as e:
+            return self._error_response(str(e), e.status)
+        logger.info("Sign in to Google on the TV asked for from Settings")
+        return web.json_response(await self._sign_in_answer())
+
+    async def _make_the_keyboard(self) -> None:
+        """Make the room Pi's virtual keyboard as the sign-in begins, so that the desktop has taken it up by the first key (as the mouse is
+        made as a pointer socket opens). One that cannot be made is no reason to refuse the sign-in: the first key says why, in words."""
+        try:
+            await self._off_the_loop(self._keyboard.open)
+        except TvError:
+            pass
+        except Exception:  # noqa: BLE001 - a bug in making it: the first key makes it, or says why not
+            logger.warning("The room Pi's keyboard could not be made as the sign-in began", exc_info=True)
+
+    async def _handle_sign_in_done(self, request: web.Request) -> web.Response:
+        """Done: the sign-in browser closes, the room's Google session is looked for, and the TV has its browser back. {"signed_in",
+        "address", "words"}: "Signed in as <address>", or words that say Google kept none."""
+        refused = self._sign_in_refusal(request)
+        if refused is not None:
+            return refused
+        try:
+            address = await self._meeting.end_sign_in(True)
+        except SignInError as e:
+            return self._error_response(str(e), e.status)
+        words = SIGNED_IN_AS.format(address=address) if address else NO_SESSION
+        return web.json_response({"signed_in": address is not None, "address": address, "words": words})
+
+    async def _handle_sign_in_cancel(self, request: web.Request) -> web.Response:
+        """Cancel: the sign-in browser closes, nothing changes, and the TV has its browser back."""
+        refused = self._sign_in_refusal(request)
+        if refused is not None:
+            return refused
+        try:
+            await self._meeting.end_sign_in(False)
+        except SignInError as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response({"signed_in": None, "address": None, "words": ENDED_WORDS[CANCELLED]})
+
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
         """The LG and Samsung TVs on the network. It also answers before a TV is configured.
 
@@ -1559,7 +1649,7 @@ class ControlService(Service):
             return self._error_response("The pointer is for the room's own page", 403)
         ws = web.WebSocketResponse(heartbeat=self.POINTER_HEARTBEAT_S, max_msg_size=MAX_BODY_BYTES)
         await ws.prepare(request)
-        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop)
+        relay = PointerRelay(self._tv, self._mouse, self._off_the_loop, keyboard=self._keyboard)
         self._pointers[ws] = _Pointer(request, relay)
         try:
             await self._make_the_mouse()
@@ -1840,6 +1930,8 @@ class ControlService(Service):
             return self._error_response(refusal, 409)
         if self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response("A meeting is already in progress", 409)
+        if getattr(self._meeting, "signing_in", False):
+            return self._error_response(SIGN_IN_FIRST, 409)
         self._last_error = None
         self._title = title
         self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode))

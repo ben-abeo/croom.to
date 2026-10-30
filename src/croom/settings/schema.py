@@ -7,8 +7,9 @@ its kind, the values it takes, and whether the room applies it at once (live) or
 config has it, and the settings that would lock Settings out of the room (the room page turned off, or moved to another port or
 address) are refused, since no page offers them.
 
-The kinds: text, number, switch, choice, list, time, secret (shown as set or not, never read back) and credential (a key file's path,
-which the credential pages set).
+The kinds: text, number, switch, choice, list, time, secret (shown as set or not, never read back), credential (a key file's path,
+which the credential pages set) and signin (the Google profile folder: the Meetings page shows the sign-in, and offers the room's folder
+when there is none).
 """
 
 import math
@@ -17,7 +18,7 @@ import zoneinfo
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
-KINDS = ("text", "number", "switch", "choice", "list", "time", "secret", "credential")
+KINDS = ("text", "number", "switch", "choice", "list", "time", "secret", "credential", "signin")
 PAGES = ("room", "calendar", "meetings", "devices", "laptop", "ai")
 
 CONTROL_DEFAULTS = {"enabled": True, "host": "0.0.0.0", "port": 8080}   # ControlConfig's own, for a config that says nothing
@@ -125,6 +126,8 @@ SCHEMA: List[Setting] = [
     Setting("meeting.controls.reactions", "Reactions", "meetings", "list", max_items=12, max_length=40,
             help="By the names Zoom's picker gives them"),
     Setting("meeting.zoom_credentials_path", "Zoom SDK keys", "meetings", "credential", max_length=4096),
+    Setting("meeting.google_profile_dir", "Google sign-in", "meetings", "signin", max_length=4096,
+            help="The room's own Google account, for Google Meet: signed in on the TV"),
     # Devices
     Setting("audio.output_device", "Speaker", "devices", "choice", choices=AUTOMATIC, free=True, max_length=200,
             help="The speakers the room has now; Automatic is PipeWire's default"),
@@ -263,7 +266,7 @@ def _time(s: Setting, value: Any) -> str:
 def _credential(s: Setting, value: Any) -> str:
     text = _text(s, value)
     if text and not text.startswith("/"):
-        raise SettingError(f"{s.label} is a file's full path")
+        raise SettingError(f"{s.label} is a {'folder' if s.kind == 'signin' else 'file'}'s full path")
     return text
 
 
@@ -280,7 +283,7 @@ def validate(path: str, value: Any) -> Any:
         return _list(s, value)
     if s.kind == "time":
         return _time(s, value)
-    if s.kind == "credential":
+    if s.kind in ("credential", "signin"):
         return _credential(s, value)
     text = _text(s, value)            # text and secret
     if s.required and not text:

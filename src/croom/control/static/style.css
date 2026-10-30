@@ -586,6 +586,12 @@ body.keyboard-open .schedule { display: none; }
 .touchpad .touchpad-switch .button[aria-pressed="true"] { background: var(--blue-600); }
 .touchpad #touchpad-done { flex: 0 0 auto; min-height: 56px; background: var(--blue-600); border-color: var(--blue-600); color: #fff; }
 .touchpad #touchpad-done:hover { background: var(--blue-700); border-color: var(--blue-700); }
+/* Sign in to Google (Settings, Meetings): the room Pi alone, Type on the TV, Cancel and Done. The keyboard comes up over the surface. */
+.touchpad .touchpad-keys, .touchpad .touchpad-cancel { flex: 0 0 auto; min-height: 56px; background: transparent; border-color: var(--periwinkle-300); color: #fff; }
+.touchpad .touchpad-keys[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.touchpad .touchpad-keys[hidden], .touchpad .touchpad-cancel[hidden], .touchpad-switch[hidden] { display: none; }
+.touchpad .button:disabled { opacity: 0.55; }
+.keyboard.remote { z-index: 80; }   /* typing on the TV: over the full-screen touchpad, which keeps the screen above it */
 .touchpad-surface {
   flex: 1 1 auto; min-height: 0; display: flex; align-items: center; justify-content: center; background: var(--tray);
   touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
@@ -819,6 +825,13 @@ select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); o
 .button.credential-upload, .button.credential-usb, .button.credential-type, .button.credential-pick,
 .button.credential-save-typed { min-height: 52px; padding: 0 18px; }
 .button.credential-pick { max-width: 100%; overflow-wrap: anywhere; }
+/* The Google sign-in's row (settings-pages.js): signed in as whom, then Sign in to Google (or the room's folder to use, when it has none). */
+.setting-signin { display: grid; gap: 10px; justify-items: start; width: 100%; }
+.signin-status { margin: 12px 0 0; overflow-wrap: anywhere; }
+.signin-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+.button.signin-start, .button.signin-setup { min-height: 52px; padding: 0 18px; }
+.button.signin-start[hidden], .button.signin-setup[hidden] { display: none; }
+.signin-message.ok { color: #fff; }   /* "Signed in as …": the row's pale red is for what went wrong */
 /* Under a page's form (the Laptop switch's Test the switch) */
 .settings-after { margin-top: 28px; gap: 10px; justify-items: start; }
 .settings-after .kicker, .settings-after .setting-help { margin: 0; }

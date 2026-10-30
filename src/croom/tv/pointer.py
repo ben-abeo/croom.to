@@ -1,8 +1,9 @@
 """
 The touchpad's transport (spec 2026-10-13 TV remote and touchpad, sections 3 and 5). The events of one /ws/pointer socket move the TV's
 cursor, through the pointer socket of the TV's client, or a virtual mouse on the room Pi, through evdev.UInput, which the Pi's desktop takes
-like a USB mouse. The TV service and the virtual device are handed in and the libraries are imported where they are used, so the tests run
-on fakes: no TV, no evdev and no /dev/uinput.
+like a USB mouse. The room Pi also takes typing (spec 2026-10-29, section 3: Sign in to Google on the TV): `keys` messages are typed on a
+virtual keyboard, US layout, made the same way. The TV service and the virtual devices are handed in and the libraries are imported where
+they are used, so the tests run on fakes: no TV, no evdev and no /dev/uinput.
 """
 
 import asyncio
@@ -18,6 +19,7 @@ from croom.tv.names import one_line
 logger = logging.getLogger(__name__)
 
 MOUSE_NAME = "Crystal Meet touchpad"
+KEYBOARD_NAME = "Crystal Meet keyboard"
 MAX_DELTA = 2000          # the most one message moves or scrolls by: a cursor does not cross a screen twice, so more is a mistake
 REASON_LIMIT = 160        # how much of a library's own words goes to the table
 
@@ -26,9 +28,10 @@ TYPES = ("move", "tap", "right", "scroll", "down", "up")
 BAD_MESSAGE = 'A pointer message is a JSON object like {"target": "tv", "type": "move", "dx": 3, "dy": -2}'
 BAD_TARGET = 'The target of a pointer message is "tv" or "pi"'
 BAD_TYPE = "The type of a pointer message is one of " + ", ".join(TYPES)
-KEYS_LATER = "Typing into the room Pi comes in a later version"
 NO_RIGHT_BUTTON = "The TV's cursor has no right button"
-CLOSED_WHILE_MADE = "The room Pi's mouse was closed while it was being made"
+KEYS_FOR_THE_PI = "Typing goes to the room Pi: the TV's cursor has no keyboard"
+NO_KEYBOARD = "The room Pi has no keyboard to type with here"
+MAX_TEXT = 200            # the most one keys message types: a pasted address or a password, never a page of text
 
 # The kernel's input codes that the virtual mouse uses (linux/input-event-codes.h), by the names evdev.ecodes has for them: here, so
 # that this module and its tests need neither evdev nor /dev/uinput.
@@ -38,6 +41,47 @@ CODES: Dict[str, int] = {
     "BTN_LEFT": 0x110, "BTN_RIGHT": 0x111,
 }
 BUTTONS = {"left": "BTN_LEFT", "right": "BTN_RIGHT"}
+
+# The virtual keyboard's keys (linux/input-event-codes.h), and what each character is on a US keyboard: its key, and whether Shift is down.
+KEY_CODES: Dict[str, int] = {
+    "KEY_ESC": 1, "KEY_1": 2, "KEY_2": 3, "KEY_3": 4, "KEY_4": 5, "KEY_5": 6, "KEY_6": 7, "KEY_7": 8, "KEY_8": 9, "KEY_9": 10, "KEY_0": 11,
+    "KEY_MINUS": 12, "KEY_EQUAL": 13, "KEY_BACKSPACE": 14, "KEY_TAB": 15,
+    "KEY_Q": 16, "KEY_W": 17, "KEY_E": 18, "KEY_R": 19, "KEY_T": 20, "KEY_Y": 21, "KEY_U": 22, "KEY_I": 23, "KEY_O": 24, "KEY_P": 25,
+    "KEY_LEFTBRACE": 26, "KEY_RIGHTBRACE": 27, "KEY_ENTER": 28,
+    "KEY_A": 30, "KEY_S": 31, "KEY_D": 32, "KEY_F": 33, "KEY_G": 34, "KEY_H": 35, "KEY_J": 36, "KEY_K": 37, "KEY_L": 38,
+    "KEY_SEMICOLON": 39, "KEY_APOSTROPHE": 40, "KEY_GRAVE": 41, "KEY_LEFTSHIFT": 42, "KEY_BACKSLASH": 43,
+    "KEY_Z": 44, "KEY_X": 45, "KEY_C": 46, "KEY_V": 47, "KEY_B": 48, "KEY_N": 49, "KEY_M": 50,
+    "KEY_COMMA": 51, "KEY_DOT": 52, "KEY_SLASH": 53, "KEY_SPACE": 57,
+    "KEY_HOME": 102, "KEY_UP": 103, "KEY_LEFT": 105, "KEY_RIGHT": 106, "KEY_END": 107, "KEY_DOWN": 108, "KEY_DELETE": 111,
+}
+_UNSHIFTED = {"-": "KEY_MINUS", "=": "KEY_EQUAL", "[": "KEY_LEFTBRACE", "]": "KEY_RIGHTBRACE", ";": "KEY_SEMICOLON", "'": "KEY_APOSTROPHE",
+              "`": "KEY_GRAVE", "\\": "KEY_BACKSLASH", ",": "KEY_COMMA", ".": "KEY_DOT", "/": "KEY_SLASH", " ": "KEY_SPACE"}
+_SHIFTED = {"!": "KEY_1", "@": "KEY_2", "#": "KEY_3", "$": "KEY_4", "%": "KEY_5", "^": "KEY_6", "&": "KEY_7", "*": "KEY_8", "(": "KEY_9",
+            ")": "KEY_0", "_": "KEY_MINUS", "+": "KEY_EQUAL", "{": "KEY_LEFTBRACE", "}": "KEY_RIGHTBRACE", ":": "KEY_SEMICOLON",
+            '"': "KEY_APOSTROPHE", "~": "KEY_GRAVE", "|": "KEY_BACKSLASH", "<": "KEY_COMMA", ">": "KEY_DOT", "?": "KEY_SLASH"}
+
+
+def _characters() -> Dict[str, Tuple[int, bool]]:
+    keys: Dict[str, Tuple[int, bool]] = {}
+    for letter in "abcdefghijklmnopqrstuvwxyz":
+        keys[letter] = (KEY_CODES["KEY_" + letter.upper()], False)
+        keys[letter.upper()] = (KEY_CODES["KEY_" + letter.upper()], True)
+    for digit in "0123456789":
+        keys[digit] = (KEY_CODES["KEY_" + digit], False)
+    keys.update({char: (KEY_CODES[name], False) for char, name in _UNSHIFTED.items()})
+    keys.update({char: (KEY_CODES[name], True) for char, name in _SHIFTED.items()})
+    keys["\n"] = (KEY_CODES["KEY_ENTER"], False)
+    keys["\t"] = (KEY_CODES["KEY_TAB"], False)
+    return keys
+
+
+CHARACTERS: Dict[str, Tuple[int, bool]] = _characters()   # every printable ASCII character, and a new line and a tab
+NAMED_KEYS: Dict[str, int] = {
+    "Enter": KEY_CODES["KEY_ENTER"], "Backspace": KEY_CODES["KEY_BACKSPACE"], "Tab": KEY_CODES["KEY_TAB"], "Escape": KEY_CODES["KEY_ESC"],
+    "ArrowLeft": KEY_CODES["KEY_LEFT"], "ArrowRight": KEY_CODES["KEY_RIGHT"], "ArrowUp": KEY_CODES["KEY_UP"], "ArrowDown": KEY_CODES["KEY_DOWN"],
+    "Delete": KEY_CODES["KEY_DELETE"], "Home": KEY_CODES["KEY_HOME"], "End": KEY_CODES["KEY_END"],
+}
+BAD_KEYS = ('A keys message has "text", what to type, or "key": one of ' + ", ".join(NAMED_KEYS))
 # What an error's text says, when it is not the system's own class and number that say it (evdev's UInput looks before it opens)
 NOT_ALLOWED_TEXTS = ("permission denied", "cannot be opened for writing")
 NOT_THERE_TEXTS = ("no such file", "does not exist", "uinput module")
@@ -46,10 +90,7 @@ NOT_THERE_TEXTS = ("no such file", "does not exist", "uinput module")
 def _uinput() -> Any:
     """The virtual mouse as evdev makes it: relative motion, a wheel and two buttons. evdev is imported here and not at the top of
     the module, so that a room without a touchpad runs without it."""
-    try:
-        from evdev import UInput
-    except ImportError as e:
-        raise TvError("The room Pi's mouse needs the evdev library: pip install evdev") from e
+    UInput = _evdev_uinput("mouse")
     capabilities = {
         CODES["EV_REL"]: [CODES["REL_X"], CODES["REL_Y"], CODES["REL_WHEEL"]],
         CODES["EV_KEY"]: [CODES["BTN_LEFT"], CODES["BTN_RIGHT"]],
@@ -57,46 +98,62 @@ def _uinput() -> Any:
     return UInput(capabilities, name=MOUSE_NAME)
 
 
-def _why_not(error: BaseException) -> str:
-    """Why the virtual mouse could not be made, as words that say what to do. What stands in the way is the device /dev/uinput: the
-    user the agent runs as may not be allowed to open it (it is not in the input group, or the device is not the group's), or it is not
-    there (the uinput kernel module is not loaded). The installer sets up both. evdev reports a failed open by its own exception as well
-    as by the system's, so the words are chosen from the error's number and its text: evdev looks before it opens, and says `"/dev/uinput"
-    cannot be opened for writing` or `"/dev/uinput" does not exist or is not a character device file - verify that the uinput module is
-    loaded` (its UInput._verify)."""
+def _uinput_keyboard() -> Any:
+    """The virtual keyboard as evdev makes it: the keys of KEY_CODES, Shift among them."""
+    UInput = _evdev_uinput("keyboard")
+    return UInput({CODES["EV_KEY"]: sorted(set(KEY_CODES.values()))}, name=KEYBOARD_NAME)
+
+
+def _evdev_uinput(noun: str) -> Any:
+    try:
+        from evdev import UInput
+    except ImportError as e:
+        raise TvError(f"The room Pi's {noun} needs the evdev library: pip install evdev") from e
+    return UInput
+
+
+def _why_not(error: BaseException, noun: str = "mouse") -> str:
+    """Why the virtual mouse (or keyboard: `noun`) could not be made, as words that say what to do. What stands in the way is the device
+    /dev/uinput: the user the agent runs as may not be allowed to open it (it is not in the input group, or the device is not the group's),
+    or it is not there (the uinput kernel module is not loaded). The installer sets up both. evdev reports a failed open by its own
+    exception as well as by the system's, so the words are chosen from the error's number and its text: evdev looks before it opens, and
+    says `"/dev/uinput" cannot be opened for writing` or `"/dev/uinput" does not exist or is not a character device file - verify that the
+    uinput module is loaded` (its UInput._verify)."""
     text = str(error)
     lowered = text.lower()
     code = getattr(error, "errno", None)
     if isinstance(error, TvError):
         return text
     if isinstance(error, PermissionError) or code == errno.EACCES or any(phrase in lowered for phrase in NOT_ALLOWED_TEXTS):
-        return ("The room Pi's mouse is not allowed to use /dev/uinput: the user the agent runs as needs to be in the input group, and "
+        return (f"The room Pi's {noun} is not allowed to use /dev/uinput: the user the agent runs as needs to be in the input group, and "
                 "/dev/uinput to belong to it (the installer sets up both; then restart the agent: sudo systemctl restart croom)")
     if isinstance(error, FileNotFoundError) or code == errno.ENOENT or any(phrase in lowered for phrase in NOT_THERE_TEXTS):
-        return "The room Pi's mouse needs /dev/uinput, and it is not there: the uinput kernel module is not loaded (sudo modprobe uinput)"
-    return (f"The room Pi's mouse could not be made: {one_line(text, REASON_LIMIT) or type(error).__name__} (it needs the uinput kernel "
+        return f"The room Pi's {noun} needs /dev/uinput, and it is not there: the uinput kernel module is not loaded (sudo modprobe uinput)"
+    return (f"The room Pi's {noun} could not be made: {one_line(text, REASON_LIMIT) or type(error).__name__} (it needs the uinput kernel "
             "module and the agent's user in the input group, which the installer sets up)")
 
 
-class PiMouse:
-    """A virtual mouse on the room Pi. The device is made when open() is called (the control service calls it when a pointer socket
-    opens, in a thread: it takes a moment to appear, and the desktop takes it up a moment after) or, failing that, the first time
-    something is sent to it; it is made again after it was lost, and removed by close(). A room that never uses the touchpad has no
-    mouse on its desktop. `unavailable` is the reason, in words, when it cannot be made (permission, the module, the library): every
-    event then raises TvError with it, and the next one tries again, in case it has been put right, though not sooner than RETRY_S
+class _PiDevice:
+    """A virtual input device on the room Pi (PiMouse, PiKeyboard). The device is made when open() is called (the control service calls
+    it when a pointer socket opens, in a thread: it takes a moment to appear, and the desktop takes it up a moment after) or, failing that,
+    the first time something is sent to it; it is made again after it was lost, and removed by close(). A room that never uses the touchpad
+    has no such device on its desktop. `unavailable` is the reason, in words, when it cannot be made (permission, the module, the library):
+    every event then raises TvError with it, and the next one tries again, in case it has been put right, though not sooner than RETRY_S
     after the try that failed.
 
     uinput_factory makes the device: an object with write(type, code, value) and syn() (and close()), as evdev.UInput has them. The
     default makes the real one. clock is the time (seconds, steadily) that RETRY_S is counted on.
     """
 
+    NOUN = "device"       # what the words call it: "The room Pi's mouse ..."
+    DEVICE_NAME = ""
     # close() is called on the event loop's thread (by the agent's stop): it waits this long for a device that is being made, which evdev
     # does in about a second, and then gives up on it. The thread that is making it closes the device when it is made.
     CLOSE_WAIT_S = 2.0
     RETRY_S = 1.0        # a try that failed is not made again within this long: a finger on the pad is an event for every frame
 
     def __init__(self, uinput_factory: Optional[Callable[[], Any]] = None, clock: Callable[[], float] = time.monotonic):
-        self._factory = uinput_factory or _uinput
+        self._factory = uinput_factory or self._default_factory
         self._clock = clock
         self._device: Any = None
         self._making = threading.Lock()     # one thread makes the device: open() is called from the sockets' threads
@@ -104,6 +161,10 @@ class PiMouse:
         self._given_up = 0                  # how many creations close() has given up waiting for: one that began before it closes its own device when it ends
         self._retry_at = 0.0                # the time before which the device is not tried for again (the last try failed)
         self.unavailable: Optional[str] = None
+
+    @staticmethod
+    def _default_factory() -> Any:  # pragma: no cover - each kind of device has its own
+        raise NotImplementedError
 
     @property
     def ready(self) -> bool:
@@ -117,31 +178,10 @@ class PiMouse:
         when it cannot be made."""
         self._open()
 
-    def move(self, dx: int, dy: int) -> None:
-        """Move the pointer by dx to the right and dy down."""
-        self._emit(*[("EV_REL", axis, delta) for axis, delta in (("REL_X", dx), ("REL_Y", dy)) if delta])
-
-    def press(self, button: str = "left") -> None:
-        self._emit(("EV_KEY", BUTTONS[button], 1))
-
-    def release(self, button: str = "left") -> None:
-        self._emit(("EV_KEY", BUTTONS[button], 0))
-
-    def click(self, button: str = "left") -> None:
-        """A press and a release, each reported on its own, as a mouse does (one report with both can be taken as neither)."""
-        self.press(button)
-        self.release(button)
-
-    def scroll(self, dy: int) -> None:
-        """Turn the wheel by dy notches: a negative number is towards the person at the screen (the content moves up, as a
-        finger drawn up the screen moves it)."""
-        if dy:
-            self._emit(("EV_REL", "REL_WHEEL", dy))
-
     def close(self) -> None:
-        """Remove the device (the kernel lets go of a button that was down on it). One that is being made is waited for, for CLOSE_WAIT_S,
-        and removed when it is there; if it is not there by then it is given up on, and the thread that is making it closes it when it
-        is made (a creation that begins after this call is a use of the mouse again, and is kept)."""
+        """Remove the device (the kernel lets go of a button or a key that was down on it). One that is being made is waited for, for
+        CLOSE_WAIT_S, and removed when it is there; if it is not there by then it is given up on, and the thread that is making it closes it
+        when it is made (a creation that begins after this call is a use of the device again, and is kept)."""
         got = self._making.acquire(timeout=self.CLOSE_WAIT_S)
         with self._state:
             if not got:
@@ -165,7 +205,7 @@ class PiMouse:
             try:
                 device = self._factory()
             except Exception as e:  # noqa: BLE001 - /dev/uinput cannot be opened, or the library is not there
-                reason = _why_not(e)
+                reason = _why_not(e, self.NOUN)
                 if reason != self.unavailable:         # (said once: a page that sends many events a second would say it as often)
                     logger.warning(reason)
                 self.unavailable = reason
@@ -177,23 +217,23 @@ class PiMouse:
                     self._device = device
             if not wanted:                             # close() did not wait for this one: nobody wants it any more
                 self._let_go(device)
-                raise TvError(CLOSED_WHILE_MADE)
+                raise TvError(f"The room Pi's {self.NOUN} was closed while it was being made")
             self.unavailable = None
-            logger.info(f"The room Pi's virtual mouse is ready ({MOUSE_NAME})")
+            logger.info(f"The room Pi's virtual {self.NOUN} is ready ({self.DEVICE_NAME})")
             return device
 
-    def _emit(self, *events: Tuple[str, str, int]) -> None:
-        """Write events, by the names of their type and code, and report them as one."""
+    def _emit(self, *events: Tuple[str, Any, int]) -> None:
+        """Write events, by the names of their type and code (or a code's number), and report them as one."""
         if not events:
             return
         device = self._open()
         try:
             for kind, code, value in events:
-                device.write(CODES[kind], CODES[code], value)
+                device.write(CODES[kind], CODES[code] if isinstance(code, str) else code, value)
             device.syn()
         except OSError as e:
             self._lose(device)
-            raise TvError(f"The room Pi's mouse stopped taking events: {one_line(str(e), REASON_LIMIT) or type(e).__name__}") from e
+            raise TvError(f"The room Pi's {self.NOUN} stopped taking events: {one_line(str(e), REASON_LIMIT) or type(e).__name__}") from e
 
     def _lose(self, device: Any) -> None:
         """A device that cannot be written to is let go of, and made again by the next event."""
@@ -201,12 +241,90 @@ class PiMouse:
             self._device = None
         self._let_go(device)
 
-    @staticmethod
-    def _let_go(device: Any) -> None:
+    def _let_go(self, device: Any) -> None:
         try:
             device.close()
         except Exception:  # noqa: BLE001 - it is going away either way
-            logger.debug("The room Pi's virtual mouse did not close cleanly", exc_info=True)
+            logger.debug(f"The room Pi's virtual {self.NOUN} did not close cleanly", exc_info=True)
+
+
+class PiMouse(_PiDevice):
+    """A virtual mouse on the room Pi (see _PiDevice for how its device is made and let go of)."""
+
+    NOUN = "mouse"
+    DEVICE_NAME = MOUSE_NAME
+    _default_factory = staticmethod(_uinput)
+
+    def move(self, dx: int, dy: int) -> None:
+        """Move the pointer by dx to the right and dy down."""
+        self._emit(*[("EV_REL", axis, delta) for axis, delta in (("REL_X", dx), ("REL_Y", dy)) if delta])
+
+    def press(self, button: str = "left") -> None:
+        self._emit(("EV_KEY", BUTTONS[button], 1))
+
+    def release(self, button: str = "left") -> None:
+        self._emit(("EV_KEY", BUTTONS[button], 0))
+
+    def click(self, button: str = "left") -> None:
+        """A press and a release, each reported on its own, as a mouse does (one report with both can be taken as neither)."""
+        self.press(button)
+        self.release(button)
+
+    def scroll(self, dy: int) -> None:
+        """Turn the wheel by dy notches: a negative number is towards the person at the screen (the content moves up, as a
+        finger drawn up the screen moves it)."""
+        if dy:
+            self._emit(("EV_REL", "REL_WHEEL", dy))
+
+
+def keystrokes(message: Dict[str, Any]) -> List[Tuple[int, bool]]:
+    """What a keys message types, as (key code, with Shift) in order: its "text", character by character on a US keyboard, or its one
+    named "key". TvError, in words, for a message that is neither, a key the keyboard does not have, or a character a US keyboard cannot
+    type (nothing of that message is typed then)."""
+    text, key = message.get("text"), message.get("key")
+    if (text is None) == (key is None):
+        raise TvError(BAD_KEYS)
+    if key is not None:
+        if not isinstance(key, str) or key not in NAMED_KEYS:
+            raise TvError(BAD_KEYS)
+        return [(NAMED_KEYS[key], False)]
+    if not isinstance(text, str):
+        raise TvError(BAD_KEYS)
+    if len(text) > MAX_TEXT:
+        raise TvError(f"That is too much to type at once: {MAX_TEXT} characters at most")
+    strokes = []
+    for char in text:
+        stroke = CHARACTERS.get(char)
+        if stroke is None:
+            shown = f'"{char}"' if char.isprintable() else f"U+{ord(char):04X}"
+            raise TvError(f"The TV keyboard types the letters, digits and symbols of a US keyboard: {shown} is not one of them")
+        strokes.append(stroke)
+    return strokes
+
+
+class PiKeyboard(_PiDevice):
+    """A virtual keyboard on the room Pi, US layout (see _PiDevice for how its device is made and let go of): what the touch Pi's
+    keyboard types on the TV when Sign in to Google has the room Pi's own browser there."""
+
+    NOUN = "keyboard"
+    DEVICE_NAME = KEYBOARD_NAME
+    _default_factory = staticmethod(_uinput_keyboard)
+
+    def stroke(self, code: int, shift: bool = False) -> None:
+        """One key pressed and let go, with Shift held around it when `shift`: each change reported on its own, as a keyboard does."""
+        if shift:
+            self._emit(("EV_KEY", KEY_CODES["KEY_LEFTSHIFT"], 1))
+        try:
+            self._emit(("EV_KEY", code, 1))
+            self._emit(("EV_KEY", code, 0))
+        finally:
+            if shift and self.ready:                   # (a device that was lost took the Shift with it)
+                self._emit(("EV_KEY", KEY_CODES["KEY_LEFTSHIFT"], 0))
+
+    def type(self, text: str) -> None:
+        """Type `text` at once (the relay types a message's characters a moment apart; this is for a test and a person at a shell)."""
+        for code, shift in keystrokes({"text": text}):
+            self.stroke(code, shift)
 
 
 def _delta(message: Dict[str, Any], key: str) -> int:
@@ -241,14 +359,23 @@ class PointerRelay:
     not work, or it was lost) makes it in a thread, off_the_loop(call, *args) being how a thread is waited for (asyncio.to_thread unless the
     socket's owner, which has to be able to end the wait when the service stops, gives its own): the device takes a moment to appear, and
     nothing else on the loop may wait for it.
+
+    Typing (`{"target": "pi", "type": "keys", "text": "..."}` or `"key": "Enter"`) goes to the room Pi's keyboard, a key KEY_GAP_S after
+    the one before it: the desktop reads a device's events at its own pace, and a burst of them all at once can be more than the kernel
+    keeps for it. The socket waits for a message's typing before it reads the next, so the order is kept. The TV is not typed on.
     """
+
+    KEY_GAP_S = 0.012          # between two keys of one message
+    FRESH_KEYBOARD_S = 0.5     # a keyboard just made is not typed on at once: the desktop takes it up a moment after it appears
 
     CALL_TIMEOUT_S = 2.0      # a message to the TV is only written to its socket: one that takes longer is not being answered
     STALE_FAILURE_S = 1.0     # a move that failed on its way is said by the next move if it comes this soon; after that it is old news
 
-    def __init__(self, tv_service: Any, pi_mouse: PiMouse, off_the_loop: Optional[Callable[..., Awaitable[Any]]] = None):
+    def __init__(self, tv_service: Any, pi_mouse: PiMouse, off_the_loop: Optional[Callable[..., Awaitable[Any]]] = None,
+                 keyboard: Optional[PiKeyboard] = None):
         self._tv = tv_service
         self._mouse = pi_mouse
+        self._keyboard = keyboard
         self._off_the_loop = off_the_loop or asyncio.to_thread
         self._pending: Optional[List[int]] = None      # the moves that came in while one was in flight, added up: [dx, dy]
         self._sender: Optional[asyncio.Task] = None    # sends the TV's moves, for as long as there are any to send
@@ -267,13 +394,16 @@ class PointerRelay:
         """Carry out one message.
 
         Raises:
-            TvError: the message is no use (not an object, an unknown target or type, a delta that is not a number), it cannot be done
-                (a right button for the TV, typing), or the TV or the room Pi's mouse cannot be reached. A move for the TV that is sent in the
-                background and fails is said by the next move.
+            TvError: the message is no use (not an object, an unknown target or type, a delta that is not a number, keys that cannot be
+                typed), it cannot be done (a right button or typing for the TV), or the TV or the room Pi's mouse or keyboard cannot be
+                reached. A move for the TV that is sent in the background and fails is said by the next move.
         """
         target, kind, dx, dy = self._read(message)
         if kind == "keys":
-            raise TvError(KEYS_LATER)
+            if target != "pi":
+                raise TvError(KEYS_FOR_THE_PI)
+            await self._type(keystrokes(message))
+            return
         if target == "pi":
             await self._pi(kind, dx, dy)
         else:
@@ -331,6 +461,25 @@ class PointerRelay:
             self._pi_event(kind, dx, dy)
         else:
             await self._off_the_loop(self._pi_event, kind, dx, dy)
+
+    async def _type(self, strokes: List[Tuple[int, bool]]) -> None:
+        """Type on the room Pi's keyboard, one key at a time, KEY_GAP_S apart. A keyboard that is not there is made first, in a thread, and
+        given FRESH_KEYBOARD_S for the desktop to take it up."""
+        keyboard = self._keyboard
+        if keyboard is None:
+            raise TvError(NO_KEYBOARD)
+        if not strokes:
+            return
+        if not keyboard.ready:
+            await self._off_the_loop(keyboard.open)
+            await asyncio.sleep(self.FRESH_KEYBOARD_S)
+        for index, (code, shift) in enumerate(strokes):
+            if index:
+                await asyncio.sleep(self.KEY_GAP_S)
+            if keyboard.ready:
+                keyboard.stroke(code, shift)
+            else:                                      # (lost on the way: made again in a thread, by the stroke)
+                await self._off_the_loop(keyboard.stroke, code, shift)
 
     def _pi_event(self, kind: str, dx: int, dy: int) -> None:
         mouse = self._mouse

@@ -234,6 +234,11 @@
   // The whole touchscreen as a touchpad (spec 5.3): a strip that names the target, a switch between the two targets, Done, and nothing else
   // on it to be tapped by mistake. It opens over the TV view and the page's own idle return waits while it is up; Done, or ten minutes with
   // no touch on it, puts it away and the page is on the TV view again.
+  //
+  // Sign in to Google (Settings, Meetings: spec 2026-10-29, section 3) opens it with options.signIn = { title, line, done(), cancel() }: the
+  // room Pi alone (Google's page is on the TV through the room Pi), Type on the TV (the page's keyboard, typing on the room Pi), Cancel and
+  // Done, which are the sign-in's own. The agent closes a sign-in after 15 minutes without a touch, so the surface does not put itself away:
+  // the sign-in's page hides it when the sign-in has ended.
   const surface = (function () {
     const root = el("touchpad");
     const title = el("touchpad-title");
@@ -241,6 +246,11 @@
     const how = el("touchpad-how");
     const mark = el("touchpad-link");
     const halves = { tv: el("touchpad-tv"), pi: el("touchpad-pi") };
+    const switcher = el("touchpad-target");
+    const keys = el("touchpad-keys");
+    const cancel = el("touchpad-cancel");
+    const done = el("touchpad-done");
+    const NOT_TYPED = "Not typed: the connection to the room is coming back";
     const HOW = {
       tv: "One finger moves \u00B7 Tap to click\nTwo fingers scroll \u00B7 Press and hold, then move, to drag",
       pi: "One finger moves \u00B7 Tap to click \u00B7 Two-finger tap to right-click\nTwo fingers scroll \u00B7 Press and hold, then move, to drag",
@@ -251,9 +261,25 @@
     let idle = null;
     let said = "";                          // what the agent last said it could not do, until it has been quiet for WORDS_MS
     let saidTimer = null;
+    let signIn = null;                      // Sign in to Google's: { title, line, busy, done(), cancel() }, while it has the surface
     const read = reader(el("touchpad-surface"), () => target);
+    // What the keyboard types goes to the room Pi's keyboard, through the pointer socket (`keys`): text as it is, and Enter and Delete by name.
+    const typing = {
+      text: (text) => sendKeys({ text: text }),
+      key: (name) => sendKeys({ key: name }),
+      closed: () => { if (!root.hidden) draw(); },
+    };
+    function sendKeys(what) {
+      if (link.send(Object.assign({ target: "pi", type: "keys" }, what))) return;
+      said = NOT_TYPED;
+      clearTimeout(saidTimer);
+      saidTimer = setTimeout(() => { said = ""; draw(); }, WORDS_MS);
+      draw();
+    }
+    const keyboard = () => window.croomKeyboard;
 
     function draw() {
+      if (signIn) { drawSignIn(); return; }
       title.textContent = target === "tv" ? "Moving the TV's cursor" : "Moving the mouse on the room's screen";
       const line = said || (target === "tv" ? tv.name || "The TV" : tv.usable ? "The room Pi behind the TV"
         : tv.pointer === false ? "This TV does not support a pointer"
@@ -262,6 +288,15 @@
       how.textContent = HOW[target];
       for (const key of Object.keys(halves)) halves[key].setAttribute("aria-pressed", String(key === target));
       halves.tv.disabled = !tv.usable;
+      mark.hidden = link.state() !== "down";
+    }
+    function drawSignIn() {
+      title.textContent = signIn.title;
+      const line = said || signIn.line || "";
+      if (small.textContent !== line) small.textContent = line;
+      how.textContent = HOW.pi;
+      keys.setAttribute("aria-pressed", String(Boolean(keyboard() && keyboard().isOpen())));
+      keys.disabled = cancel.disabled = done.disabled = Boolean(signIn.busy);
       mark.hidden = link.state() !== "down";
     }
     function touched() {
@@ -285,18 +320,38 @@
       tv = options.tv;
       target = options.target;   // (remote.js asks for the TV only while there is one to move: the pointer mode goes off under the cards)
       opener = options.opener || null;
+      signIn = options.signIn || null;
+      if (signIn) target = "pi";
+      root.classList.toggle("signing-in", Boolean(signIn));
+      switcher.hidden = Boolean(signIn);
+      keys.hidden = cancel.hidden = !signIn;
       said = "";
       root.hidden = false;
       coverPage(true);
       P.holdIdleReturn(true);
       link.want("surface", true);
-      touched();
+      if (signIn) clearTimeout(idle);
+      else touched();
       draw();
-      el("touchpad-done").focus({ preventScroll: true });
+      done.focus({ preventScroll: true });
+    }
+    // The sign-in's line or its busy state changed (Done is checking the sign-in): drawn again.
+    function update(changes) {
+      if (!signIn) return;
+      Object.assign(signIn, changes);
+      draw();
     }
     function hide() {
       if (root.hidden) return;
       read.cancel();            // a held drag goes up before the socket closes
+      if (signIn) {
+        signIn = null;
+        if (keyboard()) keyboard().typeOn(null);   // the keys go back to the page's fields
+        root.classList.remove("signing-in");
+        switcher.hidden = false;
+        keys.hidden = cancel.hidden = true;
+        keys.disabled = cancel.disabled = done.disabled = false;
+      }
       root.hidden = true;
       clearTimeout(idle);
       clearTimeout(saidTimer);
@@ -316,8 +371,15 @@
     }
 
     for (const key of Object.keys(halves)) halves[key].addEventListener("click", () => choose(key));
-    el("touchpad-done").addEventListener("click", hide);
-    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) root.addEventListener(type, () => { if (!root.hidden) touched(); });
+    done.addEventListener("click", () => { if (signIn) signIn.done(); else hide(); });
+    cancel.addEventListener("click", () => { if (signIn) signIn.cancel(); });
+    keys.addEventListener("click", () => {
+      const k = keyboard();
+      if (!signIn || !k) return;
+      if (k.isOpen()) k.hide(); else k.typeOn(typing);
+      draw();
+    });
+    for (const type of ["pointerdown", "pointermove", "pointerup", "pointercancel"]) root.addEventListener(type, () => { if (!root.hidden && !signIn) touched(); });
     link.watch(() => { if (!root.hidden) draw(); });
     link.onError((words) => {
       if (root.hidden) return;
@@ -327,7 +389,7 @@
       said = words;
       draw();
     });
-    return { show: show, hide: hide, sync: sync, isOpen: () => !root.hidden };
+    return { show: show, hide: hide, sync: sync, update: update, isOpen: () => !root.hidden, signingIn: () => Boolean(signIn) };
   })();
 
   window.croomTouchpad = { link: link, reader: reader, surface: surface, WORDS_MS: WORDS_MS };

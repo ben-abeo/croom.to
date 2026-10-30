@@ -11,7 +11,7 @@ import sqlite3
 import subprocess
 import sys
 from pathlib import Path
-from typing import Callable, Optional, TextIO
+from typing import Callable, List, Optional, TextIO
 
 from croom.meeting.browser_env import ensure_browsers_path, profile_holder
 
@@ -26,6 +26,13 @@ def chromium_executable() -> str:
 
     with sync_playwright() as p:
         return p.chromium.executable_path
+
+
+def sign_in_command(executable: str, profile_dir: Path, kiosk: bool = False) -> List[str]:
+    """The bundled Chromium, plainly (no automation), on the room's profile, opening Google's sign-in page: what `croom --sign-in-meet`
+    runs, and the touch Pi's Sign in to Google on the TV (with kiosk, the page fills the TV)."""
+    return [executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
+            "--password-store=basic", "--window-size=1920,1080", *(["--kiosk"] if kiosk else []), SIGN_IN_URL]
 
 
 def session_saved(profile_dir: Path) -> bool:
@@ -81,9 +88,7 @@ def sign_in_meet(profile_dir: Path, out: TextIO = sys.stdout, display: Optional[
     print("A browser opens on the room's screen. Sign in there as the room's Google user, "
           "then close the browser window.", file=out)
     print(f"Profile: {profile_dir}", file=out)
-    runner([executable, f"--user-data-dir={profile_dir}", "--no-first-run", "--no-default-browser-check",
-            "--password-store=basic", "--window-size=1920,1080", SIGN_IN_URL],
-           check=False, env={**os.environ, "DISPLAY": display})
+    runner(sign_in_command(executable, profile_dir), check=False, env={**os.environ, "DISPLAY": display})
     if session_saved(profile_dir):
         print("Profile saved. Test it with: croom --check-meet <meeting link> -c /etc/croom/config.yaml, "
               "then start the service: sudo systemctl start croom", file=out)

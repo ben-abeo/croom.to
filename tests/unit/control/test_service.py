@@ -225,6 +225,60 @@ class StubMeeting:
             raise self.fail_diagnostics
         return {"user_keys": ["userId", "muted"], "buttons": [], "state": {"muted": self.muted}}
 
+    # Settings' Sign in to Google on the TV, as MeetingService answers it: `google_profile` None is a room with no Google profile folder,
+    # `google` what the profile holds, `signs_in_as` the address Done finds (None: Google kept no session), `sign_in_refusal` a
+    # SignInError begin_sign_in raises; `sign_ins` what was asked, in order.
+    google_profile = "/var/lib/croom/meet-profile"
+    signing_in = False
+    sign_in_refusal = None
+    signs_in_as = "conference-a@crystalpm.com"
+
+    def _sign_ins(self):
+        if "sign_ins" not in self.__dict__:
+            self.sign_ins, self.google, self.sign_in_last = [], {"signed_in": False, "address": None}, None
+        return self.sign_ins
+
+    def sign_in_state(self):
+        self._sign_ins()
+        state = {"configured": self.google_profile is not None, "profile_dir": self.google_profile, "active": self.signing_in,
+                 "last": self.sign_in_last, "signed_in": False, "address": None}
+        if self.signing_in:
+            state["idle_left_s"] = 900
+        elif self.google_profile is not None:
+            state.update(self.google)
+        return state
+
+    async def begin_sign_in(self):
+        from croom.meeting.signin_session import LEAVE_FIRST, SET_UP_FIRST, SignInError
+        self._sign_ins().append("begin")
+        if self.sign_in_refusal is not None:
+            raise self.sign_in_refusal
+        if self.google_profile is None:
+            raise SignInError(SET_UP_FIRST)
+        if self.state not in (MeetingState.IDLE, MeetingState.ERROR):
+            raise SignInError(LEAVE_FIRST)
+        self.signing_in = True
+        return self.sign_in_state()
+
+    async def end_sign_in(self, done):
+        from croom.meeting.signin_session import NO_SESSION, NOT_SIGNING_IN, SignInError
+        self._sign_ins().append("done" if done else "cancel")
+        if not self.signing_in:
+            raise SignInError(NOT_SIGNING_IN)
+        self.signing_in = False
+        address = self.signs_in_as if done else None
+        if address:
+            self.google = {"signed_in": True, "address": address}
+        words = (f"Signed in as {address}" if address else NO_SESSION) if done else "Sign-in cancelled: nothing changed"
+        self.sign_in_last = {"outcome": "done" if done else "cancelled", "words": words, "address": address, "at": "2026-10-30T10:00:00"}
+        return address
+
+    def sign_in_ends_by_itself(self, outcome="idle", words="The sign-in closed after 15 minutes without a touch: nothing changed"):
+        """The agent closed the sign-in (15 minutes without a touch, the browser closed by itself)."""
+        self._sign_ins()
+        self.signing_in = False
+        self.sign_in_last = {"outcome": outcome, "words": words, "address": None, "at": "2026-10-30T10:00:00"}
+
 
 class StubCalendar:
     """Behaves like CalendarService for the parts the control service uses."""
@@ -577,6 +631,40 @@ class StubMouse:
         self.closed += 1
 
 
+class StubKeyboard:
+    """Behaves like PiKeyboard: notes the keys it is told to stroke, in `strokes` ((key code, with Shift)), and raises `fail` when it has
+    one. `opened` counts the times the service made it ahead of the first key (a sign-in began)."""
+
+    ready = True
+
+    def __init__(self):
+        self.strokes = []
+        self.fail = None
+        self.unavailable = None
+        self.opened = 0
+        self.closed = 0
+
+    def open(self):
+        self.opened += 1
+        if self.fail is not None:
+            raise self.fail
+
+    def stroke(self, code, shift=False):
+        if self.fail is not None:
+            raise self.fail
+        self.strokes.append((code, shift))
+
+    def close(self):
+        self.closed += 1
+
+    def typed(self):
+        """The text the strokes type, on a US keyboard (named keys as <Name>)."""
+        from croom.tv.pointer import CHARACTERS, NAMED_KEYS
+        by_stroke = {stroke: char for char, stroke in CHARACTERS.items() if char not in "\n\t"}
+        by_code = {code: name for name, code in NAMED_KEYS.items()}
+        return "".join(by_stroke.get(stroke) or f"<{by_code[stroke[0]]}>" for stroke in self.strokes)
+
+
 class StubSearch:
     """Stands in for discover_tvs, which puts a packet on the network: it counts how often it was asked and answers `tvs`, or
     raises `fail`, once `gate` (an asyncio.Event; none: at once) is open."""
@@ -630,11 +718,12 @@ async def no_room_devices():
 
 
 def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, laptop=None, pin_store=None,
-                 admin=None, find_devices=no_room_devices, **config):
+                 admin=None, find_devices=no_room_devices, keyboard=None, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
     return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse,
-                          scores=scores, laptop=laptop, pin_store=pin_store, admin=admin, find_devices=find_devices)
+                          scores=scores, laptop=laptop, pin_store=pin_store, admin=admin, find_devices=find_devices,
+                          keyboard=keyboard if keyboard is not None else StubKeyboard())
 
 
 @pytest.fixture(autouse=True)
@@ -2883,7 +2972,9 @@ class TestPointerSocket:
         ('{"target": "tv"}', BAD_TYPE), ('{"target": "tv", "type": "wiggle"}', BAD_TYPE),
         ('{"target": "tv", "type": "move", "dx": "3"}', "dx is a number"), ('{"target": "pi", "type": "move", "dy": NaN}', "dy is a number"),
         ('{"target": "tv", "type": "right"}', "The TV's cursor has no right button"),
-        ('{"target": "pi", "type": "keys", "text": "a"}', "Typing into the room Pi comes in a later version"),
+        ('{"target": "tv", "type": "keys", "text": "a"}', "Typing goes to the room Pi: the TV's cursor has no keyboard"),
+        ('{"target": "pi", "type": "keys", "text": "\u00e9"}',
+         'The TV keyboard types the letters, digits and symbols of a US keyboard: "\u00e9" is not one of them'),
     ])
     async def test_a_frame_that_is_no_use_is_answered_in_words_and_the_socket_goes_on(self, client_factory, frame, words):
         tv, mouse = StubTv(), StubMouse()

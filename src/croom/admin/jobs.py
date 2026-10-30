@@ -112,15 +112,19 @@ def in_background(work: Callable[[], None]) -> None:
 
 @dataclass
 class Paths:
-    """The folders the jobs work in: the real ones by default, a temporary folder in the tests."""
+    """The folders the jobs work in: the real ones by default, a temporary folder in the tests. `admin_dir` is the helper's own (root's,
+    mode 700): its state never lives where the room's user can write, since the helper acts on what it says (which release to switch to,
+    which config to put back). It is beside the data folder unless named: /var/lib/croom-admin."""
     config_dir: Path = Path("/etc/croom")
     data_dir: Path = Path("/var/lib/croom")
     media_root: Path = Path("/media")
     install_dir: Path = Path("/opt/croom")
+    admin_dir: Optional[Path] = None
 
     def __post_init__(self):
         for name in ("config_dir", "data_dir", "media_root", "install_dir"):
             setattr(self, name, Path(getattr(self, name)))
+        self.admin_dir = Path(self.admin_dir) if self.admin_dir is not None else self.data_dir.with_name(self.data_dir.name + "-admin")
 
     @property
     def config(self) -> Path:
@@ -128,6 +132,12 @@ class Paths:
 
     @property
     def state(self) -> Path:
+        """The helper's record (restarts, the last config write, updates, the release kept before): root's alone, mode 600."""
+        return self.admin_dir / "admin-state.json"
+
+    @property
+    def legacy_state(self) -> Path:
+        """Where an earlier helper kept its record, in the room user's data folder: removed at start and never read."""
         return self.data_dir / "admin-state.json"
 
     @property
@@ -167,6 +177,7 @@ class Host:
     run_long: Runner = partial(run_command, timeout=BUILD_TIMEOUT_S)   # an update's build: python -m venv, pip install
     python: str = "/usr/bin/python3"             # what a release's venv is made with
     github: Any = field(default_factory=GitHub)  # whether a version to install is on main (croom.settings.github.GitHub)
+    sync: Callable[[], None] = os.sync           # a new release on the disk before its VERSION says it is whole
 
 
 # --- checks
@@ -453,20 +464,40 @@ class Jobs:
 
     # --- restart and the health watch
 
+    def _ensure_admin_dir(self) -> None:
+        """The helper's own folder, root's (the helper's user's) and mode 700, made when missing."""
+        self._paths.admin_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(self._paths.admin_dir, 0o700)
+
     def _read_state(self) -> Dict[str, Any]:
+        """The helper's record; {} when there is none, or the file is not one the helper wrote (not its own, or writable by others,
+        or a link): the record names releases and configs the helper acts on."""
         try:
-            state = json.loads(self._paths.state.read_text())
+            fd = os.open(self._paths.state, os.O_RDONLY | os.O_NOFOLLOW)
+        except OSError:
+            return {}
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o022:
+                logger.warning(f"Not reading {self._paths.state}: it is not the helper's own file")
+                return {}
+            with os.fdopen(fd, "r") as f:
+                fd = -1
+                state = json.load(f)
         except (OSError, ValueError):
             return {}
+        finally:
+            if fd >= 0:
+                os.close(fd)
         return state if isinstance(state, dict) else {}
 
     def _update_state(self, **changes: Any) -> None:
         state = self._read_state()
         state.update(changes)
-        self._paths.data_dir.mkdir(parents=True, exist_ok=True)
-        fd, temp = tempfile.mkstemp(dir=self._paths.data_dir, prefix=".admin-state.")
+        self._ensure_admin_dir()
+        fd, temp = tempfile.mkstemp(dir=self._paths.admin_dir, prefix=".admin-state.")
         try:
-            os.fchmod(fd, 0o644)   # on the open file, not by its name: a name in the folder can be swapped, the descriptor can't
+            os.fchmod(fd, 0o600)   # on the open file, not by its name: a name in the folder can be swapped, the descriptor can't
             with os.fdopen(fd, "w") as f:
                 fd = -1
                 json.dump(state, f)
@@ -485,6 +516,23 @@ class Jobs:
         if why:
             record["why"] = why
         self._update_state(restart=record)
+
+    def _room_started(self) -> Optional[float]:
+        """When the room software last started (systemd's ActiveEnterTimestamp, Unix seconds); None when systemd does not say."""
+        code, output = self._host.run(["systemctl", "show", "croom", "--property=ActiveEnterTimestamp", "--value", "--timestamp=unix"])
+        match = re.fullmatch(r"@(\d+(?:\.\d+)?)", output.strip()) if code == 0 else None
+        return float(match.group(1)) if match else None
+
+    def config_waiting(self) -> bool:
+        """Whether a config the helper wrote has not been started with yet: written after the last restart asked for here and after the
+        room software last started (when systemd says)."""
+        state = self._read_state()
+        last_write = state.get("last_write")
+        if not isinstance(last_write, (int, float)) or isinstance(last_write, bool):
+            return False
+        marks = [mark for mark in (state.get("watch_asked_at"), self._room_started())
+                 if isinstance(mark, (int, float)) and not isinstance(mark, bool)]
+        return not marks or last_write > max(marks)
 
     def _control_address(self) -> Tuple[str, int]:
         """Where the room page listens in the config on disk now (the one the room restarted with): its host, or the loopback when it
@@ -582,7 +630,14 @@ class Jobs:
     def resume(self) -> None:
         """At the helper's start: a watch that the helper's own stop cut short (the record still says restarting or watching) goes on,
         from when its restart was asked for, so that a bad change is still undone. The room is given its full 2 minutes again. An
-        update cut short is taken up or closed, and the release folders an update left unfinished are removed (croom.admin.update)."""
+        update cut short is taken up or closed, and the release folders an update left unfinished are removed (croom.admin.update).
+        The helper's own folder is made, and a record an earlier helper kept in the room user's data folder is removed unread: the
+        room's user could have written anything there."""
+        self._ensure_admin_dir()
+        try:
+            self._paths.legacy_state.unlink(missing_ok=True)
+        except OSError as e:
+            logger.warning(f"Could not remove the old record {self._paths.legacy_state}: {e}")
         self._updater.resume()
         state = self._read_state()
         record = state.get("restart")

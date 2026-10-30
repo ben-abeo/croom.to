@@ -6,6 +6,9 @@ import grp
 import json
 import os
 import stat
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 import yaml
@@ -327,7 +330,7 @@ def test_a_room_that_does_not_come_back_after_a_recent_change_gets_the_last_conf
     status = jobs.table["restart_status"]({})
     assert status["undone"] is True and status["state"] == "undone"
     assert "2 minutes" in status["why"] and status["at"]
-    state = json.loads((paths.data_dir / "admin-state.json").read_text())
+    state = json.loads(paths.state.read_text())
     assert state["restart"]["undone"] is True
 
 
@@ -528,11 +531,16 @@ def test_write_config_is_refused_while_a_restart_is_watched(machine, paths):
     assert (paths.config_dir / "config.yaml").read_text() == GOOD
 
 
-def test_the_state_file_is_mode_644_and_a_failed_write_leaves_no_temporary_file(machine, paths, monkeypatch):
+def test_the_state_file_is_the_helpers_alone_and_a_failed_write_leaves_no_temporary_file(machine, paths, monkeypatch):
+    """The record is in the helper's own folder (root's, 700; /var/lib/croom-admin beside the room user's /var/lib/croom), mode 600:
+    the helper acts on what it says, so the room's user may not write it, nor read it."""
     jobs, *_ = machine
     jobs.table["restart"]({})
-    assert mode(paths.data_dir / "admin-state.json") == 0o644
-    before = (paths.data_dir / "admin-state.json").read_text()
+    assert paths.state == paths.data_dir.with_name("var-admin") / "admin-state.json"
+    assert Paths().state == Path("/var/lib/croom-admin/admin-state.json")
+    assert mode(paths.admin_dir) == 0o700 and mode(paths.state) == 0o600
+    assert not (paths.data_dir / "admin-state.json").exists()
+    before = paths.state.read_text()
 
     def broken(*args, **kwargs):
         raise OSError("disk full")
@@ -540,8 +548,8 @@ def test_the_state_file_is_mode_644_and_a_failed_write_leaves_no_temporary_file(
     monkeypatch.setattr("croom.admin.jobs.json.dump", broken)
     with pytest.raises(OSError):
         jobs._update_state(last_write=1)
-    assert [p.name for p in paths.data_dir.iterdir()] == ["admin-state.json"]
-    assert (paths.data_dir / "admin-state.json").read_text() == before
+    assert [p.name for p in paths.admin_dir.iterdir()] == ["admin-state.json"]
+    assert paths.state.read_text() == before
 
 
 def test_the_watchs_two_minutes_are_on_the_monotonic_clock(paths):
@@ -696,3 +704,40 @@ def test_journal_says_why_it_could_not_read_the_log(paths):
     with pytest.raises(JobError) as refused:
         journal_jobs(paths, runner).journal({"before": "s=1"})
     assert str(refused.value) == "The log could not be read: Failed to seek to cursor: Invalid argument"
+
+
+# --- Task 8 fix round: the helper's record is its own
+
+
+def test_a_record_left_in_the_room_users_folder_is_removed_unread(machine, paths):
+    """An earlier helper kept its record in /var/lib/croom, which the room's user owns and so could have written: it is not believed."""
+    jobs, runner, *_ = machine
+    (paths.data_dir / "admin-state.json").write_text(json.dumps({"restart": {"state": "watching"}, "watch_asked_at": 1,
+                                                                 "update": {"state": "watching", "commit": "../../etc", "from": "x"}}))
+    jobs.resume()
+    assert not (paths.data_dir / "admin-state.json").exists()
+    assert runner.calls == [] and jobs.table["restart_status"]({}) == {"state": "none", "undone": False}
+    assert mode(paths.admin_dir) == 0o700
+
+
+@pytest.mark.parametrize("spoil", ["group-writable", "link"])
+def test_a_record_that_is_not_the_helpers_own_file_is_not_read(machine, paths, tmp_path, spoil):
+    jobs, *_ = machine
+    jobs._update_state(last_write=5, restart={"state": "healthy", "undone": False})
+    if spoil == "group-writable":
+        paths.state.chmod(0o664)
+    else:
+        elsewhere = tmp_path / "forged.json"
+        elsewhere.write_text(paths.state.read_text())
+        elsewhere.chmod(0o600)
+        paths.state.unlink()
+        paths.state.symlink_to(elsewhere)
+    assert jobs.table["restart_status"]({}) == {"state": "none", "undone": False}
+
+
+def test_the_helper_check_makes_the_jobs_without_listening(tmp_path):
+    socket = tmp_path / "admin.sock"
+    done = subprocess.run([sys.executable, "-m", "croom.admin", "--check", "--socket", str(socket)], capture_output=True, text=True,
+                          timeout=60)
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.strip() == "The helper starts" and not socket.exists()

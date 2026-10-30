@@ -20,6 +20,8 @@ CROOM_VERSION="2.0.0-dev"
 INSTALL_DIR="/opt/croom"
 CONFIG_DIR="/etc/croom"
 DATA_DIR="/var/lib/croom"
+# The root helper's own record (which release was kept before, restarts, updates): root's alone, never the room user's to write
+ADMIN_DIR="${ADMIN_DIR:-/var/lib/croom-admin}"
 LOG_DIR="/var/log/croom"
 SYSTEMD_DIR="${SYSTEMD_DIR:-/etc/systemd/system}"
 # The agent runs as the desktop user that invoked sudo, so Chromium can use the
@@ -243,6 +245,7 @@ create_directories() {
     chmod 755 "$INSTALL_DIR"
     chown -R "$CROOM_USER:$CROOM_USER" "$INSTALL_DIR/models" "$INSTALL_DIR/browsers"
     chown -R "$CROOM_USER:$CROOM_USER" "$DATA_DIR"
+    make_admin_dir
     chown -R "$CROOM_USER:$CROOM_USER" "$LOG_DIR"
 }
 
@@ -291,10 +294,18 @@ switch_release() {
     mv -f "$INSTALL_DIR/.VERSION.$$" "$INSTALL_DIR/VERSION"
 }
 
-# The helper's record of the release kept before the running one (Switch back goes to it, and an update never removes it)
+# The root helper's own folder: root's, mode 700 (the helper acts on what its record says, so the room's user may not write it)
+make_admin_dir() {
+    mkdir -p "$ADMIN_DIR"
+    chown "$RELEASE_OWNER" "$ADMIN_DIR"
+    chmod 700 "$ADMIN_DIR"
+}
+
+# The helper's record of the release kept before the running one (Switch back goes to it, and an update never removes it), in the
+# helper's own folder, mode 600
 record_previous_release() {
-    mkdir -p "$DATA_DIR"
-    python3 - "$DATA_DIR/admin-state.json" "$1" << 'PYTHON'
+    make_admin_dir
+    python3 - "$ADMIN_DIR/admin-state.json" "$1" << 'PYTHON'
 import json, os, sys
 path, name = sys.argv[1], sys.argv[2]
 try:
@@ -305,11 +316,13 @@ except (OSError, ValueError):
 if not isinstance(state, dict):
     state = {}
 state["previous_release"] = name
-with open(path + ".installer", "w") as f:
+fd = os.open(path + ".installer", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f:
     json.dump(state, f)
-os.chmod(path + ".installer", 0o644)
+os.chmod(path + ".installer", 0o600)
 os.replace(path + ".installer", path)
 PYTHON
+    chown "$RELEASE_OWNER" "$ADMIN_DIR/admin-state.json"
 }
 
 # A venv this installer made before releases (a folder, the room user's) becomes the first release, root's, under the commit pip
@@ -387,6 +400,8 @@ install_croom() {
             prune_releases "$current"
         fi
     fi
+    # Every release root's and writable by root alone, the one moved in included: the helper runs only such a release
+    seal_release "$INSTALL_DIR/releases"
 
     # Install the browser where the service user can find it: under sudo the
     # default would be root's ~/.cache, invisible to the desktop user at runtime.

@@ -27,6 +27,7 @@ class Runner:
     def __init__(self):
         self.calls = []
         self.fail = {}
+        self.answers = {}      # the start of a command -> (code, output), or a function giving them
         self.on_call = None
 
     def __call__(self, args):
@@ -39,6 +40,18 @@ class Runner:
                 return answer
         if args[1:3] == ["-m", "venv"]:
             os.makedirs(os.path.join(args[3], "bin"), exist_ok=True)
+            with open(os.path.join(args[3], "bin", "python"), "w"):
+                pass
+        if args[0].endswith("/pip"):          # pip under a umask that leaves what it makes writable by the group and others
+            path = os.path.join(os.path.dirname(os.path.dirname(args[0])), "lib", "croom.py")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w"):
+                pass
+            os.chmod(path, 0o666)
+            os.chmod(os.path.dirname(path), 0o777)
+        for word, answer in self.answers.items():
+            if " ".join(args).startswith(word):
+                return answer() if callable(answer) else answer
         return 0, ""
 
     def systemctl(self):
@@ -91,6 +104,7 @@ def release(paths, name, complete=True):
     """A release folder as the installer or an update leaves it."""
     folder = paths.releases / name
     (folder / "venv" / "bin").mkdir(parents=True)
+    (folder / "venv" / "bin" / "python").write_text("")
     if complete:
         (folder / "VERSION").write_text(name + "\n")
     return folder
@@ -107,8 +121,19 @@ def layout(paths):
     release(paths, A)
     release(paths, P)
     link(paths, A)
-    (paths.data_dir / "admin-state.json").write_text(json.dumps({"previous_release": P}))
+    write_state(paths, {"previous_release": P})
     return paths
+
+
+def write_state(paths, state):
+    """The helper's own record, as the helper keeps it: its folder mode 700, the file mode 600."""
+    paths.admin_dir.mkdir(mode=0o700, exist_ok=True)
+    paths.state.write_text(json.dumps(state))
+    paths.state.chmod(0o600)
+
+
+def read_state(paths):
+    return json.loads(paths.state.read_text())
 
 
 class Machine:
@@ -121,7 +146,11 @@ class Machine:
         self.jobs = Jobs(Host(paths=paths, run=self.runner, run_long=self.runner, owner=getpass.getuser(),
                               group=grp.getgrgid(os.getgid()).gr_name, probe=self.probe, clock=self.clock, sleep=self.clock.sleep,
                               monotonic=self.clock, background=background or (lambda work: work()), github=self.github,
-                              python="/usr/bin/python3"))
+                              python="/usr/bin/python3", sync=self.synced))
+        self.syncs = []
+
+    def synced(self):
+        self.syncs.append(sorted(p.name for p in self.paths.releases.iterdir() if (p / "VERSION").exists()))
 
     def job(self, name, **args):
         return self.jobs.table[name](args)
@@ -133,7 +162,7 @@ class Machine:
         return os.readlink(self.paths.venv_link)
 
     def state(self):
-        return json.loads((self.paths.data_dir / "admin-state.json").read_text())
+        return read_state(self.paths)
 
 
 def releases(paths):
@@ -148,12 +177,13 @@ def test_an_update_builds_beside_the_running_release_switches_restarts_and_watch
     assert m.job("update", commit=B) == {"updating": True}
     assert m.github.asked == [B]                                     # only a commit of main is installed
     venv = str(layout.releases / B / "venv")
-    assert m.runner.calls[:4] == [
+    assert m.runner.calls[:5] == [
         ["/usr/bin/python3", "-m", "venv", venv],
         [venv + "/bin/pip", "install", "--no-input", "--disable-pip-version-check", f"git+{REPO_URL}@{B}"],
         ["runuser", "-u", getpass.getuser(), "--", "env", f"PLAYWRIGHT_BROWSERS_PATH={layout.install_dir / 'browsers'}",
          venv + "/bin/playwright", "install", "chromium"],
         [venv + "/bin/python", "-c", "import croom.core.agent, croom.admin.jobs"],
+        [venv + "/bin/python", "-m", "croom.admin", "--check"],          # the new release's helper starts, before it is switched to
     ]
     assert m.runner.systemctl() == [["systemctl", "restart", "croom"], ["systemctl", "--no-block", "restart", "croom-admin"]]
     assert m.running() == f"releases/{B}/venv"                       # a relative link, made beside the old one and renamed over it
@@ -168,6 +198,7 @@ def test_an_update_builds_beside_the_running_release_switches_restarts_and_watch
         "Installing bbbbbbb from GitHub: this takes several minutes",
         "Installing the meeting browser it uses",
         "Checking that it starts",
+        "Checking that its helper starts",
         "Switched to bbbbbbb",
         "Restarting the room software",
         "Waiting for the room to answer (up to 3 minutes)",
@@ -192,8 +223,8 @@ def test_the_progress_lines_are_in_the_record_while_it_builds(layout):
     assert seen[0] == ("building", ["Making a new environment for bbbbbbb"])
     assert seen[1] == ("building", ["Making a new environment for bbbbbbb", "Installing bbbbbbb from GitHub: this takes several minutes"])
     assert ("restarting", ["Making a new environment for bbbbbbb", "Installing bbbbbbb from GitHub: this takes several minutes",
-                           "Installing the meeting browser it uses", "Checking that it starts", "Switched to bbbbbbb",
-                           "Restarting the room software"]) in seen
+                           "Installing the meeting browser it uses", "Checking that it starts", "Checking that its helper starts",
+                           "Switched to bbbbbbb", "Restarting the room software"]) in seen
 
 
 def test_the_link_is_switched_by_renaming_a_new_link_over_it(layout, monkeypatch):
@@ -239,6 +270,7 @@ def test_a_build_that_fails_leaves_the_running_release_and_removes_its_folder(la
     ("venv", "Making a new environment for bbbbbbb failed: the room is still on aaaaaaa"),
     ("playwright", "Installing the meeting browser it uses failed: the room is still on aaaaaaa"),
     ("-c", "Checking that it starts failed: the room is still on aaaaaaa"),
+    ("--check", "Checking that its helper starts failed: the room is still on aaaaaaa"),
 ])
 def test_each_step_that_fails_stops_the_update_before_the_switch(layout, word, line):
     m = Machine(layout)
@@ -344,9 +376,9 @@ def test_a_refused_update_leaves_the_helper_free(layout):
 
 def test_an_update_cut_off_while_building_is_closed_and_its_folder_removed_at_the_next_start(layout):
     release(layout, B, complete=False)                                 # pip was half way through
-    state = json.loads((layout.data_dir / "admin-state.json").read_text())
+    state = read_state(layout)
     state["update"] = {"state": "building", "commit": B, "from": A, "lines": ["Installing bbbbbbb from GitHub: this takes several minutes"]}
-    (layout.data_dir / "admin-state.json").write_text(json.dumps(state))
+    write_state(layout, state)
     m = Machine(layout)
     m.jobs.resume()
     assert m.running() == f"releases/{A}/venv" and releases(layout) == [A, P]
@@ -373,9 +405,9 @@ def test_the_sweep_never_removes_the_running_release_even_without_its_version(pa
 
 
 def write_record(paths, **record):
-    state = json.loads((paths.data_dir / "admin-state.json").read_text())
+    state = read_state(paths)
     state["update"] = dict({"commit": B, "from": A, "lines": []}, **record)
-    (paths.data_dir / "admin-state.json").write_text(json.dumps(state))
+    write_state(paths, state)
 
 
 @pytest.mark.parametrize("state, restarts", [("watching", 0), ("restarting", 1), ("switching", 1)])
@@ -459,3 +491,162 @@ def test_version_says_the_running_release_when_it_was_installed_and_the_one_befo
 
 def test_update_status_before_any_update(paths):
     assert Machine(paths).record() == {"state": "none"}
+
+
+# --- Task 8 fix round: nothing the helper acts on comes from a name it did not check
+
+
+def test_a_forged_record_naming_a_path_is_set_aside_and_nothing_is_removed(layout, tmp_path):
+    """The reviewer's case: a record whose commit is a path, and a room that does not answer. Nothing outside releases/ is touched,
+    and the link stays where it is."""
+    victim = tmp_path / "victim"
+    (victim / "venv").mkdir(parents=True)
+    (victim / "VERSION").write_text("x\n")
+    write_record(layout, state="watching", commit="../../victim")
+    m = Machine(layout, probe=Probe(up=False))
+    m.jobs.resume()
+    assert victim.exists() and (victim / "VERSION").exists()
+    assert m.running() == f"releases/{A}/venv" and releases(layout) == [A, P]
+    assert m.record()["state"] == "failed" and "commit" not in m.record() and m.runner.calls == []
+
+
+@pytest.mark.parametrize("name", ["../../victim", "/etc", "a" * 39, "unknown/../..", "local-x"])
+def test_a_name_that_is_not_a_releases_is_never_made_into_a_path(layout, name):
+    m = Machine(layout)
+    with pytest.raises(JobError):
+        m.jobs._updater._release(name)
+    m.jobs._updater._remove(name)
+    assert releases(layout) == [A, P]
+
+
+def test_a_forged_kept_release_does_not_let_the_kept_one_be_pruned_or_a_path_be_kept(layout):
+    state = read_state(layout)
+    state["previous_release"] = "../../opt"
+    write_state(layout, state)
+    m = Machine(layout)
+    assert m.job("version")["previous"] is None
+    with pytest.raises(JobError, match="no earlier version"):
+        m.job("rollback")
+
+
+def test_an_absent_release_before_never_becomes_the_link(layout):
+    """A room on B that does not answer, whose record says it came from a release that is not on the TV Pi: the link is not pointed
+    at nothing (the room software and the helper would both be gone); it stays, and the record says why."""
+    release(layout, B)
+    link(layout, B)
+    absent = "d" * 40
+    write_record(layout, state="watching", **{"from": absent})
+    m = Machine(layout, probe=Probe(up=False))
+    m.jobs.resume()
+    assert m.running() == f"releases/{B}/venv"
+    record = m.record()
+    assert record["state"] == "failed" and "is not whole on this TV Pi" in record["lines"][-1]
+    assert not (layout.releases / absent).exists()
+
+
+@pytest.mark.parametrize("spoil", ["VERSION", "folder", "bin", "python"])
+def test_a_release_that_is_not_roots_alone_is_neither_reused_nor_switched_to(layout, spoil):
+    """A release whose folder, VERSION, venv/bin or venv/bin/python another user could change is not run as root: an update builds it
+    afresh, and Switch back refuses it."""
+    for name in (B, P):
+        folder = layout.releases / name
+        if not folder.exists():
+            release(layout, name)
+        target = {"VERSION": folder / "VERSION", "folder": folder, "bin": folder / "venv" / "bin",
+                  "python": folder / "venv" / "bin" / "python"}[spoil]
+        target.chmod(target.stat().st_mode | 0o022)
+    m = Machine(layout)
+    with pytest.raises(JobError, match="no earlier version"):
+        m.job("rollback")
+    m.job("update", commit=B)
+    assert [c for c in m.runner.calls if c[0].endswith("/pip")]                       # built again, not reused
+    assert m.record()["state"] == "done" and m.running() == f"releases/{B}/venv"
+
+
+def test_the_switch_refuses_a_release_that_is_not_whole(layout):
+    release(layout, B, complete=False)
+    m = Machine(layout)
+    with pytest.raises(JobError, match="not whole"):
+        m.jobs._updater._switch(B)
+    assert m.running() == f"releases/{A}/venv"
+
+
+def test_a_new_release_is_sealed_and_on_the_disk_before_its_version_is_written(layout):
+    m = Machine(layout)
+    m.job("update", commit=B)
+    lib = layout.releases / B / "venv" / "lib"
+    assert stat.S_IMODE(lib.stat().st_mode) == 0o755 and stat.S_IMODE((lib / "croom.py").stat().st_mode) == 0o644
+    assert m.syncs == [[A, P]]                                       # synced once, before B's VERSION existed
+
+
+def test_an_update_waits_for_a_written_config_to_be_restarted_with(layout):
+    m = Machine(layout)
+    m.jobs._update_state(last_write=m.clock() - 60)                   # written, and no restart since
+    with pytest.raises(JobError, match="Restart now first, then update"):
+        m.job("update", commit=B)
+    with pytest.raises(JobError, match="Restart now first, then update"):
+        m.job("rollback")
+    m.runner.answers["systemctl show croom"] = (0, f"@{m.clock() - 10:.0f}\n")   # the room software started after it (a reboot)
+    assert m.job("update", commit=B) == {"updating": True}
+
+
+def test_a_restart_asked_for_after_the_write_lets_the_update_go(layout):
+    m = Machine(layout)
+    m.jobs._update_state(last_write=m.clock() - 60, watch_asked_at=m.clock() - 30)
+    assert m.job("update", commit=B) == {"updating": True}
+
+
+def test_after_a_boot_the_watch_waits_for_the_room_software_to_start(layout):
+    """Taken up at the helper's start (a boot): the 3 minutes count from when systemd says the room software is active, so a slow
+    desktop does not undo a good update."""
+    release(layout, B)
+    link(layout, B)
+    write_record(layout, state="watching")
+    started_at = {}
+    probe = Probe(up=lambda n: n * HEALTH_INTERVAL_S > 60)             # answers a minute into the watch
+    m = Machine(layout, probe=probe)
+    began = m.clock()
+    m.runner.answers["systemctl is-active"] = lambda: (0, "") if m.clock() - began >= 200 else (3, "")
+    real = probe.__call__
+
+    def first(host, port):
+        started_at.setdefault("at", m.clock())
+        return real(host, port)
+    m.jobs._host.probe = first
+    m.jobs.resume()
+    assert started_at["at"] - began >= 200                             # no look before the room software was active
+    assert m.record()["state"] == "done" and m.running() == f"releases/{B}/venv"
+
+
+def test_the_wait_for_the_room_software_is_capped_at_5_minutes(layout):
+    release(layout, B)
+    link(layout, B)
+    write_record(layout, state="watching")
+    m = Machine(layout, probe=Probe(up=False))
+    began = m.clock()
+    m.runner.answers["systemctl is-active"] = (3, "")
+    m.jobs.resume()
+    waited = len([c for c in m.runner.calls if c[:2] == ["systemctl", "is-active"]])
+    assert waited * HEALTH_INTERVAL_S <= 300 + HEALTH_INTERVAL_S
+    assert m.clock() - began >= 300 + UPDATE_TIMEOUT_S
+    assert m.record()["state"] == "rolled_back"
+
+
+@pytest.mark.parametrize("state", ["restarting", "watching"])
+def test_an_update_whose_link_is_not_on_the_new_release_is_closed_without_a_watch_or_a_prune(layout, state):
+    release(layout, B)
+    release(layout, "d" * 40)                                          # a third: not pruned, nothing is credited
+    write_record(layout, state=state)                                   # the link is still on A
+    m = Machine(layout)
+    m.jobs.resume()
+    assert m.record()["state"] == "failed"
+    assert m.record()["lines"][-1] == "The update was cut off before it was finished: the room is still on aaaaaaa"
+    assert m.probe.asked == 0 and m.runner.calls == []
+    assert releases(layout) == [A, B, P, "d" * 40] and m.state()["previous_release"] == P
+
+
+def test_an_orphaned_third_release_is_pruned_at_start(layout):
+    release(layout, "d" * 40)
+    m = Machine(layout)
+    m.jobs.resume()
+    assert releases(layout) == [A, P]

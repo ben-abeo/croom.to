@@ -292,7 +292,7 @@ def test_completion_message_names_the_zoom_check_when_zoom_credentials_were_inst
 def test_profile_folder_is_private_to_the_service_user(tmp_path):
     result = run_bash(
         f"source {SCRIPT}; INSTALL_DIR={tmp_path / 'opt'}; CONFIG_DIR={tmp_path / 'etc'}; DATA_DIR={tmp_path / 'lib'}; "
-        f"LOG_DIR={tmp_path / 'log'}; CROOM_USER=$(id -un); RELEASE_OWNER=$(id -un):$(id -gn); create_directories"
+        f"LOG_DIR={tmp_path / 'log'}; CROOM_USER=$(id -un); RELEASE_OWNER=$(id -un):$(id -gn); ADMIN_DIR={tmp_path / 'admin'}; create_directories"
     )
     assert result.returncode == 0, result.stderr
     profile = tmp_path / "lib" / "meet-profile"

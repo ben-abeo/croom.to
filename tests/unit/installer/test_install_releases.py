@@ -53,7 +53,7 @@ class Device:
 
     def __init__(self, root):
         self.root = root
-        self.opt, self.data = root / "opt", root / "lib"
+        self.opt, self.data, self.admin = root / "opt", root / "lib", root / "lib-admin"
         (self.opt / "browsers").mkdir(parents=True)              # as create_directories leaves it
         self.bin = root / "bin"
         self.bin.mkdir()
@@ -67,7 +67,7 @@ class Device:
 
     def run(self, function, main=B, repo=None, pip_commit=""):
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", CALLS=str(self.calls), MAIN=main, PIP_COMMIT=pip_commit)
-        snippet = (f"source {SCRIPT}; INSTALL_DIR={self.opt}; DATA_DIR={self.data}; CROOM_USER={self.user}; "
+        snippet = (f"source {SCRIPT}; INSTALL_DIR={self.opt}; DATA_DIR={self.data}; ADMIN_DIR={self.admin}; CROOM_USER={self.user}; "
                    f"RELEASE_OWNER={self.user}:{self.group}; " + (f"CROOM_REPO={repo}; " if repo else "") + function)
         result = subprocess.run(["bash", "-c", snippet], capture_output=True, text=True, env=env, cwd=REPO)
         assert result.returncode == 0, result.stdout + result.stderr
@@ -104,7 +104,7 @@ class Device:
         return venv
 
     def state(self):
-        return json.loads((self.data / "admin-state.json").read_text())
+        return json.loads((self.admin / "admin-state.json").read_text())
 
 
 @pytest.fixture
@@ -123,7 +123,7 @@ def test_a_first_install_builds_mains_newest_commit_as_a_release_and_links_the_v
     assert f"pip install git+https://github.com/ben-abeo/croom.to.git@{B}" in logged
     assert "playwright install chromium" in logged
     assert logged[0] == "git ls-remote https://github.com/ben-abeo/croom.to.git refs/heads/main"
-    assert not (device.data / "admin-state.json").exists()                          # nothing kept before it
+    assert not (device.admin / "admin-state.json").exists()                         # nothing kept before it
     mode = (device.opt / "releases" / B).stat().st_mode & 0o777
     assert mode == 0o755                                                            # readable by all, writable by its owner (root) only
 
@@ -190,13 +190,40 @@ def test_the_install_folder_is_roots_and_only_its_data_folders_the_users(tmp_pat
     group = subprocess.check_output(["id", "-gn"], text=True).strip()
     result = subprocess.run(["bash", "-c", f"source {SCRIPT}; INSTALL_DIR={tmp_path / 'opt'}; CONFIG_DIR={tmp_path / 'etc'}; "
                              f"DATA_DIR={tmp_path / 'lib'}; LOG_DIR={tmp_path / 'log'}; CROOM_USER={user}; "
-                             f"RELEASE_OWNER={user}:{group}; create_directories"], capture_output=True, text=True, cwd=REPO)
+                             f"RELEASE_OWNER={user}:{group}; ADMIN_DIR={tmp_path / 'admin'}; create_directories"], capture_output=True, text=True, cwd=REPO)
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "opt").stat().st_mode & 0o777 == 0o755
     assert (tmp_path / "opt" / "models").is_dir() and (tmp_path / "opt" / "browsers").is_dir()
+    assert (tmp_path / "admin").stat().st_mode & 0o777 == 0o700
 
 
 def test_the_services_run_from_the_venv_link():
     script = SCRIPT.read_text()
     assert "ExecStart=$INSTALL_DIR/venv/bin/python -m croom.core.agent" in script
     assert "ExecStart=$INSTALL_DIR/venv/bin/python -m croom.admin" in script
+
+
+def test_the_release_kept_before_is_recorded_in_the_helpers_own_folder(device):
+    """The helper acts on that record, so it is root's alone: its folder mode 700, the file 600; never the room user's data folder."""
+    device.old_venv(commit=A)
+    device.install()
+    assert (device.admin.stat().st_mode & 0o777) == 0o700
+    assert ((device.admin / "admin-state.json").stat().st_mode & 0o777) == 0o600
+    assert not (device.data / "admin-state.json").exists()
+    script = SCRIPT.read_text()
+    assert 'ADMIN_DIR="${ADMIN_DIR:-/var/lib/croom-admin}"' in script
+    assert "make_admin_dir" in script.split("create_directories() {")[1].split("\n}\n")[0]
+
+
+def test_every_release_is_sealed_the_moved_one_included(device):
+    """Nothing under releases/ is left writable by the group or others: the room user's old venv (moved in) and what pip made."""
+    venv = device.old_venv(commit=A)
+    loose = venv / "lib" / "python3.11" / "site-packages" / "croom" / "agent.py"
+    loose.parent.mkdir(parents=True)
+    loose.write_text("")
+    loose.chmod(0o666)
+    loose.parent.chmod(0o777)
+    device.install()
+    for path in (device.opt / "releases").rglob("*"):
+        if not path.is_symlink():
+            assert not path.stat().st_mode & 0o022, path

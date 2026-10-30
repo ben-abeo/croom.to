@@ -6,7 +6,6 @@ GitHub; the agent's GitHub is the real client on a fake transport."""
 
 import getpass
 import grp
-import json
 import os
 
 import pytest
@@ -15,7 +14,7 @@ from croom.admin.jobs import Host, Jobs
 from croom.meeting.providers.base import MeetingState
 from croom.settings.github import CANT_CHECK, GitHub
 from croom.settings.pin import PinStore
-from tests.unit.admin.test_update import A, B, P, Clock, FakeGitHub, Probe, Runner, link, release
+from tests.unit.admin.test_update import A, B, P, Clock, FakeGitHub, Probe, Runner, link, release, write_state
 from tests.unit.control.test_service import StubMeeting, client_factory, make_service  # noqa: F401  (client_factory is a fixture)
 from tests.unit.control.test_settings_credentials_api import CONFIG, JobsAdmin
 from tests.unit.settings.test_github import NEWEST, REPO, Transport, commit, compare
@@ -47,7 +46,7 @@ class Helper(JobsAdmin):
         release(self.paths, A)
         release(self.paths, P)
         link(self.paths, A)
-        (self.paths.data_dir / "admin-state.json").write_text(json.dumps({"previous_release": P}))
+        write_state(self.paths, {"previous_release": P})
         self.runner, self.clock, self.queued = Runner(), Clock(), []
         self.jobs = Jobs(Host(paths=self.paths, owner=getpass.getuser(), group=grp.getgrgid(os.getgid()).gr_name, run=self.runner,
                               run_long=self.runner, probe=Probe(), clock=self.clock, sleep=self.clock.sleep, monotonic=self.clock,
@@ -209,3 +208,10 @@ def test_from_config_asks_the_real_github(monkeypatch):
     fake = Fake()
     fake.available = lambda: False
     assert isinstance(ControlService.from_config(Config(), admin=fake)._github, GitHub)
+
+
+async def test_an_update_waits_for_a_saved_change_to_be_restarted_with(client_factory, pins, helper, unlocked):  # noqa: F811
+    helper.jobs._update_state(last_write=helper.clock() - 60)
+    client = await client_factory(service(pins, helper))
+    response = await client.post("/api/settings/software/update", json={"device": "tv", "commit": B}, headers=unlocked)
+    assert response.status == 409 and (await response.json())["error"] == "Restart now first, then update"

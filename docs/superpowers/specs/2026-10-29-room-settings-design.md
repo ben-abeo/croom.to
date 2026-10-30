@@ -53,6 +53,13 @@ left sit in its top bar. The same pages work in a laptop browser at the room's a
 | **Software** | One card per device: its version, the newest on GitHub, the changes between; **Update**; **Update all**; **Restart room software**; **Reboot** per device; **Devices waiting to join** (Allow / Refuse) |
 | **Security** | Change the PIN |
 
+**Mic level (Ben, 2026-10-29: "increase microphone volume for when people say they can't hear you"):** the Sound panel, in a
+meeting and outside one, gets a **Mic level** slider (0 to 150, where 100 is the device's normal level) under the speaker's, with Quieter
+/ Louder (5 at a time). It is an everyday control, outside the PIN. It drives the room microphone's PipeWire source (`audio.input_device`,
+or the default source) with `wpctl`, as the speaker slider drives its sink. The chosen level is kept in the control settings and put
+back at each join and every 5 seconds during a meeting, because the meeting apps' automatic gain control in the browser moves the
+source's level by itself. "No microphone found" when there is no source.
+
 **Saving a page:** every field is checked; a refused value says why beside it, and nothing is saved. A setting the room applies at once
 says **Saved**; one that needs the room software to restart says **Saved: applies after a restart**, and the page shows **Restart
 now**. Restart, reboot, update and sign-in are refused during a meeting: "Leave the meeting first".
@@ -153,7 +160,7 @@ rest of the room page does today. HTTPS on the Pis is a separate project.
 ## 9. Phases
 
 1. **Settings shell:** the PIN, the helper (config, restart), the schema, the **Room** page.
-2. **Every config page** and the credential files.
+2. **Every config page** and the credential files; the **Mic level** slider.
 3. **Sign in to Google on the TV**, with the TV keyboard.
 4. **Check and Logs.**
 5. **TV Pi software:** update with rollback, reboot.

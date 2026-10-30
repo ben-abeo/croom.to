@@ -44,9 +44,13 @@ Follow the five guides in this order:
    meetings hosted by other accounts), a Server-to-Server app for tokens, one
    Zoom user per room, and the credentials file on the device.
 
-For an SMT1019 wall panel at the door, [Set up a Crystal Meet door sign panel](docs/guides/crystal-meet-door-sign-panel.pdf)
-installs the Crystal Meet Door Sign app from `android/door-sign` over USB: the panel starts into the door sign, and the
-light bar round it turns green, yellow or red with the room's status (`android/door-sign/README.md` covers building it).
+For an SMT1019 wall panel at the door, set a new panel up as
+[android/door-sign/README.md](android/door-sign/README.md#room-settings-the-app-as-the-panels-device-owner) says under
+"Room settings: the app as the panel's device owner": a factory reset, the release APK over USB and the app made the panel's
+device owner, so that the room can reboot, update and move it from **Settings**. The panel starts into the door sign, and
+the light bar round it turns green, yellow or red with the room's status. The PDF guide
+[Set up a Crystal Meet door sign panel](docs/guides/crystal-meet-door-sign-panel.pdf) predates the device owner and is out
+of date until it is redone: follow the README for a new panel.
 
 The commands the guides walk through, for reference:
 
@@ -136,16 +140,26 @@ page, which the message names ("AI & dashboard: AI backend: choose one of the li
 A setting the room applies at once (the booking hours, the camera preset names) says
 **Saved**; any other says **Saved: applies after a restart**, and the page shows
 **Restart now**. Restart, reboot, update, Wi-Fi changes and the Google sign-in are
-refused during a meeting: "Leave the meeting first".
+refused during a meeting: "Leave the meeting first". Restart, reboot, update and
+**Update all** are refused too while Laptop mode has the MeetUp, and a join is refused
+while the TV Pi updates ("The room is updating: it restarts in a few minutes").
 
 **Restarting, and the undo.** **Restart now** (and **Restart room software**) asks
 the root helper to restart `croom`, and the helper then watches `GET /api/status`
-for 2 minutes. If the room does not answer and the config was written in the 10
-minutes before the restart was asked for, the helper puts `config.yaml.1` back,
-restarts again and records why; the page says "Your last change was undone: the room
-did not start with it". A change is undone once only, and a room that does not come
-back with no recent change is left as it is. On a real room the restarted agent has
-forgotten the unlock, so the PIN pad comes up first.
+for 2 minutes. The helper keeps `/etc/croom/config.yaml.good`, the config the room
+last started with (root writes it, owner the room user, mode 640): the installer
+writes it at every install and upgrade, and the helper each time a watch sees the room
+answer. If the room does not answer and a saved change was waiting for the restart
+when it was asked for (however long before: no time window), the helper puts
+`config.yaml.good` back, keeps the config the room did not start with as
+`config.yaml.1`, restarts again and records why, naming the change undone; the page
+says "Your last change was undone: the room did not start with it". A change is undone
+once only, and a room that does not come back with no change waiting is left as it is.
+A save of only the settings the room applies at once (the booking hours, the camera
+preset names) leaves nothing waiting. A reboot or a power cut after a save starts the
+room with the change and no Restart now: the helper, starting, waits for systemd to
+start `croom` (up to 5 minutes) and watches it the same way. On a real room the
+restarted agent has forgotten the unlock, so the PIN pad comes up first.
 
 ### The root helper
 
@@ -153,7 +167,9 @@ forgotten the unlock, so the PIN pad comes up first.
 It listens on `/run/croom-admin.sock` (the room user's group, mode 660), takes one JSON
 request per connection and answers `{"ok": true, …}` or `{"ok": false, "error": words}`.
 It does a fixed list of jobs and refuses any other: `write_config` (the check, the
-rotation to `config.yaml.1` … `.5`, the write, owner the room user, mode 640),
+rotation to `config.yaml.1` … `.5`, the write, owner the room user, mode 640; and
+`config.yaml.good`, the config the room last started with, which the restart watch
+puts back),
 `save_credential` (the key's check, then `/etc/croom/google-service-account.json` or
 `zoom-credentials.json`, mode 600), `usb_files` and `read_usb_file` (`*.json` directly
 under `/media/*/*/`, 64 KB at most), `restart` and `restart_status`, `reboot`,
@@ -182,9 +198,13 @@ works.
   version before ("The update to … was undone: the room did not start with it"). A
   build that fails, or is cut off by the power, never touched the running release; its
   folder is removed at the helper's next start. Two releases are kept, and **Switch back
-  to** goes to the one before. The helper installs only a commit that is on `main`,
-  and refuses an update during a meeting, a restart, a Wi-Fi change, or while a saved
-  config waits for a restart ("Restart now first, then update").
+  to** goes to the one before, offered only when that release's own helper starts (its
+  `python -m croom.admin --check`: a release from before room settings has none). The
+  helper installs only a commit that is on `main`, and refuses an update during a
+  meeting, a restart, a Wi-Fi change, or while a saved config waits for a restart
+  ("Restart now first, then update"). Before it switches, it asks the room on the
+  loopback whether a meeting is on (`GET /api/devices/busy`) and waits for it to end,
+  up to 30 minutes, then goes on, saying so in its lines.
 - **The table Pi.** Its agent (`croom-kiosk-agent.service`, standard-library Python,
   run as root from `/opt/croom-kiosk`) fetches `main` into its own clone, checks the
   commit is on it, unpacks it as a release beside the running one, runs that version's
@@ -337,16 +357,21 @@ sudo bash installer/install.sh          # no --config: the room's config and key
 sudo reboot
 ```
 
+If the installer stops with an error, `sudo systemctl start croom` brings the room back
+on its old version (the link still names it); fix what it said and run it again.
+
 The installer moves the old `/opt/croom/venv` into `/opt/croom/releases/<its commit>`
 (root's) and makes `/opt/croom/venv` a link to it, builds the newest `main` beside it
 (10 to 20 minutes), switches the link and keeps the old release as the one to switch
 back to; installs and starts `croom-admin.service` and makes `/var/lib/croom-admin`;
-rewrites the units; and sets the keyboard layout to US, which the reboot applies (with
-croom on the new release). Croom is stopped first so that it does not run half on the
+rewrites the units; keeps the room's config as `/etc/croom/config.yaml.good` (the one the
+restart watch puts back); and sets the keyboard layout to US, which the reboot applies
+(with croom on the new release). Croom is stopped first so that it does not run half on the
 old code and half on the new while the link moves. Afterwards, on the table screen:
 **Options**, then **Settings**: choose the room's PIN. **Software** shows the TV Pi on
-the newest version. Do not **Switch back** to the version before this one: it has no
-Settings and no helper, and only the installer brings them back.
+the newest version, and no **Switch back** to the version before this one: it has no
+Settings and no helper that starts, so it is not offered (only the installer brings
+them back).
 
 **2. The table Pi**, over SSH or at its desktop (about 5 minutes):
 
@@ -362,7 +387,11 @@ reboot, on the table screen: **Options**, then **Settings**, then **Software**, 
 **Settings** updates and reboots it.
 
 **3. The door sign panel**, at the panel with a laptop that has `adb` and the release
-APK, per panel (about 30 minutes). The one-time cost: the factory reset erases
+APK, per panel (about 30 minutes). The APK is `app-release.apk` from the `door-sign-2`
+release on GitHub (the repository's Releases), or one built with the room's release key
+as "Build a release" in `android/door-sign/README.md` says
+([its section](android/door-sign/README.md#build-a-release); the plain Build section makes
+a debug APK, which a panel that updates itself from Settings does not take). The one-time cost: the factory reset erases
 everything on the panel (its Wi-Fi, the app's room address and PIN, any other app), so
 note the room address and the Wi-Fi password first, and the door shows nothing until it
 is done. Then:

@@ -554,3 +554,23 @@ def test_readme_describes_the_redesigned_door_sign():
     assert "a room name that takes three lines of the smaller type (31 characters or more" not in text                   # and the one before a name stepped down
     for gone in ("tinted Austin scenery", "four backgrounds chosen from the table", "Longhorns scoreboard", "chosen from the table"):
         assert gone not in text, gone
+
+
+def test_readme_after_the_final_review_new_panels_the_upgrades_way_back_the_release_apk_and_the_good_config():
+    """New door sign panels follow android/door-sign/README.md's device-owner section (the PDF guide is out of date); the upgrade says
+    how to bring the room back when the installer stops, and where the panel's APK comes from; the undo puts back config.yaml.good."""
+    text = " ".join(README.read_text(encoding="utf-8").split())
+    for needle in (
+        "[android/door-sign/README.md](android/door-sign/README.md#room-settings-the-app-as-the-panels-device-owner)",
+        "is out of date until it is redone",
+        "If the installer stops with an error, `sudo systemctl start croom` brings the room back on its old version",
+        "`app-release.apk` from the `door-sign-2` release on GitHub",
+        "(android/door-sign/README.md#build-a-release)",
+        "`/etc/croom/config.yaml.good`, the config the room last started with",
+        "keeps the room's config as `/etc/croom/config.yaml.good`",
+    ):
+        assert needle in text, needle
+    upgrade = text.split("## Upgrade a room to room settings", 1)[1].split(" ## ", 1)[0]
+    assert upgrade.index("sudo reboot") < upgrade.index("If the installer stops with an error") < upgrade.index("**2. The table Pi**")
+    door = (REPO / "android" / "door-sign" / "README.md").read_text(encoding="utf-8")
+    assert "## Room settings: the app as the panel's device owner" in door and "### Build a release" in door

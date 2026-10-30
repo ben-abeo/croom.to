@@ -67,6 +67,7 @@
     <button type="button" id="back-from-options" class="button quiet back">Back</button>
     <div class="menu">
       <button type="button" id="open-camera-setup" class="button quiet menu-item" data-icon="move">Camera framing</button>
+      <button type="button" id="open-mic-options" class="button quiet menu-item" data-icon="mic">Mic level</button>
       <button type="button" id="open-screensaver" class="button quiet menu-item" data-icon="monitor">Screensaver</button>
       <button type="button" id="open-door-sign" class="button quiet menu-item" data-icon="door">Door sign</button>
       <button type="button" id="open-tv-options" class="button quiet menu-item" data-icon="tv">TV</button>
@@ -140,6 +141,28 @@
     </section>
   </section>
 
+  <!-- Mic level (spec 2026-10-29): the room microphone's level, 0 to 150 where 100 is the device's normal level; from Options, and from the meeting
+       screen's dock. The room keeps the level chosen here during every meeting (the devices service puts it back). devices.js draws it. -->
+  <section class="view" data-view="mic">
+    <button type="button" id="back-from-mic" class="button quiet back">Back</button>
+    <section class="mic-section">
+      <p class="kicker">Mic level</p>
+      <p id="mic-note" class="note"></p>
+      <div id="mic-panel" class="sound" hidden>
+        <p id="mic-device" class="device"></p>
+        <label class="visually-hidden" for="mic-slider">Mic level</label>
+        <input id="mic-slider" type="range" min="0" max="150" step="1" value="100">
+        <div class="sound-buttons">
+          <button type="button" id="mic-quieter" class="button quiet" data-icon="mic">Quieter</button>
+          <span id="mic-level" class="level" aria-live="polite"></span>
+          <button type="button" id="mic-louder" class="button quiet" data-icon="mic">Louder</button>
+        </div>
+        <p class="note mic-help">100 is the microphone's normal level. Turn it up when the people in the call cannot hear the room; the room keeps
+          it there in every meeting.</p>
+      </div>
+    </section>
+  </section>
+
   <section class="view" data-view="screensaver">
     <button type="button" id="back-from-screensaver" class="button quiet back">Back</button>
     <section class="screen-section">
@@ -195,6 +218,8 @@
             </div>
           </div>
         </section>
+        <!-- Mic level (spec 2026-10-29): its own screen, as the camera's: the dock has no height to spare at the table's 1280 by 800 -->
+        <button type="button" id="open-mic" class="button quiet menu-item" data-icon="mic">Mic level</button>
         <div class="menu">
           <button type="button" id="open-camera-live" class="button quiet menu-item" data-icon="move">Camera</button>
           <button type="button" id="open-upcoming" class="button quiet menu-item" data-icon="calendar">Upcoming meetings</button>

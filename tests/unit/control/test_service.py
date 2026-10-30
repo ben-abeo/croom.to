@@ -394,10 +394,40 @@ class StubCamera:
         return self.preview_on
 
 
+class StubMic:
+    """Behaves like RoomMic for the parts the control service uses: 0 to 150, the level chosen last kept (spec 2026-10-29, Mic level)."""
+
+    def __init__(self, available=True, level=100, device="Logitech MeetUp Speakerphone Analog Stereo"):
+        self.available, self.level, self.device = available, level, device
+        self.reason = None if available else "no audio source"
+        self.calls = []
+        self.refreshes = 0
+
+    def state(self):
+        return {"available": self.available, "device": self.device if self.available else None, "level": self.level,
+                "device_level": self.level, "reason": self.reason}
+
+    async def refresh(self, force=False):
+        self.refreshes += 1
+        return self.state()
+
+    async def set_level(self, level):
+        if not self.available:
+            from croom.devices.errors import DeviceUnavailable
+            raise DeviceUnavailable(self.reason)
+        self.level = max(0, min(150, int(level)))
+        self.calls.append(("level", self.level))
+        return self.state()
+
+    async def step(self, delta):
+        return await self.set_level(self.level + int(delta))
+
+
 class StubDevices:
-    def __init__(self, volume=None, camera=None):
+    def __init__(self, volume=None, camera=None, mic=None):
         self.volume = volume if volume is not None else StubVolume()
         self.camera = camera if camera is not None else StubCamera()
+        self.mic = mic if mic is not None else StubMic()
 
 
 class StubTv:

@@ -1,7 +1,9 @@
 """
 The devices service (spec 2026-10-08 sound and camera, section 4.1): owns the room
 speaker's volume and the camera's framing, starts them, homes the camera once a
-home has been saved, and keeps looking for a device that is missing.
+home has been saved, and keeps looking for a device that is missing. It also owns the
+microphone's level (spec 2026-10-29, Mic level), which it puts back to the level the
+room chose when a meeting joins and every few seconds while one is connected.
 """
 
 import asyncio
@@ -11,7 +13,9 @@ from typing import Any, Awaitable, Callable, Optional
 from croom.core.service import Service
 from croom.devices.camera import RoomCamera
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
+from croom.devices.mic import RoomMic
 from croom.devices.volume import RoomVolume
+from croom.meeting.providers.base import MeetingState
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +24,17 @@ class DevicesService(Service):
     REDISCOVER_S = 30.0
     RECLAIM_S = 15.0        # the MeetUp takes a few seconds to come back as a camera and a speaker after the switch moves it
     RECLAIM_POLL_S = 0.5
+    MIC_REAPPLY_S = 5.0     # how often the chosen microphone level is put back while a meeting is connected
 
-    def __init__(self, volume: RoomVolume, camera: RoomCamera):
+    def __init__(self, volume: RoomVolume, camera: RoomCamera, mic: Optional[RoomMic] = None, meeting=None):
         super().__init__("devices")
         self.volume = volume
         self.camera = camera
+        self.mic = mic          # None: a room (or a test) without the microphone's level
+        self._meeting = meeting  # the meeting service, whose state says when the microphone's level is kept
+        self._callback_registered = False
+        self._mic_task: Optional[asyncio.Task] = None
+        self._running = False   # between start() and stop(): a meeting's state outside that starts nothing
         # Homing drives the camera into its stops and back: up to twice its travel time (16 s by default). The
         # manager starts the services one after another, so homing runs in the background and the room page is
         # not held back by it at every boot and restart. stop() and the tests wait for it through this task.
@@ -34,15 +44,24 @@ class DevicesService(Service):
         self._away = False   # the MeetUp is lent to a laptop (spec 2026-10-27): the background check does not look for it
 
     @classmethod
-    def from_config(cls, config, store) -> "DevicesService":
-        return cls(RoomVolume.from_config(config), RoomCamera.from_config(config, store))
+    def from_config(cls, config, store, meeting=None) -> "DevicesService":
+        return cls(RoomVolume.from_config(config), RoomCamera.from_config(config, store), RoomMic.from_config(config, store), meeting)
 
     async def start(self) -> None:
         await self._check(self.volume.refresh, force=True)
         await self._check(self.camera.discover)
         speaker_state, camera_state = self.volume.state(), self.camera.state()
-        logger.info(f"Devices found: speaker {speaker_state['device'] if speaker_state['available'] else 'none'}, "
-                    f"camera {camera_state['device'] if camera_state['available'] else 'none'}")
+        found = (f"Devices found: speaker {speaker_state['device'] if speaker_state['available'] else 'none'}, "
+                 f"camera {camera_state['device'] if camera_state['available'] else 'none'}")
+        if self.mic is not None:
+            await self._check(self.mic.refresh, force=True)
+            mic_state = self.mic.state()
+            found += f", microphone {mic_state['device'] if mic_state['available'] else 'none'}"
+        logger.info(found)
+        self._running = True
+        if self._meeting is not None and not self._callback_registered:
+            self._meeting.add_state_callback(self._on_meeting_state)
+            self._callback_registered = True
         will_home = self.camera.available and self.camera.home_saved
         self.homing = asyncio.create_task(self._home_at_start()) if will_home else None
         self._rediscover_task = asyncio.create_task(self._rediscover())
@@ -87,10 +106,39 @@ class DevicesService(Service):
                 await self._check(self.camera.discover)
             if not self.volume.available:
                 await self._check(self.volume.refresh, force=True)
+            if self.mic is not None and not self.mic.available:
+                await self._check(self.mic.refresh, force=True)
+
+    # ------------------------------------------------------------------
+    # The microphone's level during a meeting (spec 2026-10-29, Mic level)
+    # ------------------------------------------------------------------
+
+    def _on_meeting_state(self, state: MeetingState) -> None:
+        """The meeting service's state callback: a meeting that is connected keeps the chosen microphone level, from its first moment
+        and every MIC_REAPPLY_S; anything else (leaving, over, failed, back in a lobby) ends that."""
+        if self.mic is None:
+            return
+        if state == MeetingState.CONNECTED and self._running:
+            if self._mic_task is None or self._mic_task.done():
+                try:
+                    self._mic_task = asyncio.get_running_loop().create_task(self._keep_mic_level())
+                except RuntimeError:     # no loop running: a callback from outside the agent's loop has nothing to start
+                    logger.debug("Meeting connected outside the event loop: the microphone level is not kept")
+        elif self._mic_task is not None:
+            self._mic_task.cancel()
+            self._mic_task = None
+
+    async def _keep_mic_level(self) -> None:
+        """Put the chosen level back now and every MIC_REAPPLY_S, until cancelled. Not while the MeetUp is lent to a laptop: the room
+        does not touch it then. Nothing escapes: _check warns about a bug once per message."""
+        while True:
+            if not self._away:
+                await self._check(self.mic.reapply)
+            await asyncio.sleep(self.MIC_REAPPLY_S)
 
     async def release(self) -> None:
         """The MeetUp is going to a laptop (spec 2026-10-27 Laptop mode): the preview ends, the camera is closed (a homing under way
-        is cut short), and the background check leaves the camera and the speaker alone until reclaim()."""
+        is cut short), and the background check leaves the camera, the speaker and the microphone alone until reclaim()."""
         self._away = True
         self.camera.set_preview(False)
         await self.camera.close()
@@ -105,6 +153,8 @@ class DevicesService(Service):
         while True:
             await self._check(self.camera.discover)
             await self._check(self.volume.refresh, force=True)
+            if self.mic is not None:
+                await self._check(self.mic.refresh, force=True)
             if self.camera.available or loop.time() >= deadline:
                 break
             await asyncio.sleep(self.RECLAIM_POLL_S)
@@ -112,12 +162,15 @@ class DevicesService(Service):
             self.homing = asyncio.create_task(self._home_at_start())
 
     async def stop(self) -> None:
-        task, self._rediscover_task = self._rediscover_task, None
-        if task is not None:
-            task.cancel()
-            # asyncio.wait, not await or suppress(): it waits for the task to finish without raising the task's
-            # own cancellation here, and a cancel aimed at stop() itself still gets through.
-            await asyncio.wait({task})
+        self._running = False
+        for name in ("_rediscover_task", "_mic_task"):
+            task = getattr(self, name)
+            setattr(self, name, None)
+            if task is not None:
+                task.cancel()
+                # asyncio.wait, not await or suppress(): it waits for the task to finish without raising the task's
+                # own cancellation here, and a cancel aimed at stop() itself still gets through.
+                await asyncio.wait({task})
         # Closing the camera cuts a homing that is still under way short and waits for it to stop the motors
         await self.camera.close()
         if self.homing is not None:

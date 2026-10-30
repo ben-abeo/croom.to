@@ -62,6 +62,7 @@ body[data-view="idle"] .view[data-view="idle"],
 body[data-view="booking"] .view[data-view="booking"],
 body[data-view="options"] .view[data-view="options"],
 body[data-view="camera"] .view[data-view="camera"],
+body[data-view="mic"] .view[data-view="mic"],
 body[data-view="screensaver"] .view[data-view="screensaver"],
 body[data-view="door-sign"] .view[data-view="door-sign"],
 body[data-view="settings-pin"] .view[data-view="settings-pin"],
@@ -86,14 +87,14 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 .upcoming-box { display: flex; flex-direction: column; width: 100%; }
 .list-box { display: flex; flex-direction: column; width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
-.view[data-view="options"], .view[data-view="camera"], .view[data-view="screensaver"], .view[data-view="door-sign"], .view[data-view="upcoming"],
-.view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"],
+.view[data-view="options"], .view[data-view="camera"], .view[data-view="mic"], .view[data-view="screensaver"], .view[data-view="door-sign"],
+.view[data-view="upcoming"], .view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"],
 .view[data-view="settings-pin"], .view[data-view="settings"] { grid-template-rows: auto 1fr; justify-items: start; }
 #meeting-detail { margin: 0; max-width: 90ch; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines; a long title keeps to one line at 1280 */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
 .button.back { justify-self: start; min-height: 64px; padding: 0 22px; }
 .button.nav { min-height: 64px; }
-.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' five sit three and two from 1024 px wide (below) */
+.menu { display: grid; grid-template-columns: repeat(2, minmax(260px, 420px)); gap: 24px; width: 100%; align-content: start; }   /* the meeting screen's two (Camera and Upcoming meetings); Options' six sit three and three from 1024 px wide (below) */
 .button.menu-item { min-height: 160px; font-size: 1.4rem; }
 .meeting-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 32px; }
 /* The secondary row, and the reaction row that takes its place: smaller buttons, so that the seven (Captions, the view, Hide self view,
@@ -362,7 +363,9 @@ body.keyboard-open .schedule { display: none; }
 
 /* Sound and Camera panels (spec 2026-10-08). The Sound strip is the speaker's name over one line: the slider, then the buttons. */
 .device { margin: 0 0 10px; color: var(--periwinkle-300); overflow-wrap: anywhere; }
-.sound-section .note, .camera-section .note { overflow-wrap: anywhere; }   /* a refusal can quote a long file path */
+.sound-section .note, .camera-section .note, .mic-section .note { overflow-wrap: anywhere; }
+.mic-section { width: 100%; max-width: 900px; }   /* Mic level's screen (spec 2026-10-29): the Sound strip's slider and buttons, with room to read */
+.mic-section .mic-help { flex: 1 1 100%; margin-top: 12px; }   /* a refusal can quote a long file path */
 .sound { display: flex; flex-wrap: wrap; align-items: center; column-gap: 28px; }
 .sound[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 .sound .device { flex: 1 1 100%; margin-bottom: 4px; }
@@ -615,8 +618,8 @@ body.keyboard-open .schedule { display: none; }
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
 }
 @media (min-width: 1024px) {
-  /* Options' five (Camera framing, Screensaver, Door sign, TV and Settings) three and two, the same height as when there were four two by two: a
-     third row would not fit the kiosk's 800 px. */
+  /* Options' six (Camera framing, Mic level, Screensaver, Door sign, TV and Settings) three and three, the same height as when there were four two
+     by two: a third row would not fit the kiosk's 800 px. */
   .view[data-view="options"] .menu { grid-template-columns: repeat(3, minmax(220px, 380px)); }
   /* Mute and Remove side by side: a person with no Mute leaves its room empty, and the marks end in one column. The room's own row has no buttons and
      leaves all of it empty, in a list that has buttons. Remove keeps the width of its second-tap words, so that nothing in the row moves under a finger
@@ -647,6 +650,7 @@ body.keyboard-open .schedule { display: none; }
   .participant .marks { flex: 1 1 auto; justify-content: flex-start; }
   .view[data-view="idle"] { grid-template-columns: 1fr; grid-template-rows: auto; grid-template-areas: "now" "link" "schedule"; }
   .menu { grid-template-columns: 1fr; }
+  .view[data-view="options"] .button.menu-item { min-height: 120px; }   /* six in one column: a portrait tablet's 1280 px still holds them and Key click */
   .camera-grid { grid-template-columns: 1fr; gap: 24px; }   /* the pad, then the presets: two columns need about 800 px */
   .camera-left { flex-wrap: wrap; }
   /* The next-booking warning: overflow-wrap: anywhere lets it shrink to one letter, so its width is not left to what a
@@ -720,7 +724,7 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 .meeting-main #reaction-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
 /* The dock: the device's name (or why there is no sound) with Camera and Upcoming meetings beside it, then the volume slider and its buttons. The
    Sound strip's parts take their places in the dock's grid (display: contents), so the strip keeps its markup and its script (devices.js). */
-.meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; grid-template-areas: "device device menu" "slider buttons buttons";
+.meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; grid-template-areas: "device device mic-open menu" "slider buttons buttons buttons";
                 align-items: center; gap: 10px 18px; padding: 14px 18px; border-radius: 20px; background: var(--surface-800); }
 .meeting-dock .sound-section, .meeting-dock .sound:not([hidden]) { display: contents; }
 .meeting-dock .sound-section > .kicker { display: none; }   /* the device's name says what the strip is */
@@ -730,6 +734,9 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 .meeting-dock .sound-buttons { grid-area: buttons; flex-wrap: nowrap; margin: 0; }
 .meeting-dock .menu { grid-area: menu; display: flex; justify-content: flex-end; gap: 12px; width: auto; }
 .view[data-view="meeting"] .meeting-dock .button.menu-item { min-height: 56px; font-size: 1rem; padding: 0 18px; }
+/* Mic level's way in (spec 2026-10-29): on the speaker's line, before Camera and Upcoming meetings, which keep the dock's right */
+.meeting-dock #open-mic { grid-area: mic-open; }
+.view[data-view="meeting"] .meeting-dock #open-mic { min-height: 56px; font-size: 1rem; padding: 0 18px; }
 @media (max-width: 900px) {
   .view[data-view="meeting"] { grid-template-columns: minmax(0, 1fr); }   /* a tablet stood up, or a phone: the card over the controls */
   .meeting-clock { font-size: 2.6rem; }
@@ -737,9 +744,10 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 @media (max-width: 640px) {
   .meeting-main .actions.meeting-secondary { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .meeting-main .meeting-secondary .button { white-space: normal; }
-  .meeting-dock { grid-template-columns: minmax(0, 1fr); grid-template-areas: "device" "slider" "buttons" "menu"; }
+  .meeting-dock { grid-template-columns: minmax(0, 1fr); grid-template-areas: "device" "slider" "buttons" "mic-open" "menu"; }
   .meeting-dock .sound-buttons, .meeting-dock .menu { flex-wrap: wrap; justify-content: flex-start; }
   .meeting-dock .sound-buttons .button, .meeting-dock .menu .button { flex: 1 1 auto; justify-content: center; }
+  .meeting-dock #open-mic { justify-content: center; }
   /* A tile on a phone is a button like the others, its symbol beside its words, one to a row: a label that wraps under a symbol grows the tile. */
   .meeting-main .actions.meeting-actions { grid-template-columns: minmax(0, 1fr); }
   .meeting-main .meeting-actions .button { min-height: 64px; padding: 0 20px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }

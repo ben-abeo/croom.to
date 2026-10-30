@@ -156,13 +156,14 @@ class CroomAgent:
             except ImportError as e:
                 logger.warning(f"Dashboard client not available: {e}")
 
-        # Room devices: the speaker's volume and the camera's framing (spec 2026-10-08)
+        # Room devices: the speaker's volume, the microphone's level and the camera's framing (spec 2026-10-08, 2026-10-29)
         settings_store = None
         try:
             from croom.control.settings import SettingsStore
             from croom.devices.service import DevicesService
             settings_store = SettingsStore(self.config.resolve_data_dir() / "control-settings.json")
-            self.service_manager.register(DevicesService.from_config(self.config, settings_store))
+            self.service_manager.register(DevicesService.from_config(
+                self.config, settings_store, meeting=self.service_manager.get_service("meeting")))
             logger.info("Room devices registered")
         except ImportError as e:
             logger.warning(f"Room devices not available: {e}")

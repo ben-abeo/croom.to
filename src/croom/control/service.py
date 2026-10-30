@@ -383,6 +383,8 @@ class ControlService(Service):
         app.router.add_post("/api/settings", self._handle_set_settings)
         app.router.add_get("/api/audio/volume", self._handle_volume)
         app.router.add_post("/api/audio/volume", self._handle_set_volume)
+        app.router.add_get("/api/audio/mic", self._handle_mic)
+        app.router.add_post("/api/audio/mic", self._handle_set_mic)
         app.router.add_post("/api/camera/move", self._handle_camera_move)
         app.router.add_post("/api/camera/zoom", self._handle_camera_zoom)
         app.router.add_post("/api/camera/home", self._handle_camera_home)
@@ -606,6 +608,7 @@ class ControlService(Service):
             "screensaver": self._screensaver,
             "settings": self._settings_payload(),
             "audio": self._audio_state(),
+            "mic": self._mic_state(),
             "camera": self._camera_state(),
             "tv": self._tv_status(),
             "laptop": self._laptop_status(),
@@ -726,10 +729,13 @@ class ControlService(Service):
     def _camera(self):
         return getattr(self._devices, "camera", None)
 
+    def _mic(self):
+        return getattr(self._devices, "mic", None)
+
     async def _refresh_devices(self) -> None:
         """Cached reads, so a status poll costs nothing most of the time and never raises."""
         camera = self._camera()
-        readers = [("speaker", getattr(self._volume(), "refresh", None))]
+        readers = [("speaker", getattr(self._volume(), "refresh", None)), ("microphone", getattr(self._mic(), "refresh", None))]
         if camera is not None and camera.available:
             # read_zoom() goes through discovery, which globs and opens /dev/video*: not on every poll of a room
             # without a camera. The devices service looks for a missing camera itself, every 30 s.
@@ -755,6 +761,10 @@ class ControlService(Service):
     def _audio_state(self) -> Dict[str, Any]:
         volume = self._volume()
         return volume.state() if volume is not None else dict(self.NO_DEVICES, level=0, muted=False, device=None)
+
+    def _mic_state(self) -> Dict[str, Any]:
+        mic = self._mic()
+        return mic.state() if mic is not None else dict(self.NO_DEVICES, level=0, device_level=0, device=None)
 
     def _camera_state(self) -> Dict[str, Any]:
         camera = self._camera()
@@ -826,6 +836,25 @@ class ControlService(Service):
             return await volume.set_muted(data["muted"])
 
         return await self._device_call(request, volume, action)
+
+    # The microphone's level (spec 2026-10-29, Mic level): an everyday control, outside the Settings PIN. The level chosen here is
+    # kept in the settings by the microphone itself, and the devices service puts it back during a meeting.
+    async def _handle_mic(self, request: web.Request) -> web.Response:
+        await self._refresh_devices()
+        return web.json_response(self._mic_state())
+
+    async def _handle_set_mic(self, request: web.Request) -> web.Response:
+        mic = self._mic()
+
+        async def action(data):
+            named = [key for key in ("level", "step") if key in data]
+            if len(named) != 1:
+                raise ValueError("Send one of level or step")
+            if named[0] == "level":
+                return await mic.set_level(self._int_field(data, "level"))
+            return await mic.step(self._int_field(data, "step"))
+
+        return await self._device_call(request, mic, action)
 
     async def _handle_camera_move(self, request: web.Request) -> web.Response:
         camera = self._camera()

@@ -71,7 +71,7 @@ setup guide").
 1. **Factory reset** the panel (Android Settings › System › Reset options › Erase all data). Go through Android's first-start
    screens without adding a Google account, turn on Wi-Fi (or plug in Ethernet), then turn on USB debugging (Settings › About
    tablet, tap Build number seven times; Settings › System › Developer options › USB debugging).
-2. **Install the release APK** (signed with the room key: see "Release builds and the signing key"; a panel set up with a debug
+2. **Install the release APK** (signed with the room key: see "Releases and the signing key"; a panel set up with a debug
    build cannot update itself to a release):
 
    ```bash
@@ -113,11 +113,16 @@ To take the device owner away again (to give the panel to something else): facto
   reach the TV Pi on it within 90 seconds. The door sign is back on Office"). A panel that restarts during those 90 seconds goes
   back when the app starts. Android does not tell an app other than its own Settings that a password was wrong, so a wrong password
   shows as "Could not join … within 90 seconds".
+  Android saves a password typed for a network it knows over the one it has, and an app can't read the old one back to put it
+  back, so the panel refuses those: a password for the network it is on ("This door sign is on Office now: join another network
+  first"), and for any other network it has saved ("Forget Guest first, then join it again"; joining a saved network with the
+  password field left empty uses its saved password and is allowed).
 - **Update** (Settings › Software, and Update all): see "Releases" below. The TV Pi downloads the release's APK from GitHub,
   checks it and keeps it in its data directory (`door-sign/`); the panel downloads it from the TV Pi
   (`GET /api/devices/apk/<versionCode>`, with its id and token), checks its size and SHA-256 against the job, that it is this app
   (`to.croom.doorsign`), the version the job names and newer than the one installed, and signed with the same key, and only then
-  installs it through Android's `PackageInstaller` without asking. Android restarts the app with the new version, which reports
+  installs it through Android's `PackageInstaller` without asking. Updates from Settings need Android 12 or newer on the panel (the
+  SMT1019 runs 14): before it, Android does not give an APK's signers for that check. Android restarts the app with the new version, which reports
   "Updated to version N". There is no going back (Android does not install an older version over a newer one): a panel that has not
   checked in within 5 minutes of installing shows "Door sign didn't check in after updating", and someone looks at the panel.
 
@@ -180,6 +185,8 @@ The Software page lists the newest release and the ones between the panel's vers
 - Reboot: the panel restarts and the card says "Rebooted".
 - Network: Change Wi-Fi lists the networks; join one the TV Pi is reached on: kept. Join one it is not (a guest network): back on
   the old one within about 2 minutes, in words. Pull the panel's power during the 90 seconds: back on the old one after it starts.
+- Retype the password of the network the panel is on, wrongly: the panel refuses ("This door sign is on … now: join another
+  network first") and stays connected, its saved password unchanged.
 - Update to a newer release: the sign comes back by itself on the new version, the card says "Updated to version N". An APK signed
   with another key, or an older version, is refused in words and nothing is installed.
 - A panel without device owner (a debug build installed the old way): the sign works, the card says it is not the device owner, and

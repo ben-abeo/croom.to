@@ -2,7 +2,7 @@ plugins {
     id "com.android.application"
 }
 
-// The release key (README, "Release builds and the signing key"): from keystore.properties beside settings.gradle, or from the
+// The release key (README, "Releases and the signing key"): from keystore.properties beside settings.gradle, or from the
 // environment. Never in the repository. Without it a release build is left unsigned; debug builds use the debug key as always.
 def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file("keystore.properties")

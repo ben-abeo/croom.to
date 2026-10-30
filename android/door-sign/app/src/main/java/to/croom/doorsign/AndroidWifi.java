@@ -82,9 +82,10 @@ final class AndroidWifi implements WifiChange.WifiPort {
         if (wifi == null) return saved;
         try {
             List<WifiConfiguration> configured = wifi.getConfiguredNetworks();
-            if (configured != null) for (WifiConfiguration c : configured) saved.add(new WifiChange.Saved(c.networkId, unquote(c.SSID)));
+            if (configured == null) return null;
+            for (WifiConfiguration c : configured) saved.add(new WifiChange.Saved(c.networkId, unquote(c.SSID)));
         } catch (SecurityException e) {
-            // Not the device owner: no saved networks to show
+            return null;    // not the device owner, or no location permission: WifiChange changes nothing without them
         }
         return saved;
     }

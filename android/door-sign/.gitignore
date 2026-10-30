@@ -4,7 +4,7 @@ app/.cxx/
 local.properties
 *.iml
 .idea/
-# The release signing key and its passwords: never committed (README, "Release builds and the signing key")
+# The release signing key and its passwords: never committed (README, "Releases and the signing key")
 keystore.properties
 *.jks
 *.keystore

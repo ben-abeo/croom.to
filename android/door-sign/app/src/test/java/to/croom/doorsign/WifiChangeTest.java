@@ -46,9 +46,14 @@ public class WifiChangeTest {
             signals.put(ssid, signal);
         }
 
+        final Map<Integer, String> listedAs = new HashMap<>();        // saved, but listed under another name than the one it joins
+        boolean unreadable;                                          // Android does not let the app read the saved networks
+
+        /** A network saved by hand (Android's Settings), with the security its air entry has. */
         int save(String ssid, String password) {
             int id = nextId++;
-            saved.put(id, new String[] {ssid, password});
+            String[] there = air.get(ssid);
+            saved.put(id, new String[] {ssid, password, there == null ? "psk" : WifiChange.kind(there[0])});
             allowed.add(id);
             return id;
         }
@@ -74,13 +79,21 @@ public class WifiChangeTest {
 
         @Override public List<WifiChange.Saved> saved() {
             List<WifiChange.Saved> list = new ArrayList<>();
-            for (Map.Entry<Integer, String[]> n : saved.entrySet()) list.add(new WifiChange.Saved(n.getKey(), n.getValue()[0]));
+            if (unreadable) return null;
+            for (Map.Entry<Integer, String[]> n : saved.entrySet()) {
+                list.add(new WifiChange.Saved(n.getKey(), listedAs.getOrDefault(n.getKey(), n.getValue()[0])));
+            }
             return list;
         }
 
+        /** As Android: a network saved already with the same name and security is updated in place, and keeps its id. */
         @Override public int add(String ssid, String password, String kind, boolean hidden) {
-            int id = nextId++;
-            saved.put(id, new String[] {ssid, password});
+            Integer id = null;
+            for (Map.Entry<Integer, String[]> n : saved.entrySet()) {
+                if (n.getValue()[0].equals(ssid) && n.getValue()[2].equals(kind)) id = n.getKey();
+            }
+            if (id == null) id = nextId++;
+            saved.put(id, new String[] {ssid, password, kind});
             allowed.add(id);
             change("add " + ssid + " " + kind + (hidden ? " hidden" : ""));
             return id;
@@ -271,11 +284,94 @@ public class WifiChangeTest {
         assertEquals(office, (int) wifi.on);
     }
 
-    @Test public void aNewPasswordForTheSameNetworkReplacesTheOldOne() throws Exception {
-        String words = change().change("Office", "office-pass", false, "j", QUIET);
-        assertEquals("Joined Office. The door sign reaches the TV Pi", words);
-        assertEquals(1, wifi.saved.size());
-        assertFalse(wifi.saved.containsKey(office));
+    @Test public void aPasswordForTheNetworkThePanelIsOnIsRefusedAndItStaysConnected() {
+        assertEquals("This door sign is on Office now: join another network first",
+                refusal(() -> change().change("Office", "wrong-password", false, "j", QUIET)));
+        assertEquals(office, (int) wifi.on);
+        assertEquals("office-pass", wifi.saved.get(office)[1]);
+        assertTrue(wifi.calls.isEmpty());
+        assertNull(change().record());
+    }
+
+    @Test public void aPasswordForAnotherSavedNetworkIsRefused() {
+        int saved = wifi.save("New Net", "new-password");
+        assertEquals("Forget New Net first, then join it again", refusal(() -> change().change("New Net", "other-password", false, "j", QUIET)));
+        assertEquals("new-password", wifi.saved.get(saved)[1]);
+        assertTrue(wifi.calls.isEmpty());
+    }
+
+    @Test public void aFailedTrialOfAnotherSavedNetworkNeverDeletesIt() {
+        int saved = wifi.save("New Net", "new-password");
+        wifi.roomOn.remove("New Net");
+        String words = refusal(() -> change().change("New Net", "", false, "j", QUIET));
+        assertTrue(words, words.endsWith("The door sign is back on Office"));
+        assertEquals("new-password", wifi.saved.get(saved)[1]);
+        assertEquals(office, (int) wifi.on);
+        assertTrue(wifi.saved.containsKey(office));
+    }
+
+    /** Android saved the new settings over a network the panel knew under another name: never removed, and said. */
+    @Test public void settingsSavedOverAKnownNetworkAreNeverRemoved() throws Exception {
+        int stale = wifi.save("New Net", "stale-password");
+        wifi.listedAs.put(stale, "4e6577204e6574");
+        wifi.roomOn.remove("New Net");
+        String words = refusal(() -> change().change("New Net", "new-password", false, "j", QUIET));
+        assertTrue(wifi.saved.containsKey(stale));
+        assertTrue(wifi.saved.containsKey(office));
+        assertEquals(office, (int) wifi.on);
+        assertEquals("Joined New Net, but the door sign could not reach the TV Pi on it within 90 seconds. Android saved the new password "
+                + "over New Net's, which can't be put back: forget New Net and join it again with its password. The door sign is back on Office",
+                words);
+        assertTrue(change().record().getBoolean("overwrote"));
+    }
+
+    @Test public void withoutTheSavedNetworksOrTheCurrentNameNothingChanges() {
+        wifi.unreadable = true;
+        assertEquals("Android did not let the door sign read its saved networks: nothing was changed",
+                refusal(() -> change().change("New Net", "new-password", false, "j", QUIET)));
+        assertEquals("Android did not let the door sign read its saved networks: nothing was changed", refusal(() -> change().forget("Office")));
+        wifi.unreadable = false;
+        wifi.saved.get(office)[0] = null;           // connected, but its name hidden (no location permission)
+        assertEquals("Android did not let the door sign read the network it is on: nothing was changed",
+                refusal(() -> change().change("New Net", "new-password", false, "j", QUIET)));
+        assertTrue(wifi.calls.isEmpty());
+    }
+
+    /** Going back never removes a network saved before the change, whatever the record says of it (a second layer). */
+    @Test public void goingBackKeepsEveryNetworkSavedBefore() throws Exception {
+        int guest = wifi.save("New Net", "new-password");
+        JSONObject record = new JSONObject().put("state", "trying").put("ssid", "New Net").put("old", office).put("old_name", "Office")
+                .put("new", guest).put("created", true).put("before", new JSONArray())
+                .put("known", new JSONArray().put(office).put(guest));
+        change().goBack(record, "Test");
+        assertTrue(wifi.saved.containsKey(guest));
+        record.put("new", office).put("ssid", "Office").put("known", new JSONArray());
+        change().goBack(record, "Test");
+        assertTrue(wifi.saved.containsKey(office));
+    }
+
+    @Test public void theSafetyNetNeverRemovesTheNetworkToGoBackTo() {
+        // The worst case of a merge: Android hands back the id of the network the panel is on
+        wifi.saved.get(office)[0] = "Office";
+        wifi.inAir("Office 5G", "[WPA2-PSK-CCMP][RSN-PSK-CCMP][ESS]", "office-pass", 60);
+        WifiChange.WifiPort merging = new WifiChange.WifiPort() {
+            @Override public boolean hasWifi() { return true; }
+            @Override public WifiChange.Current current() { return wifi.current(); }
+            @Override public List<WifiChange.Seen> scan(boolean fresh) { return wifi.scan(fresh); }
+            @Override public List<WifiChange.Saved> saved() { return wifi.saved(); }
+            @Override public int add(String ssid, String password, String kind, boolean hidden) { wifi.calls.add("add"); return office; }
+            @Override public boolean connect(int networkId) { return wifi.connect(networkId); }
+            @Override public void allow(int networkId) { wifi.allow(networkId); }
+            @Override public boolean remove(int networkId) { return wifi.remove(networkId); }
+            @Override public String rejected(int networkId) { return null; }
+            @Override public boolean reachesRoom() { return false; }
+            @Override public boolean onEthernet() { return false; }
+            @Override public String address() { return null; }
+        };
+        WifiChange c = new WifiChange(merging, store, () -> now, ms -> now += ms, () -> "t");
+        refusal(() -> c.change("Office 5G", "office-pass", false, "j", QUIET));
+        assertTrue(wifi.saved.containsKey(office));
+        assertFalse(wifi.calls.contains("remove " + office));
     }
 
     @Test public void onEthernetOnlyJoiningIsChecked() throws Exception {

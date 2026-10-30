@@ -83,6 +83,7 @@ final class WifiChange {
         /** The networks in range (`fresh`: scan now; otherwise what Android found last). */
         List<Seen> scan(boolean fresh) throws Refused;
 
+        /** The saved networks; null when Android does not let the app read them. */
         List<Saved> saved();
 
         /** Save a network (kind: psk, sae, owe or open); its id, or -1 when Android refused it. */
@@ -191,15 +192,27 @@ final class WifiChange {
         }
     }
 
+    private List<Saved> saved() {
+        List<Saved> saved = port.saved();
+        return saved == null ? Collections.emptyList() : saved;
+    }
+
+    /** The saved networks, for a change: one made without knowing them could save over one and lose it. */
+    private List<Saved> savedOrRefuse() throws Refused {
+        List<Saved> saved = port.saved();
+        if (saved == null) throw new Refused("Android did not let the door sign read its saved networks: nothing was changed");
+        return saved;
+    }
+
     private TreeSet<String> savedNames() {
         TreeSet<String> names = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
-        for (Saved s : port.saved()) if (s.ssid != null && !s.ssid.isEmpty()) names.add(s.ssid);
+        for (Saved s : saved()) if (s.ssid != null && !s.ssid.isEmpty()) names.add(s.ssid);
         return names;
     }
 
     private List<Saved> savedAs(String ssid) {
         List<Saved> found = new ArrayList<>();
-        for (Saved s : port.saved()) if (ssid.equals(s.ssid)) found.add(s);
+        for (Saved s : saved()) if (ssid.equals(s.ssid)) found.add(s);
         return found;
     }
 
@@ -293,16 +306,31 @@ final class WifiChange {
         if (kind.equals("wep")) throw new Refused(ssid + " uses WEP, which is not safe: networks like it are not supported");
         if ((kind.equals("open") || kind.equals("owe")) && !password.isEmpty()) throw new Refused(ssid + " is an open network: it takes no password");
         if (kind.equals("sae") && password.length() == 64) throw new Refused(ssid + " takes its password, not a key of 64 characters");
+        List<Saved> all = savedOrRefuse();
         List<Saved> profiles = savedAs(ssid);
-        int reuse = !profiles.isEmpty() && password.isEmpty() ? profiles.get(0).networkId : -1;
-        if ((kind.equals("psk") || kind.equals("sae")) && password.isEmpty() && reuse < 0) throw new Refused("Enter the password for " + ssid);
         Current old = port.current();
-        if (old != null && ssid.equals(old.ssid) && password.isEmpty()) throw new Refused("The door sign is on " + ssid + " already");
+        if (old != null && old.ssid == null) {
+            throw new Refused("Android did not let the door sign read the network it is on: nothing was changed");
+        }
+        if (old != null && ssid.equals(old.ssid)) {
+            // Android saves a network's new password over the one it is on (the same name and security): a wrong one would cut it off
+            if (password.isEmpty()) throw new Refused("The door sign is on " + ssid + " already");
+            throw new Refused("This door sign is on " + ssid + " now: join another network first");
+        }
+        if (!profiles.isEmpty() && !password.isEmpty()) {
+            // Likewise for a saved network: its password can't be read back, so a change that fails could not put it back
+            throw new Refused("Forget " + ssid + " first, then join it again");
+        }
+        int reuse = !profiles.isEmpty() ? profiles.get(0).networkId : -1;
+        if ((kind.equals("psk") || kind.equals("sae")) && password.isEmpty() && reuse < 0) throw new Refused("Enter the password for " + ssid);
 
         JSONObject record = new JSONObject();
         try {
             JSONArray before = new JSONArray();
             for (Saved s : profiles) before.put(s.networkId);
+            JSONArray known = new JSONArray();          // every network saved before the change: none of them is ever removed by it
+            for (Saved s : all) known.put(s.networkId);
+            record.put("known", known);
             record.put("ssid", ssid).put("old", old == null ? -1 : old.networkId).put("old_name", old == null ? "" : old.ssid)
                     .put("new", reuse).put("created", reuse < 0).put("before", before).put("job", jobId == null ? "" : jobId)
                     .put("ethernet", port.onEthernet());
@@ -316,6 +344,12 @@ final class WifiChange {
             id = port.add(ssid, password, kind, hidden);
             if (id < 0) throw new Refused(goBack(record, "Could not save " + ssid + "'s settings: Android refused them"));
             put(record, "new", id);
+            if (ids(record, "known").contains(id) || (old != null && old.networkId == id)) {
+                // Android saved them over a network it knew (the same name and security, which the refusals above should have
+                // caught): its password can't be read back to put back, so it is never removed, and the words say so
+                put(record, "created", false);
+                put(record, "overwrote", true);
+            }
             save(record, null, null);
         }
         if (!port.connect(id)) throw new Refused(goBack(record, "Could not join " + ssid + ": Android refused to"));
@@ -346,6 +380,13 @@ final class WifiChange {
         return keep(record);
     }
 
+    private static List<Integer> ids(JSONObject record, String key) {
+        List<Integer> ids = new ArrayList<>();
+        JSONArray kept = record.optJSONArray(key);
+        for (int i = 0; kept != null && i < kept.length(); i++) ids.add(kept.optInt(i));
+        return ids;
+    }
+
     private boolean onNetwork(int networkId) {
         Current current = port.current();
         return current != null && current.networkId == networkId;
@@ -367,7 +408,7 @@ final class WifiChange {
         int old = record.optInt("old", -1);
         if (old >= 0 && old != id) port.allow(old);
         if (record.optBoolean("created")) {
-            for (Saved s : savedAs(ssid)) if (s.networkId != id) port.remove(s.networkId);
+            for (Saved s : savedAs(ssid)) if (s.networkId != id && s.networkId != old) port.remove(s.networkId);
         }
         String words = "Joined " + ssid + ". The door sign reaches the TV Pi"
                 + (record.optBoolean("ethernet") ? " (it is on Ethernet as well, so only joining " + ssid + " was checked)" : "");
@@ -384,11 +425,18 @@ final class WifiChange {
         int old = record.optInt("old", -1);
         String oldName = record.optString("old_name");
         if (record.optBoolean("created", true)) {
-            // The new network's settings, also when Android saved them but the panel restarted before their id was written down
-            List<Integer> before = new ArrayList<>();
-            JSONArray kept = record.optJSONArray("before");
-            for (int i = 0; kept != null && i < kept.length(); i++) before.add(kept.optInt(i));
-            for (Saved s : savedAs(ssid)) if (s.networkId == id || !before.contains(s.networkId)) port.remove(s.networkId);
+            // The new network's settings, also when Android saved them but the panel restarted before their id was written down; never
+            // a network saved before the change, nor the one to go back to
+            List<Integer> keep = ids(record, record.has("known") ? "known" : "before");
+            for (Saved s : savedAs(ssid)) {
+                if (s.networkId != old && !keep.contains(s.networkId) && (s.networkId == id || !ids(record, "before").contains(s.networkId))) {
+                    port.remove(s.networkId);
+                }
+            }
+        }
+        if (record.optBoolean("overwrote")) {
+            why = why + ". Android saved the new password over " + ssid + "'s, which can't be put back: forget " + ssid
+                    + " and join it again with its password";
         }
         String words;
         if (old < 0) {
@@ -432,6 +480,7 @@ final class WifiChange {
     String forget(String ssid) throws Refused {
         if (!Job.validSsid(ssid)) throw new Refused("Choose a network (a name of 1 to 32 characters)");
         if (underWay()) throw new Refused("A Wi-Fi change is under way: wait for it to finish");
+        savedOrRefuse();
         List<Saved> profiles = savedAs(ssid);
         if (profiles.isEmpty()) throw new Refused("The door sign does not know " + ssid);
         Current current = port.current();

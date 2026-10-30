@@ -35,7 +35,9 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     static final String TAG = "DoorSign";
     static final String NOT_OWNER = "The door sign is not the panel's device owner: see its setup guide";
     static final String OLD_ANDROID = "Wi-Fi from Settings needs Android 11 or newer on the panel";
-    static final String OLD_ANDROID_UPDATE = "Updates from Settings need Android 9 or newer on the panel";
+    // Before Android 12, getPackageArchiveInfo does not give an APK's signers with GET_SIGNING_CERTIFICATES: no updates there
+    static final String OLD_ANDROID_UPDATE = "Updates from Settings need Android 12 or newer on the panel";
+    static final int UPDATE_MIN_SDK = 31;
     static final long INSTALL_WAIT_MS = 3 * 60_000;
 
     private final Context context;
@@ -119,7 +121,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     @Override public String cannot(String type) {
         if (!isOwner()) return NOT_OWNER;
         if (type.startsWith("wifi_") && Build.VERSION.SDK_INT < 30) return OLD_ANDROID;
-        if (type.equals(Job.UPDATE) && Build.VERSION.SDK_INT < 28) return OLD_ANDROID_UPDATE;
+        if (type.equals(Job.UPDATE) && Build.VERSION.SDK_INT < UPDATE_MIN_SDK) return OLD_ANDROID_UPDATE;
         return null;
     }
 
@@ -165,7 +167,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         return Build.VERSION.SDK_INT >= 28 ? info.getLongVersionCode() : info.versionCode;
     }
 
-    @android.annotation.TargetApi(28)     // cannot(UPDATE) refuses updates on older Android
+    @android.annotation.TargetApi(31)     // cannot(UPDATE) refuses updates on older Android
     @Override public String update(int versionCode, String sha256, long size, JobRunner.Progress progress) throws Refused {
         long installed = installedVersion();
         if (versionCode <= installed) {
@@ -212,7 +214,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         }
     }
 
-    @android.annotation.TargetApi(28)
+    @android.annotation.TargetApi(31)
     private static Set<String> signers(SigningInfo info) {
         Set<String> digests = new HashSet<>();
         if (info == null) return digests;
@@ -223,7 +225,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
 
     /** One PackageInstaller session for the APK; as device owner Android installs it without asking anyone. Returns once Android says
      * it is installed (if the app is still alive to hear it); Refused with Android's words otherwise. */
-    @android.annotation.TargetApi(28)
+    @android.annotation.TargetApi(31)
     private void install(File apk, int versionCode) throws IOException, Refused {
         PackageInstaller installer = context.getPackageManager().getPackageInstaller();
         PackageInstaller.SessionParams params = new PackageInstaller.SessionParams(PackageInstaller.SessionParams.MODE_FULL_INSTALL);

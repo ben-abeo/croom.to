@@ -48,6 +48,10 @@ class ConfigEditor:
     def pending_restart(self) -> bool:
         return self._pending_restart
 
+    def note_restart(self) -> None:
+        """Something saved outside the config (a key file) applies after a restart: the pages offer Restart now."""
+        self._pending_restart = True
+
     def on_change(self, paths: Iterable[str], hook: Hook) -> None:
         """Run `hook` after a save that changes any of these live settings, with the values all of them have now ({path: value}): the
         booking hours are handed over together, so that moving both later never passes through an end before the start."""

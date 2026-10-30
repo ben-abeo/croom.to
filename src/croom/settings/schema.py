@@ -55,6 +55,7 @@ class Setting:
     max_items: int = 20            # a list
     pattern: Optional[str] = None  # text that must match it whole (blank is allowed unless required)
     pattern_words: str = ""        # what the pattern asks for, in words
+    free: bool = False             # a choice that takes any one line of text: the room's devices, offered as they are found (see devices.py)
 
     def options(self) -> List[Tuple[str, str]]:
         choices = self.choices() if callable(self.choices) else self.choices
@@ -77,6 +78,8 @@ class Setting:
             entry["max_items"] = self.max_items
         if self.required:
             entry["required"] = True
+        if self.free:
+            entry["free"] = True
         return entry
 
 
@@ -86,10 +89,11 @@ def time_zones() -> List[Tuple[str, str]]:
 
 
 PLATFORMS = (("zoom", "Zoom"), ("google_meet", "Google Meet"), ("teams", "Teams"), ("webex", "Webex"))
-# Every name croom.ai.backends.BACKEND_NAMES takes, and auto (kept here so that the root helper need not import the AI backends): a name the
-# room accepts must never be one the schema refuses, or a hand-written config would block every save.
+# auto, and the name of each AI backend (its `name`), which is what croom.ai.service.AIService matches ai.backend against (kept here so
+# that the root helper need not import the AI backends). Another name is not a backend the room would use: AIService falls back to auto.
 AI_BACKENDS = (("auto", "Automatic"), ("hailo", "Hailo"), ("coral", "Coral"), ("nvidia", "NVIDIA"), ("intel", "Intel (OpenVINO)"),
-               ("openvino", "OpenVINO"), ("cpu", "Processor only"), ("onnx", "Processor only (ONNX)"))
+               ("cpu", "Processor only"))
+AUTOMATIC = (("auto", "Automatic"),)   # the devices' choice before the room's own are added (croom.settings.devices)
 URL = r"https?://[^\s/$.?#][^\s]*"
 NO_SPACES = r"\S+"
 
@@ -122,9 +126,12 @@ SCHEMA: List[Setting] = [
             help="By the names Zoom's picker gives them"),
     Setting("meeting.zoom_credentials_path", "Zoom SDK keys", "meetings", "credential", max_length=4096),
     # Devices
-    Setting("audio.output_device", "Speaker", "devices", "text", max_length=200, help="auto, or the speaker's name"),
-    Setting("audio.input_device", "Microphone", "devices", "text", max_length=200, help="auto, or the microphone's name"),
-    Setting("video.device", "Camera", "devices", "text", max_length=200, help="auto, or the camera's device"),
+    Setting("audio.output_device", "Speaker", "devices", "choice", choices=AUTOMATIC, free=True, max_length=200,
+            help="The speakers the room has now; Automatic is PipeWire's default"),
+    Setting("audio.input_device", "Microphone", "devices", "choice", choices=AUTOMATIC, free=True, max_length=200,
+            help="The microphones the room has now; Automatic is PipeWire's default"),
+    Setting("video.device", "Camera", "devices", "choice", choices=AUTOMATIC, free=True, max_length=200,
+            help="The cameras the room has now; Automatic is the first that can pan or zoom"),
     Setting("video.ptz_travel_seconds", "Camera travel time", "devices", "number", range=(1, 60), step=0.5,
             help="Seconds the camera takes from one end stop to the other"),
     Setting("control.camera_presets", "Camera preset names", "devices", "list", live=True, required=True, max_items=3, max_length=24),
@@ -209,6 +216,8 @@ def _switch(s: Setting, value: Any) -> bool:
 
 
 def _choice(s: Setting, value: Any) -> str:
+    if s.free:      # a device: the room's own are offered, but one unplugged now (or named by a part of its name) is still the room's
+        return _text(s, value) or "auto"   # a blank line in a hand-written file is the room's default, as the devices read it
     options = s.options()
     if not isinstance(value, str) or value not in {v for v, _ in options}:
         raise SettingError(f"{s.label}: choose one of the list")

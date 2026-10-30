@@ -5,8 +5,10 @@
 // one that waits for the room software to restart says "Saved: applies after a restart" and the page offers Restart now. When the last
 // restart put the settings before a change back, the page says so at its top.
 //
-// A page is drawn with croomSettings.form(host, key); the Room page is one. Later pages may add kinds of field to
-// croomSettings.fieldKinds (kind -> function (field, value) giving { node, read }).
+// A page is drawn with croomSettings.form(host, key, options); the Room page is one, and settings-pages.js draws the others with it.
+// options.after(box) fills a box under the form (the Laptop switch's Test the switch). Later pages may add kinds of field to
+// croomSettings.fieldKinds (kind -> function (field, value, page) giving { node, read, readOnly?, focus? }); `page` lets a field that
+// saves on its own (a key file) say so as the form does: page.saved(answer) and page.say(words, ok).
 (function () {
   "use strict";
   const S = window.croomSettings;
@@ -18,6 +20,7 @@
   const RESTARTING = "Restarting the room software\u2026";
   const BACK = "The room software has restarted";
   const NOT_BACK = "The room software has not come back yet";
+  const NOT_RESTARTED = "The room software did not restart";
   const RETURN_POLL_MS = 2000, RETURN_WAIT_MS = 5 * 60 * 1000;   // the helper's watch is 2 minutes, and an undo restarts it again
   const UNDONE = "Your last change was undone: the room did not start with it";
   const NOTHING_CHANGED = "Nothing to save: nothing has changed";
@@ -170,7 +173,7 @@
 
   // Draw the form of page `key` into `host`. Gives back the function that ends it (a page left while its values are on their way is
   // not drawn into afterwards).
-  function form(host, key) {
+  function form(host, key, options) {
     let gone = false;
     host.replaceChildren();
     const root = make("div", "settings-form");
@@ -181,6 +184,11 @@
     const loading = make("p", "note settings-loading", "Loading");
     root.append(banner, loading);
     host.append(root);
+    if (options && options.after) {          // drawn whether or not the form can be: it does not need the root helper
+      const after = make("div", "settings-form settings-after");
+      host.append(after);
+      options.after(after, () => gone);
+    }
 
     (async () => {
       let data;
@@ -212,10 +220,16 @@
       const rows = new Map();
       const original = {};
       const list = make("div", "setting-rows");
+      // What a field that saves on its own (a key file) tells the page: said as a save of the form is, and Restart now offered.
+      const page = {
+        saved: (answer) => { if (gone) return; say(answer.restart ? SAVED_RESTART : SAVED, true); restart.hidden = !answer.pending_restart; },
+        say: (words, ok) => { if (!gone) say(words, ok); },
+        gone: () => gone,
+      };
       for (const field of data.fields) {
         const draw = kinds[field.kind] || kinds.text;
         const value = data.values[field.path];
-        const control = draw(field, value);
+        const control = draw(field, value, page);
         const row = make("div", "setting-row");
         row.dataset.path = field.path;
         const id = "setting-" + field.path.replace(/[^a-z0-9]+/gi, "-");
@@ -318,7 +332,21 @@
           if (gone) return;
           if (!up) away = true;
           else if (away) { say(BACK, true); showUndone(); return; }
-          if (Date.now() > until) { if (away) say(NOT_BACK); return; }
+          else {
+            // Not gone yet: a look at the restart's record keeps this screen unlocked while it waits (the PIN's 5 minutes would end
+            // with the wait). A refused token is a room that restarted between the two looks: the PIN pad is up, as it is after one.
+            try { await S.api("/api/settings/restart"); } catch (e) { if (e.locked) return; }
+            if (gone) return;
+          }
+          if (Date.now() > until) {
+            if (away) { say(NOT_BACK); return; }
+            // Never away in all that time: the restart did not happen (the helper's systemctl failed, or it never ran). The button comes
+            // back for another go, and the record may say why.
+            say(NOT_RESTARTED);
+            restart.hidden = false;
+            showUndone();
+            return;
+          }
           setTimeout(look, RETURN_POLL_MS);
         };
         setTimeout(look, RETURN_POLL_MS);

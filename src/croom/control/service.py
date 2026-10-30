@@ -30,6 +30,9 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.settings.config_edit import ConfigEditor
+from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
+from croom.settings.devices import find_devices as find_room_devices
+from croom.settings.devices import offer
 from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
 from croom.settings.schema import BY_PATH, SettingError
 from croom.tv.discover import discover_tvs
@@ -51,7 +54,9 @@ def _a_bool(label: str) -> Callable[[Any], Any]:
 
 
 STATIC_DIR = Path(__file__).parent / "static"
-MAX_BODY_BYTES = 4096
+MAX_BODY_BYTES = 4096                  # a JSON request, and a pointer message: what every route but Settings' saves reads at most
+MAX_SETTINGS_BODY = 128 * 1024         # a Settings page's save, at the schema's list limits (40 dialogs of 120 characters, escaped)
+MAX_UPLOAD_BYTES = MAX_SETTINGS_BODY   # the app's limit: a key file's upload (64 KB and the form around it) and a Settings save
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
 ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invitations print it: spaces, no-break spaces
 # Zoom's own alphabet for a passcode: letters, digits and @ - _ * (Zoom allows 10 of them; this allows 32).
@@ -226,6 +231,8 @@ class ControlService(Service):
             without it, whose Settings pages that need it say "Not available on this device" (from_config makes the real one). The
             config's config_file is the config.yaml the Settings pages read (from_config: /etc/croom/config.yaml, the one the helper
             writes; config.yaml beside settings_file when the config names none).
+        find_devices: the room's speakers, microphones and cameras for the Devices page (croom.settings.devices.find_devices, which
+            runs pw-dump and opens /dev/video*, unless a test stands in for it).
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -245,6 +252,7 @@ class ControlService(Service):
         laptop=None,
         pin_store=None,
         admin=None,
+        find_devices=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -285,6 +293,8 @@ class ControlService(Service):
         self._editor = ConfigEditor(
             self.config.get("config_file") or Path(self.config.get("settings_file", "control-settings.json")).parent / "config.yaml", admin
         )
+        self._credentials = Credentials(self._editor, admin)
+        self._find_devices = find_devices or find_room_devices
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
         self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
         self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
@@ -357,7 +367,8 @@ class ControlService(Service):
     def create_app(self) -> web.Application:
         """The aiohttp application; tests drive it without a listener."""
         _register_font_types()
-        app = web.Application(client_max_size=MAX_BODY_BYTES, middlewares=[_static_no_cache])
+        # The app's limit is a key file's upload: every JSON route reads at most MAX_BODY_BYTES of it (_read_object), a Settings save more
+        app = web.Application(client_max_size=MAX_UPLOAD_BYTES, middlewares=[_static_no_cache])
         app.router.add_get("/", self._handle_index)
         app.router.add_get("/sign", self._handle_sign)
         app.router.add_get("/tv", self._handle_tv)
@@ -407,6 +418,12 @@ class ControlService(Service):
         app.router.add_post("/api/settings/config/{page}", self._handle_save_config)
         app.router.add_get("/api/settings/restart", self._handle_restart_status)
         app.router.add_post("/api/settings/restart", self._handle_restart)
+        app.router.add_get("/api/settings/credentials", self._handle_credentials)
+        app.router.add_post("/api/settings/credentials/zoom/typed", self._handle_zoom_typed)
+        app.router.add_post("/api/settings/credentials/{kind}", self._handle_upload_credential)
+        app.router.add_post("/api/settings/credentials/{kind}/usb", self._handle_usb_credential)
+        app.router.add_get("/api/settings/usb-files", self._handle_usb_files)
+        app.router.add_post("/api/settings/laptop/test", self._handle_test_switch)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -1260,10 +1277,13 @@ class ControlService(Service):
             return self._error_response(NOT_AVAILABLE, 503)
         return None
 
-    def _settings_refusal(self, request: web.Request, post: bool) -> Optional[web.Response]:
+    def _settings_refusal(
+        self, request: web.Request, post: bool, *more: Callable[[web.Request], Optional[web.Response]]
+    ) -> Optional[web.Response]:
         """The answer that refuses a request to a Settings route that needs the root helper, in this order: no PIN (before anything of
-        the request is read), not JSON (a POST), no helper; None when it may go on."""
-        checks = [self._require_unlock] + ([self._require_json] if post else []) + [lambda _: self._without_helper()]
+        the request is read), not JSON (a POST), no helper, then the route's own `more`; None when it may go on. (Each is looked at
+        with `is not None`: an aiohttp response is a mapping, and an empty one is false.)"""
+        checks = [self._require_unlock] + ([self._require_json] if post else []) + [lambda _: self._without_helper(), *more]
         for check in checks:
             refused = check(request)
             if refused is not None:
@@ -1293,6 +1313,8 @@ class ControlService(Service):
             return self._error_response(f"There is no Settings page {page}", 404)
         except SettingError as e:
             return self._error_response(str(e), 500)
+        if page == "devices":
+            fields = offer(fields, values, await self._room_devices())
         return web.json_response({"values": values, "fields": fields, "pending_restart": self._editor.pending_restart})
 
     async def _handle_save_config(self, request: web.Request) -> web.Response:
@@ -1302,7 +1324,7 @@ class ControlService(Service):
         refused = self._settings_refusal(request, post=True)
         if refused is not None:
             return refused
-        data = await self._read_object(request)
+        data = await self._read_object(request, MAX_SETTINGS_BODY)
         if data is None:
             return self._error_response("Send a JSON object", 400)
         page = request.match_info["page"]
@@ -1337,7 +1359,7 @@ class ControlService(Service):
         return web.json_response({"restarting": True})
 
     async def _handle_restart_status(self, request: web.Request) -> web.Response:
-        """How the last restart went: {"state": none | watching | healthy | undone | down, "undone", "at"?, "why"?}."""
+        """How the last restart went: {"state": none | restarting | watching | healthy | undone | down, "undone", "at"?, "why"?}."""
         refused = self._settings_refusal(request, post=False)
         if refused is not None:
             return refused
@@ -1348,6 +1370,149 @@ class ControlService(Service):
         except AdminError as e:
             return self._error_response(str(e), 409)
         return web.json_response({key: value for key, value in answer.items() if key != "ok"})
+
+    async def _room_devices(self) -> Optional[Dict[str, Any]]:
+        """The speakers, microphones and cameras the room has now; None when they can't be listed (the page offers Automatic)."""
+        try:
+            return await self._find_devices()
+        except Exception as e:  # noqa: BLE001 - the Devices page opens whatever the listing does
+            logger.warning(f"Could not list the room's devices: {type(e).__name__}: {e}")
+            return None
+
+    # --- the key files (spec 2026-10-29, section 4)
+
+    def _credential_kind(self, request: web.Request) -> Optional[web.Response]:
+        """404 for a kind of key the room has no use for; None for google or zoom."""
+        kind = request.match_info.get("kind", "")
+        try:
+            self._credentials.kind(kind)
+        except KeyError:
+            return self._error_response(f"There is no key {kind}: the room takes a Google service-account key or Zoom SDK keys", 404)
+        return None
+
+    def _require_multipart(self, request: web.Request) -> Optional[web.Response]:
+        """A key's upload is the one Settings POST that is not JSON: a form upload, behind the PIN's header as every other."""
+        if request.content_type != "multipart/form-data":
+            return self._error_response("Send the key file as a form upload (multipart/form-data)", 415)
+        return None
+
+    async def _credential_answer(self, save: Awaitable[Dict[str, Any]]) -> web.Response:
+        """A key's save, answered: what was saved, or the refusal in words (the helper's check of the file is 400)."""
+        try:
+            answer = await save
+        except CredentialError as e:
+            return self._error_response(str(e), e.status)
+        except SettingError as e:
+            return web.json_response({"error": str(e), "errors": e.errors}, status=400)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 400)
+        logger.info(f"Settings saved the {answer['kind']} key: {answer['summary']}")
+        return web.json_response(answer)
+
+    async def _handle_credentials(self, request: web.Request) -> web.Response:
+        """What the room's key files are: {"google": {"summary", "saved_at", "path"} | {"path", "problem"} | null, "zoom": ...}. Read from
+        the files the config names (the room software's own), never with what is in them; no helper needed."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        try:
+            return web.json_response(self._credentials.status())
+        except SettingError as e:
+            return self._error_response(str(e), 500)
+
+    async def _handle_upload_credential(self, request: web.Request) -> web.Response:
+        """A key file uploaded from a laptop: multipart form-data with the file in the field `file`, at most 64 KB."""
+        refused = self._settings_refusal(request, False, self._require_multipart, self._credential_kind)
+        if refused is not None:
+            return refused
+        too_large = self._error_response("This file is too large for a key file: a key is the few-KB .json file the console downloads", 413)
+        if request.content_length is not None and request.content_length > MAX_UPLOAD_BYTES:
+            return too_large
+        raw: Optional[bytes] = None
+        try:
+            reader = await request.multipart()
+            for _ in range(8):   # a form of a field or two: no more parts are looked through than that
+                part = await reader.next()
+                if part is None:
+                    break
+                if getattr(part, "name", None) != "file":
+                    await part.release()
+                    continue
+                data = bytearray()
+                while True:
+                    chunk = await part.read_chunk()
+                    if not chunk:
+                        break
+                    data.extend(chunk)
+                    if len(data) > MAX_KEY_FILE:
+                        return too_large
+                raw = bytes(data)
+                break
+        except Exception as e:  # noqa: BLE001 - a form that is not one (a bad boundary, a body cut off): said in words, whatever raised
+            logger.info(f"A key upload could not be read: {type(e).__name__}: {e}")
+            return self._error_response("The upload could not be read: choose the key file again", 400)
+        if not raw:
+            return self._error_response("Choose a key file to upload", 400)
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return self._error_response("That file is not text: a key file is the .json file the console downloads", 400)
+        return await self._credential_answer(self._credentials.save(request.match_info["kind"], content))
+
+    async def _handle_usb_credential(self, request: web.Request) -> web.Response:
+        """{"path"}: a key file on a USB stick in the TV Pi (one /api/settings/usb-files listed), read and saved by the helper."""
+        refused = self._settings_refusal(request, True, self._credential_kind)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        return await self._credential_answer(self._credentials.save_from_usb(request.match_info["kind"], data.get("path")))
+
+    async def _handle_zoom_typed(self, request: web.Request) -> web.Response:
+        """{"key", "secret"}: the Zoom Meeting SDK key and secret typed at the page, saved as the Zoom credentials file."""
+        refused = self._settings_refusal(request, post=True)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        return await self._credential_answer(self._credentials.save_typed_zoom(data.get("key"), data.get("secret")))
+
+    async def _handle_usb_files(self, request: web.Request) -> web.Response:
+        """The key files on the USB sticks plugged into the TV Pi: {"files": [{"path", "name", "stick", "size"}]}."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        try:
+            return web.json_response(await self._credentials.usb_files())
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+
+    # --- Laptop switch: Test the switch
+
+    LAPTOP_OFF = "The Laptop switch is off: turn it on, save, and restart the room software to test it"
+
+    async def _handle_test_switch(self, request: web.Request) -> web.Response:
+        """Test the switch: the running Laptop service presses it, the MeetUp goes over and back, and the check's lines are the answer
+        ({"ok", "lines"}). Not in a meeting; in a room whose Laptop switch is off, says to turn it on and restart."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        if self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        if self._laptop is None:
+            return self._error_response(self.LAPTOP_OFF, 409)
+        try:
+            return web.json_response(await self._laptop.test_switch())
+        except LaptopError as e:
+            return self._error_response(str(e), e.status)
 
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
         """The LG and Samsung TVs on the network. It also answers before a TV is configured.
@@ -1621,12 +1786,17 @@ class ControlService(Service):
         return None
 
     @staticmethod
-    async def _read_object(request: web.Request) -> Optional[Dict[str, Any]]:
-        """The request body as a JSON object, or None when it is not one."""
+    async def _read_object(request: web.Request, limit: int = MAX_BODY_BYTES) -> Optional[Dict[str, Any]]:
+        """The request body as a JSON object, or None when it is not one (or is longer than `limit` bytes)."""
         if not request.can_read_body:
             return {}
+        if request.content_length is not None and request.content_length > limit:
+            return None
         try:
-            data = await request.json()
+            body = await request.read()
+            if len(body) > limit:
+                return None
+            data = json.loads(body.decode(request.charset or "utf-8"))
         except Exception:
             return None
         return data if isinstance(data, dict) else None

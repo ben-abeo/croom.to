@@ -383,3 +383,45 @@ async def test_an_unexpected_failure_in_release_is_the_same(room):
     with pytest.raises(LaptopError, match=NO_ANSWER):
         await room.service.to_laptop(30)
     assert room.google.events == {} and room.devices.calls == ["reclaim"] and room.switch.moves == []
+
+
+# --- Settings' Test the switch (spec 2026-10-29)
+
+
+async def test_test_the_switch_moves_the_meetup_over_and_back_and_leaves_the_room_as_it_was(room):
+    answer = await room.service.test_switch()
+    assert answer["ok"] is True
+    text = "\n".join(answer["lines"])
+    assert "GPIO17" in text and "now on the laptop side" in text and "back on the Pi" in text
+    assert room.switch.moves == ["laptop", "room"] and room.switch.on_pi
+    assert room.devices.calls == ["release", "reclaim"]                # the room's devices let go of the MeetUp, and took it back
+    assert not room.service.camera_away and not room.switch.closed and not room.switch.opened
+    await room.look()
+    await room.look()
+    assert not room.service.camera_away                               # the watch did not take the test for a hand at the switch
+
+
+async def test_test_the_switch_that_does_not_move_says_so_and_takes_the_devices_back(room):
+    room.switch.answers = False
+    answer = await room.service.test_switch()
+    assert answer["ok"] is False and any("did not answer" in line for line in answer["lines"])
+    assert room.devices.calls == ["release", "reclaim"]
+
+
+async def test_test_the_switch_with_no_pin_presses_nothing(tmp_path):
+    room = Room(tmp_path, switch=FakeUsbSwitch(available=False))
+    answer = await room.service.test_switch()
+    assert answer["ok"] is False and any("cannot be pressed" in line for line in answer["lines"])
+    assert room.switch.moves == [] and room.devices.calls == []
+
+
+@pytest.mark.parametrize("state", [MeetingState.JOINING, MeetingState.CONNECTED])
+async def test_test_the_switch_is_refused_in_a_meeting_and_while_the_laptop_has_the_meetup(room, state):
+    room.meeting.state = state
+    with pytest.raises(LaptopError, match=IN_A_MEETING):
+        await room.service.test_switch()
+    room.meeting.state = MeetingState.IDLE
+    await room.service.to_laptop(30)
+    with pytest.raises(LaptopError, match=CAMERA_AWAY):
+        await room.service.test_switch()
+    assert room.switch.moves == ["laptop"]

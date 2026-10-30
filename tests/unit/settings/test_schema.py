@@ -366,10 +366,22 @@ async def test_saves_are_one_at_a_time(config_file, admin):
 # --- every value the room accepts, the schema accepts (a hand-written one must never block every save)
 
 
-def test_every_ai_backend_the_room_takes_is_a_choice():
-    from croom.ai.backends import BACKEND_NAMES
-    for name in ["auto", *BACKEND_NAMES]:
+def test_the_ai_backends_offered_are_auto_and_the_name_of_each_backend():
+    # AIService uses the backend whose `name` is ai.backend: those names (and auto) are the choices, and no other
+    import importlib
+    names = set()
+    for module, cls in (("hailo", "HailoBackend"), ("coral", "CoralBackend"), ("openvino", "OpenVINOBackend"), ("nvidia", "NVIDIABackend"),
+                        ("onnx_cpu", "ONNXCPUBackend")):
+        backend = getattr(importlib.import_module(f"croom.ai.backends.{module}"), cls)
+        names.add(backend.name.fget(object.__new__(backend)))   # the name is a constant: no need for the hardware __init__ looks for
+    assert names == {"hailo", "coral", "intel", "nvidia", "cpu"}
+    offered = {c["value"] for c in BY_PATH["ai.backend"].describe()["choices"]}
+    assert offered == {"auto"} | names
+    for name in offered:
         assert validate("ai.backend", name) == name
+    for name in ("openvino", "onnx"):
+        with pytest.raises(SettingError):
+            validate("ai.backend", name)
 
 
 def test_every_meeting_platform_the_room_builds_is_a_choice():

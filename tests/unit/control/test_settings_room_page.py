@@ -186,7 +186,7 @@ def test_the_form_draws_every_kind_of_setting_and_sends_what_changed(browser, tm
         reactions.locator(".setting-remove").first.click()                # Thumbs Up goes
         reactions.locator(".setting-add").click()
         reactions.locator("input").last.fill("Wave")
-        assert page.locator(".setting-row[data-path='meeting.zoom_credentials_path'] .setting-credential").inner_text() == "Not set"
+        assert page.locator(".setting-row[data-path='meeting.zoom_credentials_path'] .credential-summary").inner_text() == "Not set"
         assert save_and_wait(page) == "Saved: applies after a restart"
         meeting = yaml.safe_load(config_file.read_text())["meeting"]
         assert meeting["platforms"] == ["zoom", "google_meet", "teams", "webex"] and meeting["kiosk"] is False

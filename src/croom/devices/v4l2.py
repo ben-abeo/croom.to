@@ -11,12 +11,15 @@ import os
 from typing import Dict, List, Optional, Tuple
 
 from croom.video.v4l2_ioctl import (
+    V4L2_CAP_VIDEO_CAPTURE,
     V4L2_CID_CAMERA_CLASS_BASE,
     V4L2_CID_ZOOM_ABSOLUTE,
     VIDIOC_G_CTRL,
+    VIDIOC_QUERYCAP,
     VIDIOC_QUERYCTRL,
     VIDIOC_S_CTRL,
     _IOWR,
+    v4l2_capability,
     v4l2_control,
     v4l2_queryctrl,
 )
@@ -26,6 +29,7 @@ V4L2_CID_TILT_SPEED = V4L2_CID_CAMERA_CLASS_BASE + 33   # 0x009a0921: -1 down, 0
 V4L2_CTRL_FLAG_DISABLED = 0x0001
 Range = Tuple[int, int, int, int]   # minimum, maximum, step, default
 V4L2_CTRL_CLASS_CAMERA = 0x009a0000   # the `which` of an extended-control call that sets camera-class controls
+V4L2_CAP_DEVICE_CAPS = 0x80000000     # the capability's device_caps says what this node does (capabilities: the whole device)
 
 
 class _v4l2_ext_value(ctypes.Union):
@@ -60,6 +64,26 @@ class V4l2Controls:
     def nodes(self) -> List[str]:
         """Every /dev/video* node, lowest number first."""
         return sorted(glob.glob("/dev/video*"), key=_node_number)
+
+    def camera_name(self, path: str) -> Optional[str]:
+        """The name of the camera at a node (VIDIOC_QUERYCAP's card), or None when the node is not one a room's camera could be: it
+        does not capture video (a USB camera's metadata node, a codec) or is the Pi's own (a platform device: the ISP, the decoders),
+        or it can't be opened."""
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except OSError:
+            return None
+        try:
+            cap = v4l2_capability()
+            fcntl.ioctl(fd, VIDIOC_QUERYCAP, cap)
+        except OSError:
+            return None
+        finally:
+            os.close(fd)
+        caps = cap.device_caps if cap.capabilities & V4L2_CAP_DEVICE_CAPS else cap.capabilities
+        if not caps & V4L2_CAP_VIDEO_CAPTURE or cap.bus_info.startswith(b"platform:"):
+            return None
+        return cap.card.decode("utf-8", "replace").strip("\x00 ") or path
 
     def open(self, path: str) -> int:
         return os.open(path, os.O_RDWR | os.O_NONBLOCK)

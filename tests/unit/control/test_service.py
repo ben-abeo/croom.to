@@ -624,12 +624,17 @@ def skip_if_day_ends_within(hours: float) -> None:
         pytest.skip(f"less than {hours} hours left in the local day")
 
 
+async def no_room_devices():
+    """The Devices page's listing of the room's speakers, microphones and cameras, standing in for pw-dump and /dev/video*: none."""
+    return {"audio.output_device": [], "audio.input_device": [], "video.device": []}
+
+
 def make_service(meeting=None, calendar=None, devices=None, tv=None, discover=None, mouse=None, scores=None, laptop=None, pin_store=None,
-                 admin=None, **config):
+                 admin=None, find_devices=no_room_devices, **config):
     settings = {"host": "127.0.0.1", "port": 0, "room_name": "Lab", "room_location": "2nd floor"}
     settings.update(config)
     return ControlService(config=settings, meeting=meeting, calendar=calendar, devices=devices, tv=tv, discover=discover, mouse=mouse,
-                          scores=scores, laptop=laptop, pin_store=pin_store, admin=admin)
+                          scores=scores, laptop=laptop, pin_store=pin_store, admin=admin, find_devices=find_devices)
 
 
 @pytest.fixture(autouse=True)

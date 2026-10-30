@@ -38,7 +38,7 @@ from croom.scores.espn import ScheduleUnavailable
 from croom.scores.service import ScoresService
 from croom.tv.errors import TvError
 from tests.unit.control.test_service import (
-    BOARDROOM, STUB_PEOPLE, StubCalendar, StubDevices, StubMeeting, StubMouse, StubSearch, StubTv, event, skip_if_day_ends_within,
+    BOARDROOM, STUB_PEOPLE, StubCalendar, StubDevices, StubMeeting, StubMouse, StubSearch, StubTv, event, no_room_devices, skip_if_day_ends_within,
 )
 from tests.unit.calendar.test_bookings import ROOM_CAL, FakeGoogle
 from tests.unit.control.test_bookings_api import BookingCalendar
@@ -54,7 +54,7 @@ class PageServer:
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
-                 bookings=False, laptop=None, admin=None, config_file=None):
+                 bookings=False, laptop=None, admin=None, config_file=None, find_devices=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -77,6 +77,8 @@ class PageServer:
         self.admin = admin              # the root helper's client (Settings): none is a room without the helper, "Not available on this device"
         # The config.yaml the Settings pages read: in the server's own folder unless a test names one (never /etc/croom)
         self.config_file = Path(config_file) if config_file is not None else Path(self._settings_dir.name) / "config.yaml"
+        # The Devices page's listing of the room's speakers, microphones and cameras: never pw-dump or /dev/video* in a test
+        self.find_devices = find_devices or no_room_devices
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -117,7 +119,7 @@ class PageServer:
             config=config,
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
-            laptop=self.laptop, admin=self.admin,
+            laptop=self.laptop, admin=self.admin, find_devices=self.find_devices,
         )
         await service.start()
         self.port = service.bound_port

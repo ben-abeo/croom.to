@@ -28,9 +28,10 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import yaml
 
 from croom.core.config import Config
-from croom.meeting.zoom_auth import PLACEHOLDER as ZOOM_PLACEHOLDER
-from croom.meeting.zoom_auth import S2S_KEYS as ZOOM_S2S_KEYS
-from croom.meeting.zoom_auth import SDK_KEYS as ZOOM_SDK_KEYS
+from croom.settings.credentials import KINDS as CREDENTIAL_KINDS
+from croom.settings.credentials import CredentialError
+from croom.settings.credentials import parse as parse_credential
+from croom.settings.credentials import summary as credential_summary
 from croom.settings.schema import SettingError, check_config
 
 logger = logging.getLogger(__name__)
@@ -50,7 +51,7 @@ MAX_CREDENTIAL = 64 * 1024
 MAX_CONFIG = 256 * 1024
 COMMAND_TIMEOUT_S = 90            # systemctl restart waits for the agent to stop, which can take a while
 
-CREDENTIAL_FILES = {"google": "google-service-account.json", "zoom": "zoom-credentials.json"}
+CREDENTIAL_FILES = {key: kind.file_name for key, kind in CREDENTIAL_KINDS.items()}
 
 Runner = Callable[[List[str]], Tuple[int, str]]
 
@@ -177,50 +178,6 @@ def check_config_yaml(text: Any, current: Optional[Dict[str, Any]] = None) -> Di
     return data
 
 
-def _blank(data: Dict[str, Any], key: str) -> bool:
-    value = data.get(key)
-    return not isinstance(value, str) or not value.strip() or value.strip().startswith(ZOOM_PLACEHOLDER)
-
-
-def _what_it_is(data: Dict[str, Any]) -> Optional[str]:
-    """What a JSON file uploaded as a key looks like, for a refusal that names it."""
-    if data.get("type") == "service_account":
-        return "a Google service-account key"
-    if any(key in data for key in ZOOM_SDK_KEYS + ZOOM_S2S_KEYS):
-        return "a Zoom credentials file"
-    if "installed" in data or "web" in data:
-        return "a Google OAuth client file"
-    return None
-
-
-def _google_summary(data: Dict[str, Any]) -> str:
-    if data.get("type") != "service_account":
-        what = _what_it_is(data)
-        if what:
-            raise JobError(f"This is {what}, not a Google service-account key")
-        raise JobError('This is not a Google service-account key: it has no "type": "service_account"')
-    for key in ("client_email", "private_key"):
-        value = data.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise JobError(f"This Google key has no {key}: download a new key for the service account")
-    return f"Key for {data['client_email']}"
-
-
-def _zoom_summary(data: Dict[str, Any]) -> str:
-    if data.get("type") == "service_account":
-        raise JobError("This is a Google service-account key, not Zoom credentials")
-    for key in ZOOM_SDK_KEYS:
-        if _blank(data, key):
-            raise JobError(f"These Zoom credentials have no {key} (or it is still {ZOOM_PLACEHOLDER})")
-    present = [key for key in ZOOM_S2S_KEYS if not _blank(data, key)]
-    if present and len(present) != len(ZOOM_S2S_KEYS):
-        missing = ", ".join(key for key in ZOOM_S2S_KEYS if key not in present)
-        raise JobError(f"These Zoom credentials have no {missing}: the server-to-server values and room_user go together")
-    if present:
-        return f"Zoom Meeting SDK keys, joining as {data['room_user'].strip()}"
-    return "Zoom Meeting SDK keys"
-
-
 # --- the jobs
 
 
@@ -323,12 +280,9 @@ class Jobs:
             raise JobError("The key must be a Google service-account key or Zoom credentials")
         content = _text(args, "content", MAX_CREDENTIAL)
         try:
-            data = json.loads(content)
-        except ValueError:
-            data = None
-        if not isinstance(data, dict):
-            raise JobError("This is not a JSON file: a key file is the .json file the console downloads")
-        summary = _google_summary(data) if kind == "google" else _zoom_summary(data)
+            summary = credential_summary(kind, parse_credential(content))
+        except CredentialError as e:
+            raise JobError(str(e)) from e
         target = self._paths.config_dir / CREDENTIAL_FILES[kind]
         self._paths.config_dir.mkdir(parents=True, exist_ok=True)
         self._place(target, content.encode("utf-8"), 0o600)
@@ -526,7 +480,8 @@ class Jobs:
         self._host.background(lambda: self._watch(asked_at))
 
     def restart_status(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """How the last restart went: watching, healthy, undone (with why) or down (with why); state none before any."""
+        """How the last restart went: restarting (asked for, systemctl not yet done), watching, healthy, undone (with why) or down (with
+        why); state none before any."""
         _only(args)
         record = self._read_state().get("restart")
         return record if isinstance(record, dict) else {"state": "none", "undone": False}

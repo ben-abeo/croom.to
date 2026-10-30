@@ -30,10 +30,12 @@ def test_from_the_meeting_screens_dock_the_mic_level_changes_and_back_returns_to
         page = open_page(browser, server)
         join_by_id(page)
         page.wait_for_function("!document.getElementById('sound-panel').hidden", timeout=5000)
-        assert page.locator("#open-mic").inner_text().strip() == "Mic level"
+        assert page.locator("#open-mic").inner_text().strip() == "Mic"                          # short: the speaker's name keeps its line
+        assert page.locator("#open-mic").get_attribute("aria-label") == "Mic level"
         assert page.locator("#open-mic svg use").get_attribute("href") == "#icon-mic"
         device, mic, camera = box(page, "#sound-device"), box(page, "#open-mic"), box(page, "#open-camera-live")
         assert abs(mic[1] - camera[1]) <= 1 and mic[2] < camera[0] and device[2] <= mic[0], (device, mic, camera)   # on the speaker's line, before Camera
+        assert mic[2] - mic[0] < 160, mic                                                          # a word's width, not a menu item's
         page.click("#open-mic")
         page.wait_for_function("document.body.dataset.view === 'mic'", timeout=5000)
         page.wait_for_function("!document.getElementById('mic-panel').hidden", timeout=5000)

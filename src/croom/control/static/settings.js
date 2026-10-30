@@ -82,9 +82,11 @@
     fetch("/api/settings/lock", { method: "POST", headers: headers, body: "{}" }).catch(() => {});   // gone already, or unreachable: nothing to do
   }
 
-  // A request with the token, answered with its status and body whatever the status (the PIN's own routes read their refusals).
+  // A request with the token, answered with its status and body whatever the status (the PIN's own routes read their refusals). A body
+  // that is a form (a key file's upload) goes as the browser sends a form, with its own Content-Type; every other as JSON.
   async function call(path, options) {
-    const headers = { "Content-Type": "application/json" };
+    const form = options && typeof FormData !== "undefined" && options.body instanceof FormData;
+    const headers = form ? {} : { "Content-Type": "application/json" };
     const token = heldToken();
     if (token) headers[UNLOCK_HEADER] = token;
     const response = await fetch(path, Object.assign({}, options || {}, { headers: headers }));
@@ -115,6 +117,7 @@
     return answer.data;
   }
   const post = (path, body) => api(path, { method: "POST", body: JSON.stringify(body || {}) });
+  const upload = (path, form) => api(path, { method: "POST", body: form });
 
   // Back to the pad, saying why, when the person is still in Settings; the token goes either way.
   function relock(words, minutes) {
@@ -397,7 +400,7 @@
   });
 
   window.croomSettings = {
-    PAGES: PAGES, api: api, post: post, pinPad: pinPad, open: openSettings,
+    PAGES: PAGES, api: api, post: post, upload: upload, pinPad: pinPad, open: openSettings,
     // A page built in a file of its own hands its draw over here; its place in the menu is PAGES'.
     define: (key, draw) => {
       const page = PAGES.find((p) => p.key === key);

@@ -7,13 +7,17 @@ when, the booking it follows, whether it made that booking) is kept in laptop.js
 """
 
 import asyncio
+import io
 import logging
+import time
 from datetime import datetime
 from typing import Any, Callable, Dict, Optional
 
 from croom.calendar.bookings import BookingError
 from croom.control.settings import SettingsStore
+from croom.core.config import Config
 from croom.core.service import Service
+from croom.laptop.check import check_laptop
 from croom.laptop.errors import (CAMERA_AWAY, HOW_LONG, IN_A_MEETING, NOT_READY, SOURCE, SWITCHING, TITLE, TV_FAILED,  # noqa: F401
                                  LaptopError)
 from croom.laptop.switch import LAPTOP, NO_ANSWER, ROOM, UsbSwitch
@@ -28,9 +32,10 @@ class LaptopService(Service):
     WATCH_S = 2.0
 
     def __init__(self, switch, store: SettingsStore, calendar=None, meeting=None, devices=None, tv=None,
-                 clock: Optional[Callable[[], datetime]] = None):
+                 clock: Optional[Callable[[], datetime]] = None, config: Optional[Config] = None):
         super().__init__("laptop")
         self._switch, self._store = switch, store
+        self._config = config        # the config the switch was made from: Test the switch's words name its pin
         self._calendar, self._meeting, self._devices, self._tv = calendar, meeting, devices, tv
         self._clock = clock or (lambda: datetime.now().astimezone())
         self._lock = asyncio.Lock()
@@ -44,7 +49,7 @@ class LaptopService(Service):
     @classmethod
     def from_config(cls, config, calendar=None, meeting=None, devices=None, tv=None, switch=None) -> "LaptopService":
         return cls(switch or UsbSwitch.from_config(config), SettingsStore(config.resolve_data_dir() / "laptop.json"),
-                   calendar=calendar, meeting=meeting, devices=devices, tv=tv)
+                   calendar=calendar, meeting=meeting, devices=devices, tv=tv, config=config)
 
     # -- what is kept
 
@@ -242,6 +247,41 @@ class LaptopService(Service):
             await self._end_booking(key)
         logger.info("The MeetUp is back on the room")
         return self.state()
+
+    async def test_switch(self) -> Dict[str, Any]:
+        """Settings' Test the switch (spec 2026-10-29): `croom --check-laptop --switch` with this service's own switch, then the MeetUp
+        brought back, so that the room is left as it was. {"ok": whether the switch moved it both ways, "lines": what the check says}.
+        Refused in a meeting, while the laptop has the MeetUp, and while a switch is under way; the watch waits meanwhile."""
+        if self._busy():
+            raise LaptopError(IN_A_MEETING)
+        if self._active:
+            raise LaptopError(CAMERA_AWAY)
+        if self._lock.locked():
+            raise LaptopError(SWITCHING)
+        async with self._lock:
+            out = io.StringIO()
+            if not self._switch.available:
+                code = await check_laptop(self._config or Config(), out, switch=self._switch, held=True)
+                return {"ok": False, "lines": out.getvalue().splitlines()}
+            await self._release()
+            try:
+                code = await check_laptop(self._config or Config(), out, switch=self._switch, move=True, held=True)
+                if self._switch.holder() != ROOM:
+                    started = time.monotonic()
+                    if await self._switch.move_to(ROOM):
+                        print(f"Pressed again: the MeetUp is back on the Pi ({time.monotonic() - started:.1f} s).", file=out)
+                    else:
+                        code = 1
+                        print("The switch did not bring the MeetUp back: press the switch's button by hand.", file=out)
+            except Exception as e:  # noqa: BLE001 - the room gets its devices back whatever the switch did
+                logger.exception("Test the switch failed")
+                code = 1
+                print(f"The test stopped: {type(e).__name__}: {e}", file=out)
+            finally:
+                self._last_holder = None    # the moves were asked for: the watch starts afresh
+                await self._reclaim()
+            logger.info(f"Test the switch: {'passed' if code == 0 else 'failed'}")
+            return {"ok": code == 0, "lines": out.getvalue().splitlines()}
 
     # -- the others
 

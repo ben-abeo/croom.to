@@ -16,7 +16,11 @@ result of one it had. A job handed out but not mentioned in the device's next ch
 was lost); a running job the device stops mentioning has ended without a result.
 
 The registry (devices, their hashed tokens, last seen, last result, and the refused ids) is persisted in the data directory, mode 600;
-last seen is written at most every SAVE_EVERY_S, the rest at once. The protocol is the same for every kind of device: the jobs' arguments
+last seen is written at most every SAVE_EVERY_S, the rest of an allowed device's at once. What a pending device says is written only with
+the next of those throttled writes, never at once: anyone on the LAN can make up pending devices, and must not wear the card out. A
+devices.json that can't be read as one is moved aside (devices.json.bad-<time>) rather than written over, so that a person can look at it.
+
+A wifi_scan's result (the networks the device found) is kept in memory with the device, for Settings › Network. The protocol is the same for every kind of device: the jobs' arguments
 are checked here (check_job) and again by the device.
 """
 
@@ -54,7 +58,8 @@ MAX_REFUSED = 50
 SAVE_EVERY_S = 60
 MAX_WORDS = 300
 MAX_TEXT = 64
-MAX_NETWORK = 2048
+MAX_NETWORK = 4096
+MAX_NETWORKS = 30                 # a wifi_scan's result: the networks kept
 DONE, FAILED, RUNNING = "done", "failed", "running"
 
 WIFI_PASSWORD = re.compile(r"[\x20-\x7e]{8,63}|[0-9A-Fa-f]{64}")
@@ -97,9 +102,14 @@ def _update_args(args: Dict[str, Any]) -> Dict[str, Any]:
 def _connect_args(args: Dict[str, Any]) -> Dict[str, Any]:
     ssid = _ssid(args)
     password = args.get("password", "")
+    if password is None:
+        password = ""
     if not isinstance(password, str) or (password and not WIFI_PASSWORD.fullmatch(password)):
-        raise CheckinError("A Wi-Fi password is 8 to 63 characters", 400)
-    return {"ssid": ssid, "password": password}
+        raise CheckinError("A Wi-Fi password is 8 to 63 letters, digits and symbols, or a key of 64 characters 0 to 9 and A to F", 400)
+    hidden = args.get("hidden", False)
+    if not isinstance(hidden, bool):
+        raise CheckinError("Hidden must be true or false", 400)
+    return {"ssid": ssid, "password": password, "hidden": hidden}
 
 
 def _forget_args(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -133,6 +143,26 @@ def _text(value: Any, limit: int = MAX_TEXT) -> str:
     return "".join(c for c in value if c.isprintable())[:limit]
 
 
+def scan_result(result: Any) -> Optional[List[Dict[str, Any]]]:
+    """A wifi_scan's result as a device reported it ({"networks": [...]}), cleaned: at most MAX_NETWORKS networks, each {"ssid",
+    "signal", "security", "open", "saved", "in_use"}; None when it is not one."""
+    networks = result.get("networks") if isinstance(result, dict) else None
+    if not isinstance(networks, list):
+        return None
+    clean = []
+    for network in networks[:MAX_NETWORKS]:
+        if not isinstance(network, dict) or not isinstance(network.get("ssid"), str):
+            continue
+        ssid = network["ssid"]
+        if not ssid or len(ssid.encode("utf-8", "replace")) > 32:
+            continue
+        signal = network.get("signal")
+        clean.append({"ssid": ssid, "signal": signal if isinstance(signal, int) and not isinstance(signal, bool) and 0 <= signal <= 100 else 0,
+                      "security": _text(network.get("security"), 40), "open": network.get("open") is True,
+                      "saved": network.get("saved") is True, "in_use": network.get("in_use") is True})
+    return clean
+
+
 def _iso(seconds: Optional[float]) -> Optional[str]:
     if seconds is None:
         return None
@@ -156,6 +186,7 @@ class Registry:
         self._devices: Dict[str, Dict[str, Any]] = {}
         self._refused: List[str] = []
         self._jobs: Dict[str, Dict[str, Any]] = {}       # device id -> its job (waiting, handed out or running): in memory only
+        self._scans: Dict[str, Dict[str, Any]] = {}      # device id -> its last wifi_scan's networks and when: in memory only
         self._saved_at = 0.0
         self._dirty = False
         self._load()
@@ -169,8 +200,14 @@ class Registry:
             data = json.loads(self.path.read_text())
         except FileNotFoundError:
             return
-        except (OSError, ValueError) as e:
+        except OSError as e:
             logger.error(f"Could not read the devices that check in from {self.path}: {e}")
+            return
+        except ValueError as e:
+            self._set_aside(f"it is not JSON ({e})")
+            return
+        if not isinstance(data, dict):
+            self._set_aside("it is not a JSON object")
             return
         devices = data.get("devices") if isinstance(data, dict) else None
         for device_id, entry in (devices or {}).items():
@@ -179,6 +216,18 @@ class Registry:
                 self._devices[device_id] = entry
         refused = data.get("refused") if isinstance(data, dict) else None
         self._refused = [r for r in (refused or []) if isinstance(r, str) and DEVICE_ID.fullmatch(r)][-MAX_REFUSED:]
+
+    def _set_aside(self, why: str) -> None:
+        """Move a devices.json that can't be read out of the way (devices.json.bad-<time>), so that the next write does not lose it."""
+        stamp = datetime.fromtimestamp(self._clock(), timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        aside = self.path.with_name(f"{self.path.name}.bad-{stamp}")
+        try:
+            os.replace(self.path, aside)
+        except OSError as e:
+            logger.error(f"Could not read {self.path} ({why}), nor move it aside: {e}")
+            self.path = None   # kept in memory only: the file is not written over
+            return
+        logger.error(f"Could not read {self.path} ({why}): moved it aside to {aside}; the devices must be allowed again")
 
     def _save(self, force: bool = True) -> None:
         """Write the registry (at once when `force`; otherwise only when SAVE_EVERY_S has gone by since the last write)."""
@@ -244,14 +293,14 @@ class Registry:
                 entry = {"kind": kind, "state": "pending", "token_hash": hashed, "first_seen": now, "last_seen": now}
                 self._devices[device_id] = entry
                 self._seen(entry, body, address, now)
-                self._save()
+                self._save(force=False)   # a device waiting to join is written with the next throttled write, never at once
                 logger.info(f"A {label(kind)} asks to join: {entry.get('name') or device_id} at {address}")
                 return {"state": "pending", "interval": INTERVAL_S}
             if not hmac.compare_digest(entry["token_hash"], hashed):
                 raise CheckinError("This device's token is not the one it joined with", 403)
             changed = self._seen(entry, body, address, now)
             if entry["state"] == "pending":
-                self._save(force=changed)
+                self._save(force=False)
                 return {"state": "pending", "interval": INTERVAL_S}
             changed = self._report(device_id, entry, body.get("job"), now) or changed
             job = self._hand_out(device_id, now)
@@ -285,6 +334,10 @@ class Registry:
         words = _text(report.get("words"), MAX_WORDS) if report else ""
         if job is not None and report is not None and report["id"] == job["id"]:
             if state in (DONE, FAILED):
+                if job["type"] == "wifi_scan" and state == DONE:
+                    networks = scan_result(report.get("result"))
+                    if networks is not None:
+                        self._scans[device_id] = {"networks": networks, "at": _iso(now)}
                 self._close(device_id, entry, job, state, words, now)
                 return True
             job["state"] = RUNNING
@@ -341,6 +394,7 @@ class Registry:
             entry = self._entry(device_id)
             del self._devices[device_id]
             self._jobs.pop(device_id, None)
+            self._scans.pop(device_id, None)
             self._refused = (self._refused + [device_id])[-MAX_REFUSED:]
             self._save()
             logger.info(f"The {label(entry['kind'])} {entry.get('name') or device_id} was refused")
@@ -351,6 +405,7 @@ class Registry:
             entry = self._entry(device_id)
             del self._devices[device_id]
             self._jobs.pop(device_id, None)
+            self._scans.pop(device_id, None)
             self._save()
             logger.info(f"The {label(entry['kind'])} {entry.get('name') or device_id} was forgotten")
 
@@ -396,6 +451,11 @@ class Registry:
         with self._lock:
             return any(e["state"] == "allowed" and e["kind"] == kind and e.get("last_seen", 0) >= since for e in self._devices.values())
 
+    def known(self, kind: str) -> bool:
+        """Whether a device of `kind` has joined (been allowed)."""
+        with self._lock:
+            return any(e["state"] == "allowed" and e["kind"] == kind for e in self._devices.values())
+
     @staticmethod
     def _public_job(job: Dict[str, Any]) -> Dict[str, Any]:
         return {"id": job["id"], "type": job["type"], "args": _public_args(job["args"]), "state": job["state"],
@@ -414,6 +474,7 @@ class Registry:
             "online": last_seen is not None and now - last_seen <= ONLINE_S,
             "job": self._public_job(job) if job else None,
             "last": dict(last, at=_iso(last.get("at"))) if isinstance(last, dict) else None,
+            "scan": copy.deepcopy(self._scans.get(device_id)),
         }
 
 

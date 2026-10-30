@@ -12,6 +12,7 @@ import tarfile
 from pathlib import Path
 
 from croom.settings.checkin import CheckinError, Registry
+from tests.unit.admin.fake_nm import FakeNM
 
 REPO = Path(__file__).resolve().parents[3]
 AGENT_PATH = REPO / "tools" / "kiosk_agent" / "croom_kiosk_agent.py"
@@ -86,8 +87,9 @@ class Runner:
     archive, tar -xf, bash <release>/installer/install-kiosk.sh (fails for the releases in `bad_setup`) and systemctl reboot. `calls`
     lists every command; `setups` the releases set up, in order; `reboots` counts."""
 
-    def __init__(self, main=(A, B, C)):
+    def __init__(self, main=(A, B, C), nm=None):
         self.main = set(main)
+        self.nm = nm                    # NetworkManager (nmcli, and ping): its own stand-in, which keeps its own calls
         self.offline = False
         self.bad_setup = set()
         self.reboot_fails = False
@@ -96,6 +98,8 @@ class Runner:
         self.cut = None                 # a callable run before each command (PowerCut counts them)
 
     def __call__(self, args, env=None, timeout=None):
+        if self.nm is not None and args[0] in ("nmcli", "ping"):
+            return self.nm(args)
         if self.cut:
             self.cut()
         self.calls.append(list(args))
@@ -180,7 +184,10 @@ class Device:
         agent.point(self.paths.good, running)
         (self.paths.config).write_text(json.dumps({"url": URL, "user": USER}))
         self.clock = Clock()
-        self.runner = Runner()
+        (root / "nm").mkdir()
+        self.nm = FakeNM(root / "nm")
+        self.runner = Runner(nm=self.nm)
+        self.room_up = lambda url: True      # GET <room>/api/status answers (on whichever network the touch Pi is)
         self.room = Room(self.clock)
         self.children = []
         self.child_does = lambda child: None
@@ -198,7 +205,8 @@ class Device:
     def host(self):
         return agent.Host(run=self.runner, post=self.room, clock=self.clock, monotonic=self.clock, sleep=self.clock.sleep,
                           spawn=self.spawn, execv=lambda path, args: self.execs.append(args), sync=self.sync, python="/usr/bin/python3",
-                          network=lambda url: {"address": "10.0.0.9"}, hostname=lambda: "touch-pi")
+                          network=lambda url: {"address": "10.0.0.9"}, hostname=lambda: "touch-pi",
+                          room_status=lambda url: self.room_up(url), nm_connections=str(self.nm.dir))
 
     def running(self):
         return agent.link_target(self.paths.good)

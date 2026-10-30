@@ -126,10 +126,11 @@ async def test_job_refusals(client_factory, pins, registry, unlocked):  # noqa: 
     response = await client.post(f"/api/settings/devices/{TOUCH}/jobs", json={"type": "wifi_connect", "args": {"ssid": "Office",
                                                                                                              "password": "short"}},
                                  headers=unlocked)
-    assert response.status == 400 and (await response.json())["error"] == "A Wi-Fi password is 8 to 63 characters"
+    assert response.status == 400 and (await response.json())["error"].startswith("A Wi-Fi password is 8 to 63 letters")
     meeting.state = MeetingState.CONNECTED
-    for job in ("reboot", "update"):
-        response = await client.post(f"/api/settings/devices/{TOUCH}/jobs", json={"type": job, "args": {"commit": B}}, headers=unlocked)
+    for job in ("reboot", "update", "wifi_connect", "wifi_forget"):
+        response = await client.post(f"/api/settings/devices/{TOUCH}/jobs", json={"type": job, "args": {"commit": B, "ssid": "Guest"}},
+                                     headers=unlocked)
         assert response.status == 409 and (await response.json())["error"] == "Leave the meeting first"
     response = await client.post(f"/api/settings/devices/{TOUCH}/jobs", json={"type": "wifi_scan"}, headers=unlocked)
     assert response.status == 200

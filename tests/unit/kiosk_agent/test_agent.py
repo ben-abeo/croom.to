@@ -1,5 +1,5 @@
 """The touch Pi's agent (room settings spec 2026-10-29, sections 6 and 7): its identity, the check-in with the room (the real registry
-behind a fake HTTP), its jobs (reboot, update, the Wi-Fi ones not built yet), the update's build, switch, kiosk setup and reboot, the
+behind a fake HTTP), its jobs (reboot, update; the Wi-Fi ones are in test_wifi.py), the update's build, switch, kiosk setup and reboot, the
 5 minutes the new version has to check in after it (the good agent supervising a fake child), going back, and what each start does after
 a power cut at any point. Everything outside the agent's folders is a stand-in (fakes.py)."""
 
@@ -61,7 +61,9 @@ def test_it_waits_to_join_then_checks_in_with_its_token(device):
     url, body, headers = device.room.posts[-1]
     assert url == "http://pimeet-3.local:8080/api/devices/checkin"
     assert headers[TOKEN_HEADER] == me.identity["token"]
-    assert body == {"id": me.identity["id"], "kind": "touch", "version": A, "name": "touch-pi", "network": {"address": "10.0.0.9"},
+    assert body == {"id": me.identity["id"], "kind": "touch", "version": A, "name": "touch-pi",
+                    "network": {"address": "10.0.0.9", "wifi": True, "connection": "wifi", "ssid": "Office", "signal": 70,
+                                "saved": ["Office"], "change": None},
                     "job": None}
     [waiting] = device.room.registry.waiting()
     assert waiting["name"] == "touch-pi" and waiting["version"] == A
@@ -100,16 +102,6 @@ def test_a_reboot_that_fails_says_why(device):
     give(device, me, "reboot")
     me.checkin()
     assert last(device, me)["state"] == "failed" and last(device, me)["words"] == "Could not reboot: Failed to reboot"
-
-
-@pytest.mark.parametrize("job, args", [("wifi_scan", {}), ("wifi_connect", {"ssid": "Office", "password": "12345678"}),
-                                       ("wifi_forget", {"ssid": "Office"})])
-def test_wifi_is_not_built_yet(device, job, args):
-    me = allowed(device)
-    give(device, me, job, **args)
-    me.checkin()
-    assert last(device, me)["state"] == "failed" and last(device, me)["words"] == "Not yet"
-    assert device.runner.calls == []
 
 
 def test_a_job_is_done_once_and_one_at_a_time(device):

@@ -10,8 +10,10 @@ whoever is in the room.
 import asyncio
 import contextlib
 import copy
+import ipaddress
 import json
 import logging
+import math
 import mimetypes
 import re
 from datetime import date, datetime, timedelta, timezone
@@ -30,7 +32,7 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
-from croom.settings.checkin import COMMIT_KINDS, TOKEN_HEADER, CheckinError, Registry
+from croom.settings.checkin import COMMIT_KINDS, KINDS, TOKEN_HEADER, CheckinError, Registry
 from croom.settings.checks import CheckBusy, Checks
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
@@ -471,6 +473,9 @@ class ControlService(Service):
         app.router.add_post("/api/settings/devices/{device}/refuse", self._handle_refuse_device)
         app.router.add_post("/api/settings/devices/{device}/forget", self._handle_forget_device)
         app.router.add_post("/api/settings/devices/{device}/jobs", self._handle_device_job)
+        app.router.add_get("/api/devices/seen-since", self._handle_seen_since)
+        app.router.add_get("/api/settings/network", self._handle_network)
+        app.router.add_post("/api/settings/network/{device}/{action}", self._handle_network_action)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -1843,13 +1848,111 @@ class ControlService(Service):
         if data is None:
             return self._error_response("Send a JSON object", 400)
         job = data.get("type")
-        if job in ("reboot", "update") and self._meeting_state() in IN_PROGRESS_STATES:
+        if job in ("reboot", "update", "wifi_connect", "wifi_forget") and self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response(self.LEAVE_FIRST, 409)
         try:
             queued = self._registry.queue(request.match_info["device"], job, data.get("args"))
         except CheckinError as e:
             return self._error_response(str(e), e.status)
         return web.json_response({"job": queued})
+
+    @staticmethod
+    def _from_this_machine(request: web.Request) -> bool:
+        """Whether the request came from the TV Pi itself: over the loopback, or from the very address it was made to (a connection
+        to one of the machine's own addresses from that address). The peer is the socket's, never a header."""
+        transport = request.transport
+        peer = transport.get_extra_info("peername") if transport is not None else None
+        local = transport.get_extra_info("sockname") if transport is not None else None
+        if not peer or not isinstance(peer, (tuple, list)):
+            return False
+        try:
+            address = ipaddress.ip_address(str(peer[0]).split("%")[0])
+        except ValueError:
+            return False
+        mapped = getattr(address, "ipv4_mapped", None)
+        if address.is_loopback or (mapped is not None and mapped.is_loopback):
+            return True
+        return bool(local) and isinstance(local, (tuple, list)) and str(local[0]) == str(peer[0])
+
+    async def _handle_seen_since(self, request: web.Request) -> web.Response:
+        """GET ?kind=touch&since=<Unix seconds>: whether a device of that kind that has joined checked in at or after `since`, and
+        whether one has joined at all: {"seen", "known"}. Answered only to the TV Pi itself (the root helper, checking a new Wi-Fi
+        network: it has no PIN), and it says nothing but that."""
+        if not self._from_this_machine(request):
+            return self._error_response("Only the TV Pi itself may ask this", 403)
+        kind = request.query.get("kind")
+        try:
+            since = float(request.query.get("since", ""))
+        except ValueError:
+            since = math.nan
+        if kind not in KINDS or not math.isfinite(since):
+            return self._error_response("Send kind (touch or sign) and since (Unix seconds)", 400)
+        return web.json_response({"seen": self._registry.seen_since(kind, since), "known": self._registry.known(kind)})
+
+    # --- Network: the Wi-Fi of the TV Pi and of the devices that check in (spec 2026-10-29, sections 3 and 7)
+
+    NETWORK_ACTIONS = ("scan", "connect", "forget")
+
+    async def _handle_network(self, request: web.Request) -> web.Response:
+        """What Settings › Network shows: {"tv": the TV Pi's connection ({"available": False, "error"} without the helper; otherwise
+        the helper's wifi_status: "wifi", "connection", "ssid", "signal", "address", "saved", "change"), "devices": the devices that
+        have joined, each with its "network" (what it says in its check-ins), its Wi-Fi job and last result, and "scan" (its last
+        wifi_scan's networks), "in_meeting"}."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response({"tv": await self._tv_network(), "devices": self._registry.devices(),
+                                  "in_meeting": self._meeting_state() in IN_PROGRESS_STATES})
+
+    async def _tv_network(self) -> Dict[str, Any]:
+        if self._without_helper() is not None:
+            return {"available": False, "error": NOT_AVAILABLE}
+        try:
+            status = await self._admin.call("wifi_status")
+        except (AdminUnavailable, AdminError) as e:
+            return {"available": False, "error": str(e)}
+        return dict({key: value for key, value in status.items() if key != "ok"}, available=True)
+
+    async def _handle_network_action(self, request: web.Request) -> web.Response:
+        """POST /api/settings/network/{device}/scan | connect {ssid, password, hidden} | forget {ssid}. For the TV Pi ("tv") the root
+        helper does it: scan answers {"networks", "at"}, connect {"changing": true} (GET /api/settings/network follows the change), forget
+        {"words"}. A device that checks in is given the job (it takes it at its next check-in): {"queued": true, "job"}. A change (connect,
+        forget) is never made in a meeting."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        device, action = request.match_info["device"], request.match_info["action"]
+        if action not in self.NETWORK_ACTIONS:
+            return self._error_response(f"There is no Network action {action}", 404)
+        if device != "tv" and not self._checks_in(device):
+            return self._error_response(f"There is no device {device}", 404)
+        if action != "scan" and self._meeting_state() in IN_PROGRESS_STATES:
+            return self._error_response(self.LEAVE_FIRST, 409)
+        args: Dict[str, Any] = {}
+        if action in ("connect", "forget"):
+            args["ssid"] = data.get("ssid")
+        if action == "connect":
+            args["password"] = data.get("password") or ""
+            args["hidden"] = data.get("hidden", False)
+        if device != "tv":
+            return self._queue(device, f"wifi_{action}", {"queued": True}, **args)
+        refused = self._without_helper()
+        if refused is not None:
+            return refused
+        try:
+            answer = await self._admin.call(f"wifi_{action}", **args)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        if action == "connect":
+            logger.info(f"Wi-Fi change of the TV Pi to {args['ssid']!r} asked for from Settings")
+        return web.json_response({key: value for key, value in answer.items() if key != "ok"})
 
     # --- Meetings: Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
 

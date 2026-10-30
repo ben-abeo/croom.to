@@ -16,7 +16,17 @@ does not know under "Devices waiting to join" until someone with the PIN taps Al
   old, known-good agent that starts the new one (--trial) and waits up to 5 minutes for it to check in with the TV Pi. When it has, the
   new release becomes `good` and the agent starts over from it; when it has not, `current` goes back to the old release, the old kiosk
   setup is run again, and the touch Pi reboots onto it.
-- wifi_scan, wifi_connect, wifi_forget: not built yet ("Not yet").
+- wifi_scan: the networks in range (the job's result, which the TV Pi keeps for Settings › Network).
+- wifi_connect {ssid, password, hidden}: join a network with the safety net of spec section 7: the connection the touch Pi was on is
+  kept, the new network is joined, and within 90 seconds the touch Pi must reach the room (GET <room page>/api/status); otherwise it
+  goes back to the network before and says why. The password goes into NetworkManager's own file for the network (root's, mode 600),
+  never on a command line. The change's record (wifi.json) is written before each step, so that a power cut leaves the touch Pi on the
+  network before unless the new one was proven (the agent's next start finishes or undoes it).
+- wifi_forget {ssid}: forget a saved network (not the one the touch Pi is on: it would be cut off).
+
+The Wi-Fi work is the TV Pi's helper's own (croom/admin/nmcli.py, standard library only), loaded from this release by its path. Each
+check-in tells the TV Pi how the touch Pi is connected (Wi-Fi or Ethernet, the network, its signal, the networks it knows, the last
+change), read from NetworkManager at most every STATUS_EVERY_S.
 
 Every step of an update is written to update.json before it is taken, with the file written whole (a temporary file, fsync, rename), so
 that a power cut at any moment leaves a state the next start finishes or undoes: cut off while building, the half-built folder is
@@ -26,10 +36,12 @@ is an argument list.
 
 Layout (root's): /opt/croom-kiosk/{repo.git, releases/<commit>/, current -> releases/<commit>, good -> releases/<commit>};
 /var/lib/croom-kiosk/ (mode 700): config.json {url, user} (the installer's), identity.json {id, token} (mode 600), update.json, job.json
-(the last job and its state, told to the TV Pi at each check-in), trial-ok (the new agent's word that it checked in).
+(the last job and its state, told to the TV Pi at each check-in), trial-ok (the new agent's word that it checked in), wifi.json (the
+last Wi-Fi change, mode 600).
 """
 
 import argparse
+import importlib.util
 import json
 import logging
 import os
@@ -51,6 +63,19 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("croom-kiosk-agent")
 
+
+def _load_nmcli():
+    """croom/admin/nmcli.py of this release (or clone), by its path: the TV Pi's helper's Wi-Fi work, standard library only."""
+    path = Path(__file__).resolve().parents[2] / "src" / "croom" / "admin" / "nmcli.py"
+    spec = importlib.util.spec_from_file_location("croom_kiosk_nmcli", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+nmcli = _load_nmcli()
+
 BASE = "/opt/croom-kiosk"
 STATE = "/var/lib/croom-kiosk"
 KIND = "touch"
@@ -64,7 +89,9 @@ LONG_TIMEOUT_S = 15 * 60          # git fetch from GitHub, the kiosk setup (whic
 COMMIT = re.compile(r"[0-9a-f]{40}")
 JOB_ID = re.compile(r"[0-9a-f]{16}")
 MAIN = "refs/remotes/origin/main"
-NOT_YET = "Not yet"
+STATUS_EVERY_S = 30               # how often the check-in's Wi-Fi status is read from NetworkManager
+RESULT_FOR_S = 60                 # how long a scan's networks go with the check-ins after it (the TV Pi keeps them from the first)
+NM_CONNECTIONS = "/etc/NetworkManager/system-connections"
 AGENT_FILE = Path("tools") / "kiosk_agent" / "croom_kiosk_agent.py"
 SETUP_FILE = Path("installer") / "install-kiosk.sh"
 SAFE_PATH = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -113,8 +140,18 @@ def http_post(url: str, body: bytes, headers: Dict[str, str], timeout: float = 1
             return e.code, b""
 
 
+def room_answers(url: str) -> bool:
+    """Whether the room page answers GET /api/status: the touch Pi can do its job on the network it is on."""
+    request = urllib.request.Request(urllib.parse.urljoin(url, "/api/status"), headers={"User-Agent": "croom-kiosk-agent"})
+    try:
+        with urllib.request.urlopen(request, timeout=4) as response:
+            return 200 <= response.status < 300
+    except (OSError, ValueError):
+        return False
+
+
 def network_status(url: str) -> Dict[str, Any]:
-    """The address this touch Pi reaches the TV Pi from (no packet is sent: a UDP socket only picks its route). Task 10 adds Wi-Fi."""
+    """The address this touch Pi reaches the TV Pi from (no packet is sent: a UDP socket only picks its route)."""
     host = urllib.parse.urlsplit(url).hostname or ""
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -131,7 +168,8 @@ class Host:
                  monotonic: Callable[[], float] = time.monotonic, sleep: Callable[[float], None] = time.sleep,
                  spawn=None, execv=os.execv, sync: Callable[[], None] = os.sync, python: str = sys.executable,
                  network: Callable[[str], Dict[str, Any]] = network_status, hostname: Callable[[], str] = socket.gethostname,
-                 euid: Callable[[], int] = os.geteuid):
+                 euid: Callable[[], int] = os.geteuid, room_status: Callable[[str], bool] = room_answers,
+                 nm_connections: str = NM_CONNECTIONS):
         self.run = run
         self.post = post
         self.clock = clock
@@ -144,6 +182,8 @@ class Host:
         self.network = network
         self.hostname = hostname
         self.euid = euid
+        self.room_status = room_status
+        self.nm_connections = nm_connections
 
 
 class Paths:
@@ -159,6 +199,7 @@ class Paths:
         self.update = self.state / "update.json"
         self.job = self.state / "job.json"
         self.trial_ok = self.state / "trial-ok"
+        self.wifi = self.state / "wifi.json"
 
     def release(self, name: str) -> Path:
         """A release's folder; a name that is not a commit is never made into a path."""
@@ -168,6 +209,19 @@ class Paths:
 
     def agent(self, release: str) -> Path:
         return self.release(release) / AGENT_FILE
+
+
+class JsonStore:
+    """The Wi-Fi change's record in a file of its own, written whole, root's alone."""
+
+    def __init__(self, path: Path):
+        self.path = path
+
+    def load(self) -> Dict[str, Any]:
+        return read_json(self.path)
+
+    def save(self, record: Dict[str, Any]) -> None:
+        write_json(self.path, record)
 
 
 class Failed(Exception):
@@ -271,6 +325,11 @@ class Agent:
         self._job: Dict[str, Any] = read_json(paths.job)       # the last job: what each check-in tells the TV Pi
         self._said: Optional[str] = None                        # the last trouble logged, so that it is logged once
         self.stopping = False
+        self.wifi = nmcli.Wifi(run=lambda args: host.run(args), store=JsonStore(paths.wifi), connections=Path(host.nm_connections),
+                               name="touch Pi", clock=host.clock, monotonic=host.monotonic, sleep=host.sleep)
+        self._wifi_status: Optional[Dict[str, Any]] = None      # what the check-ins say of the Wi-Fi, read every STATUS_EVERY_S
+        self._wifi_status_at = 0.0
+        self._result_until = 0.0                                # until when the last job's result goes with the check-ins
 
     # --- start
 
@@ -282,6 +341,7 @@ class Agent:
         self.identity = self._identity()
         if self.trial:
             return None
+        self._recover_wifi()
         plan = self.recover()
         if plan is None:
             self._recover_job()
@@ -305,7 +365,10 @@ class Agent:
             job = self._job
             if not JOB_ID.fullmatch(str(job.get("id", ""))):
                 return None
-            return {key: job.get(key) for key in ("id", "type", "state", "words")}
+            report = {key: job.get(key) for key in ("id", "type", "state", "words")}
+            if job.get("result") is not None and self.host.monotonic() < self._result_until:
+                report["result"] = job["result"]
+            return report
 
     def _set_job(self, **fields: Any) -> None:
         with self._lock:
@@ -319,7 +382,7 @@ class Agent:
     def checkin(self) -> Optional[Dict[str, Any]]:
         """One check-in: the TV Pi's answer, or None when there was none to use."""
         body = {"id": self.identity["id"], "kind": KIND, "version": self.version, "name": self.host.hostname()[:64],
-                "network": self.host.network(self.url), "job": self.report()}
+                "network": self.network(), "job": self.report()}
         target = urllib.parse.urljoin(self.url, "/api/devices/checkin")
         try:
             status, raw = self.host.post(target, json.dumps(body).encode("utf-8"), {TOKEN_HEADER: self.identity["token"]})
@@ -345,6 +408,27 @@ class Agent:
         if isinstance(job, dict):
             self.take(job)
         return answer
+
+    def network(self) -> Dict[str, Any]:
+        """How the touch Pi is connected, for the TV Pi's Network page: the address it reaches the room from, and its Wi-Fi (read at
+        most every STATUS_EVERY_S; at once after a Wi-Fi job)."""
+        network = dict(self.host.network(self.url))
+        now = self.host.monotonic()
+        if self._wifi_status is None or now - self._wifi_status_at >= STATUS_EVERY_S:
+            self._wifi_status_at = now
+            try:
+                status = self.wifi.status()
+            except Exception as e:  # noqa: BLE001 - no NetworkManager, or it did not answer: the check-in goes on without it
+                logger.debug(f"Could not read the Wi-Fi status: {e}")
+                status = {}
+            change = status.get("change") or None
+            self._wifi_status = {key: status[key] for key in ("wifi", "connection", "ssid", "signal") if key in status}
+            if status:
+                self._wifi_status["saved"] = [s[:32] for s in status.get("saved", [])][:20]
+                self._wifi_status["change"] = dict(change, words=str(change.get("words") or "")[:200]) if change else None
+        for key, value in (self._wifi_status or {}).items():
+            network.setdefault(key, value)
+        return network
 
     def _trouble(self, words: Optional[str]) -> None:
         if words != self._said:
@@ -384,7 +468,7 @@ class Agent:
         with self._lock:
             if self._job.get("id") == job_id or (self._worker is not None and self._worker.is_alive()):
                 return False
-        self._set_job(id=job_id, type=kind, state="running", words="Starting")
+        self._set_job(id=job_id, type=kind, state="running", words="Starting", result=None)
         args = args if isinstance(args, dict) else {}
         worker = threading.Thread(target=self._do, args=(job_id, kind, args), name=f"job-{kind}", daemon=True)
         with self._lock:
@@ -424,8 +508,59 @@ class Agent:
             raise Failed(f"Could not reboot: {last_line(out) or code}")
         return None   # "Rebooted" is told after it (_recover_job)
 
-    def do_not_yet(self, job_id: str, args: Dict[str, Any]) -> Optional[str]:
-        raise Failed(NOT_YET)
+    # --- Wi-Fi
+
+    def do_wifi_scan(self, job_id: str, args: Dict[str, Any]) -> Optional[str]:
+        self.progress("Looking for networks")
+        try:
+            found = self.wifi.scan(fresh=True)["networks"]
+        except nmcli.WifiError as e:
+            raise Failed(str(e)) from e
+        finally:
+            self._wifi_status = None
+        networks = [{key: n.get(key) for key in ("ssid", "signal", "security", "open", "saved", "in_use")} for n in found][:30]
+        self._result_until = self.host.monotonic() + RESULT_FOR_S
+        self._set_job(result={"networks": networks})
+        return f"Found {len(networks)} network{'' if len(networks) == 1 else 's'}"
+
+    def do_wifi_connect(self, job_id: str, args: Dict[str, Any]) -> Optional[str]:
+        hidden = args.get("hidden", False)
+        if not isinstance(hidden, bool):
+            raise Failed("Hidden must be true or false")
+        try:
+            plan = self.wifi.prepare(args.get("ssid"), args.get("password") or "", hidden)
+            return self.wifi.change(plan, lambda device, since: self._wifi_checks(device, plan.ethernet), self.progress, job=job_id)
+        except nmcli.WifiError as e:
+            raise Failed(str(e)) from e
+        finally:
+            self._wifi_status = None
+
+    def _wifi_checks(self, device: str, ethernet: bool):
+        """The touch Pi's job on a new network: it reaches the room (GET /api/status). On Ethernet the room is reached that way
+        whatever the Wi-Fi does, so the Wi-Fi's gateway must answer too."""
+        reaches = nmcli.Check(lambda: self.host.room_status(self.url),
+                              f"the touch Pi could not reach the room at {self.url} within {nmcli.TRIAL_S} seconds")
+        if ethernet:
+            return [self.wifi.gateway_check(device), reaches], "The touch Pi is on Ethernet, so its Wi-Fi gateway was checked as well"
+        return [reaches], "The touch Pi reaches the room"
+
+    def do_wifi_forget(self, job_id: str, args: Dict[str, Any]) -> Optional[str]:
+        try:
+            return self.wifi.forget(args.get("ssid"))
+        except nmcli.WifiError as e:
+            raise Failed(str(e)) from e
+        finally:
+            self._wifi_status = None
+
+    def _recover_wifi(self) -> None:
+        """A Wi-Fi change the agent's stop cut short (a power cut, a crash): finished when it was proven, undone when not."""
+        try:
+            words = self.wifi.recover()
+        except Exception:  # noqa: BLE001 - the agent must start all the same
+            logger.exception("Could not finish or undo the Wi-Fi change")
+            return
+        if words:
+            logger.warning(f"Wi-Fi: {words}")
 
     # --- update
 
@@ -678,8 +813,11 @@ class Agent:
         if job.get("state") != "running":
             return
         record = read_json(self.paths.update)
+        wifi = self.wifi.record()
         if job.get("type") == "reboot":
             self._set_job(state="done", words="Rebooted")
+        elif job.get("type") == "wifi_connect" and wifi.get("job") == job.get("id") and wifi.get("state") in ("done", "undone"):
+            self._set_job(state="done" if wifi["state"] == "done" else "failed", words=wifi.get("words") or "")
         elif job.get("type") == "update" and record.get("job") == job.get("id") and record.get("state") in ("done", "failed", "rolled_back"):
             self._tell(record)     # the update ended, and the agent stopped before its job said so
         else:
@@ -721,9 +859,9 @@ def seal(folder: Path) -> None:
 JOBS: Dict[str, Callable[[Agent, str, Dict[str, Any]], Optional[str]]] = {
     "reboot": Agent.do_reboot,
     "update": Agent.do_update,
-    "wifi_scan": Agent.do_not_yet,
-    "wifi_connect": Agent.do_not_yet,
-    "wifi_forget": Agent.do_not_yet,
+    "wifi_scan": Agent.do_wifi_scan,
+    "wifi_connect": Agent.do_wifi_connect,
+    "wifi_forget": Agent.do_wifi_forget,
 }
 
 

@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 from functools import partial
 from datetime import datetime, timezone
@@ -55,6 +56,7 @@ MAX_CONFIG = 256 * 1024
 COMMAND_TIMEOUT_S = 90            # systemctl restart waits for the agent to stop, which can take a while
 BUILD_TIMEOUT_S = 40 * 60         # an update's pip install on a Pi: the libraries come as wheels, but evdev compiles
 UPDATE_UNDER_WAY = "An update is under way: wait for it to finish"
+WIFI_UNDER_WAY = "A Wi-Fi change is under way: wait for it to finish"
 
 # The journal job (Settings > Logs): the room software's log, newest first
 JOURNAL_UNIT = "croom"
@@ -105,6 +107,17 @@ def status_answers(host: str, port: int) -> bool:
         return False
 
 
+def ask_room(host: str, port: int, path: str) -> Optional[Dict[str, Any]]:
+    """The room page's JSON answer to GET `path` at the address it listens on; None when it does not answer with a JSON object."""
+    address = f"[{host}]" if ":" in host else host
+    try:
+        with urllib.request.urlopen(f"http://{address}:{port}{path}", timeout=PROBE_TIMEOUT_S) as response:
+            answer = json.loads(response.read(64 * 1024).decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+    return answer if isinstance(answer, dict) else None
+
+
 def in_background(work: Callable[[], None]) -> None:
     """Run `work` in a daemon thread: the restart job answers at once and the watch goes on after it."""
     threading.Thread(target=work, name="croom-admin-watch", daemon=True).start()
@@ -120,9 +133,10 @@ class Paths:
     media_root: Path = Path("/media")
     install_dir: Path = Path("/opt/croom")
     admin_dir: Optional[Path] = None
+    nm_connections: Path = Path("/etc/NetworkManager/system-connections")   # NetworkManager's profiles (keyfiles), root's
 
     def __post_init__(self):
-        for name in ("config_dir", "data_dir", "media_root", "install_dir"):
+        for name in ("config_dir", "data_dir", "media_root", "install_dir", "nm_connections"):
             setattr(self, name, Path(getattr(self, name)))
         self.admin_dir = Path(self.admin_dir) if self.admin_dir is not None else self.data_dir.with_name(self.data_dir.name + "-admin")
 
@@ -178,6 +192,8 @@ class Host:
     python: str = "/usr/bin/python3"             # what a release's venv is made with
     github: Any = field(default_factory=GitHub)  # whether a version to install is on main (croom.settings.github.GitHub)
     sync: Callable[[], None] = os.sync           # a new release on the disk before its VERSION says it is whole
+    ask_room: Callable[[str, int, str], Optional[Dict[str, Any]]] = ask_room   # GET <room page><path>: Wi-Fi asks it what it has seen
+    new_uuid: Callable[[], str] = lambda: str(uuid.uuid4())                    # a new Wi-Fi profile's
 
 
 # --- checks
@@ -302,8 +318,12 @@ class Jobs:
         self._watch_lock = threading.Lock()
         self._watching = False
         self._updating = False                  # an update (or a switch back) from its check to its end: guarded by _watch_lock
-        from croom.admin.update import Updater  # (here: croom.admin.update imports this module)
+        self._wifi_changing = False             # a Wi-Fi job, a change from its check to its end: guarded by _watch_lock
+        self._state_lock = threading.RLock()    # one change to the record at a time (it is read, changed and written whole)
+        from croom.admin.update import Updater  # (here: croom.admin.update and croom.admin.wifi import this module)
+        from croom.admin.wifi import WifiJobs
         self._updater = Updater(self)
+        self._wifi = WifiJobs(self)
         self.table: Dict[str, Callable[[Dict[str, Any]], Dict[str, Any]]] = {
             "write_config": self.write_config,
             "save_credential": self.save_credential,
@@ -317,6 +337,10 @@ class Jobs:
             "update": self._updater.update,
             "update_status": self._updater.update_status,
             "rollback": self._updater.rollback,
+            "wifi_status": self._wifi.status,
+            "wifi_scan": self._wifi.scan,
+            "wifi_connect": self._wifi.connect,
+            "wifi_forget": self._wifi.forget,
         }
 
     @property
@@ -492,24 +516,27 @@ class Jobs:
         return state if isinstance(state, dict) else {}
 
     def _update_state(self, **changes: Any) -> None:
-        state = self._read_state()
-        state.update(changes)
-        self._ensure_admin_dir()
-        fd, temp = tempfile.mkstemp(dir=self._paths.admin_dir, prefix=".admin-state.")
-        try:
-            os.fchmod(fd, 0o600)   # on the open file, not by its name: a name in the folder can be swapped, the descriptor can't
-            with os.fdopen(fd, "w") as f:
-                fd = -1
-                json.dump(state, f)
-            os.replace(temp, self._paths.state)
-        except BaseException:
-            if fd >= 0:
-                os.close(fd)
+        with self._state_lock:   # a Wi-Fi change's record and a config write's mark may be written at the same moment
+            state = self._read_state()
+            state.update(changes)
+            self._ensure_admin_dir()
+            fd, temp = tempfile.mkstemp(dir=self._paths.admin_dir, prefix=".admin-state.")
             try:
-                os.unlink(temp)
-            except FileNotFoundError:
-                pass
-            raise
+                os.fchmod(fd, 0o600)   # on the open file, not by its name: a name in the folder can be swapped, the descriptor can't
+                with os.fdopen(fd, "w") as f:
+                    fd = -1
+                    json.dump(state, f)
+                    f.flush()
+                    os.fsync(f.fileno())   # the Wi-Fi record must be on the card before the change it announces is made
+                os.replace(temp, self._paths.state)
+            except BaseException:
+                if fd >= 0:
+                    os.close(fd)
+                try:
+                    os.unlink(temp)
+                except FileNotFoundError:
+                    pass
+                raise
 
     def _record(self, state: str, undone: bool, why: str = "") -> None:
         record = {"state": state, "undone": undone, "at": datetime.fromtimestamp(self._host.clock()).astimezone().isoformat(timespec="seconds")}
@@ -615,6 +642,8 @@ class Jobs:
                 raise JobError(UPDATE_UNDER_WAY)
             if self._watching:
                 raise JobError("The room is restarting: wait for it to come back")
+            if self._wifi_changing:   # the restart would cut the check of the new network (the touch Pi's check-in) short
+                raise JobError(WIFI_UNDER_WAY)
             self._watching = True
         try:
             asked_at = self._host.clock()
@@ -639,6 +668,7 @@ class Jobs:
         except OSError as e:
             logger.warning(f"Could not remove the old record {self._paths.legacy_state}: {e}")
         self._updater.resume()
+        self._wifi.resume()
         state = self._read_state()
         record = state.get("restart")
         asked_at = state.get("watch_asked_at")
@@ -665,6 +695,8 @@ class Jobs:
         with self._watch_lock:
             if self._updating:
                 raise JobError(UPDATE_UNDER_WAY)
+            if self._wifi_changing:
+                raise JobError(WIFI_UNDER_WAY)
         self._host.background(self._reboot_soon)
         return {"rebooting": True}
 

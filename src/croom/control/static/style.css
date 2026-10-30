@@ -910,6 +910,10 @@ select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); o
 .software-bar .message { margin: 0; }
 .software-bar .message.ok { color: #fff; }
 .software-device { display: grid; gap: 16px; }
+.software-stopped { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; flex: 0 0 auto; }
+.software-stopped[hidden] { display: none; }
+.software-stopped .note { margin: 0; }
+.software-stopped .button { min-height: 60px; padding: 0 18px; }
 .software-page:has(.device-card, .software-waiting) .software-card:not(.unavailable) { flex: 0 0 auto; }   /* several cards: the page scrolls, no card squeezed */
 .software-page:has(.device-card, .software-waiting) { height: auto; }
 .device-name { margin-left: 12px; font-size: 1rem; font-weight: 400; color: var(--periwinkle-300); }
@@ -925,6 +929,41 @@ select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); o
 .waiting-title { font-weight: 600; }
 .waiting-detail { color: var(--periwinkle-300); }
 .waiting-device .button { min-height: 60px; padding: 0 18px; }
+/* Settings › Network (settings-network.js): a card per device, as Software's: how it is connected, the last change, Change Wi-Fi (the
+   networks in range, a password, Join) and Forget (the networks it knows). The page scrolls inside its box; no card is squeezed. */
+.network-page { gap: 16px; height: auto; }
+.network-cards { display: grid; gap: 16px; }
+.network-card.software-card { flex: 0 0 auto; }
+.network-card .software-version.settings-unavailable { font-size: 1.4rem; font-weight: 400; color: var(--periwinkle-300); }
+.network-stopped { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.network-stopped[hidden], .network-card [hidden] { display: none; }
+.network-stopped .note { margin: 0; }
+.network-stopped .button { min-height: 60px; padding: 0 18px; }
+.network-panel, .network-forgets { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+                                   background: var(--surface-900); }
+.network-panel-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.network-panel-bar .button, .network-join .button, .network-forgets .button { min-height: 60px; padding: 0 18px; }
+.network-scan-note { margin: 0; }
+.network-list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; max-height: 30vh; overflow-y: auto; }
+.network-list.network-saved { max-height: none; }
+.network-item { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
+.network-saved .network-item { justify-content: space-between; padding: 4px 0; border-top: 1px solid var(--line-soft); }
+.button.network-choice { display: flex; flex: 1 1 auto; justify-content: space-between; align-items: center; gap: 4px 16px; min-height: 56px;
+                         padding: 0 16px; text-align: left; flex-wrap: wrap; }
+.button.network-choice.chosen { background: var(--blue-600); border-color: var(--blue-600); }
+.network-name { font-weight: 600; overflow-wrap: anywhere; }
+.network-detail { color: var(--periwinkle-300); font-weight: 400; }
+.network-choice.chosen .network-detail { color: #fff; }
+.network-join { display: grid; gap: 10px; }
+.network-join-title { margin: 0; font-weight: 600; overflow-wrap: anywhere; }
+.network-label { display: grid; gap: 6px; }
+.network-password-row { display: flex; gap: 10px; align-items: center; }
+.network-password-row .setting-input { flex: 1 1 auto; min-width: 0; }
+.network-warning { margin: 0; padding: 10px 14px; border-radius: var(--radius-sm); background: var(--warn-fill); color: var(--ink-900);
+                   border-left: 6px solid var(--warn-bar); }
+.network-card .message { margin: 0; }
+.network-card .message.ok { color: #fff; }
+.button.network-forget-one.confirm { background: var(--warn-fill); border-color: var(--warn-bar); color: var(--ink-900); }
 /* Save stays in sight at the foot of a long page (Meetings) as the rows scroll under it */
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; position: sticky; bottom: 0; z-index: 1;
                     padding: 10px 0; background: var(--surface-900); }

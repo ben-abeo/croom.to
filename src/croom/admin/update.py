@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from croom.admin.jobs import HEALTH_INTERVAL_S, HEALTH_TIMEOUT_S, UPDATE_UNDER_WAY, JobError, Jobs, _only
+from croom.admin.jobs import HEALTH_INTERVAL_S, HEALTH_TIMEOUT_S, UPDATE_UNDER_WAY, WIFI_UNDER_WAY, JobError, Jobs, _only
 from croom.settings.github import CANT_CHECK, GitHubError, is_commit, short
 
 logger = logging.getLogger(__name__)
@@ -264,6 +264,8 @@ class Updater:
                 raise JobError(UPDATE_UNDER_WAY)
             if self._jobs._watching:
                 raise JobError(RESTARTING_NOW)
+            if self._jobs._wifi_changing:   # the update's restart would cut the new network's check short
+                raise JobError(WIFI_UNDER_WAY)
             self._jobs._updating = True
 
     def _end(self) -> None:

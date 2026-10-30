@@ -9,7 +9,9 @@
 // The other devices' cards (the touch Pi, the door sign, which check in with the TV Pi) go in the box under it: a file of their own
 // hands a draw over with croomSettings.softwareCard(draw), and draw(box, answer, again) is called with GET /api/settings/software's
 // answer each time the page reads it (again() reads it once more, after a change); it may give back a function that tidies up when the
-// page is left or read again. While a device has a job under way the page reads again every 2 seconds, as while the TV Pi updates.
+// page is left or read again. While a device has a job under way the page reads again every 2 seconds, as while the TV Pi updates; while
+// the devices with a job are all away (not checking in), every 30 seconds, and once they have been away 10 minutes not at all (Check again
+// reads once more): an open page must not keep Settings unlocked for ever.
 //
 // Update all, over the cards, updates every device that is not on the newest version (the TV Pi last: its update restarts the room
 // software); it waits while a meeting is on ("Leave the meeting first") and while anything is under way.
@@ -20,6 +22,8 @@
 
   const UNDER_WAY = ["building", "switching", "restarting", "watching", "rolling_back"];
   const POLL_MS = 2000;
+  const OFFLINE_POLL_MS = 30000;             // a device with a job that is not checking in
+  const GIVE_UP_S = 10 * 60;                 // ... and after it has been away this long, the page stops reading by itself
   const RETURN_WAIT_MS = 10 * 60 * 1000;     // a build takes minutes; the restart and its watch 3 more; a reboot about 2
   const CONFIRM_MS = 4000;
   const NOT_AVAILABLE = "Not available on this device";
@@ -73,7 +77,13 @@
     tv.dataset.device = "tv";
     tv.hidden = true;
     const others = make("div", "software-devices");   // the touch Pi's and the door sign's cards
-    root.append(loading, bar, tv, others);
+    const stopped = make("div", "software-stopped");   // the page has stopped reading: the device it waits for has been away 10 minutes
+    const stoppedWords = make("p", "note");
+    const checkAgain = button("Check again", "quiet software-again", "refresh-cw");
+    stopped.append(stoppedWords, checkAgain);
+    stopped.hidden = true;
+    checkAgain.addEventListener("click", () => { stopped.hidden = true; read(); });
+    root.append(loading, bar, stopped, tv, others);
     host.append(root);
 
     // --- the TV Pi's card: built once, filled at each reading
@@ -188,7 +198,21 @@
       if (answer.in_meeting) allMessage.textContent = "Leave the meeting first";
       else if (allMessage.textContent === "Leave the meeting first") allMessage.textContent = "";
     }
-    const deviceBusy = (answer) => (answer.devices || []).some((d) => d.job);
+    // When to read again for the devices' jobs: soon while one that has a job checks in; slowly while they are all away; not at all once
+    // they have been away GIVE_UP_S
+    function deviceDelay(answer) {
+      const busy = (answer.devices || []).filter((d) => d.job);
+      stopped.hidden = true;
+      if (!busy.length) return null;
+      if (busy.some((d) => d.online)) return POLL_MS;
+      if (busy.every((d) => d.seen_ago === null || d.seen_ago > GIVE_UP_S)) {
+        const name = busy[0].label || "device";
+        stoppedWords.textContent = "The " + name + " has not checked in for 10 minutes: this page has stopped checking on it.";
+        stopped.hidden = false;
+        return null;
+      }
+      return OFFLINE_POLL_MS;
+    }
 
     function drawOthers(answer) {
       for (const tidy of tidyCards) { try { tidy(); } catch (e) { console.warn("A Software card did not tidy up:", e); } }
@@ -224,7 +248,9 @@
       fillBar(answer);
       drawOthers(answer);
       const tvBusy = card.available && card.update && UNDER_WAY.includes(card.update.state);
-      if ((tvBusy || deviceBusy(answer)) && !waiting) timer = setTimeout(read, POLL_MS);
+      const devices = deviceDelay(answer);
+      const delay = tvBusy ? POLL_MS : devices;
+      if (delay !== null && !waiting) timer = setTimeout(read, delay);
     }
 
     // The room software (or the whole TV Pi) goes away and comes back: ask whether it answers until it has been away and is back, then

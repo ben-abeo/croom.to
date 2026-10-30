@@ -91,7 +91,8 @@ def mode(path):
 def test_the_table_lists_this_tasks_jobs_and_nothing_else(machine):
     jobs, *_ = machine
     assert set(jobs.table) == {"write_config", "save_credential", "usb_files", "read_usb_file", "restart", "restart_status", "reboot",
-                               "version", "journal", "update", "update_status", "rollback"}
+                               "version", "journal", "update", "update_status", "rollback", "wifi_status", "wifi_scan", "wifi_connect",
+                               "wifi_forget"}
 
 
 def test_a_job_refuses_an_argument_it_does_not_take(machine):

@@ -202,19 +202,20 @@ def test_a_result_for_a_job_the_tv_pi_has_forgotten_is_kept(registry, tmp_path, 
 def test_a_wifi_password_is_never_shown_back(registry):
     joined(registry)
     job = registry.queue(TOUCH, "wifi_connect", {"ssid": "Office", "password": "secret-words"})
-    assert job["args"] == {"ssid": "Office"}
-    assert registry.get(TOUCH)["job"]["args"] == {"ssid": "Office"}
+    assert job["args"] == {"ssid": "Office", "hidden": False}
+    assert registry.get(TOUCH)["job"]["args"] == {"ssid": "Office", "hidden": False}
     handed = registry.checkin(body(), TOKEN, "10.0.0.9")["job"]
-    assert handed["args"] == {"ssid": "Office", "password": "secret-words"}
+    assert handed["args"] == {"ssid": "Office", "password": "secret-words", "hidden": False}
     registry.checkin(body(job={"id": handed["id"], "type": "wifi_connect", "state": "failed", "words": "Not yet"}), TOKEN, "10.0.0.9")
-    assert registry.get(TOUCH)["last"]["args"] == {"ssid": "Office"}
+    assert registry.get(TOUCH)["last"]["args"] == {"ssid": "Office", "hidden": False}
     assert "secret-words" not in json.dumps(registry.devices())
 
 
 @pytest.mark.parametrize("job, args", [
     ("format_disk", {}), ("update", {}), ("update", {"commit": "B" * 40}), ("update", {"commit": "b" * 39}),
     ("wifi_connect", {"ssid": "", "password": "12345678"}), ("wifi_connect", {"ssid": "x" * 33}),
-    ("wifi_connect", {"ssid": "Office", "password": "short"}), ("wifi_forget", {}), ("reboot", "now"),
+    ("wifi_connect", {"ssid": "Office", "password": "short"}), ("wifi_connect", {"ssid": "Office", "hidden": "yes"}),
+    ("wifi_connect", {"ssid": "Office", "password": "x" * 64}), ("wifi_forget", {}), ("reboot", "now"),
 ])
 def test_job_arguments_are_checked(job, args):
     with pytest.raises(CheckinError) as caught:
@@ -225,7 +226,9 @@ def test_job_arguments_are_checked(job, args):
 def test_job_arguments_are_cleaned():
     assert check_job("reboot", {"extra": 1}) == {}
     assert check_job("update", {"commit": COMMIT, "url": "x"}) == {"commit": COMMIT}
-    assert check_job("wifi_connect", {"ssid": "Office"}) == {"ssid": "Office", "password": ""}
+    assert check_job("wifi_connect", {"ssid": "Office"}) == {"ssid": "Office", "password": "", "hidden": False}
+    assert check_job("wifi_connect", {"ssid": "Hidden", "password": "a" * 64, "hidden": True, "x": 1}) == \
+        {"ssid": "Hidden", "password": "a" * 64, "hidden": True}
 
 
 def test_last_seen_and_not_seen_since(registry, clock, tmp_path):
@@ -260,6 +263,58 @@ def test_what_a_device_says_of_itself_is_kept_short(registry):
 
 def test_a_registry_file_that_is_not_one_is_set_aside(tmp_path, clock):
     (tmp_path / "devices.json").write_text("{not json")
+    registry = Registry(tmp_path / "devices.json", clock=clock)
+    assert registry.devices() == []
+    aside = tmp_path / "devices.json.bad-20270115T080000Z"
+    assert aside.read_text() == "{not json" and not (tmp_path / "devices.json").exists()   # moved aside, not written over
+    joined(registry)
+    assert aside.read_text() == "{not json" and TOUCH in json.loads((tmp_path / "devices.json").read_text())["devices"]
+    (tmp_path / "devices.json").write_text("[1, 2]")
+    clock.now += 1
     assert Registry(tmp_path / "devices.json", clock=clock).devices() == []
+    assert (tmp_path / "devices.json.bad-20270115T080001Z").read_text() == "[1, 2]"
     (tmp_path / "devices.json").write_text(json.dumps({"devices": {"../x": {"kind": "touch"}, TOUCH: {"kind": "toaster"}}}))
     assert Registry(tmp_path / "devices.json", clock=clock).waiting() == []
+
+
+def test_devices_waiting_to_join_never_force_a_write(registry, tmp_path, clock, monkeypatch):
+    """Anyone on the LAN can ask to join, as often as they like: what they say is written only with the throttled writes."""
+    joined(registry)                                                 # Allow writes at once
+    writes = []
+    real = os.replace
+    monkeypatch.setattr("croom.settings.checkin.os.replace", lambda a, b: (writes.append(b), real(a, b)))
+    for n in range(MAX_PENDING):
+        clock.now += 1
+        registry.checkin(body(f"{n:032x}", name=f"pi-{n}"), TOKEN, "10.0.0.9")
+        registry.checkin(body(f"{n:032x}", name=f"renamed-{n}", version="c" * 40), TOKEN, "10.0.0.9")   # changes, too
+    assert writes == [] and len(registry.waiting()) == MAX_PENDING
+    clock.now += SAVE_EVERY_S
+    registry.checkin(body(f"{0:032x}"), TOKEN, "10.0.0.9")
+    assert len(writes) == 1
+    assert len(json.loads((tmp_path / "devices.json").read_text())["devices"]) == MAX_PENDING + 1
+
+
+def test_a_wifi_scan_result_is_kept_with_the_device_cleaned(registry):
+    joined(registry)
+    registry.queue(TOUCH, "wifi_scan")
+    handed = registry.checkin(body(), TOKEN, "10.0.0.9")["job"]
+    networks = [{"ssid": "Office", "signal": 70, "security": "WPA2", "open": False, "saved": True, "in_use": True, "extra": "x"},
+                {"ssid": "x" * 40, "signal": 1}, {"ssid": 5}, "nonsense", {"ssid": "Guest", "signal": 900, "security": "", "open": True}]
+    report = {"id": handed["id"], "type": "wifi_scan", "state": "done", "words": "Found 2 networks", "result": {"networks": networks}}
+    registry.checkin(body(job=report), TOKEN, "10.0.0.9")
+    scan = registry.get(TOUCH)["scan"]
+    assert scan["at"] == "2027-01-15T08:00:00+00:00"
+    assert scan["networks"] == [{"ssid": "Office", "signal": 70, "security": "WPA2", "open": False, "saved": True, "in_use": True},
+                                {"ssid": "Guest", "signal": 0, "security": "", "open": True, "saved": False, "in_use": False}]
+    assert registry.get(TOUCH)["last"]["words"] == "Found 2 networks"
+    registry.forget(TOUCH)
+    joined(registry)
+    assert registry.get(TOUCH)["scan"] is None
+
+
+def test_known_says_whether_a_device_of_a_kind_has_joined(registry):
+    assert not registry.known("touch")
+    registry.checkin(body(), TOKEN, "10.0.0.9")
+    assert not registry.known("touch")                               # waiting is not joined
+    registry.allow(TOUCH)
+    assert registry.known("touch") and not registry.known("sign")

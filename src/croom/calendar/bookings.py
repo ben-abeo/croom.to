@@ -322,6 +322,17 @@ class RoomBookings:
     def busy(self, leave_out: Optional[str] = None) -> List[Span]:
         return busy_spans(self.merge(), leave_out)
 
+    def in_progress(self) -> Optional[CalendarEvent]:
+        """The booking the room is in at this moment, Google's or its own, not cancelled or declined: the one Laptop mode lends
+        the MeetUp for (spec 2026-10-27). None when the room is free."""
+        now = self.clock()
+        return next((e for e in self.merge() if e.start_time <= now < e.end_time
+                     and e.status != "cancelled" and e.response_status != "declined"), None)
+
+    def find(self, key: str) -> Optional[CalendarEvent]:
+        """A booking the room shows, by the room's tag or by Google's id: Laptop mode follows its end as it moves in Google."""
+        return next((e for e in self.merge() if key in (e.booking_id, e.id)), None)
+
     def slots(self, day: date) -> Dict[str, Any]:
         starts = open_starts(day, self.clock(), self.busy(), self.start_hour, self.end_hour) if self._bookable_day(day) else []
         return {"date": day.isoformat(), "starts": [{"start": s.isoformat(), "durations": d} for s, d in starts]}
@@ -435,6 +446,13 @@ class RoomBookings:
         booking = self._find(key)
         if booking.start < self.clock().replace(second=0, microsecond=0):
             raise BookingError("That booking has started: end it instead")
+        booking.cancelled = True
+        return await self._changed(booking)
+
+    async def withdraw(self, key: str) -> Booking:
+        """A booking whose purpose fell through a moment after it was made (Laptop mode's switch did not move): cancelled
+        whatever the minute."""
+        booking = self._find(key)
         booking.cancelled = True
         return await self._changed(booking)
 

@@ -68,6 +68,25 @@ class TestServiceRegistration:
         assert dashboard.config["state_file"] == str(tmp_path / "dashboard-state.json")
         assert dashboard.config["device_info"]["name"] == agent.config.room.name
 
+    def test_laptop_mode_is_registered_when_enabled_and_handed_to_the_control_page(self, tmp_path, no_hardware):
+        config = make_config(tmp_path, control=True)
+        config.laptop.enabled = True
+        agent = make_agent(config)
+        agent._initialize_services()
+        laptop = agent.service_manager.get_service("laptop")
+        control = agent.service_manager.get_service("control")
+        assert laptop is not None and control._laptop is laptop
+        assert laptop._devices is agent.service_manager.get_service("devices")
+        order = agent.service_manager._start_order
+        assert order.index("devices") < order.index("laptop") < order.index("control")
+        assert order.index("tv") < order.index("laptop")
+
+    def test_laptop_mode_is_absent_when_not_enabled(self, tmp_path, no_hardware):
+        agent = make_agent(make_config(tmp_path, control=True))
+        agent._initialize_services()
+        assert agent.service_manager.get_service("laptop") is None
+        assert agent.service_manager.get_service("control")._laptop is None
+
 
 class TestTvRegistration:
     def with_a_tv(self, tmp_path, enabled=True) -> Config:

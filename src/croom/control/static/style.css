@@ -532,6 +532,7 @@ body.keyboard-open .schedule { display: none; }
 .tv-mac input { width: 220px; max-width: 100%; }
 .tv-connection { flex: 0 0 auto; margin-bottom: 14px; }
 .tv-settings-form { display: flex; flex-wrap: wrap; gap: 10px 14px; align-items: flex-end; padding-top: 8px; }
+.tv-settings-form label[hidden] { display: none; }   /* the laptop input, in a room with no laptop switch */
 .tv-settings-form label { display: flex; flex-direction: column; gap: 4px; min-width: 0; font-size: 0.9rem; }
 .tv-settings-form input, .tv-settings-form select, .tv-mac input {
   color: #fff; background: var(--surface-900); border: 1px solid var(--periwinkle-300); border-radius: 8px;
@@ -737,3 +738,6 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
   .meeting-main .actions.meeting-actions { grid-template-columns: minmax(0, 1fr); }
   .meeting-main .meeting-actions .button { min-height: 64px; padding: 0 20px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
 }
+
+/* Laptop mode (spec 2026-10-27): the idle card is the Laptop screen; joining by link waits for the MeetUp to come back. */
+body[data-laptop="on"] .link { display: none; }

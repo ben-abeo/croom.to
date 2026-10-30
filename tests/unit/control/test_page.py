@@ -54,7 +54,7 @@ class PageServer:
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
-                 bookings=False):
+                 bookings=False, laptop=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -64,6 +64,7 @@ class PageServer:
         self.calendar_connected = calendar_connected
         self.port_arg = port
         self.schedules = schedules      # team id -> the schedule ESPN would answer; None leaves the room without a scoreboard
+        self.laptop = laptop            # Laptop mode (spec 2026-10-27): none is a room without the USB switch
         self.with_bookings = bookings   # the room books in its calendar (spec 2026-10-25): self.rooms keeps them, self.google is a fake Google
         self.rooms = None
         self.google = None
@@ -113,6 +114,7 @@ class PageServer:
             config=config,
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
+            laptop=self.laptop,
         )
         await service.start()
         self.port = service.bound_port

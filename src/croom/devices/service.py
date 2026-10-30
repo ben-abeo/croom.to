@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 
 class DevicesService(Service):
     REDISCOVER_S = 30.0
+    RECLAIM_S = 15.0        # the MeetUp takes a few seconds to come back as a camera and a speaker after the switch moves it
+    RECLAIM_POLL_S = 0.5
 
     def __init__(self, volume: RoomVolume, camera: RoomCamera):
         super().__init__("devices")
@@ -29,6 +31,7 @@ class DevicesService(Service):
         self.homing: Optional[asyncio.Task] = None
         self._rediscover_task: Optional[asyncio.Task] = None
         self._last_failure: Optional[str] = None
+        self._away = False   # the MeetUp is lent to a laptop (spec 2026-10-27): the background check does not look for it
 
     @classmethod
     def from_config(cls, config, store) -> "DevicesService":
@@ -78,10 +81,35 @@ class DevicesService(Service):
     async def _rediscover(self) -> None:
         while True:
             await asyncio.sleep(self.REDISCOVER_S)
+            if self._away:
+                continue
             if not self.camera.available:
                 await self._check(self.camera.discover)
             if not self.volume.available:
                 await self._check(self.volume.refresh, force=True)
+
+    async def release(self) -> None:
+        """The MeetUp is going to a laptop (spec 2026-10-27 Laptop mode): the preview ends, the camera is closed (a homing under way
+        is cut short), and the background check leaves the camera and the speaker alone until reclaim()."""
+        self._away = True
+        self.camera.set_preview(False)
+        await self.camera.close()
+        self.camera.forget_position()
+
+    async def reclaim(self, home: bool = True) -> None:
+        """The MeetUp is back: look for it now, not at the next background check, giving it RECLAIM_S to reappear as a camera, then
+        (when `home`) home the camera, which the laptop may have moved. Not in a meeting: the camera is in use."""
+        self._away = False
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.RECLAIM_S
+        while True:
+            await self._check(self.camera.discover)
+            await self._check(self.volume.refresh, force=True)
+            if self.camera.available or loop.time() >= deadline:
+                break
+            await asyncio.sleep(self.RECLAIM_POLL_S)
+        if home and self.camera.available and self.camera.home_saved and (self.homing is None or self.homing.done()):
+            self.homing = asyncio.create_task(self._home_at_start())
 
     async def stop(self) -> None:
         task, self._rediscover_task = self._rediscover_task, None

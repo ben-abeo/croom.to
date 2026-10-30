@@ -361,7 +361,7 @@ class TestTvConfig:
         assert config.tv.pi_input == "HDMI_1" and config.tv.keep_on is True
 
     def test_round_trips_through_dict(self):
-        tv = {"enabled": True, "brand": "lg", "host": "10.0.0.41", "mac": "aa:bb", "pi_input": "HDMI_2", "keep_on": False}
+        tv = {"enabled": True, "brand": "lg", "host": "10.0.0.41", "mac": "aa:bb", "pi_input": "HDMI_2", "laptop_input": "", "keep_on": False}
         config = Config.from_dict({"tv": tv})
         assert config.tv == TvConfig(**tv)
         assert config.to_dict()["tv"] == tv
@@ -641,3 +641,21 @@ class TestMeetingPlatformsAndEmptySections:
         loaded = load_config(str(path))
         assert loaded.data_dir == "" and loaded.room.name == "Conference Room"
         assert "Warning: Failed to load config from" in capsys.readouterr().out
+
+
+def test_the_laptop_section_and_the_laptops_tv_input_have_defaults_and_round_trip():
+    from croom.core.config import Config, LaptopConfig
+    config = Config()
+    assert config.laptop == LaptopConfig()
+    assert (config.laptop.enabled, config.laptop.gpio_pin, config.laptop.active_low, config.laptop.press_ms,
+            config.laptop.usb_id, config.laptop.switch_wait_s) == (False, 17, False, 200, "046d:0866", 10)
+    assert config.tv.laptop_input == ""
+    loaded = Config.from_dict({"laptop": {"enabled": True, "gpio_pin": 27, "active_low": True}, "tv": {"laptop_input": "HDMI_2"}})
+    assert loaded.laptop.enabled and loaded.laptop.gpio_pin == 27 and loaded.laptop.active_low and loaded.laptop.usb_id == "046d:0866"
+    again = Config.from_dict(loaded.to_dict())
+    assert again.laptop == loaded.laptop and again.tv.laptop_input == "HDMI_2"
+
+
+def test_an_empty_laptop_section_is_its_defaults():
+    from croom.core.config import Config, LaptopConfig
+    assert Config.from_dict({"laptop": None}).laptop == LaptopConfig()

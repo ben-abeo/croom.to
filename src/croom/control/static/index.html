@@ -36,6 +36,7 @@
       <p id="kicker" class="kicker">Connecting</p>
       <p id="headline" class="headline">Connecting to the room</p>
       <p id="detail" class="detail"></p>
+      <p id="laptop-problem" class="message" role="status"></p>
       <p id="message" class="message" role="status"></p>
       <div id="actions" class="actions"></div>
     </section>
@@ -370,6 +371,7 @@
         <form id="tv-settings-form" class="tv-settings-form">
           <label>TV MAC address<input id="tv-settings-mac" type="text" data-keyboard="mac" autocomplete="off" spellcheck="false" placeholder="AA:BB:CC:DD:EE:FF"></label>
           <label>Room Pi input<select id="tv-settings-input"><option value="HDMI_1">HDMI 1</option><option value="HDMI_2">HDMI 2</option><option value="HDMI_3">HDMI 3</option><option value="HDMI_4">HDMI 4</option></select></label>
+          <label>Laptop input<select id="tv-settings-laptop"><option value="">Not set</option><option value="HDMI_1">HDMI 1</option><option value="HDMI_2">HDMI 2</option><option value="HDMI_3">HDMI 3</option><option value="HDMI_4">HDMI 4</option></select></label>
           <button type="submit" id="tv-settings-save" class="button quiet">Save connection</button>
           <p id="tv-settings-result" role="status"></p>
         </form>

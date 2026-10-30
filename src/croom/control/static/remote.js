@@ -315,6 +315,10 @@
     const input = t.pi_input || "HDMI_1";
     if (!Array.from(select.options).some((o) => o.value === input)) select.add(new Option(input, input));
     select.value = input;
+    const laptop = el("tv-settings-laptop");
+    const laptopInput = t.laptop_input || "";
+    if (laptopInput && !Array.from(laptop.options).some((o) => o.value === laptopInput)) laptop.add(new Option(laptopInput, laptopInput));
+    laptop.value = laptopInput;
     el("tv-settings-result").textContent = "";
     tvFind();
   }
@@ -327,7 +331,7 @@
     render();
     try {
       tvTake(await tvAsk(TV_CONTROL_MS, "The TV", (extra) => post("/api/tv/settings", {
-        mac: el("tv-settings-mac").value.trim(), pi_input: el("tv-settings-input").value,
+        mac: el("tv-settings-mac").value.trim(), pi_input: el("tv-settings-input").value, laptop_input: el("tv-settings-laptop").value,
       }, extra)));
       el("tv-settings-result").textContent = "Saved";
     } catch (e) {
@@ -675,6 +679,8 @@
     el("tv-pairing").hidden = card !== "pairing";
     el("tv-refused").hidden = card !== "refused";
     el("tv-choose").hidden = card !== "choose";
+    const laptopSwitch = Boolean(model.status && model.status.laptop && model.status.laptop.enabled);
+    el("tv-settings-laptop").closest("label").hidden = !laptopSwitch;   // a room with no laptop switch has no laptop input to choose
     el("tv-change").hidden = !t.configured || tvView.pairing || card === "choose";
     el("tv-change").disabled = tvView.turningOn || tvView.forgetting;
     if ((card !== "" || (pointer.target === "tv" && !tvSupports(t, "pointer"))) && pointer.target) stopPointer();

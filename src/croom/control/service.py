@@ -26,6 +26,7 @@ from croom.control.settings import SettingsStore
 from croom.core.config import DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
+from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
@@ -214,6 +215,7 @@ class ControlService(Service):
         mouse: the room Pi's virtual mouse that the touchpad drives (a croom.tv.pointer.PiMouse, made when it is first used, unless a
             test stands in for it).
         scores: the scores service (current() lists the football scores of the schools that are on), or None.
+        laptop: the Laptop service (the room's MeetUp lent to a laptop through the USB switch), or None in a room without the switch.
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -230,6 +232,7 @@ class ControlService(Service):
         discover=None,
         mouse=None,
         scores=None,
+        laptop=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -262,6 +265,7 @@ class ControlService(Service):
         self._mouse_waits: Set[asyncio.Task] = set()         # the sockets' handlers that wait for the room Pi's mouse to be made (stop() ends them)
         self._scores = scores
         self._scores_failure: Optional[str] = None
+        self._laptop = laptop
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -282,6 +286,7 @@ class ControlService(Service):
         store=None,
         tv=None,
         scores=None,
+        laptop=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         return cls(
@@ -301,6 +306,7 @@ class ControlService(Service):
             store=store,
             tv=tv,
             scores=scores,
+            laptop=laptop,
         )
 
     @property
@@ -355,6 +361,7 @@ class ControlService(Service):
         app.router.add_post("/api/tv/settings", self._handle_tv_settings)
         app.router.add_post("/api/tv/forget", self._handle_tv_forget)
         app.router.add_get("/api/tv/discover", self._handle_tv_discover)
+        app.router.add_post("/api/laptop", self._handle_laptop)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -558,6 +565,7 @@ class ControlService(Service):
             "audio": self._audio_state(),
             "camera": self._camera_state(),
             "tv": self._tv_status(),
+            "laptop": self._laptop_status(),
         }
         scores = self._scores_status()
         if scores:
@@ -985,7 +993,7 @@ class ControlService(Service):
             if self._tv_selecting:
                 raise TvError("A TV connection is already waiting; finish or cancel it first")
             selected = dict(found)
-            for name in ("mac", "pi_input"):
+            for name in ("mac", "pi_input", "laptop_input"):
                 if name in data:
                     selected[name] = data[name]
             self._tv_selecting = True
@@ -1011,6 +1019,50 @@ class ControlService(Service):
                 return self._tv.status()
 
         return await self._tv_call(request, action)
+
+    # ------------------------------------------------------------------
+    # Laptop mode (spec 2026-10-27): the room's MeetUp lent to a laptop at the table through the USB switch
+    # ------------------------------------------------------------------
+
+    NO_LAPTOP = "This room has no laptop switch"
+
+    def _laptop_status(self) -> Dict[str, Any]:
+        """Laptop mode's block of the status; {"enabled": False} in a room without the switch. The status must always answer."""
+        if self._laptop is None:
+            return {"enabled": False}
+        try:
+            return self._laptop.state()
+        except Exception as e:  # noqa: BLE001 - the status must always answer
+            message = f"Could not read Laptop mode: {type(e).__name__}: {e}"
+            if message != self._read_failures.get("laptop"):
+                self._read_failures["laptop"] = message
+                logger.warning(message, exc_info=True)
+            return {"enabled": False}
+
+    async def _handle_laptop(self, request: web.Request) -> web.Response:
+        """{"to": "laptop", "minutes"?: n} or {"to": "room"}, answered with Laptop mode's state, or 409 in words."""
+        rejection = self._require_json(request)
+        if rejection is not None:
+            return rejection
+        if self._laptop is None:
+            return self._error_response(self.NO_LAPTOP, 503)
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        to = data.get("to")
+        try:
+            if to == "laptop":
+                minutes = data.get("minutes")
+                if minutes is not None and (not isinstance(minutes, int) or isinstance(minutes, bool)):
+                    return self._error_response("minutes is a whole number", 400)
+                state = await self._laptop.to_laptop(minutes)
+            elif to == "room":
+                state = await self._laptop.to_room()
+            else:
+                return self._error_response('Send {"to": "laptop"} or {"to": "room"}', 400)
+        except (LaptopError, BookingError) as e:
+            return self._error_response(str(e), e.status)
+        return web.json_response({"laptop": state})
 
     async def _handle_tv_discover(self, request: web.Request) -> web.Response:
         """The LG and Samsung TVs on the network. It also answers before a TV is configured.
@@ -1328,6 +1380,9 @@ class ControlService(Service):
         url = normalize_link(url)
         if self._platform_for(url) is None:
             return self._error_response("Unsupported meeting link", 400)
+        refusal = self._laptop.join_refusal() if self._laptop is not None else None
+        if refusal:
+            return self._error_response(refusal, 409)
         if self._meeting_state() in IN_PROGRESS_STATES:
             return self._error_response("A meeting is already in progress", 409)
         self._last_error = None

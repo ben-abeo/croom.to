@@ -292,6 +292,10 @@ class RoomCamera:
             self._fail(f"camera call failed: {e}")
             raise DeviceUnavailable(self._reason) from e
 
+    def forget_position(self) -> None:
+        """Stop trusting the dead-reckoned position: something else (a laptop) may have moved the camera."""
+        self._position_known = False
+
     async def close(self) -> None:
         await self._cancel_long_move()
         self._cancel_watchdog()

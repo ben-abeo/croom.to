@@ -167,6 +167,25 @@ class CroomAgent:
         except ImportError as e:
             logger.warning(f"Room devices not available: {e}")
 
+        # Laptop mode (spec 2026-10-27): the MeetUp lent to a laptop at the table through the USB switch
+        laptop_service = None
+        if self.config.laptop.enabled:
+            try:
+                from croom.laptop.service import LaptopService
+                laptop_service = LaptopService.from_config(
+                    self.config,
+                    calendar=self.service_manager.get_service("calendar"),
+                    meeting=self.service_manager.get_service("meeting"),
+                    devices=self.service_manager.get_service("devices"),
+                    tv=tv_service,
+                )
+                self.service_manager.register(
+                    laptop_service, dependencies=["meeting", "calendar", "devices"] + (["tv"] if tv_service is not None else [])
+                )
+                logger.info("Laptop mode registered")
+            except ImportError as e:
+                logger.warning(f"Laptop mode not available: {e}")
+
         # Room control page (local web UI for the room), with the door sign's football scoreboard it shows
         if self.config.control.enabled:
             try:
@@ -180,11 +199,13 @@ class CroomAgent:
                     store=settings_store,
                     tv=tv_service,   # the room page's TV (None when the room has none enabled): its status and its controls
                     scores=scores_service,
+                    laptop=laptop_service,
                 )
                 dependencies = (
                     ["meeting", "calendar", "devices"]
                     + (["tv"] if tv_service is not None else [])
                     + (["scores"] if scores_service is not None else [])
+                    + (["laptop"] if laptop_service is not None else [])
                 )
                 self.service_manager.register(control_service, dependencies=dependencies)
                 logger.info("Room control page registered")
@@ -353,6 +374,16 @@ def main() -> None:
         help="Check that the room's LG TV answers (or, with no TV configured, list the LG TVs on the network) and exit",
         action="store_true"
     )
+    parser.add_argument(
+        "--check-laptop",
+        help="Check the laptop switch's pin and where the MeetUp is, and exit (stop croom first: it holds the pin)",
+        action="store_true"
+    )
+    parser.add_argument(
+        "--switch",
+        help="With --check-laptop: press the switch once and report where the MeetUp went",
+        action="store_true"
+    )
 
     parser.add_argument(
         "--check-meet",
@@ -389,6 +420,10 @@ def main() -> None:
         if hasattr(sys.stdout, "reconfigure"):
             sys.stdout.reconfigure(errors="replace")
         raise SystemExit(asyncio.run(check_tv(load_config(args.config))))
+
+    if args.check_laptop:
+        from croom.laptop.check import check_laptop
+        raise SystemExit(asyncio.run(check_laptop(load_config(args.config), move=args.switch)))
 
     if args.check_meet:
         import tempfile

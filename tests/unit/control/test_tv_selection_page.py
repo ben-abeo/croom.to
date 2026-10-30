@@ -157,7 +157,7 @@ def test_connection_settings_save_mac_and_pi_input_without_pairing(browser):
         page.get_by_label("Room Pi input").select_option("HDMI_2")
         page.get_by_role("button", name="Save connection", exact=True).click()
         page.wait_for_function("document.getElementById('tv-settings-result').textContent.includes('Saved')")
-        assert saved == [{"mac": "AA:BB:CC:DD:EE:88", "pi_input": "HDMI_2"}]
+        assert saved == [{"mac": "AA:BB:CC:DD:EE:88", "pi_input": "HDMI_2", "laptop_input": ""}]
         assert tv.calls == []
         assert fits(page)
 

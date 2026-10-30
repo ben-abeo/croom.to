@@ -999,6 +999,7 @@
     el("open-tv-remote").hidden = model.offline || (!inMeeting && !(tv && tv.configured && tv.paired));
     labelWithIcon(el("open-tv-remote"), inMeeting ? "TV" : "TV Remote", "tv");
     if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
+    el("laptop-problem").textContent = "";   // the Laptop screen's, written by renderLaptop
     el("message").textContent = model.error;   // the idle card's line; the meeting screen's own is written with its dialog card (renderDialog)
 
     if (model.offline || !model.status) {
@@ -1046,13 +1047,15 @@
     passcodeCard = asking;
     renderMeetingBar(m);
     renderUpcoming();
-    el("open-options").hidden = mode() !== "idle";
     el("room-name").textContent = s.room.name;
     el("room-location").textContent = s.room.location;
     el("room-location").hidden = !s.room.location;
     const label = m.title || (m.platform ? platformName(m.platform) + " meeting" : "the meeting");
     el("meeting-detail").textContent = meetingLine(m, label);
 
+    document.body.dataset.laptop = laptopHasIt(s) ? "on" : "off";
+    if (laptopHasIt(s) && mode() === "idle" && !["idle", "tv"].includes(view())) applyView("idle", true);   // lent at the switch itself
+    el("open-options").hidden = mode() !== "idle" || laptopHasIt(s);
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
       body.dataset.state = "joining";
@@ -1074,7 +1077,7 @@
       specs = [{ label: "Dismiss", className: "quiet", icon: "x-circle", onClick: leave }];
       if (asking) specs.push({ label: "Join again", className: "primary", icon: "video", onClick: joinAgain });
     } else {
-      specs = renderIdle(cal);
+      specs = laptopHasIt(s) ? renderLaptop(s.laptop) : renderIdle(cal);
     }
     if (mode() === "meeting") {
       // Leave is the meeting card's, at its foot (the control deck, Ben 2026-10-25); the controls are tiles beside it.
@@ -1176,6 +1179,51 @@
     refreshEvents();
   }
 
+  // Laptop mode (spec 2026-10-27): the room's MeetUp lent to a laptop at the table through the USB switch. The status's laptop block
+  // says whether the room has the switch and who has the MeetUp; while the laptop has it, the idle card is the Laptop screen.
+  const laptopOf = (s) => (s && s.laptop && s.laptop.enabled ? s.laptop : null);
+  const laptopHasIt = (s) => Boolean(laptopOf(s) && laptopOf(s).holder === "laptop");
+  let laptopBusy = false;
+
+  async function switchLaptop(to) {
+    if (laptopBusy) return;
+    laptopBusy = true;
+    render();
+    try {
+      await api("/api/laptop", { method: "POST", body: JSON.stringify({ to: to }) });
+      model.error = "";
+    } catch (e) {
+      model.error = e.message;
+    } finally {
+      laptopBusy = false;
+      refreshStatus();
+      refreshEvents();
+    }
+  }
+
+  function laptopSpecs(cal, ongoing) {
+    const l = laptopOf(model.status);
+    if (!l || !l.available) return [];
+    const b = bookingOf(cal);
+    // A booking in progress is the laptop's time, and a room with no calendar has none to book: one tap. A free room asks how long.
+    const oneTap = Boolean(ongoing) || !b;
+    if (!oneTap && !b.now.minutes.length) return [];
+    const busy = laptopBusy || l.switching;
+    return [{ id: "laptop", label: busy ? "Switching…" : "Laptop", className: "quiet", icon: "laptop", disabled: busy,
+              onClick: () => (oneTap ? switchLaptop("laptop") : openBooking("laptop")) }];
+  }
+
+  function renderLaptop(l) {
+    document.body.dataset.state = "soon";
+    el("kicker").textContent = "Laptop";
+    el("headline").textContent = "The camera, microphones and speaker are on the laptop" + (l.until ? " until " + fmtTime(new Date(l.until)) : "");
+    el("detail").textContent = "Choose Logitech MeetUp as the camera, microphone and speaker in your meeting app";
+    el("laptop-problem").textContent = l.problem || "";   // its own line (spec 3): the card's #message belongs to the last refusal (model.error)
+    const busy = laptopBusy || l.switching;
+    return [{ id: "laptop-back", label: busy ? "Switching…" : "Back to room", className: "primary", icon: "home", disabled: busy,
+              onClick: () => switchLaptop("room") }];
+  }
+
   let bookingSteps = null;   // the steps that are up (booking.js), so that leaving the view closes them
   function openBooking(mode) {
     const b = bookingOf(model.status && model.status.calendar);
@@ -1207,7 +1255,7 @@
       el("kicker").textContent = "In use";
       el("headline").textContent = ongoing.title + " until " + fmtTime(new Date(ongoing.end_time));
       el("detail").textContent = ongoing.clash ? "Double-booked with " + ongoing.clash : ongoing.pending ? "Booked here; not in Google Calendar yet." : "";
-      return bookingSpecs(cal, ongoing);
+      return bookingSpecs(cal, ongoing).concat(laptopSpecs(cal, ongoing));
     }
 
     if (current) {
@@ -1216,7 +1264,7 @@
       el("headline").textContent = current.title + " is happening now";
       el("detail").textContent = fmtRange(new Date(current.start_time), new Date(current.end_time)) + (current.joinable ? ", " + platformName(current.meeting_platform) : "");
       return (current.joinable ? [{ label: "Join now", className: "primary", icon: "video", onClick: () => joinEvent(current.id), target: current.id }] : [])
-        .concat(bookingSpecs(cal, current));
+        .concat(bookingSpecs(cal, current)).concat(laptopSpecs(cal, current));
     }
 
     if (next) {
@@ -1233,16 +1281,16 @@
         el("headline").textContent = "Free until " + fmtTime(start);
       }
       el("detail").textContent = "Next: " + next.title + ", " + fmtRange(start, new Date(next.end_time)) + (next.joinable ? ", " + platformName(next.meeting_platform) : "");
-      if (!next.joinable) return bookingSpecs(cal, null);
+      if (!next.joinable) return bookingSpecs(cal, null).concat(laptopSpecs(cal, null));
       return [{ label: window.open ? "Join now" : "Join opens at " + fmtTime(window.opensAt), className: "primary", icon: "video", onClick: () => joinEvent(next.id), disabled: !window.open, target: next.id }]
-        .concat(bookingSpecs(cal, null));
+        .concat(bookingSpecs(cal, null)).concat(laptopSpecs(cal, null));
     }
 
     body.dataset.state = "free";
     el("kicker").textContent = "Room free";
     el("headline").textContent = scheduled(cal) ? "Free for the rest of the day" : "Free";
     el("detail").textContent = scheduled(cal) ? "Nothing else is booked in here today." : "No calendar is connected. Join with a link below.";
-    return bookingSpecs(cal, null);
+    return bookingSpecs(cal, null).concat(laptopSpecs(cal, null));
   }
 
   function renderEvents(cal) {

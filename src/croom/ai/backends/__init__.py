@@ -65,6 +65,18 @@ def get_best_backend():
     return None
 
 
+# The names a config's ai.backend may give (besides "auto"), and the class each means. The Settings schema offers the same names.
+BACKEND_NAMES = {
+    "hailo": "HailoBackend",
+    "nvidia": "NVIDIABackend",
+    "coral": "CoralBackend",
+    "intel": "OpenVINOBackend",
+    "openvino": "OpenVINOBackend",
+    "cpu": "ONNXCPUBackend",
+    "onnx": "ONNXCPUBackend",
+}
+
+
 def get_backend_by_name(name: str):
     """
     Get a backend class by name.
@@ -75,17 +87,7 @@ def get_backend_by_name(name: str):
     Returns:
         Backend class or None if not found.
     """
-    name_map = {
-        "hailo": "HailoBackend",
-        "nvidia": "NVIDIABackend",
-        "coral": "CoralBackend",
-        "intel": "OpenVINOBackend",
-        "openvino": "OpenVINOBackend",
-        "cpu": "ONNXCPUBackend",
-        "onnx": "ONNXCPUBackend",
-    }
-
-    class_name = name_map.get(name.lower())
+    class_name = BACKEND_NAMES.get(name.lower())
     if not class_name:
         return None
 

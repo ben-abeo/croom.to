@@ -15,7 +15,10 @@
   const SAVED = "Saved";
   const SAVED_RESTART = "Saved: applies after a restart";
   const RESTART_NOW = "Restart now";
-  const RESTARTING = "Restarting the room software";
+  const RESTARTING = "Restarting the room software\u2026";
+  const BACK = "The room software has restarted";
+  const NOT_BACK = "The room software has not come back yet";
+  const RETURN_POLL_MS = 2000, RETURN_WAIT_MS = 5 * 60 * 1000;   // the helper's watch is 2 minutes, and an undo restarts it again
   const UNDONE = "Your last change was undone: the room did not start with it";
   const NOTHING_CHANGED = "Nothing to save: nothing has changed";
 
@@ -277,26 +280,49 @@
             if (r) { r.error.textContent = words; r.row.classList.add("refused"); placed = true; }
           }
           // A refusal of a setting on another page (a value in the file that is not right) is said here, in full.
-          const elsewhere = Object.entries(errors).filter(([path]) => !rows.has(path)).map(([, words]) => words);
+          const pages = (e.data && e.data.pages) || {};
+          const pageLabel = (path) => { const p = S.PAGES.find((page) => page.key === pages[path]); return p ? p.label + ": " : ""; };
+          const elsewhere = Object.entries(errors).filter(([path]) => !rows.has(path)).map(([path, words]) => pageLabel(path) + words);
           say(elsewhere.length ? elsewhere.join(". ") : placed ? "Not saved: see the settings marked" : e.message);
         } finally {
           save.disabled = false;
         }
       });
 
+      // Restart now: the room software goes away and comes back. The page says so, and asks the room whether it answers until it has
+      // been away and is back (a request that fails meanwhile is the restart, not an error); then it reads the restart's record, as a
+      // page does when it opens: the undo banner, or, since a restarted room has forgotten every unlock, the PIN pad.
       restart.addEventListener("click", async () => {
         restart.disabled = true;
         try {
           await S.post("/api/settings/restart", {});
-          if (gone) return;
-          say(RESTARTING, true);
-          restart.hidden = true;
         } catch (e) {
-          if (!gone && !e.locked) say(e.message);
-        } finally {
           restart.disabled = false;
+          if (gone || e.locked) return;
+          if (e.status) { say(e.message); return; }   // refused in words ("Leave the meeting first")
         }
+        if (gone) return;
+        say(RESTARTING, true);
+        restart.hidden = true;
+        restart.disabled = false;
+        awaitReturn();
       });
+
+      function awaitReturn() {
+        const until = Date.now() + RETURN_WAIT_MS;
+        let away = false;
+        const look = async () => {
+          if (gone) return;
+          let up = false;
+          try { up = (await fetch("/api/status", { cache: "no-store" })).ok; } catch (e) { up = false; }
+          if (gone) return;
+          if (!up) away = true;
+          else if (away) { say(BACK, true); showUndone(); return; }
+          if (Date.now() > until) { if (away) say(NOT_BACK); return; }
+          setTimeout(look, RETURN_POLL_MS);
+        };
+        setTimeout(look, RETURN_POLL_MS);
+      }
     }
 
     return () => { gone = true; };

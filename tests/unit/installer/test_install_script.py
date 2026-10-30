@@ -161,6 +161,10 @@ def test_the_root_helpers_group_is_the_users_primary_group_by_its_own_name(tmp_p
     result = run_bash(f"source {SCRIPT}; SYSTEMD_DIR={units}; CROOM_USER=pi; write_units", env={"PATH": f"{bin_dir}:{os.environ['PATH']}"})
     assert result.returncode == 0, result.stderr
     assert "-m croom.admin --owner pi --group staff\n" in (units / "croom-admin.service").read_text()
+    # The agent runs in that group too, so that it can always reach the helper's socket
+    for unit in ("croom.service", "croom-ui.service"):
+        text = (units / unit).read_text()
+        assert "User=pi\n" in text and "Group=staff\n" in text, unit
 
 
 def test_the_root_helper_is_enabled_and_started():

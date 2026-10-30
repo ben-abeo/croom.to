@@ -44,6 +44,7 @@ DEFAULT_CONTROL_PORT = 8080
 LOOPBACK = "127.0.0.1"
 ANY_ADDRESS = ("", "0.0.0.0", "::")   # a room page listening on every address is asked on the loopback
 RESTARTING = "The room is restarting: try again in a moment"
+REBOOT_DELAY_S = 1.0              # the answer is on its way to the room page before the machine goes down
 MAX_USB_FILE = 64 * 1024          # a key file is a few KB; anything bigger on a stick is not one
 MAX_CREDENTIAL = 64 * 1024
 MAX_CONFIG = 256 * 1024
@@ -454,11 +455,16 @@ class Jobs:
             self._place(self._paths.config, previous, 0o640)
             self._update_state(last_write=None)
 
-    def _watch(self, asked_at: float) -> None:
+    def _watch(self, asked_at: float, restart_first: bool = False) -> None:
         """After a restart: the room answers within 2 minutes, or, when its config was changed within the 10 minutes before the restart
-        was asked for and the one before it is kept, that one is put back and the room restarted again. Never raises: it is the last
-        thing between a bad change and a room that stays down."""
+        was asked for and the one before it is kept, that one is put back and the room restarted again. With `restart_first`, the
+        restart itself is done here first, in the background: systemctl waits for the room software to stop, and the room software
+        waits for the request that asked for the restart, so the answer must not wait for systemctl. Never raises: it is the last thing
+        between a bad change and a room that stays down."""
         try:
+            if restart_first:
+                self._restart_room()
+                self._record("watching", False)
             if self._comes_back():
                 self._record("healthy", False)
                 return
@@ -485,7 +491,9 @@ class Jobs:
                 self._watching = False
 
     def restart(self, args: Dict[str, Any]) -> Dict[str, Any]:
-        """Restart the room software, then watch it come back in the background (the answer does not wait for it)."""
+        """Restart the room software and watch it come back, both in the background: the answer goes at once. (systemctl restart waits
+        for the room software to stop, and the room software, stopping, waits for the request that asked: answering after systemctl
+        would hold both up until the room software's own stop gave up on that request.)"""
         _only(args)
         with self._watch_lock:
             if self._watching:
@@ -494,22 +502,21 @@ class Jobs:
         try:
             asked_at = self._host.clock()
             self._update_state(watch_asked_at=asked_at)
-            self._record("watching", False)
-            self._restart_room()
-            self._host.background(lambda: self._watch(asked_at))
+            self._record("restarting", False)
+            self._host.background(lambda: self._watch(asked_at, restart_first=True))
         except BaseException:
             with self._watch_lock:
                 self._watching = False
             raise
-        return {"watching": True}
+        return {"restarting": True}
 
     def resume(self) -> None:
-        """At the helper's start: a watch that the helper's own stop cut short (the record still says watching) goes on, from when its
-        restart was asked for, so that a bad change is still undone. The room is given its full 2 minutes again."""
+        """At the helper's start: a watch that the helper's own stop cut short (the record still says restarting or watching) goes on,
+        from when its restart was asked for, so that a bad change is still undone. The room is given its full 2 minutes again."""
         state = self._read_state()
         record = state.get("restart")
         asked_at = state.get("watch_asked_at")
-        if not (isinstance(record, dict) and record.get("state") == "watching" and isinstance(asked_at, (int, float))):
+        if not (isinstance(record, dict) and record.get("state") in ("restarting", "watching") and isinstance(asked_at, (int, float))):
             return
         with self._watch_lock:
             if self._watching:
@@ -525,11 +532,19 @@ class Jobs:
         return record if isinstance(record, dict) else {"state": "none", "undone": False}
 
     def reboot(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Reboot the TV Pi a moment after answering: the answer would otherwise wait on a machine that is going down."""
         _only(args)
-        code, output = self._host.run(["systemctl", "reboot"])
-        if code != 0:
-            raise JobError(f"The TV Pi did not reboot: {output.strip() or f'systemctl said {code}'}")
-        return {}
+        self._host.background(self._reboot_soon)
+        return {"rebooting": True}
+
+    def _reboot_soon(self) -> None:
+        try:
+            self._host.sleep(REBOOT_DELAY_S)
+            code, output = self._host.run(["systemctl", "reboot"])
+            if code != 0:
+                logger.error(f"The TV Pi did not reboot: {output.strip() or f'systemctl said {code}'}")
+        except Exception:
+            logger.exception("The reboot failed")
 
     def version(self, args: Dict[str, Any]) -> Dict[str, Any]:
         """The commit this TV Pi runs, as the installer or an update wrote it; unknown when nothing did."""

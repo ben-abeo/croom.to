@@ -101,7 +101,7 @@ def test_restart_now_restarts_the_room_and_is_refused_in_a_meeting(browser, tmp_
         assert jobs(admin) == ["write_config"]
         server._loop.call_soon_threadsafe(server.meeting.set_state, MeetingState.IDLE)
         page.click(".settings-restart")
-        page.wait_for_function("document.querySelector('.settings-message').textContent === 'Restarting the room software'", timeout=5000)
+        page.wait_for_function("document.querySelector('.settings-message').textContent === 'Restarting the room software\u2026'", timeout=5000)
         assert jobs(admin) == ["write_config", "restart"]
         page.close()
 
@@ -222,4 +222,77 @@ def test_the_form_draws_every_kind_of_setting_and_sends_what_changed(browser, tm
         assert page.input_value("#setting-dashboard-enrollment-token") == ""
         assert "type a new one" in page.locator("#setting-dashboard-enrollment-token").get_attribute("placeholder")
         assert errors == []
+        page.close()
+
+
+def restarting_admin(config_file):
+    """A helper whose record says the last change was undone once a restart has been asked for (the watch put config.yaml.1 back)."""
+    admin = FakeAdmin(config_file)
+    real = admin.call
+
+    async def call(job, **args):
+        if job == "restart_status":
+            undone = any(j == "restart" for j, _ in admin.calls)
+            return {"ok": True, "state": "undone" if undone else "none", "undone": undone}
+        return await real(job, **args)
+
+    admin.call = call
+    return admin
+
+
+def test_restart_now_waits_for_the_room_to_come_back_then_reads_how_the_restart_went(browser, tmp_path):  # noqa: F811
+    config_file = tmp_path / "config.yaml"
+    config_file.write_text(CONFIG)
+    admin = restarting_admin(config_file)
+    with PageServer(admin=admin, config_file=config_file) as server:
+        page = unlocked_page(browser, server, stopped=True)
+        errors = []
+        page.on("pageerror", lambda e: errors.append(str(e)))
+        away = {"now": False}
+        page.route("**/api/status", lambda route: route.abort() if away["now"] else route.continue_())
+        open_room(page)
+        page.fill("#setting-room-name", "Boardroom")
+        page.click(".settings-save")
+        page.wait_for_function("document.querySelector('.settings-message').textContent === 'Saved: applies after a restart'", timeout=5000)
+        page.click(".settings-restart")
+        page.wait_for_function("document.querySelector('.settings-message').textContent === 'Restarting the room software\u2026'", timeout=5000)
+        assert not page.locator(".settings-restart").is_visible()
+        away["now"] = True                                   # the room software has stopped
+        page.clock.run_for(2500)
+        page.wait_for_timeout(200)
+        assert message(page) == "Restarting the room software\u2026"   # a request that fails now is the restart, not an error
+        assert not page.locator(".settings-banner").is_visible()
+        away["now"] = False                                  # and it is back
+        page.clock.run_for(2500)
+        page.wait_for_function("document.querySelector('.settings-message').textContent === 'The room software has restarted'", timeout=5000)
+        page.locator(".settings-banner").wait_for(state="visible", timeout=5000)
+        assert errors == []
+        page.close()
+
+
+def test_restart_now_whose_answer_is_lost_still_says_the_room_is_restarting(browser, tmp_path):  # noqa: F811
+    server, admin, _ = room_server(tmp_path)
+    with server:
+        page = unlocked_page(browser, server)
+        open_room(page)
+        page.fill("#setting-room-location", "Floor 3")
+        page.click(".settings-save")
+        page.wait_for_function("document.querySelector('.settings-message').textContent === 'Saved: applies after a restart'", timeout=5000)
+        page.route("**/api/settings/restart", lambda route: route.abort() if route.request.method == "POST" else route.continue_())
+        page.click(".settings-restart")
+        page.wait_for_function("document.querySelector('.settings-message').textContent === 'Restarting the room software\u2026'", timeout=5000)
+        page.close()
+
+
+def test_a_refusal_held_on_another_page_names_that_page(browser, tmp_path):  # noqa: F811
+    server, admin, config_file = room_server(tmp_path)
+    config_file.write_text(CONFIG + "ai:\n  backend: quantum\n")       # hand-written, and not a backend the room has
+    with server:
+        page = unlocked_page(browser, server)
+        open_room(page)
+        page.fill("#setting-room-name", "Boardroom")
+        page.click(".settings-save")
+        page.wait_for_function("document.querySelector('.settings-message').textContent !== ''", timeout=5000)
+        assert message(page) == "AI & dashboard: AI backend: choose one of the list"
+        assert jobs(admin) == []
         page.close()

@@ -31,7 +31,7 @@ from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
-from croom.settings.schema import SettingError
+from croom.settings.schema import BY_PATH, SettingError
 from croom.tv.discover import discover_tvs
 from croom.tv.errors import TV_NOT_ENABLED, TvError
 from croom.tv.names import one_line
@@ -1282,7 +1282,9 @@ class ControlService(Service):
         except KeyError:
             return self._error_response(f"There is no Settings page {page}", 404)
         except SettingError as e:
-            return web.json_response({"error": str(e), "errors": e.errors}, status=400)
+            # Each refused setting's page, so that one held on another page (a hand-written value) can be said with where it is
+            pages = {path: BY_PATH[path].page for path in e.errors if path in BY_PATH}
+            return web.json_response({"error": str(e), "errors": e.errors, "pages": pages}, status=400)
         except AdminUnavailable as e:
             return self._error_response(str(e), 503)
         except AdminError as e:

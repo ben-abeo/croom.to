@@ -86,7 +86,10 @@ def time_zones() -> List[Tuple[str, str]]:
 
 
 PLATFORMS = (("zoom", "Zoom"), ("google_meet", "Google Meet"), ("teams", "Teams"), ("webex", "Webex"))
-AI_BACKENDS = (("auto", "Automatic"), ("hailo", "Hailo"), ("coral", "Coral"), ("nvidia", "NVIDIA"), ("cpu", "Processor only"))
+# Every name croom.ai.backends.BACKEND_NAMES takes, and auto (kept here so that the root helper need not import the AI backends): a name the
+# room accepts must never be one the schema refuses, or a hand-written config would block every save.
+AI_BACKENDS = (("auto", "Automatic"), ("hailo", "Hailo"), ("coral", "Coral"), ("nvidia", "NVIDIA"), ("intel", "Intel (OpenVINO)"),
+               ("openvino", "OpenVINO"), ("cpu", "Processor only"), ("onnx", "Processor only (ONNX)"))
 URL = r"https?://[^\s/$.?#][^\s]*"
 NO_SPACES = r"\S+"
 

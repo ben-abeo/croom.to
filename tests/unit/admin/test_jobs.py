@@ -297,7 +297,7 @@ def test_restart_restarts_the_room_and_watches_it_come_back(machine, paths):
     jobs, runner, clock, probe = machine
     probe.up = lambda calls: calls >= 3
     write_twice(jobs)
-    assert jobs.table["restart"]({}) == {"watching": True}
+    assert jobs.table["restart"]({}) == {"restarting": True}
     assert runner.calls == [["systemctl", "restart", "croom"]]
     assert set(probe.ports) == {8099}
     status = jobs.table["restart_status"]({})
@@ -362,7 +362,7 @@ def test_a_watch_cut_off_by_the_helper_restarting_goes_on_when_it_starts_again(m
     write_twice(jobs)
     jobs._host.background = lambda work: None   # the helper stops before the watch ends
     jobs.table["restart"]({})
-    assert jobs.table["restart_status"]({})["state"] == "watching"
+    assert jobs.table["restart_status"]({})["state"] == "restarting"
     host = jobs._host
     host.background = lambda work: work()
     probe.up = lambda calls: calls > HEALTH_TIMEOUT_S // 5
@@ -397,16 +397,87 @@ def test_a_restart_while_one_is_being_watched_is_refused(machine, paths):
 
 
 def test_reboot(machine):
+    jobs, runner, clock, _ = machine
+    started = clock.now
+    assert jobs.table["reboot"]({}) == {"rebooting": True}
+    assert runner.calls == [["systemctl", "reboot"]]
+    assert clock.now - started >= 1                         # a moment after the answer
+
+
+def test_a_reboot_systemctl_refuses_is_logged(machine, caplog):
+    """The answer has gone by the time systemctl runs: its refusal is in the helper's log."""
     jobs, runner, *_ = machine
-    assert jobs.table["reboot"]({}) == {}
+    runner.codes["systemctl reboot"] = 1
+    assert jobs.table["reboot"]({}) == {"rebooting": True}
+    assert "did not reboot" in caplog.text
+
+
+class BlockingRunner(FakeRunner):
+    """systemctl as it is on the room: restart croom does not return until the room software has stopped, and the room software does
+    not stop while the request that asked waits for its answer."""
+
+    def __init__(self):
+        super().__init__()
+        import threading
+        self.release = threading.Event()
+        self.entered = threading.Event()
+
+    def __call__(self, args):
+        self.entered.set()
+        assert self.release.wait(10), "never released"
+        return super().__call__(args)
+
+
+def threaded_jobs(paths, runner):
+    import threading
+    threads = []
+
+    def background(work):
+        thread = threading.Thread(target=work, daemon=True)
+        threads.append(thread)
+        thread.start()
+
+    clock = Clock()
+    host = Host(paths=paths, run=runner, owner=getpass.getuser(), group=grp.getgrgid(os.getgid()).gr_name, probe=Probe(), clock=clock,
+                sleep=clock.sleep, monotonic=clock, background=background)
+    return Jobs(host), threads
+
+
+def test_restart_answers_before_systemctl_runs(paths):
+    runner = BlockingRunner()
+    jobs, threads = threaded_jobs(paths, runner)
+    assert jobs.table["restart"]({}) == {"restarting": True}          # while systemctl is still held
+    assert runner.entered.wait(5) and runner.calls == []
+    assert jobs.table["restart_status"]({})["state"] == "restarting"
+    with pytest.raises(JobError, match="restarting"):
+        jobs.table["write_config"]({"yaml": GOOD})                     # the watch has begun: no change meanwhile
+    runner.release.set()
+    for thread in threads:
+        thread.join(5)
+    assert runner.calls == [["systemctl", "restart", "croom"]]
+    assert jobs.table["restart_status"]({})["state"] == "healthy"
+    jobs.table["write_config"]({"yaml": GOOD})                         # and once it is over, changes are taken again
+
+
+def test_reboot_answers_before_systemctl_runs(paths):
+    runner = BlockingRunner()
+    jobs, threads = threaded_jobs(paths, runner)
+    assert jobs.table["reboot"]({}) == {"rebooting": True}
+    assert runner.entered.wait(5) and runner.calls == []
+    runner.release.set()
+    for thread in threads:
+        thread.join(5)
     assert runner.calls == [["systemctl", "reboot"]]
 
 
-def test_a_reboot_systemctl_refuses_is_said(machine):
-    jobs, runner, *_ = machine
-    runner.codes["systemctl reboot"] = 1
-    with pytest.raises(JobError, match="did not reboot"):
-        jobs.table["reboot"]({})
+def test_a_restart_cut_off_before_systemctl_ran_is_watched_again(machine, paths):
+    """The helper stopped between the answer and systemctl: the record says restarting, and the watch goes on at the next start."""
+    jobs, runner, clock, probe = machine
+    jobs._host.background = lambda work: None
+    jobs.table["restart"]({})
+    jobs._host.background = lambda work: work()
+    Jobs(jobs._host).resume()
+    assert jobs.table["restart_status"]({})["state"] == "healthy" and probe.ports
 
 
 def test_version(machine, paths):

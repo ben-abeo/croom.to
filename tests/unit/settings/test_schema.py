@@ -361,3 +361,26 @@ async def test_saves_are_one_at_a_time(config_file, admin):
     await asyncio.gather(editor.save("room", {"room.location": "Floor 2"}), editor.save("room", {"room.company": "Acme"}))
     data = yaml.safe_load(config_file.read_text())
     assert data["room"]["location"] == "Floor 2" and data["room"]["company"] == "Acme"
+
+
+# --- every value the room accepts, the schema accepts (a hand-written one must never block every save)
+
+
+def test_every_ai_backend_the_room_takes_is_a_choice():
+    from croom.ai.backends import BACKEND_NAMES
+    for name in ["auto", *BACKEND_NAMES]:
+        assert validate("ai.backend", name) == name
+
+
+def test_every_meeting_platform_the_room_builds_is_a_choice():
+    from croom.core.config import DEFAULT_PLATFORMS
+    from croom.meeting.providers import get_all_providers
+    assert validate("meeting.platforms", list(get_all_providers())) == list(get_all_providers())
+    assert validate("meeting.platforms", DEFAULT_PLATFORMS) == DEFAULT_PLATFORMS
+
+
+def test_every_default_of_the_config_passes_its_setting():
+    from croom.settings.config_edit import default_of
+    for s in SCHEMA:
+        validate(s.path, default_of(s.path))
+    assert validate("room.timezone", "UTC") == "UTC"

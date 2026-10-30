@@ -398,7 +398,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=$CROOM_USER
-Group=$CROOM_USER
+Group=$group
 WorkingDirectory=$INSTALL_DIR
 ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until [ -S /tmp/.X11-unix/X0 ]; do sleep 2; done'
 ExecStart=$INSTALL_DIR/venv/bin/python -m croom.core.agent -c $CONFIG_DIR/config.yaml
@@ -422,7 +422,7 @@ Wants=croom.service
 [Service]
 Type=simple
 User=$CROOM_USER
-Group=$CROOM_USER
+Group=$group
 WorkingDirectory=$INSTALL_DIR
 ExecStart=$INSTALL_DIR/venv/bin/python -m croom_ui.main -c $CONFIG_DIR/config.yaml --fullscreen
 Restart=always

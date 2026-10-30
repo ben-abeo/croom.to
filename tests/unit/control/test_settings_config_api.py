@@ -101,6 +101,7 @@ async def test_a_refused_value_is_400_with_words_by_setting_and_nothing_is_writt
     assert response.status == 400
     body = await response.json()
     assert body["errors"] == {"room.name": "Name can't be blank", "room.timezone": "Time zone: choose one of the list"}
+    assert body["pages"] == {"room.name": "room", "room.timezone": "room"}
     assert body["error"]
     assert admin.calls == [] and config_file.read_text() == HAND_WRITTEN
 

@@ -13,6 +13,7 @@ the screen, which the server sends back as they are.
 import json
 import logging
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -21,7 +22,7 @@ import threading
 import time
 import urllib.request
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -50,6 +51,23 @@ MAX_USB_FILE = 64 * 1024          # a key file is a few KB; anything bigger on a
 MAX_CREDENTIAL = 64 * 1024
 MAX_CONFIG = 256 * 1024
 COMMAND_TIMEOUT_S = 90            # systemctl restart waits for the agent to stop, which can take a while
+
+# The journal job (Settings > Logs): the room software's log, newest first
+JOURNAL_UNIT = "croom"
+JOURNAL_LINES = 200               # a page of the log
+MAX_JOURNAL_LINES = 500
+MAX_JOURNAL_TEXT = 2000           # characters of one line: a page of the log stays a few hundred KB at most
+JOURNAL_LEVELS = ("all", "warning")
+JOURNAL_CURSOR = re.compile(r"[A-Za-z0-9=;]{1,512}")   # what journalctl's cursors are made of ("s=...;i=...;b=...;m=...;t=...;x=...")
+# The journal's priorities as the page names them (the agent writes each line's own: croom.core.logs)
+PRIORITY_LEVELS = {0: "critical", 1: "critical", 2: "critical", 3: "error", 4: "warning", 5: "info", 6: "info", 7: "debug"}
+DEFAULT_PRIORITY = 6              # what the journal gives a line that does not say
+# A line in the agent's own format (croom.core.logs.LOG_FORMAT): its time, which the journal keeps already, and its level
+AGENT_LINE = re.compile(r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,\d{3} - (?P<name>[^\n]*?) - (?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) - "
+                        r"(?P<message>.*)", re.DOTALL)
+# A terminal's colours (ESC [ ... m) and the other control characters a line can carry: the page shows the words
+TERMINAL_CODES = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|[\x00-\x08\x0b-\x1f\x7f]")
+TOO_LONG_FOR_THE_JOURNAL = "(a line too long for the journal to show)"
 
 CREDENTIAL_FILES = {key: kind.file_name for key, kind in CREDENTIAL_KINDS.items()}
 
@@ -178,6 +196,65 @@ def check_config_yaml(text: Any, current: Optional[Dict[str, Any]] = None) -> Di
     return data
 
 
+def _journal_text(message: Any) -> str:
+    """A journal entry's MESSAGE as text: the journal gives a line that is not UTF-8 as a list of its bytes, and one longer than its
+    limit for the JSON output as null."""
+    if isinstance(message, list):
+        return bytes(b for b in message if isinstance(b, int) and 0 <= b < 256).decode("utf-8", "replace")
+    if message is None:
+        return TOO_LONG_FOR_THE_JOURNAL
+    return str(message)
+
+
+def _journal_time(record: Dict[str, Any]) -> str:
+    """When the entry was written, in the TV Pi's own time, as ISO 8601 with its offset; "" when the entry does not say."""
+    try:
+        seconds = int(record["__REALTIME_TIMESTAMP"]) / 1_000_000
+        return datetime.fromtimestamp(seconds, timezone.utc).astimezone().isoformat(timespec="seconds")
+    except (KeyError, TypeError, ValueError, OverflowError, OSError):
+        return ""
+
+
+def journal_entry(record: Dict[str, Any]) -> Dict[str, str]:
+    """One line of `journalctl -o json` as the page shows it: {"time", "level", "text"}. A line in the agent's own format is "<logger> -
+    <message>": its time is the entry's ("time") and its level is "level", which is the one the line says when the journal has it at the
+    default priority (a line written before the agent wrote its priorities)."""
+    text = TERMINAL_CODES.sub("", _journal_text(record.get("MESSAGE"))).rstrip()
+    try:
+        priority = int(record.get("PRIORITY", DEFAULT_PRIORITY))
+    except (TypeError, ValueError):
+        priority = DEFAULT_PRIORITY
+    level = PRIORITY_LEVELS.get(priority, "info")
+    agent = AGENT_LINE.match(text)
+    if agent:
+        text = f"{agent.group('name')} - {agent.group('message')}"
+        if priority == DEFAULT_PRIORITY:
+            level = agent.group("level").lower()
+    if len(text) > MAX_JOURNAL_TEXT:
+        text = text[:MAX_JOURNAL_TEXT - 1] + "…"
+    return {"time": _journal_time(record), "level": level, "text": text}
+
+
+def parse_journal(output: str) -> Tuple[List[Dict[str, str]], Optional[str]]:
+    """`journalctl -o json`'s output, one JSON object a line, as entries in its order, and the cursor of the last (where the next page
+    begins). A line that is not an object is passed over."""
+    entries: List[Dict[str, str]] = []
+    cursor = None
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(record, dict):
+            continue
+        entries.append(journal_entry(record))
+        if isinstance(record.get("__CURSOR"), str):
+            cursor = record["__CURSOR"]
+    return entries, cursor
+
+
 # --- the jobs
 
 
@@ -198,6 +275,7 @@ class Jobs:
             "restart_status": self.restart_status,
             "reboot": self.reboot,
             "version": self.version,
+            "journal": self.journal,
         }
 
     @property
@@ -509,3 +587,29 @@ class Jobs:
         except OSError:
             version = ""
         return {"version": version or "unknown"}
+
+    def journal(self, args: Dict[str, Any]) -> Dict[str, Any]:
+        """The room software's log, newest first (Settings > Logs): {"entries": [{"time", "level", "text"}], "cursor": where the next page
+        begins (the oldest entry's), "more": whether there may be older ones}. `lines` (1 to 500, 200 unless asked), `level` "all" or
+        "warning" (warnings and errors), `before`: a cursor from an earlier answer, for the page before it."""
+        _only(args, "lines", "level", "before")
+        lines = args.get("lines", JOURNAL_LINES)
+        if not isinstance(lines, int) or isinstance(lines, bool) or not 1 <= lines <= MAX_JOURNAL_LINES:
+            raise JobError(f"The lines must be a whole number from 1 to {MAX_JOURNAL_LINES}")
+        level = args.get("level", "all")
+        if level not in JOURNAL_LEVELS:
+            raise JobError('The level must be "all" or "warning"')
+        before = args.get("before")
+        if before is not None and not (isinstance(before, str) and JOURNAL_CURSOR.fullmatch(before)):
+            raise JobError("That is not a place in the log")
+        command = ["journalctl", f"--unit={JOURNAL_UNIT}", "--output=json", "--reverse", f"--lines={lines}", "--no-pager", "--quiet"]
+        if level == "warning":
+            command.append("--priority=warning")
+        if before:
+            command.append(f"--after-cursor={before}")
+        code, output = self._host.run(command)
+        if code != 0:
+            why = " ".join(output.split())[:200] or f"journalctl said {code}"
+            raise JobError(f"The log could not be read: {why}")
+        entries, cursor = parse_journal(output)
+        return {"entries": entries, "cursor": cursor, "more": len(entries) >= lines}

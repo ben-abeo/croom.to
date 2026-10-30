@@ -14,7 +14,7 @@ from croom.tv import check
 from croom.tv.check import check_tv
 from croom.tv.errors import TvError, TvTimeout
 from tests.unit.tv.fake_client import FakeTvClient
-from tests.unit.tv.helpers import DoingTv, LibraryLike, forgetful_tv, in_standby, service_for, silent_tv, within
+from tests.unit.tv.helpers import DoingTv, LibraryLike, forgetful_tv, in_standby, service_for, silent_tv, until, within
 
 KEY = "tv-client-key"
 OFF_HINT = "Check that the TV is on and that tv.host is its address: a TV that is fully off does not answer."
@@ -514,3 +514,82 @@ class TestCommandLine:
         result = croom("--check-tv", "-c", str(cfg), env=dict(os.environ, PYTHONIOENCODING="ascii"))
         assert "UnicodeEncodeError" not in result.stderr, result.stderr
         assert result.returncode == 1 and "donn?es" in result.stdout and "The TV is not paired with this device" in result.stdout
+
+
+# Settings > Check > TV inside the running agent: the agent's own TV service, looked at and never connected to a second time
+
+async def running(tmp_path, factory=FakeTvClient, key="key-9", **tv):
+    """The agent's TV service, started on a fake TV (connected when the TV answers)."""
+    service = service_for(tmp_path, factory, key=key, **tv)
+    await service.start()
+    return service
+
+
+def look(service):
+    out = io.StringIO()
+    code = check.check_running_tv(service, out)
+    assert out.getvalue().isascii()
+    return code, out.getvalue()
+
+
+async def test_the_running_service_is_looked_at_and_no_second_connection_is_made(tmp_path):
+    service = await running(tmp_path, pi_input="HDMI_1")
+    try:
+        await until(lambda: service.status()["reachable"])
+        clients = len(FakeTvClient.instances)
+        code, text = look(service)
+        assert code == 0, text
+        assert text.splitlines() == [
+            "TV: 10.0.0.41, MAC AA:BB:CC:DD:EE:FF",
+            f"The TV is paired with the room (its key is in {tmp_path / KEY}).",
+            "Looked at through the room's own connection to the TV: the check opens no second one.",
+            "The TV answers: Boardroom TV, on.",
+            "Inputs: HDMI 1 (HDMI_1), HDMI 2 (HDMI_2).",
+            "The TV shows HDMI 1 (HDMI_1), the room Pi's input (tv.pi_input).",
+            "Ready: the TV answers.",
+        ]
+        assert len(FakeTvClient.instances) == clients                         # no client of its own
+        assert service.status()["reachable"]                                  # and the agent's is still connected
+    finally:
+        await service.stop()
+
+
+async def test_the_running_service_warns_about_the_room_pis_input_as_the_check_does(tmp_path):
+    service = await running(tmp_path, factory=showing("HDMI_2"), pi_input="HDMI_1")
+    try:
+        await until(lambda: service.status()["reachable"])
+        code, text = look(service)
+        assert code == 0 and "The TV answers, with the warnings above." in text
+        assert "Warning: The TV is not showing the room Pi's input HDMI_1 (tv.pi_input): a meeting join switches it." in text
+    finally:
+        await service.stop()
+
+
+async def test_a_tv_the_running_service_cannot_reach_is_said_so(tmp_path):
+    service = await running(tmp_path, factory=silent_tv)
+    try:
+        code, text = look(service)
+        assert code == 1
+        assert "The TV at 10.0.0.41 is not answering the room now." in text and OFF_HINT in text
+    finally:
+        await service.stop()
+
+
+async def test_a_tv_that_has_refused_the_room_is_said_so_by_the_running_service(tmp_path):
+    service = await running(tmp_path, factory=forgetful_tv)
+    try:
+        await until(lambda: service.status()["refused"])
+        code, text = look(service)
+        assert code == 1 and "The TV no longer accepts this table: Forget TV, then Pair" in text and OFF_HINT not in text
+    finally:
+        await service.stop()
+
+
+async def test_the_running_service_with_no_tv_or_no_key_or_switched_off(tmp_path):
+    code, text = look(service_for(tmp_path, host=""))
+    assert code == 1 and text == "No TV is configured. On the table use Options > TV > Find TVs and select yours.\n"
+    (tmp_path / "unpaired").mkdir()
+    code, text = look(service_for(tmp_path / "unpaired", key=None))
+    assert code == 1 and "The TV is not paired with the room: pair it under Options > TV." in text
+    code, text = look(service_for(tmp_path, enabled=False))
+    assert code == 1 and "tv.enabled is false" in text

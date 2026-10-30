@@ -11,7 +11,7 @@ import io
 import logging
 import time
 from datetime import datetime
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TextIO
 
 from croom.calendar.bookings import BookingError
 from croom.control.settings import SettingsStore
@@ -282,6 +282,19 @@ class LaptopService(Service):
                 await self._reclaim()
             logger.info(f"Test the switch: {'passed' if code == 0 else 'failed'}")
             return {"ok": code == 0, "lines": out.getvalue().splitlines()}
+
+    async def check(self, out: TextIO) -> int:
+        """Settings › Check › Laptop switch: `croom --check-laptop` with this service's own switch, which is neither pressed nor opened
+        again (the MeetUp stays where it is, so a meeting is not disturbed), then what Laptop mode is doing. The check's exit code."""
+        code = await check_laptop(self._config or Config(), out, switch=self._switch, held=True)
+        if self._lock.locked():
+            print("Laptop mode: a switch is under way; check again in a moment.", file=out)
+        elif self._active:
+            until = f" until {self._until:%-I:%M %p}" if self._until else ""
+            print(f"Laptop mode: on, the laptop has the MeetUp{until}.", file=out)
+        else:
+            print("Laptop mode: off, the room has the MeetUp.", file=out)
+        return code
 
     # -- the others
 

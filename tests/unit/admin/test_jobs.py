@@ -88,7 +88,7 @@ def mode(path):
 def test_the_table_lists_this_tasks_jobs_and_nothing_else(machine):
     jobs, *_ = machine
     assert set(jobs.table) == {"write_config", "save_credential", "usb_files", "read_usb_file", "restart", "restart_status", "reboot",
-                               "version"}
+                               "version", "journal"}
 
 
 def test_a_job_refuses_an_argument_it_does_not_take(machine):
@@ -591,3 +591,107 @@ def test_read_usb_file_refuses_what_is_not_a_regular_file_without_waiting_on_it(
     monkeypatch.setattr(jobs, "_usb_listing", lambda: [{"path": str(fifo)}])
     with pytest.raises(JobError, match="not a key file on a USB stick"):
         jobs.table["read_usb_file"]({"path": str(fifo)})
+
+
+# --- journal (Settings > Logs): journalctl -u croom -o json, newest first, read by a fake runner
+
+def journal_line(text, priority=None, at_us=1_800_000_000_000_000, cursor="s=ab;i=1", **more):
+    record = {"MESSAGE": text, "__REALTIME_TIMESTAMP": str(at_us), "__CURSOR": cursor, **more}
+    if priority is not None:
+        record["PRIORITY"] = str(priority)
+    return json.dumps(record)
+
+
+class JournalRunner:
+    """journalctl: what it was asked, and the lines it prints (`code` other than 0: it fails, printing `output`)."""
+
+    def __init__(self, lines=(), code=0, output=""):
+        self.calls, self.lines, self.code, self.output = [], list(lines), code, output
+
+    def __call__(self, args):
+        self.calls.append(list(args))
+        return (self.code, self.output) if self.code else (0, "\n".join(self.lines) + "\n")
+
+
+def journal_jobs(paths, runner):
+    return Jobs(Host(paths=paths, run=runner, owner=getpass.getuser(), group=grp.getgrgid(os.getgid()).gr_name))
+
+
+def test_journal_reads_the_newest_lines_of_the_room_software_with_journalctl_and_no_shell(paths):
+    from datetime import datetime
+    runner = JournalRunner([
+        journal_line("2026-10-30 10:42:13,512 - croom.tv.service - WARNING - The TV is not answering", 4, cursor="s=ab;i=3"),
+        journal_line("Started croom.service - Crystal Meet room agent.", 6, at_us=1_799_999_999_000_000, cursor="s=ab;i=2"),
+    ])
+    answer = journal_jobs(paths, runner).journal({})
+    assert runner.calls == [["journalctl", "--unit=croom", "--output=json", "--reverse", "--lines=200", "--no-pager", "--quiet"]]
+    when = datetime.fromtimestamp(1_800_000_000).astimezone().isoformat(timespec="seconds")
+    assert answer["entries"][0] == {"time": when, "level": "warning", "text": "croom.tv.service - The TV is not answering"}
+    assert answer["entries"][1]["text"] == "Started croom.service - Crystal Meet room agent." and answer["entries"][1]["level"] == "info"
+    assert answer["cursor"] == "s=ab;i=2"                      # the oldest shown: Load more begins after it
+    assert answer["more"] is False                             # fewer than asked: the log has no more
+
+
+def test_journal_warnings_and_errors_and_the_page_before_a_cursor(paths):
+    runner = JournalRunner([journal_line("x", 3, cursor=f"s=ab;i={n}") for n in range(5, 0, -1)])
+    answer = journal_jobs(paths, runner).journal({"lines": 5, "level": "warning", "before": "s=ab;i=9;b=00;m=1f;t=5d8;x=91"})
+    assert runner.calls[0][-2:] == ["--priority=warning", "--after-cursor=s=ab;i=9;b=00;m=1f;t=5d8;x=91"]   # one argument each: never an option of its own
+    assert "--lines=5" in runner.calls[0]
+    assert [e["level"] for e in answer["entries"]] == ["error"] * 5 and answer["more"] is True and answer["cursor"] == "s=ab;i=1"
+
+
+@pytest.mark.parametrize("priority, text, level", [
+    (0, "kernel panic", "critical"), (2, "x", "critical"), (3, "x", "error"), (4, "x", "warning"), (5, "x", "info"), (7, "x", "debug"),
+    # a line from before the agent wrote its priorities: the journal has it at info, and the line says what it is
+    (6, "2026-10-30 10:42:13,512 - croom.x - ERROR - Boom", "error"),
+    (None, "2026-10-30 10:42:13,512 - croom.x - CRITICAL - Boom", "critical"),
+    # the agent's priority wins over the words
+    (4, "2026-10-30 10:42:13,512 - croom.x - INFO - says info", "warning"),
+    (6, "Traceback (most recent call last):", "info"),
+])
+def test_journal_levels(paths, priority, text, level):
+    runner = JournalRunner([journal_line(text, priority)])
+    assert journal_jobs(paths, runner).journal({})["entries"][0]["level"] == level
+
+
+def test_journal_lines_that_are_not_plain_text(paths):
+    from croom.admin.jobs import MAX_JOURNAL_TEXT, TOO_LONG_FOR_THE_JOURNAL
+    long = "y" * (MAX_JOURNAL_TEXT + 50)
+    runner = JournalRunner([
+        json.dumps({"MESSAGE": list("café".encode("utf-8")) + [0xff], "PRIORITY": "6", "__CURSOR": "s=1"}),   # not UTF-8: its bytes
+        json.dumps({"MESSAGE": None, "PRIORITY": "3", "__CURSOR": "s=2"}),                                         # over the JSON output's limit
+        journal_line(long, 6),
+        "not json", "[1, 2]", "",
+        json.dumps({"MESSAGE": "no time", "__REALTIME_TIMESTAMP": "soon"}),
+        json.dumps({"MESSAGE": list(b"\x1b[33mWARNING\x1b[0m: low\x07 disk\tspace"), "__CURSOR": "s=3"}),   # a terminal's colours
+    ])
+    entries = journal_jobs(paths, runner).journal({})["entries"]
+    assert entries[0]["text"] == "café�" and entries[1]["text"] == TOO_LONG_FOR_THE_JOURNAL
+    assert len(entries[2]["text"]) == MAX_JOURNAL_TEXT and entries[2]["text"].endswith("…")
+    assert len(entries) == 5 and entries[3] == {"time": "", "level": "info", "text": "no time"}
+    assert entries[4]["text"] == "WARNING: low disk\tspace"
+
+
+@pytest.mark.parametrize("args, words", [
+    ({"lines": 0}, "The lines must be a whole number from 1 to 500"),
+    ({"lines": 501}, "The lines must be a whole number from 1 to 500"),
+    ({"lines": "200"}, "The lines must be a whole number from 1 to 500"),
+    ({"lines": True}, "The lines must be a whole number from 1 to 500"),
+    ({"level": "debug"}, 'The level must be "all" or "warning"'),
+    ({"before": "--since=yesterday"}, "That is not a place in the log"),
+    ({"before": "s=1 i=2"}, "That is not a place in the log"),
+    ({"before": 5}, "That is not a place in the log"),
+    ({"unit": "ssh"}, "This job does not take unit"),
+])
+def test_journal_refuses_what_it_does_not_take_without_running_anything(paths, args, words):
+    runner = JournalRunner()
+    with pytest.raises(JobError) as refused:
+        journal_jobs(paths, runner).journal(args)
+    assert str(refused.value) == words and runner.calls == []
+
+
+def test_journal_says_why_it_could_not_read_the_log(paths):
+    runner = JournalRunner(code=1, output="Failed to seek to cursor: Invalid argument\n")
+    with pytest.raises(JobError) as refused:
+        journal_jobs(paths, runner).journal({"before": "s=1"})
+    assert str(refused.value) == "The log could not be read: Failed to seek to cursor: Invalid argument"

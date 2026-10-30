@@ -624,6 +624,9 @@ body.keyboard-open .schedule { display: none; }
   .headline { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
   /* A Settings page longer than the screen (Meetings, with its lists) scrolls in its own box under the head, as the bookings do */
   .view[data-view="settings"] .settings-page { height: 100%; min-height: 0; overflow-y: auto; padding-right: 8px; }
+  /* Check and Logs fill the page, and their block takes what the screen has left: the lines scroll inside it */
+  .tool-page { height: 100%; }
+  .tool-output { max-height: none; }
 }
 @media (min-width: 1024px) {
   /* Options' six (Camera framing, Mic level, Screensaver, Door sign, TV and Settings) three and three, the same height as when there were four two
@@ -840,6 +843,35 @@ select.setting-input:focus-visible { outline: 3px solid var(--periwinkle-300); o
 .laptop-test-result .laptop-test-verdict { font-weight: 600; }
 .laptop-test-result.failed .laptop-test-verdict { color: #FFD7D5; }
 .laptop-test-line { color: var(--periwinkle-300); font-size: 0.95rem; }
+/* Settings › Check and Logs (settings-tools.js): a row of buttons over a block that scrolls inside itself, so the page fits the screen */
+.tool-page { display: flex; flex-direction: column; gap: 14px; width: 100%; max-width: 1180px; min-height: 0; }
+.tool-bar { display: flex; flex-wrap: wrap; gap: 10px; flex: 0 0 auto; }
+.tool-bar .button { min-height: 60px; padding: 0 18px; }
+.tool-bar .button[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
+.tool-note { margin: 0; color: var(--periwinkle-300); }
+.check-verdict { margin: 0; min-height: 1.5em; font-weight: 600; overflow-wrap: anywhere; }
+.check-verdict.failed { color: #FFD7D5; }
+.tool-output {
+  flex: 1 1 auto; min-height: 120px; max-height: 60vh; overflow: auto; margin: 0; padding: 12px 14px;
+  color: #fff; background: var(--surface-800); border: 1px solid var(--line-soft); border-radius: var(--radius-sm);
+  font-family: ui-monospace, "DejaVu Sans Mono", "Liberation Mono", Menlo, Consolas, monospace; font-size: 0.9rem; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.tool-output[hidden] { display: none; }
+.logs-list { display: grid; align-content: start; gap: 2px; white-space: normal; }
+.log-entry { display: grid; grid-template-columns: max-content 6.5em minmax(0, 1fr); gap: 0 14px; padding: 3px 0; border-bottom: 1px solid var(--line-soft); }
+.log-time { color: var(--periwinkle-300); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.log-level { color: var(--periwinkle-300); }
+.log-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.log-entry[data-level="warning"] .log-level { color: var(--warn-bar); }
+.log-entry[data-level="error"] .log-level, .log-entry[data-level="critical"] .log-level,
+.log-entry[data-level="error"] .log-text, .log-entry[data-level="critical"] .log-text { color: #FFD7D5; }
+.logs-list .button.logs-more { justify-self: start; min-height: 52px; margin-top: 10px; padding: 0 18px; font-family: var(--font); }
+.logs-list .tool-note, .logs-list .setting-error { margin: 10px 0 0; font-family: var(--font); }
+@media (max-width: 699px) {
+  .log-entry { grid-template-columns: max-content minmax(0, 1fr); }
+  .log-text { grid-column: 1 / -1; }
+}
 /* Save stays in sight at the foot of a long page (Meetings) as the rows scroll under it */
 .settings-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 16px; position: sticky; bottom: 0; z-index: 1;
                     padding: 10px 0; background: var(--surface-900); }

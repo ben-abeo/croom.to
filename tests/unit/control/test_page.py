@@ -54,7 +54,7 @@ class PageServer:
 
     def __init__(self, calendar_events=(), room_name="Lab", room_location="2nd floor", calendar_connected=True, port=0, devices=None,
                  role="participant", controls=True, tv=None, discover=None, mouse=None, room_company=None, schedules=None,
-                 bookings=False, laptop=None, admin=None, config_file=None, find_devices=None, keyboard=None):
+                 bookings=False, laptop=None, admin=None, config_file=None, find_devices=None, keyboard=None, checks=None):
         self.role = role
         self.controls = controls
         self.events = list(calendar_events)
@@ -80,6 +80,7 @@ class PageServer:
         self.config_file = Path(config_file) if config_file is not None else Path(self._settings_dir.name) / "config.yaml"
         # The Devices page's listing of the room's speakers, microphones and cameras: never pw-dump or /dev/video* in a test
         self.find_devices = find_devices or no_room_devices
+        self.checks = checks            # Settings > Check's checks (croom.settings.checks.Checks): none is the room's own, on config_file
         self.meeting = None
         self.port = None
         self._loop = asyncio.new_event_loop()
@@ -120,7 +121,7 @@ class PageServer:
             config=config,
             meeting=self.meeting, calendar=calendar,
             devices=self.devices, store=store, scores=scores, tv=self.tv, discover=self.discover, mouse=self.mouse,
-            laptop=self.laptop, admin=self.admin, find_devices=self.find_devices, keyboard=self.keyboard,
+            laptop=self.laptop, admin=self.admin, find_devices=self.find_devices, keyboard=self.keyboard, checks=self.checks,
         )
         await service.start()
         self.port = service.bound_port

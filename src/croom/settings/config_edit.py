@@ -104,6 +104,15 @@ class ConfigEditor:
             entries.append(entry)
         return entries
 
+    def config(self) -> Config:
+        """The room's settings as the file has them now, loaded as `croom --check-…` loads them (Settings › Check). SettingError when the
+        file can't be read, or the room would not start with it."""
+        data = self._read()
+        try:
+            return Config.from_dict(data)
+        except (TypeError, ValueError, AttributeError, KeyError) as e:
+            raise SettingError(f"The room's settings file can't be loaded: {e}") from e
+
     @staticmethod
     def _page(page: str):
         if page not in PAGES:

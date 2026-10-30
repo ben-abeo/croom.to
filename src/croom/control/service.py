@@ -30,6 +30,7 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
+from croom.settings.checks import CheckBusy, Checks
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
 from croom.settings.devices import find_devices as find_room_devices
@@ -237,6 +238,8 @@ class ControlService(Service):
             writes; config.yaml beside settings_file when the config names none).
         find_devices: the room's speakers, microphones and cameras for the Devices page (croom.settings.devices.find_devices, which
             runs pw-dump and opens /dev/video*, unless a test stands in for it).
+        checks: Settings › Check's checks (croom.settings.checks.Checks), which reach Google, Zoom and the TV; by default the room's
+            own, on config_file and the services given here.
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
@@ -258,6 +261,7 @@ class ControlService(Service):
         admin=None,
         find_devices=None,
         keyboard=None,
+        checks=None,
     ):
         super().__init__("control")
         self.config = config or {}
@@ -301,6 +305,8 @@ class ControlService(Service):
         )
         self._credentials = Credentials(self._editor, admin)
         self._find_devices = find_devices or find_room_devices
+        self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
+                                                                discover=discover)
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
         self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
         self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
@@ -434,6 +440,8 @@ class ControlService(Service):
         app.router.add_post("/api/settings/google/sign-in", self._handle_sign_in)
         app.router.add_post("/api/settings/google/sign-in/done", self._handle_sign_in_done)
         app.router.add_post("/api/settings/google/sign-in/cancel", self._handle_sign_in_cancel)
+        app.router.add_post("/api/settings/checks/{name}", self._handle_check)
+        app.router.add_get("/api/settings/logs", self._handle_logs)
         app.router.add_get("/ws/pointer", self._handle_pointer)
         if self._static_dir.is_dir():
             app.router.add_static("/static/", self._static_dir)
@@ -1524,6 +1532,48 @@ class ControlService(Service):
             return web.json_response(await self._laptop.test_switch())
         except LaptopError as e:
             return self._error_response(str(e), e.status)
+
+    # --- Check and Logs (spec 2026-10-29, sections 3 and 5)
+
+    async def _handle_check(self, request: web.Request) -> web.Response:
+        """Run one of Settings › Check's checks (calendar, tv, laptop, google, zoom): {"ok", "text"}, the words the `croom --check-…`
+        command prints, within a minute. 409 "Already running" while that check runs; never refused for a meeting (none disturbs one:
+        croom.settings.checks). Needs no helper."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        name = request.match_info["name"]
+        try:
+            return web.json_response(await self._checks.run(name))
+        except KeyError:
+            return self._error_response(f"There is no check {name}", 404)
+        except CheckBusy as e:
+            return self._error_response(str(e), 409)
+
+    LOG_LEVELS = ("all", "warning")
+    LOG_LINES = 200
+
+    async def _handle_logs(self, request: web.Request) -> web.Response:
+        """The room software's log through the root helper's journal job, newest first: ?level=all|warning (warnings and errors),
+        &before=<cursor> for the page before an earlier answer's cursor. {"entries": [{"time", "level", "text"}], "cursor", "more"}."""
+        refused = self._settings_refusal(request, post=False)
+        if refused is not None:
+            return refused
+        level = request.query.get("level", "all")
+        if level not in self.LOG_LEVELS:
+            return self._error_response('The level is "all" or "warning"', 400)
+        args: Dict[str, Any] = {"lines": self.LOG_LINES, "level": level}
+        if request.query.get("before"):
+            args["before"] = request.query["before"]
+        try:
+            answer = await self._admin.call("journal", **args)
+        except AdminUnavailable as e:
+            return self._error_response(str(e), 503)
+        except AdminError as e:
+            return self._error_response(str(e), 409)
+        return web.json_response({"entries": answer.get("entries", []), "cursor": answer.get("cursor"), "more": bool(answer.get("more"))})
 
     # --- Meetings: Sign in to Google on the TV (spec 2026-10-29, sections 3 and 8)
 

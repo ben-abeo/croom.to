@@ -147,3 +147,15 @@ async def test_the_notice_meet_shows_as_the_room_joins_is_pressed_right_after_th
     assert await provider._page.evaluate(READ_DIALOGS) == []
     assert info.notice == ""                           # pressed, and a tip puts nothing on the notice line
     assert info.dialog is None
+
+
+async def test_a_tap_on_a_box_while_the_capture_runs_is_refused_at_once_in_words():
+    """The capture holds Meet's boxes for up to a minute: a tap is told so at once, not held until after the page gave up on it."""
+    page = StandInPage(KNOCK)
+    provider, info = in_a_call(page)
+    await provider._read_dialogs()
+    provider._capturing = True
+    async with provider._dialog_turn:                 # as the capture holds it
+        with pytest.raises(MeetingControlError, match="capturing Meet's page; try again in a minute"):
+            await asyncio.wait_for(provider.control("dialog", {"id": info.dialog["id"], "button": "Admit"}), 1)
+    assert page.presses == [] and info.dialog["title"] == KNOCK["title"]

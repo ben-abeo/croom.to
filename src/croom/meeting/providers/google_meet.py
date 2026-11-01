@@ -72,6 +72,8 @@ READ_CALL = r"""() => {
 KEYBOARD_TAKEN_WORDS = "Meet's chat box has the keyboard; close it on the TV first"
 # What a tap on a box that Meet has taken off the screen is told.
 DIALOG_GONE_WORDS = "That box is no longer on Meet's screen"
+# What a tap on a box is told while Settings' capture of Meet's page runs (it holds the boxes for up to a minute).
+CAPTURING_WORDS = "The room is capturing Meet's page; try again in a minute"
 
 
 class _DialogGone(MeetingControlError):
@@ -157,6 +159,7 @@ class GoogleMeetProvider(MeetingProvider):
         self.dialog_policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
         self._dialog_reader: Optional[asyncio.Task] = None
         self._dialog_turn = asyncio.Lock()
+        self._capturing = False   # Settings' capture of Meet's page is running (it holds _dialog_turn for up to a minute)
         self._next_dialog_id = 0
         self._reset_dialogs()
 
@@ -756,6 +759,8 @@ class GoogleMeetProvider(MeetingProvider):
             dialog_id, label = int(value["id"]), str(value["button"])
         except (KeyError, TypeError, ValueError):
             raise MeetingControlError("Say which dialog and which button") from None
+        if self._capturing:
+            raise MeetingControlError(CAPTURING_WORDS)   # at once: held for the capture's minute, the tap would land after the page gave up
         async with self._dialog_turn:
             key = next((key for key, words in self._on_screen.items() if words["id"] == dialog_id), None)
             if key is None:
@@ -781,9 +786,17 @@ class GoogleMeetProvider(MeetingProvider):
             raise MeetingControlError(JOIN_MEET_FIRST)
         # Its presses take the press lock one at a time (the order stays the box reader's, then the press lock's), so a touch Pi's mute is
         # never sent in the middle of one, and waits for one key, not the whole minute.
-        capture = MeetCapture(self._page, screenshots=screenshots, room_name=self._room_name, lock=self._pressing)
-        async with self._dialog_turn:
-            result = await capture.run()
+        # It opens nothing new once the call is no longer connected (a Leave, the agent's shutdown), and presses nothing once the TV has left
+        # Meet's page.
+        capture = MeetCapture(self._page, screenshots=screenshots, room_name=self._room_name, lock=self._pressing,
+                              in_call=lambda: self._state == MeetingState.CONNECTED,
+                              on_meet=lambda: self._state in (MeetingState.CONNECTED, MeetingState.LEAVING))
+        self._capturing = True   # a tap on the table's box is refused in words meanwhile, not held for the minute
+        try:
+            async with self._dialog_turn:
+                result = await capture.run()
+        finally:
+            self._capturing = False
         path = await asyncio.to_thread(save_capture, result, capture.images, Path(directory))
         logger.info(f"Captured Meet's page into {path}")
         steps = [{key: step[key] for key in ("name", "opened", "why", "closed") if key in step} for step in result["steps"]]

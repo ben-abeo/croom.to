@@ -25,6 +25,7 @@ MENU_ITEMS = '<div role="menuitem" id="layout-item">Change layout</div><div role
 FAKE_MEET = """<!DOCTYPE html><html lang="en"><head><title>Meet - abc-defg-hij</title></head><body>
 <div id="tiles">
   <div data-participant-id="p1"><span>Pat Doe</span><i>mic_off</i><button aria-label="More options for Pat Doe">more_vert</button></div>
+  <div data-participant-id="p3" role="group" aria-label="Tile"><span>jdoe</span><i class="google-symbols">mic_off</i></div>
   <div data-participant-id="p2"><span>Room 1</span><button aria-label="More options for Room 1 (You)" data-panel="tile-menu">more_vert</button></div>
 </div>
 <div role="alertdialog"><h2>Someone wants to join this call</h2><div>Sam Knock</div><button>Deny</button><button>Admit</button></div>
@@ -39,6 +40,7 @@ FAKE_MEET = """<!DOCTYPE html><html lang="en"><head><title>Meet - abc-defg-hij</
 <aside id="chat" class="panel" role="complementary" aria-label="Chat panel" hidden>
   <h2>In-call messages</h2><button aria-label="Close">close</button>
   <div data-message-id="m1"><div>Pat Doe</div><div>10:42 AM</div><div data-message-text>Hello from the laptop, write to pat.doe@example.org</div></div>
+  <div data-message-id="m2"><div>ben</div><div>10:44 AM</div><div data-message-text>hello</div></div>
   <textarea aria-label="Send a message to everyone"></textarea><button aria-label="Send a message">send</button>
 </aside>
 <div id="people" class="panel" role="complementary" aria-label="People" hidden>
@@ -179,6 +181,9 @@ async def test_names_email_addresses_and_chat_are_redacted_in_labels_and_texts(f
 
     for private in ("Pat Doe", "Lee Roe", "Sam Knock", "pat.doe@example.org", "lee.roe@example.org", "Hello from the laptop"):
         assert private not in words, private
+    for one_word in ("jdoe", "ben", "hello"):          # a lower-case name or message is a person's word, not an icon's
+        assert not re.search(rf"\b{one_word}\b", words), one_word
+    assert "mic_off" in words                          # an icon's word, known by its element, stays
     labels = {e["label"] for step in result["steps"] for e in step.get("elements", [])}
     texts = {e["text"] for step in result["steps"] for e in step.get("elements", [])}
     pat = next(label[len("More options for "):] for label in labels if label.startswith("More options for Person") and "(You)" not in label)

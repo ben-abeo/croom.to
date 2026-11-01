@@ -424,6 +424,19 @@ class TestDialogAndControlConfig:
         assert loaded.meeting.dialogs.acknowledge == ["is being recorded"] and loaded.meeting.dialogs.ask_everything is True
         assert Config.from_dict(loaded.to_dict()).meeting.controls.reactions == ["Clap"]
 
+    def test_a_room_with_the_old_eight_phrases_gets_meets_notice_and_its_file_is_not_written(self, tmp_path):
+        """A room installed before Meet's notice was added wrote the eight phrases out: read unedited, the list gains the new one in
+        memory only. An edited list is left as it is."""
+        old = ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on", "has been muted", "has been unmuted",
+               "recording has started", "recording has stopped"]
+        path = tmp_path / "config.yaml"
+        path.write_text(yaml.safe_dump({"meeting": {"dialogs": {"acknowledge": old}}}))
+        before = path.read_text()
+        assert load_config(str(path)).meeting.dialogs.acknowledge == old + ["others may see your video differently"]
+        assert path.read_text() == before
+        edited = old[:7]
+        assert Config.from_dict({"meeting": {"dialogs": {"acknowledge": edited}}}).meeting.dialogs.acknowledge == edited
+
     def test_the_reactions_are_zooms_own_names_not_emoji(self):
         """Zoom 6.5.0's picker has no emoji: its items are named Clap, Thumbs Up, Joy, Open Mouth, Heart and Tada."""
         assert sorted(DEFAULT_REACTIONS) == ["Clap", "Heart", "Joy", "Open Mouth", "Tada", "Thumbs Up"]

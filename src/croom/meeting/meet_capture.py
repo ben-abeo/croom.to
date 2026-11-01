@@ -27,7 +27,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from croom.meeting.meet_page import (
     GATHER_PRIVATE, MARK_CLOSE, NAMES_OF, PAGE_STATE, READ_DIALOGS, RECORD_ELEMENTS, UNMARK_CLOSE,
@@ -39,6 +39,7 @@ JOIN_MEET_FIRST = "Join a Google Meet call first"
 ALREADY_CAPTURING = "A capture of Google Meet is running already"
 NO_CAPTURE = "No capture of Google Meet yet"
 UP = "The capture's minute was up"
+ENDED = "The call ended"
 UNKNOWN = "unknown"   # a step's `closed` when the page did not come back as it was and no panel shows why: someone looks at the TV
 Closed = Union[bool, str]
 FILE_PATTERN = "meet-capture-*.zip"
@@ -130,13 +131,14 @@ class Redactor:
         return self.emails[address]
 
     @staticmethod
-    def _whole(words: str) -> "re.Pattern":
-        return re.compile(r"(?<!\w)" + re.escape(words) + r"(?!\w)", re.I)
+    def _whole(words: str, case: bool = False) -> "re.Pattern":
+        return re.compile(r"(?<!\w)" + re.escape(words) + r"(?!\w)", 0 if case else re.I)
 
     def __call__(self, text: str) -> str:
+        # A message is replaced as it was typed (a chat "ok" does not take Meet's "OK" with it); a name and the title in any case.
         private = {**self.titles, **self.messages}
         for message in sorted(private, key=len, reverse=True):           # a message may hold a name or an address: it goes whole first
-            text = self._whole(message).sub(private[message], text)
+            text = self._whole(message, case=message in self.messages).sub(private[message], text)
         text = EMAIL.sub(self._email, text)
         for name in sorted(self.names, key=len, reverse=True):           # "Pat Doe" before "Pat"
             text = self._whole(name).sub(self.names[name], text)
@@ -193,8 +195,13 @@ class MeetCapture:
     LIMIT_S = 60             # the whole capture
 
     def __init__(self, page, redact: Optional[Redactor] = None, screenshots: bool = True, room_name: str = "",
-                 lock: Optional[asyncio.Lock] = None):
+                 lock: Optional[asyncio.Lock] = None, in_call: Optional[Callable[[], bool]] = None,
+                 on_meet: Optional[Callable[[], bool]] = None):
         self.page = page
+        # Whether the room is still in the call (else nothing new is opened: what is open is closed and the run ends), and whether the
+        # page is still Meet's (else nothing at all is pressed: the TV has gone back to the screensaver).
+        self._in_call = in_call or (lambda: True)
+        self._on_meet = on_meet or self._in_call
         # Held for each key and click (the provider's press lock): a touch Pi's mute or camera shortcut is never sent in the middle of one.
         self._lock = lock if lock is not None else asyncio.Lock()
         self.redact = redact if redact is not None else Redactor()
@@ -216,8 +223,9 @@ class MeetCapture:
             for number, step in enumerate(STEPS, 1):
                 record: Dict[str, Any] = {"name": step.name}
                 records.append(record)
-                if self._over():
-                    record.update(opened=False, why=UP)
+                stopped = self._stopped()
+                if stopped:
+                    record.update(opened=False, why=stopped)
                     continue
                 await self._step(number, step, record)
         finally:
@@ -264,7 +272,8 @@ class MeetCapture:
             record.update(opened=False, why=f"Could not read Meet's page: {_first_line(e)}")
             return
         try:
-            by, why = await self._open(step, before) if not self._over() else (None, UP)
+            stopped = self._stopped()
+            by, why = await self._open(step, before) if not stopped else (None, stopped)
             if by is None:
                 record.update(opened=False, why=why)
             else:
@@ -316,6 +325,8 @@ class MeetCapture:
             if not await self._wait_open(step, before):
                 return None, f"{via} opened nothing"
             menu = {_key(panel) for panel in self._new_panels(before, await self._state(step))}
+            if self._stopped() == ENDED:
+                return None, ENDED   # the menu it opened is closed by the step
             item = await self._press(step.opener, roles=("menuitem", "menuitemradio", "option", "button"))
             if item is None:
                 return None, f"Meet's {via} menu has no {step.words} item"
@@ -329,7 +340,7 @@ class MeetCapture:
             why = f"{label} opened nothing"
         else:
             why = "No tile menu names the room or you" if step.own else f"Meet shows no {step.words} button"
-        if step.shortcut and not self._over():
+        if step.shortcut and not self._stopped():
             await self._key(step.shortcut)
             if await self._wait_open(step, before):
                 return step.shortcut, ""
@@ -415,6 +426,12 @@ class MeetCapture:
     def _over(self) -> bool:
         return time.monotonic() >= self._deadline
 
+    def _stopped(self) -> Optional[str]:
+        """Why nothing new is opened now: the call ended, or the minute is up; None while the capture may go on."""
+        if not self._in_call():
+            return ENDED
+        return UP if self._over() else None
+
     # --- the page
 
     async def _state(self, step: Step) -> Dict[str, Any]:
@@ -440,11 +457,15 @@ class MeetCapture:
 
     async def _key(self, key: str) -> None:
         async with self._lock:
+            if not self._on_meet():
+                return   # the TV is no longer on Meet's page: nothing is pressed on whatever is there
             self.pressed.append(key)
             await asyncio.wait_for(self.page.keyboard.press(key), self.ANSWER_S)
 
     async def _click(self, element, label: str) -> None:
         async with self._lock:
+            if not self._on_meet():
+                return
             self.pressed.append(label)
             await element.click(timeout=self.CLICK_TIMEOUT_MS)
 

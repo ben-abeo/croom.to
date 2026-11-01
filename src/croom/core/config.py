@@ -64,6 +64,10 @@ class RoomConfig:
 DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on",
                        "has been muted", "has been unmuted", "recording has started", "recording has stopped",
                        "others may see your video differently"]
+# The list as rooms installed from mid-October 2026 until Meet's notice was added wrote it out in their config.yaml. Read unedited, it gains
+# the new phrase in memory (the file is not written): Meet's notice is then answered on a room that was only updated. An edited list is
+# left as it is (the README's upgrade note says to add the phrase in Settings › Meetings).
+OLD_ACKNOWLEDGE = DEFAULT_ACKNOWLEDGE[:8]
 # Zoom 6.5.0's reaction picker has no emoji: its items are named, and the table offers them by those names.
 DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
 # The platforms a room joins when its config does not say.
@@ -104,12 +108,14 @@ def _flag(value: Any, default: bool, where: str) -> bool:
 
 @dataclass
 class DialogsConfig:
-    """What the agent does with the dialogs Zoom draws over the TV (spec 2026-10-13, section 5)."""
+    """What the agent does with the dialogs Zoom and Google Meet draw over the TV (spec 2026-10-13, section 5)."""
     acknowledge: List[str] = field(default_factory=lambda: list(DEFAULT_ACKNOWLEDGE))   # one-button notices pressed at once
     ask_everything: bool = False   # every dialog waits for a tap on the table, the acknowledgeable ones too
 
     def __post_init__(self):
         self.acknowledge = _listed(self.acknowledge, DEFAULT_ACKNOWLEDGE, "meeting.dialogs.acknowledge")
+        if self.acknowledge == OLD_ACKNOWLEDGE:
+            self.acknowledge = self.acknowledge + DEFAULT_ACKNOWLEDGE[8:]
         self.ask_everything = _flag(self.ask_everything, False, "meeting.dialogs.ask_everything")
 
 

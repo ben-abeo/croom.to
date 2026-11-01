@@ -160,15 +160,18 @@ UNMARK_CLOSE = '() => { for (const el of document.querySelectorAll("[data-croom-
 # screen", the Google account's), and from a box that says someone wants to join.
 GATHER_PRIVATE = "([kind, keys]) => {" + _DRAWN + _PANELS + r"""
   const names = [], messages = [];
-  const icon = (line) => /^[a-z0-9_]+$/.test(line);   // a Material icon's ligature (mic_off, more_vert): Meet's own word, not a person's
-  const nameLike = (line) => line.length >= 2 && line.length <= 80 && !icon(line) && !/^you$/i.test(line) && !/^\d{1,2}:\d\d/.test(line);
-  const lines = (el) => String(el.innerText || "").split("\n").map(clean).filter(Boolean);
-  // Each piece of text drawn inside el and not on a button, on its own (a name beside an icon's ligature is not run into it).
-  const pieces = (el) => {
+  // An icon is known by its element, never by the shape of its word ("ben" and "hello" look like a ligature): an <i>, an <svg>, something
+  // hidden from assistive technology, or text in Google's icon fonts (Material Icons / Symbols, Google Symbols).
+  const ICON = 'i, svg, [aria-hidden="true"], [class*="material-icons"], [class*="material-symbols"], [class*="google-material-icons"], [class*="google-symbols"]';
+  const nameLike = (line) => line.length >= 2 && line.length <= 80 && !/^you$/i.test(line) && !/^\d{1,2}:\d\d/.test(line);
+  // Each piece of text drawn inside el, on its own (a name beside an icon's ligature is not run into it): not an icon's, and not on a
+  // button unless `all` (a chat message's every word is taken, whatever it is on or looks like).
+  const pieces = (el, all) => {
     const found = [], walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
     while (walker.nextNode()) {
       const owner = walker.currentNode.parentElement, piece = clean(walker.currentNode.nodeValue);
-      if (piece && owner && drawn(owner) && !owner.closest('button, [role="button"]')) found.push(piece);
+      if (!piece || !owner || !drawn(owner)) continue;
+      if (all || (!owner.closest(ICON) && !owner.closest('button, [role="button"]'))) found.push(piece);
     }
     return found;
   };
@@ -208,13 +211,13 @@ GATHER_PRIVATE = "([kind, keys]) => {" + _DRAWN + _PANELS + r"""
   {
     let found = [...document.querySelectorAll("[data-message-text], [data-message-id]")].filter(drawn);
     if (kind === "chat" && !found.length) found = within('[role="listitem"], li');
-    for (const el of found) messages.push(...lines(el).filter((line) => !icon(line) && !/^\d{1,2}:\d\d/.test(line)));
+    for (const el of found) messages.push(...pieces(el, true));   // fails closed: every word in a message item, its time too
     if (kind === "chat" && !found.length) {
       for (const p of opened) {
         const walker = document.createTreeWalker(p, NodeFilter.SHOW_TEXT);
         while (walker.nextNode()) {
           const owner = walker.currentNode.parentElement, line = clean(walker.currentNode.nodeValue);
-          if (!line || icon(line) || !owner || !drawn(owner)) continue;
+          if (!line || !owner || !drawn(owner) || owner.closest(ICON)) continue;
           if (owner.closest('button, [role="button"], h1, h2, h3, h4, [role="heading"], label, input, textarea')) continue;
           messages.push(line);
         }

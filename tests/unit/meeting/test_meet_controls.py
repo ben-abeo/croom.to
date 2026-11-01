@@ -278,13 +278,16 @@ async def test_the_people_count_is_the_number_in_the_label_or_the_text_and_zero_
     assert await people("<span id=\"people\"></span>") == {"count": 0, "list": []}                                                          # no button
 
 
-@pytest.mark.parametrize("name, value", [
-    ("reactions", "Clap"), ("layout", "gallery"), ("hide_self", None), ("pin", None),
-    ("host.mute_all", None), ("host.record", None), ("host.end", None), ("host.mute_one", "5"),
+@pytest.mark.parametrize("name, value, words", [
+    ("host.record", None, "Not available in a Meet call"), ("host.mute_one", "5", "Not available in a Meet call"),
+    # Phase B's controls, on a page that does not draw their buttons (or for a value they do not take): each says why in its own words.
+    ("reactions", "Clap", "Meet's reactions button isn't on the screen"), ("layout", "gallery", "Say which layout: auto, tiled, spotlight, sidebar"),
+    ("hide_self", None, "Meet's menu for the room's own tile isn't on the screen"), ("pin", None, "Say which person"),
+    ("host.end", None, "Meet does not show the room as a host here; the call was not ended"),
 ])
-async def test_what_meet_does_not_offer_is_refused_in_words_and_nothing_is_pressed(meet_page, name, value):
+async def test_what_meet_does_not_offer_is_refused_in_words_and_nothing_is_pressed(meet_page, name, value, words):
     provider, info = await meet_page(replica())
-    with pytest.raises(MeetingControlError, match="^Not available in a Meet call$"):
+    with pytest.raises(MeetingControlError, match="^" + re.escape(words) + "$"):
         await provider.control(name, value)
     assert await keys(provider) == []
 

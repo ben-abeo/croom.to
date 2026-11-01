@@ -3,8 +3,9 @@ The page scripts Google Meet's call page is read and driven with (spec 2026-10-3
 Meet makes to its page is fixed here. Each is a function of the page, run with `page.evaluate`, that returns plain data.
 
 Phase A: the boxes Meet draws over the call (its notices, "Someone wants to join", "Leave call?").
-Phase B: the call's buttons (READ_CALL), the panels the room opens (people, chat, host controls), the reactions picker, and the two drivers
-that press by label (PRESS_BY_LABEL) and give the chat box the keyboard (FOCUS_CHAT_BOX).
+Phase B: the call's buttons (READ_CALL), the panels the room opens (people, chat, host controls), the reactions picker, and the drivers
+that press by label (PRESS_BY_LABEL, and STATE_BY_LABEL to look without pressing), press inside the menu a person's own row opened
+(PERSON_MENU), press a reaction (PRESS_REACTION), and give the chat box the keyboard (FOCUS_CHAT_BOX, CHAT_BOX_STATE).
 """
 
 import json
@@ -43,6 +44,12 @@ MEET = {
     # What marks a person's row in the people panel: its microphone is off (a label or an icon's word on it), its tile is pinned.
     "muted": ["Muted", "Microphone is off", "Mic is off", "mic_off"],
     "pinned": ["Pinned"],
+    # Phase B, Task 3: what the controls press on the way to their button.
+    "person_menu": ["More actions", "More options"],   # a people panel row's own menu button (or any button of the row that opens a menu)
+    "tile_menu": ["More options for"],                 # a tile's menu button: the room's own is the one naming the room or "you"
+    "leave": ["Leave call"],                           # opens Meet's leave menu, which has End the call for everyone, for a host
+    # The button of the box Meet asks for a confirmation with ("Mute all participants?", "End the call for everyone?", "Remove … from the call?").
+    "confirm": {"mute_all": ["Mute all"], "end_for_all": ["End call"], "remove": ["Remove"]},
 }
 
 # The side panels the room opens (chat, people, host controls, activities), known by their structure and never taken for a box (Review Focus 2,
@@ -307,12 +314,13 @@ GATHER_PRIVATE = "([kind, keys]) => {" + _DRAWN + _PANELS + r"""
 # starts with one of a list of words, in any case and at a word's end), the elements a press is made on, and the text drawn in an element
 # piece by piece (not an icon's, not a button's, not what is inside `skip`).
 _WORDS = r"""
-  const PRESSABLE = 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="checkbox"]';
+  const PRESSABLE = 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="checkbox"], [role="radio"], input[type="radio"], input[type="checkbox"]';
   const ICONS = 'i, svg, [aria-hidden="true"], [class*="material-icons"], [class*="material-symbols"], [class*="google-material-icons"], [class*="google-symbols"]';
   const nameOf = (el) => {
     const by = (el.getAttribute("aria-labelledby") || "").split(/\s+/).map((id) => id && document.getElementById(id)).filter(Boolean)
       .map((n) => clean(n.innerText || n.textContent)).join(" ");
-    return clean(el.getAttribute("aria-label")) || by || clean(el.innerText) || clean(el.getAttribute("title"));
+    const labelled = el.labels && el.labels.length ? clean(el.labels[0].innerText) : "";
+    return clean(el.getAttribute("aria-label")) || by || clean(el.innerText) || labelled || clean(el.getAttribute("title"));
   };
   const starts = (text, words) => {
     const t = clean(text).toLowerCase();
@@ -473,16 +481,30 @@ READ_CHAT = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _W
 
 # With the reactions picker open: the emoji it holds, in order, as strings. An emoji is a drawn button (or option, or menu item) that
 # is nothing but one (data-emoji, an image's alt, or its text), not one inside a side panel. Empty when the picker is not open. Run with MEET.
-READ_REACTIONS = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+_EMOJI = r"""
   const ONLY = /^[\p{Extended_Pictographic}‍️\u{1F3FB}-\u{1F3FF}\s]+$/u;
-  const found = [];
-  for (const el of document.querySelectorAll(PRESSABLE)) {
-    if (!drawn(el) || insideSide(el)) continue;
-    const image = el.querySelector("img[alt]");
-    const emoji = [el.getAttribute("data-emoji"), image && image.getAttribute("alt"), clean(el.innerText)].map(clean).find((t) => t && ONLY.test(t));
-    if (emoji && !found.includes(emoji)) found.push(emoji);
-  }
-  return found;
+  const emojiButtons = () => {
+    const found = [];
+    for (const el of document.querySelectorAll(PRESSABLE)) {
+      if (!drawn(el) || insideSide(el)) continue;
+      const image = el.querySelector("img[alt]");
+      const emoji = [el.getAttribute("data-emoji"), image && image.getAttribute("alt"), clean(el.innerText)].map(clean).find((t) => t && ONLY.test(t));
+      if (emoji && !found.some((f) => f.emoji === emoji)) found.push({ el: el, emoji: emoji });
+    }
+    return found;
+  };
+"""
+READ_REACTIONS = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _EMOJI + r"""
+  return emojiButtons().map((b) => b.emoji);
+}"""
+
+# Press the picker's button for `emoji` (as READ_REACTIONS gives it): true, or false when the picker shows no such one (nothing is pressed).
+# It takes {"meet": MEET, "emoji": "…"}.
+PRESS_REACTION = "({ meet, emoji }) => {  const M = meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _EMOJI + r"""
+  const button = emojiButtons().find((b) => b.emoji === emoji);
+  if (!button || !enabled(button.el)) return false;
+  button.el.click();
+  return true;
 }"""
 
 # With the host controls panel open: [{"key", "label", "on"}] for each switch of MEET.host_switches drawn in it (a switch, a checkbox or a
@@ -518,46 +540,147 @@ READ_HOST_SWITCHES = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _
 #   "panel"               inside the open side panels (chat, people, host controls, activities, any <aside>);
 #   "menu"                inside the open menus ([role=menu], [role=listbox]);
 #   {"panel": kind}       inside the open side panel of that kind ("chat", "people", "host": by its structure, _SIDE), and nowhere else;
-#   {"person": id}        inside the people panel's row with that id (as READ_PEOPLE gives it) and what the row's own buttons control
-#                         (aria-controls: its menu). An id that no row has, or that more than one row has ("name:" + a name two people
-#                         share), presses nothing: the caller says so in words. A text field is never pressed (only the elements above are).
-# A container with nothing in it, or nothing open, presses nothing.
-PRESS_BY_LABEL = "({ meet, labels, container }) => {  const M = meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + r"""
-  let roots = [document];
-  if (container === "panel") roots = sidePanels();
-  else if (container === "menu") roots = [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(drawn);
-  else if (container && typeof container === "object" && container.panel) roots = [openPanels()[container.panel]].filter(Boolean);
-  else if (container && typeof container === "object") {
-    const rows = peopleRows().filter((row) => row.id === container.person);
-    if (rows.length !== 1) return null;
-    roots = [rows[0].el];
-    for (const el of rows[0].el.querySelectorAll("[aria-controls]")) {
-      for (const id of el.getAttribute("aria-controls").split(/\s+/)) { const owned = id && document.getElementById(id); if (owned) roots.push(owned); }
+#   {"dialog": [words]}   inside a drawn dialog (not a side panel) whose title starts with one of the words (Change layout);
+#   {"person": id}        inside the people panel's row with that id (as READ_PEOPLE gives it), and nowhere else: not even a menu its
+#                         buttons name (one menu may serve every row; PERSON_MENU ties a menu to a row). An id that no row has, or that more
+#                         than one row has ("name:" + a name two people share), presses nothing: the caller says so in words.
+# A text field is never pressed (only the elements above are). A container with nothing in it, or nothing open, presses nothing. Two more
+# keys narrow the match: "exact": true, the whole label is one of the words (the bar's "More options", not "More options for Pat");
+# "own": the room's name, only an element whose label names the room or "you" (the room's own tile).
+_FIND = r"""
+  const DIALOGS = '[role="dialog"], [role="alertdialog"]';
+  const rootsOf = (container) => {
+    if (container === "panel") return sidePanels();
+    if (container === "menu") return [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(drawn);
+    if (container && typeof container === "object" && container.panel) return [openPanels()[container.panel]].filter(Boolean);
+    if (container && typeof container === "object" && container.dialog)
+      return [...document.querySelectorAll(DIALOGS)].filter((d) => drawn(d) && !insideSide(d) && titlesOf(d).some((t) => starts(t, container.dialog)));
+    if (container && typeof container === "object") {
+      const rows = peopleRows().filter((row) => row.id === container.person);
+      return rows.length === 1 ? [rows[0].el] : [];
     }
+    return [document];
+  };
+  const findByLabel = (arg) => {
+    let candidates = rootsOf(arg.container)
+      .flatMap((root) => [...(root.matches && root.matches(PRESSABLE) ? [root] : []), ...root.querySelectorAll(PRESSABLE)])
+      .filter((el) => drawn(el) && enabled(el));
+    if (arg.own) {
+      const room = String(arg.own).toLowerCase();
+      candidates = candidates.filter((el) => { const n = nameOf(el).toLowerCase(); return (room && n.includes(room)) || /\byou\b/.test(n); });
+    }
+    for (const word of arg.labels) {
+      const el = candidates.find((c) => arg.exact ? nameOf(c).toLowerCase() === word.toLowerCase() : starts(nameOf(c), [word]));
+      if (el) return el;
+    }
+    return null;
+  };
+  const isOn = (el) => el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-pressed") === "true"
+    || el.getAttribute("aria-selected") === "true" || el.checked === true;
+"""
+PRESS_BY_LABEL = "(arg) => {  const M = arg.meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + _FIND + r"""
+  const button = findByLabel(arg);
+  if (!button) return null;
+  const label = nameOf(button);
+  button.click();
+  return label;
+}"""
+
+# What PRESS_BY_LABEL would press for the same argument, without pressing it: {"label", "on"} (on: it says it is checked, pressed or
+# selected), or null when there is none.
+STATE_BY_LABEL = "(arg) => {  const M = arg.meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + _FIND + r"""
+  const el = findByLabel(arg);
+  return el ? { label: nameOf(el), on: isOn(el) } : null;
+}"""
+
+# The menus and the dialogs on the screen that are not side panels: {"menus": [role|label of each drawn menu or listbox], "dialogs": [the
+# title of each drawn dialog]}. What an action opened is what it finds here that was not here before. Run with MEET.
+OPEN_POPUPS = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  const menus = [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter((m) => drawn(m) && !insideSide(m));
+  const dialogs = [...document.querySelectorAll('[role="dialog"], [role="alertdialog"]')].filter((d) => drawn(d) && !insideSide(d));
+  return { menus: menus.map((m) => m.getAttribute("role") + "|" + clean(m.getAttribute("aria-label"))), dialogs: dialogs.map((d) => titlesOf(d)[0] || "") };
+}"""
+
+# A person's own menu in the people panel (Pin, Remove, … behind a row's menu button), opened and pressed so that a menu that may be another
+# row's is never pressed in (Review Focus 4). It takes {"meet": MEET, "id": the row's id, "labels": [words], "step": …}, in three steps:
+#   "open"   the row (exactly one with that id, else "gone") has a menu button (one that says it opens a menu, or MEET.person_menu's words):
+#            the menus on the screen now are marked as there before, the button is marked as the row's opener and pressed: "opened"; or
+#            "none" when the row has no such button;
+#   "press"  the menu that came after the press (not one marked as there before) is the row's when it is inside the row, or when the row's
+#            opener names it (aria-controls, aria-owns), or when it is the only one that came and the opener says it is expanded:
+#            {"pressed": label} after pressing the first item of `labels` in it; "waiting" while none has come; "untied" when the one that came
+#            cannot be told to be the row's, or more than one came; "none" when the row's menu has no such item; "gone" when the row or its
+#            opener is no longer there;
+#   "done"   the marks are taken off: whether a menu that came after the press is still drawn (the caller closes it).
+PERSON_MENU = "({ meet, id, labels, step }) => {  const M = meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + r"""
+  const MENUS = '[role="menu"], [role="listbox"]';
+  const menus = () => [...document.querySelectorAll(MENUS)].filter(drawn);
+  const came = () => menus().filter((m) => !m.hasAttribute("data-croom-before"));
+  const unmark = () => { for (const el of document.querySelectorAll("[data-croom-before], [data-croom-opener]")) { el.removeAttribute("data-croom-before"); el.removeAttribute("data-croom-opener"); } };
+  if (step === "done") {
+    const still = came().length > 0;
+    unmark();
+    return still;
   }
-  const candidates = roots.flatMap((root) => [...(root.matches && root.matches(PRESSABLE) ? [root] : []), ...root.querySelectorAll(PRESSABLE)])
-    .filter((el) => drawn(el) && enabled(el));
+  const rows = peopleRows().filter((row) => row.id === id);
+  if (rows.length !== 1) return "gone";
+  const row = rows[0].el;
+  if (step === "open") {
+    const opener = [...row.querySelectorAll(PRESSABLE)].filter((el) => drawn(el) && enabled(el))
+      .find((el) => ["menu", "true", "listbox"].includes((el.getAttribute("aria-haspopup") || "").toLowerCase()) || starts(nameOf(el), M.person_menu));
+    if (!opener) return "none";
+    unmark();   // what an earlier turn left, if it never got to "done"
+    for (const m of menus()) m.setAttribute("data-croom-before", "");
+    opener.setAttribute("data-croom-opener", "");
+    opener.click();
+    return "opened";
+  }
+  const opener = row.querySelector("[data-croom-opener]");
+  if (!opener) return "gone";
+  const fresh = came();
+  if (!fresh.length) return "waiting";
+  const named = ((opener.getAttribute("aria-controls") || "") + " " + (opener.getAttribute("aria-owns") || "")).split(/\s+/).filter(Boolean);
+  let tied = fresh.filter((m) => row.contains(m) || (m.id && named.includes(m.id)));
+  if (!tied.length && fresh.length === 1 && opener.getAttribute("aria-expanded") === "true") tied = fresh;
+  if (tied.length !== 1) return "untied";
+  const items = [...tied[0].querySelectorAll(PRESSABLE)].filter((el) => drawn(el) && enabled(el));
   for (const word of labels) {
-    const button = candidates.find((el) => starts(nameOf(el), [word]));
-    if (button) { const label = nameOf(button); button.click(); return label; }
+    const item = items.find((el) => starts(nameOf(el), [word]));
+    if (item) { const label = nameOf(item); item.click(); return { pressed: label }; }
   }
-  return null;
+  return "none";
 }"""
 
 # Give Meet's chat message box the keyboard and say whether it has it now. The box is a drawn, enabled text field (a <textarea>, a text
 # <input>, an editable area, a [role=textbox]) named by one of MEET.chat_box; with several, the one inside the open chat panel; with none, or
 # no way to choose, nothing is focused and the answer is false: the caller types nothing (keys typed elsewhere in Meet are its shortcuts).
-# Run with MEET.
-FOCUS_CHAT_BOX = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+# What the box holds already is selected, so that what is typed next takes its place. Run with MEET.
+_CHAT_BOX = r"""
   const FIELD = 'textarea, input, [contenteditable=""], [contenteditable="true"], [role="textbox"]';
   const fieldName = (el) => nameOf(el) || clean(el.getAttribute("placeholder"));
-  const boxes = [...document.querySelectorAll(FIELD)].filter((el) => drawn(el) && enabled(el) && !el.readOnly
-    && !(el.tagName === "INPUT" && !["text", "search", ""].includes((el.getAttribute("type") || "").toLowerCase()))
-    && starts(fieldName(el), M.chat_box));
-  const chat = openPanels().chat;
-  const inChat = chat ? boxes.filter((el) => chat.contains(el)) : [];
-  const box = inChat.length === 1 ? inChat[0] : boxes.length === 1 ? boxes[0] : null;
+  const chatBox = () => {
+    const boxes = [...document.querySelectorAll(FIELD)].filter((el) => drawn(el) && enabled(el) && !el.readOnly
+      && !(el.tagName === "INPUT" && !["text", "search", ""].includes((el.getAttribute("type") || "").toLowerCase()))
+      && starts(fieldName(el), M.chat_box));
+    const chat = openPanels().chat;
+    const inChat = chat ? boxes.filter((el) => chat.contains(el)) : [];
+    return inChat.length === 1 ? inChat[0] : boxes.length === 1 ? boxes[0] : null;
+  };
+  const textIn = (box) => ["TEXTAREA", "INPUT"].includes(box.tagName) ? String(box.value) : String(box.innerText || box.textContent || "");
+"""
+FOCUS_CHAT_BOX = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _CHAT_BOX + r"""
+  const box = chatBox();
   if (!box) return false;
   box.focus();
-  return document.activeElement === box;
+  if (document.activeElement !== box) return false;
+  if (typeof box.select === "function") box.select();
+  else { const range = document.createRange(); range.selectNodeContents(box); const s = window.getSelection(); s.removeAllRanges(); s.addRange(range); }
+  return true;
+}"""
+
+# Meet's chat message box as FOCUS_CHAT_BOX finds it: {"text": what it holds, "focused": whether it has the keyboard}, or null without one.
+# Run with MEET.
+CHAT_BOX_STATE = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _CHAT_BOX + r"""
+  const box = chatBox();
+  return box ? { text: textIn(box), focused: document.activeElement === box } : null;
 }"""

@@ -9,6 +9,7 @@ import logging
 import re
 import tempfile
 import time
+from collections import Counter
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, List, Tuple
@@ -17,15 +18,22 @@ from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
 from croom.core.logs import DIALOGS_LOGGER
 from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
 from croom.meeting.meet_page import (
+    CHAT_BOX_STATE,
+    FOCUS_CHAT_BOX,
     MEET,
+    OPEN_POPUPS,
+    PERSON_MENU,
     PRESS_BY_LABEL,
     PRESS_DIALOG,
+    PRESS_REACTION,
     READ_CALL,
     READ_CHAT,
     READ_DIALOGS,
     READ_HOST_SWITCHES,
     READ_PANELS,
     READ_PEOPLE,
+    READ_REACTIONS,
+    STATE_BY_LABEL,
 )
 from croom.meeting.providers.base import (
     DialogPolicy,
@@ -66,6 +74,22 @@ CLOSE_WORDS = ["Close"]           # the Close button inside a panel
 LAYOUTS = ["auto", "tiled", "spotlight", "sidebar"]
 PEOPLE_LISTED = 50                # the roster the table is given, at most
 CHAT_KEPT = 20                    # the last messages the table is given
+
+# The touch Pi's Meet controls (Meet controls plan Phase B, Task 3): what Chat Send is told when Meet's message box cannot be given the keyboard
+# (nothing is typed then: keys typed elsewhere in Meet are its shortcuts), and the longest message it sends.
+CHAT_BOX_WORDS = "Meet's message box isn't ready; nothing was sent"
+CHAT_LONGEST = 500
+# Each person's action: MEET's words for its button, its name in words, and whether it is for someone asking to join (the people panel's knocks).
+PERSON_ACTIONS = {"pin": ("pin", "Pin", False), "unpin": ("unpin", "Unpin", False), "host.admit": ("admit", "Admit", True),
+                  "host.deny": ("deny", "Deny", True), "host.remove": ("remove", "Remove", False)}
+# The table's configured reactions (Zoom's names) and the emoji Meet's picker holds for each, for a tap made before the picker was first read.
+REACTION_EMOJI = {"Thumbs Up": ["👍"], "Clap": ["👏"], "Heart": ["💖", "❤️"], "Joy": ["😂"], "Open Mouth": ["😮"], "Tada": ["🎉"]}
+
+
+def _starts(text: Any, words: List[str]) -> bool:
+    """Whether a label starts with one of the words, in any case and at a word's end (the page scripts' `starts`)."""
+    said = " ".join(str(text or "").split()).lower()
+    return any(said.startswith(word.lower()) and not re.match(r"[a-z0-9]", said[len(word):len(word) + 1]) for word in words)
 
 
 class _DialogGone(MeetingControlError):
@@ -159,6 +183,14 @@ class GoogleMeetProvider(MeetingProvider):
     # The touch Pi's Meet screens (Meet controls plan Phase B, Task 2): the page renews the one it has open every 60 s; a screen not renewed for
     # this long is taken as closed (the page went away) and the panel the room opened for it is closed.
     SCREEN_TIMEOUT_S = 180
+    # The controls that press Meet's own buttons (Meet controls plan Phase B, Task 3), each with the method that carries it out: a press waits
+    # this long at most for its change to show (a menu, a box, a pin, a sent message), and a menu the press should have closed this long
+    # before it is closed with Escape.
+    MEET_ACTIONS = {"chat.send": "_send_chat", "reactions": "_react", "layout": "_set_layout", "hide_self": "_set_hide_self",
+                    "pin": "_on_person", "unpin": "_on_person", "host.admit": "_on_person", "host.deny": "_on_person",
+                    "host.remove": "_on_person", "host.mute_all": "_mute_all", "host.end": "_end_for_everyone", "host.switch": "_host_switch"}
+    ACTION_WAIT_S = 3
+    MENU_SETTLE_S = 0.5
 
     def __init__(self, display=None, room_name: str = "Conference Room", clock: Callable[[], float] = time.monotonic):
         super().__init__()
@@ -528,12 +560,15 @@ class GoogleMeetProvider(MeetingProvider):
     async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
         """A control from the table, carried out with Meet's own keyboard shortcut (see MeetingProvider.control): the microphone, the
         camera, the raised hand and the captions; "dialog", a tap on a button of the box waiting on the table ({"id", "button"}); and
-        "screen", the touch Pi's Meet screen that is open ("chat", "participants", "host", or "" for none; _on_screen_said). Everything else
-        Meet's page does not offer here is refused in words. The answer is the control model as it is afterwards."""
+        "screen", the touch Pi's Meet screen that is open ("chat", "participants", "host", or "" for none; _on_screen_said); and the controls
+        that press Meet's own buttons (MEET_ACTIONS: chat.send, reactions, layout, hide_self, pin, unpin, host.*). Everything else Meet's page
+        does not offer here is refused in words. The answer is the control model as it is afterwards ({} once host.end has left the call)."""
         if self._page is None or self._state != MeetingState.CONNECTED:
             raise MeetingControlError("Not in a meeting")
         if name == "screen":
             return await self._on_screen_said(value)
+        if name in self.MEET_ACTIONS:
+            return await getattr(self, self.MEET_ACTIONS[name])(name, value)
         if name == "mute":
             await self.toggle_mute()
         elif name in self.SHORTCUTS:
@@ -774,27 +809,31 @@ class GoogleMeetProvider(MeetingProvider):
         """Press the button the label names in the box the key names, one press at a time with the shortcuts, and see the box go (for
         PRESS_WAIT_S at most): a press Meet does not take is a refusal in words, never a success. _DialogGone when the box is not there."""
         async with self._pressing:
+            await self._press_dialog_held(key, label)
+
+    async def _press_dialog_held(self, key: Tuple[str, str], label: str) -> None:
+        """_press_dialog, for a caller that holds _pressing already (a control answering Meet's confirmation box of its own press)."""
+        try:
+            result = await self._answered(self._page.evaluate(PRESS_DIALOG, [key[0], key[1], label]))
+        except MeetingControlError:
+            raise
+        except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
+            raise MeetingControlError(f"Could not press {label}: {_first_line(e)}") from e
+        if result == "gone":
+            raise _DialogGone(DIALOG_GONE_WORDS)
+        if result != "pressed":
+            raise MeetingControlError(f"Meet's box has no {label} button")
+        deadline = time.monotonic() + self.PRESS_WAIT_S
+        while True:
             try:
-                result = await self._answered(self._page.evaluate(PRESS_DIALOG, [key[0], key[1], label]))
-            except MeetingControlError:
-                raise
-            except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
-                raise MeetingControlError(f"Could not press {label}: {_first_line(e)}") from e
-            if result == "gone":
-                raise _DialogGone(DIALOG_GONE_WORDS)
-            if result != "pressed":
-                raise MeetingControlError(f"Meet's box has no {label} button")
-            deadline = time.monotonic() + self.PRESS_WAIT_S
-            while True:
-                try:
-                    reading = await self._answered(self._page.evaluate(READ_DIALOGS))
-                except Exception:  # noqa: BLE001 - the page moved on (Leave call navigates): the box went with it
-                    return
-                if key not in {self._dialog_key(dialog) for dialog in reading or [] if isinstance(dialog, dict)}:
-                    return
-                if time.monotonic() >= deadline:
-                    raise MeetingControlError(f"Meet did not close the box after {label}; try again")
-                await asyncio.sleep(self.DIALOG_POLL_S)
+                reading = await self._answered(self._page.evaluate(READ_DIALOGS))
+            except Exception:  # noqa: BLE001 - the page moved on (Leave call navigates): the box went with it
+                return
+            if key not in {self._dialog_key(dialog) for dialog in reading or [] if isinstance(dialog, dict)}:
+                return
+            if time.monotonic() >= deadline:
+                raise MeetingControlError(f"Meet did not close the box after {label}; try again")
+            await asyncio.sleep(self.DIALOG_POLL_S)
 
     async def _answer_from_table(self, value: Any) -> Dict[str, Any]:
         """A tap on one of the waiting box's buttons: the page presses it, and the box is off the table. One that has gone is refused in
@@ -901,9 +940,23 @@ class GoogleMeetProvider(MeetingProvider):
         state = await self._answered(self._page.evaluate(READ_PANELS, MEET))
         return {"open": list(state.get("open") or []), "pressed": list(state.get("pressed") or [])}
 
-    async def _press_label(self, labels: List[str], container: Any = None) -> Optional[str]:
-        """Press what PRESS_BY_LABEL finds for the words, where the container says: the label pressed, or None (nothing was pressed)."""
-        return await self._answered(self._page.evaluate(PRESS_BY_LABEL, {"meet": MEET, "labels": list(labels), "container": container}))
+    async def _press_label(self, labels: List[str], container: Any = None, *, exact: bool = False, own: Optional[str] = None) -> Optional[str]:
+        """Press what PRESS_BY_LABEL finds for the words, where the container says (`exact`: the whole label; `own`: only one naming the room
+        or "you"): the label pressed, or None (nothing was pressed)."""
+        return await self._answered(self._page.evaluate(PRESS_BY_LABEL, self._by_label(labels, container, exact, own)))
+
+    async def _label_state(self, labels: List[str], container: Any = None) -> Optional[Dict[str, Any]]:
+        """What _press_label would press, not pressed: {"label", "on"}, or None."""
+        return await self._answered(self._page.evaluate(STATE_BY_LABEL, self._by_label(labels, container, False, None)))
+
+    @staticmethod
+    def _by_label(labels: List[str], container: Any, exact: bool, own: Optional[str]) -> Dict[str, Any]:
+        arg = {"meet": MEET, "labels": list(labels), "container": container}
+        if exact:
+            arg["exact"] = True
+        if own is not None:
+            arg["own"] = own
+        return arg
 
     async def _wait_panel(self, kind: str, open_: bool) -> bool:
         """Wait (PRESS_WAIT_S at most) for the panel's structure to show it open or closed; whether it did."""
@@ -1036,6 +1089,437 @@ class GoogleMeetProvider(MeetingProvider):
                 logger.warning(f"Could not read Meet's panels ({_first_line(e)}); trying again")
             return
         self._publish()
+
+    # ------------------------------------------------------------------
+    # The controls that press Meet's own buttons (Meet controls plan Phase B, Task 3; Review Focus 3, 4 and 5)
+    # ------------------------------------------------------------------
+    #
+    # Each is one turn with both locks held (_action_turn: _dialog_turn, then _pressing), so that no box reading comes between its presses: a
+    # box Meet draws for it (the Change layout box, a confirmation) is never queued on the table or answered by the policy, and is answered by
+    # the action itself. It opens what it needs (a panel, a menu, the layout box), presses by MEET's words (PRESS_BY_LABEL), waits for the change
+    # to show (ACTION_WAIT_S at most), and closes what it opened that was not open already, whether it succeeded or not (_then_tidy): a panel
+    # the touch Pi's open screen wants stays open (_in_panel). A button Meet does not show is a refusal naming it. While the capture runs, each
+    # is refused at once in words.
+
+    @asynccontextmanager
+    async def _action_turn(self):
+        """A control's turn: refused at once while the capture runs, then both locks in their order. What the page throws (gone, navigating)
+        becomes words for the table."""
+        if self._capturing:
+            raise MeetingControlError(CAPTURING_WORDS)
+        async with self._panel_locks():
+            if self._page is None or self._state != MeetingState.CONNECTED:
+                raise MeetingControlError("Not in a meeting")
+            try:
+                yield
+            except MeetingControlError:
+                raise
+            except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
+                raise MeetingControlError(f"Meet's page did not answer ({_first_line(e)})") from e
+
+    async def _then_tidy(self, body, tidy, after_success: bool = True) -> Any:
+        """Run the action's body, then tidy away what it opened, also when it failed (then a tidy that fails is logged, and the body's
+        refusal is what the table is told). With `after_success` False, only a body that failed is tidied after (the call it ended is gone)."""
+        try:
+            result = await body()
+        except BaseException:
+            try:
+                await tidy()
+            except Exception as e:  # noqa: BLE001 - the body's own refusal is what the table is told
+                logger.warning(f"Could not put Meet's page back after a control that failed ({_first_line(e)})")
+            raise
+        if after_success:
+            await tidy()
+        return result
+
+    async def _in_panel(self, kind: str, body) -> Any:
+        """Run the body with Meet's side panel `kind` open: opened if it was not, and then closed again unless the touch Pi's open screen
+        wants it; the screen's own panel is put back if this one took its place (Meet shows one at a time)."""
+        opened = await self._open_panel(kind)
+
+        async def put_back():
+            if opened and self._screen_panel() != kind:
+                await self._close_panel(kind)
+            await self._follow_screen()
+
+        return await self._then_tidy(body, put_back)
+
+    async def _until(self, look, wait: Optional[float] = None) -> Any:
+        """Ask `look` (a coroutine function) every PRESS_POLL_S until it answers something true, for ACTION_WAIT_S at most: its last answer."""
+        deadline = time.monotonic() + (self.ACTION_WAIT_S if wait is None else wait)
+        while True:
+            answer = await look()
+            if answer or time.monotonic() >= deadline:
+                return answer
+            await asyncio.sleep(self.PRESS_POLL_S)
+
+    async def _popups(self) -> Dict[str, List[str]]:
+        """The menus and the dialogs on the screen that are not side panels (OPEN_POPUPS): {"menus": [...], "dialogs": [their titles]}."""
+        found = await self._answered(self._page.evaluate(OPEN_POPUPS, MEET))
+        return {"menus": [str(m) for m in found.get("menus") or []], "dialogs": [str(d) for d in found.get("dialogs") or []]}
+
+    async def _close_new_menus(self, before: Dict[str, List[str]]) -> None:
+        """Close the menus a control opened (those on the screen now that were not in `before`): given MENU_SETTLE_S to go by themselves (a
+        menu goes once its item is pressed), then Escape, the way a menu is closed; one that stays is a refusal in words."""
+        async def none_new() -> bool:
+            return not list((Counter((await self._popups())["menus"]) - Counter(before["menus"])).elements())
+
+        if await self._until(none_new, self.MENU_SETTLE_S):
+            return
+        await self._page.keyboard.press("Escape")
+        if not await self._until(none_new, self.PRESS_WAIT_S):
+            raise MeetingControlError("A menu of Meet's stayed open on the TV")
+
+    async def _box_keys(self) -> set:
+        """The boxes on the screen now, as the box reader knows them (by title and words)."""
+        return {self._dialog_key(d) for d in await self._answered(self._page.evaluate(READ_DIALOGS)) or [] if isinstance(d, dict)}
+
+    async def _confirm(self, before: set, words: List[str], what: str) -> None:
+        """Answer Meet's confirmation box for the press just made: a box that was not on the screen before it (`before`) and has a button of
+        `words` comes within ACTION_WAIT_S, and that button is pressed and the box goes. The caller has held _dialog_turn since before its first
+        press, so the box reader never sees this box. A box that does not come is a refusal in words."""
+        async def asked():
+            for box in await self._answered(self._page.evaluate(READ_DIALOGS)) or []:
+                if isinstance(box, dict) and self._dialog_key(box) not in before:
+                    label = next((str(b) for b in box.get("buttons") or [] if _starts(b, words)), None)
+                    if label is not None:
+                        return self._dialog_key(box), label
+            return None
+
+        found = await self._until(asked)
+        if not found:
+            raise MeetingControlError(f"Meet did not ask to confirm {what}; nothing more was pressed")
+        try:
+            await self._press_dialog_held(*found)
+        except _DialogGone:
+            raise MeetingControlError(f"Meet's box asking to confirm {what} went before it was answered") from None
+
+    # --- Chat Send (Review Focus 3)
+
+    async def _chat_box(self) -> Optional[Dict[str, Any]]:
+        return await self._answered(self._page.evaluate(CHAT_BOX_STATE, MEET))
+
+    async def _send_chat(self, name: str, value: Any) -> Dict[str, Any]:
+        """Send a message to the call's chat: Meet's chat panel opened if it is not, its message box given the keyboard (FOCUS_CHAT_BOX), and
+        only then the text put in it without a key (keyboard.insert_text: no keydown, so no shortcut of Meet's can fire), and the panel's own
+        send button pressed (Enter only when Meet shows none, and only while the box still has the keyboard). A box that cannot be given the
+        keyboard is a refusal, and nothing is typed. Sent: the box is empty again."""
+        text = value.strip() if isinstance(value, str) else ""
+        if not 1 <= len(text) <= CHAT_LONGEST:
+            raise MeetingControlError(f"Say a message of 1 to {CHAT_LONGEST} characters")
+
+        async def send():
+            if await self._answered(self._page.evaluate(FOCUS_CHAT_BOX, MEET)) is not True:
+                raise MeetingControlError(CHAT_BOX_WORDS)
+            await self._page.keyboard.insert_text(text)
+            box = await self._chat_box()
+            if box is None or " ".join(str(box.get("text") or "").split()) != " ".join(text.split()):
+                raise MeetingControlError("Meet's message box did not take the message; nothing was sent")
+            if await self._press_label(MEET["chat_send"], {"panel": "chat"}) is None:
+                box = await self._chat_box()
+                if not (box and box.get("focused")):
+                    raise MeetingControlError("Meet's message box lost the keyboard; nothing was sent")
+                await self._page.keyboard.press("Enter")
+
+            async def emptied():
+                box = await self._chat_box()
+                return box is not None and not str(box.get("text") or "").strip()
+
+            if not await self._until(emptied):
+                raise MeetingControlError("Meet did not send the message; try again")
+
+        async with self._action_turn():
+            await self._in_panel("chat", send)
+            await self._read_panels()
+        return await self._read_controls()
+
+    # --- Reactions, the layout, the room's own view
+
+    async def _reactions_shown(self) -> List[str]:
+        return [str(e) for e in await self._answered(self._page.evaluate(READ_REACTIONS, MEET)) or []]
+
+    async def _react(self, name: str, value: Any) -> Dict[str, Any]:
+        """Send a reaction: Meet's picker opened (unless it is open), its emoji taken into the model's choices, and the one asked for pressed.
+        The value is an emoji, or one of the table's configured names (REACTION_EMOJI) until the picker's own have been read; one the picker
+        does not hold is refused. The picker is closed again (its button) if this opened it."""
+        wanted = value.strip() if isinstance(value, str) else ""
+        if not wanted:
+            raise MeetingControlError("Say which reaction")
+        async with self._action_turn():
+            open_before = bool(await self._reactions_shown())
+
+            async def send():
+                choices = await self._reactions_shown()
+                if not choices:
+                    if await self._press_label(MEET["reactions"]) is None:
+                        raise MeetingControlError("Meet's reactions button isn't on the screen")
+                    choices = await self._until(self._reactions_shown)
+                    if not choices:
+                        raise MeetingControlError("Meet did not open its reactions; try again")
+                self._reaction_choices = list(choices)
+                emoji = next((e for e in [wanted, *REACTION_EMOJI.get(wanted, [])] if e in choices), None)
+                if emoji is None:
+                    raise MeetingControlError(f"Meet's reactions have no {wanted}")
+                if not await self._answered(self._page.evaluate(PRESS_REACTION, {"meet": MEET, "emoji": emoji})):
+                    raise MeetingControlError(f"Meet's {emoji} reaction isn't on the screen")
+
+            async def close_picker():
+                if open_before or not await self._reactions_shown():
+                    return
+                await self._press_label(MEET["reactions"])
+
+                async def closed():
+                    return not await self._reactions_shown()
+
+                if not await self._until(closed):
+                    raise MeetingControlError("Meet's reactions stayed open on the TV")
+
+            await self._then_tidy(send, close_picker)
+        return await self._read_controls()
+
+    async def _set_layout(self, name: str, value: Any) -> Dict[str, Any]:
+        """Choose Meet's layout ("auto", "tiled", "spotlight", "sidebar"): More options (the bar's, by its whole label), its Change layout,
+        the choice in that box, which must then say it is chosen; the box is closed (its Close, else Escape) and the menu too. The room
+        remembers the choice as layout.value (Meet shows the current one only inside its box)."""
+        if value not in LAYOUTS:
+            raise MeetingControlError("Say which layout: " + ", ".join(LAYOUTS))
+        box = {"dialog": MEET["change_layout"]}
+        choice = MEET["layouts"][value]
+
+        async def choose():
+            if await self._press_label(MEET["more_options"], exact=True) is None:
+                raise MeetingControlError("Meet's More options button isn't on the screen")
+            if not await self._until(lambda: self._press_label(MEET["change_layout"], "menu")):
+                raise MeetingControlError("Meet's More options menu has no Change layout")
+            if not await self._until(lambda: self._press_label(choice, box)):
+                raise MeetingControlError(f"Meet's Change layout box has no {choice[0]}")
+
+            async def chosen():
+                state = await self._label_state(choice, box)
+                return bool(state and state.get("on"))
+
+            if not await self._until(chosen):
+                raise MeetingControlError("Meet did not change the layout; try again")
+            self._layout = value
+
+        async def layout_box_open():
+            return any(_starts(title, MEET["change_layout"]) for title in (await self._popups())["dialogs"])
+
+        async def close_box():
+            async def gone():
+                return not await layout_box_open()
+
+            if await layout_box_open():
+                if await self._press_label(CLOSE_WORDS, box) is None or not await self._until(gone, self.PRESS_WAIT_S):
+                    await self._page.keyboard.press("Escape")
+                    if not await self._until(gone, self.PRESS_WAIT_S):
+                        raise MeetingControlError("Meet's Change layout box stayed open on the TV")
+            await self._close_new_menus(before)
+
+        async with self._action_turn():
+            before = await self._popups()
+            await self._then_tidy(choose, close_box)
+        return await self._read_controls()
+
+    async def _set_hide_self(self, name: str, value: Any) -> Dict[str, Any]:
+        """Hide or show the room's own tile on the TV (True hides; no value turns it the other way from the room's last choice): the room's
+        own tile menu (the one whose label names the room or "you"), and its Hide self view or Show self view. When the menu offers only the
+        other, the tile is that way already and nothing is pressed. Remembered as hide_self.on."""
+        if value is not None and not isinstance(value, bool):
+            raise MeetingControlError("Say whether to hide the room's own view: true or false")
+        hide = (not self._hide_self) if value is None else value
+
+        async def which():
+            for words, hidden in ((MEET["hide_self"], False), (MEET["show_self"], True)):
+                if await self._label_state(words, "menu") is not None:
+                    return words, hidden
+            return None
+
+        async def choose():
+            if await self._press_label(MEET["tile_menu"], own=self._room_name) is None:
+                raise MeetingControlError("Meet's menu for the room's own tile isn't on the screen")
+            offered = await self._until(which)
+            if not offered:
+                raise MeetingControlError("Meet's menu for the room's own tile has no Hide self view")
+            words, hidden = offered
+            if hidden != hide and await self._press_label(words, "menu") is None:
+                raise MeetingControlError(f"Meet's menu for the room's own tile has no {words[0]}")
+            self._hide_self = hide
+
+        async with self._action_turn():
+            before = await self._popups()
+            await self._then_tidy(choose, lambda: self._close_new_menus(before))
+        return await self._read_controls()
+
+    # --- A person: Pin, Unpin, Admit, Deny, Remove (Review Focus 4)
+
+    async def _people_now(self) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        """The people panel as it is now (READ_PEOPLE): the people in the call, and those asking to join."""
+        reading = await self._answered(self._page.evaluate(READ_PEOPLE, MEET)) or {}
+        return ([p for p in reading.get("people") or [] if isinstance(p, dict)],
+                [p for p in reading.get("waiting") or [] if isinstance(p, dict)])
+
+    async def _find_person(self, person: str, waiting: bool) -> Dict[str, str]:
+        """The people panel's row for the id the touch Pi sent, read now: Meet's own id, or "name:" + a name, which matches only when exactly
+        one row (in the call or asking to join) has that name. Two rows, or none (or not among those asking to join, for Admit and Deny), is a
+        refusal in words. {"id": the row's id, as PRESS_BY_LABEL finds it, "name"}."""
+        people, knocks = await self._people_now()
+        if person.startswith("name:"):
+            called = person[len("name:"):]
+            matches = [p for p in people + knocks if p.get("name") == called]
+        else:
+            matches = [p for p in people + knocks if p.get("id") == person]
+            called = str(matches[0].get("name") or "") if matches else ""
+        if len(matches) > 1:
+            raise MeetingControlError(f"Two people in the call are called {called}")
+        row = matches[0] if matches else None
+        if row is None or any(row is k for k in knocks) != waiting:
+            who = called or "That person"
+            raise MeetingControlError(f"{who} isn't waiting to join any more" if waiting else f"{who} isn't in the call any more")
+        return {"id": str(row.get("id")), "name": str(row.get("name") or "")}
+
+    async def _press_for(self, row: Dict[str, str], labels: List[str], words: str) -> None:
+        """Press the button of `labels` for that person: inside their row (PRESS_BY_LABEL with the person's id), else in the menu their own row's
+        menu button opens (PERSON_MENU), pressed in only when that menu can be tied to the row; the menu is closed again (Escape) if it stays."""
+        if await self._press_label(labels, {"person": row["id"]}) is not None:
+            return
+        arg = {"meet": MEET, "id": row["id"], "labels": list(labels)}
+        before = await self._popups()
+        opened = await self._answered(self._page.evaluate(PERSON_MENU, dict(arg, step="open")))
+        if opened == "gone":
+            raise MeetingControlError(f"{row['name']} isn't in the call any more")
+        if opened != "opened":
+            raise MeetingControlError(f"Meet has no {words} for that person")
+
+        async def in_the_menu():
+            async def answered():
+                result = await self._answered(self._page.evaluate(PERSON_MENU, dict(arg, step="press")))
+                return None if result == "waiting" else result
+
+            result = await self._until(answered)
+            if isinstance(result, dict) and result.get("pressed"):
+                return
+            if result is None:
+                raise MeetingControlError(f"Meet did not open its menu for {row['name']}; try again")
+            if result == "untied":
+                raise MeetingControlError(f"Meet's menu for {row['name']} could not be told apart from another person's; nothing was pressed")
+            if result == "gone":
+                raise MeetingControlError(f"{row['name']} isn't in the call any more")
+            raise MeetingControlError(f"Meet has no {words} for that person")
+
+        async def close_menu():
+            await self._answered(self._page.evaluate(PERSON_MENU, dict(arg, step="done")))
+            await self._close_new_menus(before)
+
+        await self._then_tidy(in_the_menu, close_menu)
+
+    async def _on_person(self, name: str, value: Any) -> Dict[str, Any]:
+        """Pin, Unpin, Admit, Deny or Remove a person by the id the touch Pi sent (PERSON_ACTIONS): the people panel opened if it is not, the
+        person found again in it at the moment of the press (_find_person), their button pressed in their row or their row's own menu only
+        (_press_for), Remove's confirmation answered, and the change seen in the panel (pinned, unpinned, no longer asking to join, gone)."""
+        key, words, waiting = PERSON_ACTIONS[name]
+        person = str(value).strip() if isinstance(value, (str, int)) and not isinstance(value, bool) else ""
+        if not person:
+            raise MeetingControlError("Say which person")
+
+        async def done(row):
+            people, knocks = await self._people_now()
+            same = [p for p in (knocks if waiting else people) if p.get("id") == row["id"]]
+            if name == "pin":
+                return any(p.get("pinned") for p in same)
+            if name == "unpin":
+                return bool(same) and not any(p.get("pinned") for p in same)
+            return not same
+
+        async def act():
+            row = await self._find_person(person, waiting)
+            boxes = await self._box_keys() if name == "host.remove" else set()
+            await self._press_for(row, MEET[key], words)
+            if name == "host.remove":
+                await self._confirm(boxes, MEET["confirm"]["remove"], f"removing {row['name']}")
+            if not await self._until(lambda: done(row)):
+                raise MeetingControlError(f"Meet did not {words.lower()} {row['name']}; try again")
+
+        async with self._action_turn():
+            await self._in_panel("people", act)
+            await self._read_panels()
+        return await self._read_controls()
+
+    # --- The host's: Mute everyone, End the call for everyone, the host panel's switches (Review Focus 5)
+
+    async def _mute_all(self, name: str, value: Any) -> Dict[str, Any]:
+        """Mute everyone (the touch Pi has asked twice): the people panel's Mute all, then Meet's confirmation box's Mute all, with both locks
+        held from before the first press to the end (the box reader never takes that box)."""
+        async def act():
+            before = await self._box_keys()
+            if await self._press_label(MEET["mute_all"], {"panel": "people"}) is None:
+                raise MeetingControlError("Meet's Mute all button isn't on the screen")
+            await self._confirm(before, MEET["confirm"]["mute_all"], "Mute all")
+
+        async with self._action_turn():
+            await self._in_panel("people", act)
+            await self._read_panels()
+        return await self._read_controls()
+
+    async def _end_for_everyone(self, name: str, value: Any) -> Dict[str, Any]:
+        """End the call for everyone (the touch Pi has asked twice), the room being a host: Meet's End the call for everyone (in Meet's leave
+        menu, opened by Leave call, unless it is on the screen already), then Meet's confirmation box's End call, with both locks held from
+        before the first press to the end; then the room leaves as `leave` does. A box that does not come is a refusal, and the room stays."""
+        async def end():
+            if not (await self._look()).get("hosting"):
+                raise MeetingControlError("Meet does not show the room as a host here; the call was not ended")
+            if await self._label_state(MEET["end_for_all"]) is None:
+                if await self._press_label(MEET["leave"]) is None:
+                    raise MeetingControlError("Meet's Leave call button isn't on the screen")
+                if not await self._until(lambda: self._label_state(MEET["end_for_all"])):
+                    raise MeetingControlError("Meet's leave menu has no End the call for everyone")
+            boxes = await self._box_keys()
+            if await self._press_label(MEET["end_for_all"]) is None:
+                raise MeetingControlError("Meet's End the call for everyone isn't on the screen")
+            await self._confirm(boxes, MEET["confirm"]["end_for_all"], "ending the call for everyone")
+
+        async with self._action_turn():
+            before = await self._popups()
+            await self._then_tidy(end, lambda: self._close_new_menus(before), after_success=False)
+        await self.leave_meeting()
+        return {}
+
+    async def _host_switches(self) -> List[Dict[str, Any]]:
+        self._switches = [dict(s) for s in await self._answered(self._page.evaluate(READ_HOST_SWITCHES, MEET)) or [] if isinstance(s, dict)]
+        return self._switches
+
+    async def _host_switch(self, name: str, value: Any) -> Dict[str, Any]:
+        """Turn one of the host panel's switches on or off ({"key": a key of MEET.host_switches, "on": true or false}): the host panel opened if
+        it is not, the switch pressed only when it is not that way already, and then seen to be."""
+        key = value.get("key") if isinstance(value, dict) else None
+        on = value.get("on") if isinstance(value, dict) else None
+        if key not in MEET["host_switches"] or not isinstance(on, bool):
+            raise MeetingControlError("Say which host switch and whether it is on")
+        words = MEET["host_switches"][key]
+
+        async def switch():
+            return next((s for s in await self._host_switches() if s.get("key") == key), None)
+
+        async def flip():
+            now = await switch()
+            if now is None:
+                raise MeetingControlError(f"Meet's host controls have no {words[0]} switch")
+            if bool(now.get("on")) == on:
+                return
+            if await self._press_label(words, {"panel": "host"}) is None:
+                raise MeetingControlError(f"Meet's {words[0]} switch can't be pressed")
+
+            async def changed():
+                after = await switch()
+                return after is not None and bool(after.get("on")) == on
+
+            if not await self._until(changed):
+                raise MeetingControlError(f"Meet did not change {now.get('label') or words[0]}; try again")
+
+        async with self._action_turn():
+            await self._in_panel("host", flip)
+            await self._read_panels()
+        return await self._read_controls()
 
     # ------------------------------------------------------------------
     # The capture (spec 2026-10-30 Meet controls, section 3)

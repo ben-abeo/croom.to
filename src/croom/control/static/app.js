@@ -860,10 +860,11 @@
     }
     if (p.me) return [];
     const specs = [];
-    // Pin or Unpin by what the row says now (p.pinned), when the model offers it (Meet's; Zoom's comes with its own pin).
+    // Pin or Unpin by what the row says now (p.pinned), when the model offers it (Meet's; Zoom's comes with its own pin). It is not a host's:
+    // anyone in a Zoom or Meet call may pin a person on their own screen, so a participant's rows have it too.
     if (controls.pin && controls.pin.available) {
       const name = p.pinned ? "unpin" : "pin";
-      specs.push({ id: "pin", label: p.pinned ? "Unpin" : "Pin", icon: "locate", className: "quiet", disabled: model.pending.has(name), onClick: () => control(name, personId(p)) });
+      specs.push({ id: "pin", label: p.pinned ? "Unpin" : "Pin", icon: "locate", className: "quiet person-pin", disabled: model.pending.has(name), onClick: () => control(name, personId(p)) });
     }
     if (can(host, "mute_one") && !p.muted) {
       specs.push({ id: "mute", label: "Mute", icon: "mic-off", className: "quiet", disabled: model.pending.has("host.mute_one"), onClick: () => control("host.mute_one", p.id) });

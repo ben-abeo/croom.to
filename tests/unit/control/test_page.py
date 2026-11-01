@@ -12402,11 +12402,11 @@ def test_the_participants_screen_lists_the_room_and_lets_a_host_act(browser):
         assert rows.nth(2).locator(".mark-hand").count() == 1 and rows.nth(2).locator(".mark-muted").count() == 1
         assert rows.nth(2).locator(".mark").all_inner_texts() == ["Hand raised", "Muted", "Video off"]
         assert rows.nth(0).locator(".button").count() == 0                                   # the room's own row: nothing to do to oneself
-        assert texts(page, "#participant-list li:nth-child(2)") == ["Mute", "Remove"]
-        assert texts(page, "#participant-list li:nth-child(3)") == ["Remove"]                # Raj is muted already: Mute is for those who are not
-        assert drawn_icons(page, "#participant-list li:nth-child(2)") == ["Mute: #icon-mic-off", "Remove: #icon-x-circle"]
-        ends = page.evaluate("[...document.querySelectorAll('#participant-list .participant')].slice(1).map((r) => Math.round(r.querySelector('.marks').getBoundingClientRect().right))")
-        assert len(set(ends)) == 1, ends                                                     # Ann has Mute and Remove, Raj only Remove: the marks end in one column all the same
+        assert texts(page, "#participant-list li:nth-child(2)") == ["Pin", "Mute", "Remove"]  # Pin is anyone's (Zoom's operatePin), the rest a host's
+        assert texts(page, "#participant-list li:nth-child(3)") == ["Pin", "Remove"]         # Raj is muted already: Mute is for those who are not
+        assert drawn_icons(page, "#participant-list li:nth-child(2)") == ["Pin: #icon-locate", "Mute: #icon-mic-off", "Remove: #icon-x-circle"]
+        ends = page.evaluate("[...document.querySelectorAll('#participant-list .participant')].map((r) => Math.round(r.querySelector('.marks').getBoundingClientRect().right))")
+        assert len(set(ends)) == 1, ends                                                     # Ann has Pin, Mute and Remove, Raj no Mute, the room none: the marks end in one column all the same
         assert fits(page)
         rows.nth(1).locator(".button", has_text="Mute").click()
         wait_for_calls(page, server, 1)
@@ -12430,11 +12430,17 @@ def test_a_participant_sees_no_host_buttons_on_the_participants_screen(browser):
         server.meeting.current_meeting.controls["host"]["waiting_room"] = {"available": False, "waiting": [{"id": 9, "name": "Guest"}]}   # not for a participant to see
         open_sub_screen(page, "Participants", "participants")
         assert page.locator("#participant-list .participant").count() == 3
-        assert page.locator("#participant-list .button").count() == 0
+        assert texts(page, "#participant-list") == ["Pin", "Pin"]                            # no host's button: only Pin, which anyone may (not on the room's own row)
         page.evaluate("window.croomPage.refreshStatus()")                                    # a poll has been and gone
         assert page.locator("#waiting-list .participant").count() == 0 and page.locator("#waiting-kicker").is_hidden()
-        gaps = page.evaluate("[...document.querySelectorAll('#participant-list .participant')].map((r) => Math.round(r.getBoundingClientRect().right - r.querySelector('.marks').getBoundingClientRect().right))")
-        assert max(gaps) <= 30, gaps                                                         # no buttons in any row: the marks end at the row's edge, with no room kept for buttons
+        gaps = "[...document.querySelectorAll('#participant-list .participant')].map((r) => Math.round(r.getBoundingClientRect().right - r.querySelector('.marks').getBoundingClientRect().right))"
+        pinned = page.evaluate(gaps)
+        assert len(set(pinned)) == 1 and max(pinned) <= 200, pinned                          # the room kept is Pin's alone, in every row, not a host's Mute and Remove
+        assert fits(page)
+        server.meeting.current_meeting.controls["pin"] = {"available": False}               # no Pin either: no buttons in any row
+        page.evaluate("window.croomPage.refreshStatus()")
+        page.wait_for_function("!document.querySelector('#participant-list .button')", timeout=5000)
+        assert max(page.evaluate(gaps)) <= 30, page.evaluate(gaps)                           # the marks end at the row's edge, with no room kept for buttons
         assert fits(page)
         page.close()
 
@@ -12836,7 +12842,7 @@ def test_a_participants_row_follows_the_model_in_place_and_the_others_keep_their
         assert page.locator("#participant-list .participant").nth(3).locator(".name").inner_text() == "Priya N."
         people[3]["muted"] = True                                                # muted by someone else: Mute is for those who are not
         poll_until(page, "document.querySelectorAll('#participant-list .mark-muted').length === 2")
-        assert texts(page, "#participant-list li:nth-child(4)") == ["Remove"]
+        assert texts(page, "#participant-list li:nth-child(4)") == ["Pin", "Remove"]
         people = without(people, "Tom Becker") + [{"id": 16777300, "name": "Newcomer", "muted": False, "video": True, "hand": False, "host": False, "me": False}]
         set_people(server, people)                                               # Tom leaves, and Newcomer comes in at the foot
         poll_until(page, "[...document.querySelectorAll('#participant-list .name')].some((n) => n.textContent === 'Newcomer')")
@@ -12851,7 +12857,7 @@ def test_a_finger_down_on_a_participants_button_is_lifted_on_it_when_another_per
     with PageServer(role="host") as server:
         page, people = a_meeting_with_a_roster(browser, server, 4)               # Room, Ann, Raj, Priya, Tom, Maria, Chen
         x, y = centre(page, "#participant-list .participant:has-text('Maria') .button", "Mute")
-        page.evaluate("window.__row = [...document.querySelectorAll('.participant')].find((r) => r.textContent.includes('Maria')); window.__mute = window.__row.querySelector('.button')")
+        page.evaluate("window.__row = [...document.querySelectorAll('.participant')].find((r) => r.textContent.includes('Maria')); window.__mute = [...window.__row.querySelectorAll('.button')].find((b) => b.textContent.includes('Mute'))")
         page.mouse.move(x, y)
         page.mouse.down()
         set_people(server, without(people, "Chen Wei"))
@@ -12868,7 +12874,7 @@ def test_a_row_that_moves_up_because_another_leaves_above_it_keeps_its_buttons_a
     and its Mute is still Maria's."""
     with PageServer(role="host") as server:
         page, people = a_meeting_with_a_roster(browser, server, 4)
-        page.evaluate("window.__row = [...document.querySelectorAll('.participant')].find((r) => r.textContent.includes('Maria')); window.__mute = window.__row.querySelector('.button')")
+        page.evaluate("window.__row = [...document.querySelectorAll('.participant')].find((r) => r.textContent.includes('Maria')); window.__mute = [...window.__row.querySelectorAll('.button')].find((b) => b.textContent.includes('Mute'))")
         set_people(server, without(people, "Priya Nair"))
         poll_until(page, "document.querySelectorAll('#participant-list .participant').length === 6")
         assert page.evaluate("window.__mute.isConnected && document.querySelectorAll('#participant-list .participant')[4] === window.__row")     # in the place Tom had
@@ -13289,7 +13295,7 @@ def test_asking_for_a_second_tap_on_remove_does_not_move_the_buttons_of_its_row(
     with PageServer(role="host") as server:
         page, _ = a_meeting_with_a_roster(browser, server, 2, touchscreen=True)
         before = row_boxes(page, "Tom")
-        assert len(before) == 2
+        assert len(before) == 3                                                   # Pin, Mute and Remove
         mute = page.locator("#participant-list .participant:has-text('Tom') .button", has_text="Mute").bounding_box()
         x, y = mute["x"] + mute["width"] / 2, mute["y"] + mute["height"] / 2
         row_button(page, "Tom", "Remove").click()

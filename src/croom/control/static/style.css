@@ -648,6 +648,11 @@ body.keyboard-open .schedule { display: none; }
   #participant-list .row-actions:not(:empty) { min-width: 24rem; justify-content: flex-end; }
   #participant-list:has(.row-actions:not(:empty)) .row-actions:empty { min-width: 24rem; }   /* (a rule of its own: an engine without :has() drops the rule it is in, and the one above is not to go with it) */
   #participant-list .row-actions .button.remove { min-width: 16rem; }
+  /* Pin (anyone's, before Mute and Remove) keeps the width of Unpin. A list with Pin keeps room for it too, in every row, so the marks still end in
+     one column; a list whose only button is Pin (a participant's) keeps room for Pin alone. */
+  #participant-list .row-actions .button.person-pin { min-width: 8.5rem; }
+  #participant-list:has(.button.person-pin) .row-actions:is(:empty, :not(:empty)) { min-width: calc(32.5rem + 8px); }
+  #participant-list:has(.button.person-pin):not(:has(.button.remove)) .row-actions:is(:empty, :not(:empty)) { min-width: 8.5rem; }
   .host-actions .button.danger, .host-actions .button.ask { min-width: 23rem; }   /* End keeps the width of its longer words: the shorter ones would fit on the line above at 1280 by 800, and the button would jump from under the finger */
 }
 @media (min-width: 1024px) and (min-height: 700px) and (max-height: 760px) {
@@ -669,6 +674,7 @@ body.keyboard-open .schedule { display: none; }
   .participant { flex-wrap: wrap; }   /* a row of a name, its marks and two buttons is wider than the screen: the name takes a line, and the marks and the buttons the next */
   .participant .name { flex-basis: 100%; }
   .participant .marks { flex: 1 1 auto; justify-content: flex-start; }
+  .participant .row-actions { flex-wrap: wrap; justify-content: flex-end; min-width: 0; max-width: 100%; }   /* Pin, Mute and Remove are wider than a phone's row: they wrap, never past its edge */
   .view[data-view="idle"] { grid-template-columns: 1fr; grid-template-rows: auto; grid-template-areas: "now" "link" "schedule"; }
   .menu { grid-template-columns: 1fr; }
   .view[data-view="options"] .button.menu-item { min-height: 120px; }   /* six in one column: a portrait tablet's 1280 px still holds them and Key click */

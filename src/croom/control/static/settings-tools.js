@@ -142,11 +142,16 @@
       run(CAPTURE, async () => {
         const answer = await S.post("/api/settings/meet-capture", { screenshots: screenshots });
         const steps = answer.steps || [];
+        // closed: true, false (a panel is still open), "unknown" (the page did not come back as it was: someone looks at the TV)
+        const after = (step) => step.closed === false ? ", and left open on the TV" : step.closed === "unknown" ? "; can't tell it closed: look at the TV" : "";
         const lines = steps.map((step) => (CAPTURE_STEPS[step.name] || step.name) + ": " + (
-          !step.opened ? "not opened" + (step.why ? " (" + step.why + ")" : "")
-            : step.closed === false ? "opened, and left open on the TV" : step.closed ? "opened and closed" : "recorded"));
+          !step.opened ? "not opened" + (step.why ? " (" + step.why + ")" : "") + after(step)
+            : step.closed === true ? "opened and closed" : "closed" in step ? "opened" + after(step) : "recorded"));
         const leftOpen = steps.some((step) => step.closed === false);
-        return { ok: !leftOpen, verdict: leftOpen ? "saved, but something was left open on the TV" : "saved; Download takes the file",
+        const unsure = steps.some((step) => step.closed === "unknown");
+        return { ok: !leftOpen && !unsure,
+                 verdict: leftOpen ? "saved, but something was left open on the TV" : unsure ? "saved; look at the TV, something may be left open"
+                   : "saved; Download takes the file",
                  text: ["File: " + answer.file].concat(lines).join("\n") };
       });
     }

@@ -110,8 +110,9 @@ RECORD_ELEMENTS = "() => {" + _DRAWN + r"""
 }"""
 
 # What is open on Meet's page, to see a panel open and close: the drawn panels (dialogs, menus, lists that pop up, side panels, regions),
-# each as {role, label, modal}, and the pressed and expanded states of the first drawn element whose label matches `source` (a regular
-# expression, any case), or null without one.
+# each as {role, label, modal}; the pressed and expanded states of the first drawn element whose label matches `source` (a regular
+# expression, any case), or null without one; and `count`, how many drawn elements have a role, a label or are buttons (what a press
+# opened that is none of those panels, a bar of plain divs with its buttons, changes it).
 _PANELS = r"""
   const PANEL = '[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], [role="complementary"], [role="region"], [role="tabpanel"], aside';
   const panels = () => [...document.querySelectorAll(PANEL)].filter(drawn);
@@ -123,8 +124,33 @@ PAGE_STATE = "(source) => {" + _DRAWN + _PANELS + r"""
   const pattern = source ? new RegExp(source, "i") : null;
   const opener = pattern && [...document.querySelectorAll("[aria-label]")].find((el) => drawn(el) && pattern.test(clean(el.getAttribute("aria-label"))));
   return { panels: panels().map(panelOf),
-           opener: opener ? { pressed: opener.getAttribute("aria-pressed") || "", expanded: opener.getAttribute("aria-expanded") || "" } : null };
+           opener: opener ? { pressed: opener.getAttribute("aria-pressed") || "", expanded: opener.getAttribute("aria-expanded") || "" } : null,
+           count: [...document.querySelectorAll("[role], [aria-label], button")].filter(drawn).length };
 }"""
+
+# The name an element is pressed by, read the way it was matched: what its aria-labelledby names, else its aria-label, else its drawn text,
+# else its title; and every one of those words, for the never-pressed check.
+NAMES_OF = "(el) => {" + _DRAWN + r"""
+  const by = (el.getAttribute("aria-labelledby") || "").split(/\s+/).map((id) => id && document.getElementById(id)).filter(Boolean)
+    .map((n) => clean(n.innerText || n.textContent)).join(" ");
+  const words = [by, clean(el.getAttribute("aria-label")), clean(el.innerText), clean(el.getAttribute("title"))];
+  return { name: words.find(Boolean) || "", words: words.filter(Boolean) };
+}"""
+
+# The Close button inside the panels `keys` names (as PAGE_STATE gives them, JSON [role, label, modal]), marked with
+# data-croom-capture="close" for the capture to press: its name, or null when those panels have none. UNMARK_CLOSE takes the mark off.
+MARK_CLOSE = "(keys) => {" + _DRAWN + _PANELS + r"""
+  for (const old of document.querySelectorAll("[data-croom-capture]")) old.removeAttribute("data-croom-capture");
+  const wanted = new Set(keys || []);
+  for (const panel of panels().filter((el) => wanted.has(keyOf(panelOf(el))))) {
+    for (const b of panel.querySelectorAll('button, [role="button"]')) {
+      const name = clean(b.getAttribute("aria-label") || b.innerText || b.getAttribute("title"));
+      if (drawn(b) && /^close\b/i.test(name)) { b.setAttribute("data-croom-capture", "close"); return name; }
+    }
+  }
+  return null;
+}"""
+UNMARK_CLOSE = '() => { for (const el of document.querySelectorAll("[data-croom-capture]")) el.removeAttribute("data-croom-capture"); }'
 
 # The words on Meet's page that are people's and must not leave the room in a capture: {"names", "messages"}. `kind` is the step ("people",
 # "chat" or another) and `keys` the panels it opened (as PAGE_STATE gives them, JSON [role, label, modal]): the people panel's list items

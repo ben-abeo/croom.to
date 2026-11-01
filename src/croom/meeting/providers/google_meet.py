@@ -775,11 +775,13 @@ class GoogleMeetProvider(MeetingProvider):
 
     async def capture(self, directory: Path, screenshots: bool = True) -> Dict[str, Any]:
         """Record Meet's panels on the TV (croom.meeting.meet_capture) into a zip in `directory`: {"file", "steps": [{"name", "opened",
-        "why"?, "closed"?}]}. The box reader is held for the whole run, so a panel the capture opens that Meet draws as a dialog (Change
+        "why"?, "closed"?: true, false or "unknown"}]}. The box reader is held for the whole run, so a panel the capture opens that Meet draws as a dialog (Change
         layout) is neither judged nor put on the table; it is closed before the reader reads again."""
         if self._page is None or self._state != MeetingState.CONNECTED:
             raise MeetingControlError(JOIN_MEET_FIRST)
-        capture = MeetCapture(self._page, screenshots=screenshots, room_name=self._room_name)
+        # Its presses take the press lock one at a time (the order stays the box reader's, then the press lock's), so a touch Pi's mute is
+        # never sent in the middle of one, and waits for one key, not the whole minute.
+        capture = MeetCapture(self._page, screenshots=screenshots, room_name=self._room_name, lock=self._pressing)
         async with self._dialog_turn:
             result = await capture.run()
         path = await asyncio.to_thread(save_capture, result, capture.images, Path(directory))

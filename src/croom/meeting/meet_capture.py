@@ -5,9 +5,11 @@ each one's elements and a screenshot, then closes it; any box on the screen is r
 Meet really draws, and a new capture shows what changed when Meet changes.
 
 What the capture presses is only what opens or closes a panel, found by its accessibility label (Meet's keyboard shortcut is the second
-way in), Escape, and a Close button; a label that admits, denies, removes, mutes everyone, sends, ends or leaves is never pressed, whatever
-finds it. A panel it opened is closed before the next step and, if that failed, once more at the end (a `finally`). The whole run is
-limited to a minute.
+way in), the Close button inside the panel it opened, and Escape when that panel has none; a name that admits, denies, removes, mutes
+everyone, sends, ends or leaves is never pressed, whatever finds it. Something opened is seen as a new panel, the opener saying it is
+open, or a change in the count of drawn elements; it is closed before the next step and, if that failed, once more at the end (a
+`finally`). A step whose page did not come back as it was, with no panel to show why, says `closed: "unknown"`: look at the TV. The whole
+run keeps to about a minute.
 
 Names (from the people panel's list items, the participant tiles and labels that hold one), email addresses and the chat's messages are
 replaced in every recorded text and label by "Person 1", "person1@example.com" and "Message 1", the same placeholder for the same words
@@ -25,9 +27,11 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 
-from croom.meeting.meet_page import GATHER_PRIVATE, PAGE_STATE, READ_DIALOGS, RECORD_ELEMENTS
+from croom.meeting.meet_page import (
+    GATHER_PRIVATE, MARK_CLOSE, NAMES_OF, PAGE_STATE, READ_DIALOGS, RECORD_ELEMENTS, UNMARK_CLOSE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +39,8 @@ JOIN_MEET_FIRST = "Join a Google Meet call first"
 ALREADY_CAPTURING = "A capture of Google Meet is running already"
 NO_CAPTURE = "No capture of Google Meet yet"
 UP = "The capture's minute was up"
+UNKNOWN = "unknown"   # a step's `closed` when the page did not come back as it was and no panel shows why: someone looks at the TV
+Closed = Union[bool, str]
 FILE_PATTERN = "meet-capture-*.zip"
 KEEP = 3            # the newest captures kept in the data directory
 TEXT_KEPT = 120     # an element's text is kept to this many characters, after it is redacted whole
@@ -75,6 +81,14 @@ def _clean(text: Any) -> str:
     return " ".join(str(text or "").split())
 
 
+class _NotKept(Exception):
+    """A step whose recording is left out, in words for the record."""
+
+
+def _why(error: BaseException) -> str:
+    return str(error) if isinstance(error, _NotKept) else f"Could not record it: {_first_line(error)}"
+
+
 def _first_line(error: BaseException) -> str:
     return next((line.strip() for line in str(error).splitlines() if line.strip()), "") or type(error).__name__
 
@@ -87,6 +101,18 @@ class Redactor:
         self.names: Dict[str, str] = {}      # by the name in lower case
         self.messages: Dict[str, str] = {}
         self.emails: Dict[str, str] = {}     # by the address in lower case
+        self.titles: Dict[str, str] = {}     # the meeting's own name (the calendar event's), from the page's title
+
+    def learn_title(self, title: str, path: str = "") -> None:
+        """The meeting's name in the page's title ("Meet - 1:1 Pat / Ben"): what is left without Meet's own words and the meeting's code."""
+        words = _clean(title)
+        for meet in (_clean(path).strip("/"), "Google Meet", "Meet"):
+            if meet:
+                words = re.sub(r"(?<!\w)" + re.escape(meet) + r"(?!\w)", " ", words, flags=re.I)
+        words = re.sub(r"\b[a-z]{3}-[a-z]{4}-[a-z]{3}\b", " ", words, flags=re.I)   # a meeting's code is Meet's, not a name
+        words = _clean(re.sub(r"^[\s\-–—|:·]+|[\s\-–—|:·]+$", "", words))
+        if len(words) >= 2:
+            self.titles[words] = "Meeting title"
 
     def learn(self, names: Iterable[str] = (), messages: Iterable[str] = ()) -> None:
         for name in map(_clean, names):
@@ -108,8 +134,9 @@ class Redactor:
         return re.compile(r"(?<!\w)" + re.escape(words) + r"(?!\w)", re.I)
 
     def __call__(self, text: str) -> str:
-        for message in sorted(self.messages, key=len, reverse=True):     # a message may hold a name or an address: it goes whole first
-            text = self._whole(message).sub(self.messages[message], text)
+        private = {**self.titles, **self.messages}
+        for message in sorted(private, key=len, reverse=True):           # a message may hold a name or an address: it goes whole first
+            text = self._whole(message).sub(private[message], text)
         text = EMAIL.sub(self._email, text)
         for name in sorted(self.names, key=len, reverse=True):           # "Pat Doe" before "Pat"
             text = self._whole(name).sub(self.names[name], text)
@@ -165,8 +192,11 @@ class MeetCapture:
     ANSWER_S = 10            # a page script or a screenshot answers within this
     LIMIT_S = 60             # the whole capture
 
-    def __init__(self, page, redact: Optional[Redactor] = None, screenshots: bool = True, room_name: str = ""):
+    def __init__(self, page, redact: Optional[Redactor] = None, screenshots: bool = True, room_name: str = "",
+                 lock: Optional[asyncio.Lock] = None):
         self.page = page
+        # Held for each key and click (the provider's press lock): a touch Pi's mute or camera shortcut is never sent in the middle of one.
+        self._lock = lock if lock is not None else asyncio.Lock()
         self.redact = redact if redact is not None else Redactor()
         self.screenshots = bool(screenshots)
         self.room_name = room_name or ""
@@ -195,8 +225,8 @@ class MeetCapture:
                     record["closed"] = await self._close(step, before)
                 except Exception as e:  # noqa: BLE001 - the page gone: nothing is open on it
                     logger.warning(f"Could not close Meet's {step.words} after the capture: {_first_line(e)}")
-                if not record.get("closed"):
-                    logger.warning(f"The capture left Meet's {step.words} open on the TV")
+                if record.get("closed") is not True:
+                    logger.warning(f"The capture may have left Meet's {step.words} open on the TV")
         user_agent = self._facts.get("user_agent", "")
         chromium = re.search(r"(?:Headless)?Chrome/([\d.]+)", user_agent)
         return {
@@ -214,16 +244,18 @@ class MeetCapture:
         """Record one step into `record`; a panel it opened is closed before it returns, or kept in _left_open for the end."""
         if step.opener is None:
             try:
+                boxes = None
                 if step.name == "dialogs":
                     boxes = await self._eval(READ_DIALOGS)
                     if not boxes:
                         record.update(opened=False, why="No box on Meet's screen")
                         return
-                    record["boxes"] = boxes
-                record["opened"] = True
                 await self._take(number, step, record, [])
+                record["opened"] = True
+                if boxes is not None:
+                    record["boxes"] = boxes   # its words are a person's too: kept only once the names on the page were read
             except Exception as e:  # noqa: BLE001 - recorded, and the capture goes on
-                record.update(opened=False, why=f"Could not record it: {_first_line(e)}")
+                record.update(opened=False, why=_why(e))
             return
         try:
             before = await self._state(step)
@@ -240,28 +272,36 @@ class MeetCapture:
                 await self._take(number, step, record, [_key(panel) for panel in new])
         except Exception as e:  # noqa: BLE001 - recorded, closed below, and the capture goes on
             record.setdefault("opened", False)
-            record["why"] = f"Could not record it: {_first_line(e)}"
+            record["why"] = _why(e)
         finally:
             try:
                 record["closed"] = await self._close(step, before)
             except Exception as e:  # noqa: BLE001 - tried again at the end
                 logger.warning(f"Could not close Meet's {step.words}: {_first_line(e)}")
                 record["closed"] = False
-            if record["closed"] is False:
+            if record["closed"] is not True:
                 self._left_open.append((step, before, record))
 
     async def _take(self, number: int, step: Step, record: Dict[str, Any], keys: List[str]) -> None:
-        """Record what the page draws now, learn the people's words on it, and take the screenshot."""
+        """Learn the people's words on the page, then record what it draws, and take the screenshot. Redaction fails closed: when the
+        people's words cannot be read, nothing of the step is kept (its elements could not be redacted)."""
+        try:
+            private = await self._gather(step, keys)
+        except Exception as e:  # noqa: BLE001 - see above
+            raise _NotKept(f"Could not read the names on it ({_first_line(e)}); its elements are left out") from e
+        self.redact.learn(private.get("names") or [], private.get("messages") or [])
         page = await self._eval(RECORD_ELEMENTS)
         if not self._facts:
             self._facts = {key: str(page.get(key) or "") for key in ("title", "path", "lang", "user_agent")}
+            self.redact.learn_title(self._facts["title"], self._facts["path"])
         record["elements"] = page.get("elements") or []
-        private = await self._eval(GATHER_PRIVATE, [step.name, keys])
-        self.redact.learn(private.get("names") or [], private.get("messages") or [])
         if self.screenshots:
             name = f"{number:02d}-{step.name}.png"
             self.images[name] = await asyncio.wait_for(self.page.screenshot(), self.ANSWER_S)
             record["screenshot"] = name
+
+    async def _gather(self, step: Step, keys: List[str]) -> Dict[str, Any]:
+        return await self._eval(GATHER_PRIVATE, [step.name, keys])
 
     # --- opening
 
@@ -286,7 +326,7 @@ class MeetCapture:
                 return label, ""
             why = f"{label} opened nothing"
         else:
-            why = f"Meet shows no {step.words} button"
+            why = "No tile menu names the room or you" if step.own else f"Meet shows no {step.words} button"
         if step.shortcut and not self._over():
             await self._key(step.shortcut)
             if await self._wait_open(step, before):
@@ -295,12 +335,16 @@ class MeetCapture:
         return None, why
 
     async def _wait_open(self, step: Step, before: Dict[str, Any], besides: Iterable[str] = (), by_opener: bool = True) -> bool:
-        """Whether a panel the page did not have before shows (besides those named), or the opener says it is open, within OPEN_WAIT_S."""
+        """Whether, within OPEN_WAIT_S, a panel the page did not have before shows (besides those named), the opener says it is open, or
+        the count of drawn role'd, labelled and button elements changed (something opened that is none of the panels; not while one of
+        `besides`, the menu that leads to it, is still drawn)."""
         besides = set(besides)
         end = min(time.monotonic() + self.OPEN_WAIT_S, self._deadline)
         while True:
             now = await self._state(step)
-            if [p for p in self._new_panels(before, now) if _key(p) not in besides] or (by_opener and self._opener_open(before, now)):
+            panels = now.get("panels") or []
+            if ([p for p in self._new_panels(before, now) if _key(p) not in besides] or (by_opener and self._opener_open(before, now))
+                    or (now.get("count") != before.get("count") and not any(_key(p) in besides for p in panels))):
                 return True
             if time.monotonic() >= end:
                 return False
@@ -308,35 +352,52 @@ class MeetCapture:
 
     # --- closing
 
-    async def _close(self, step: Step, before: Dict[str, Any]) -> bool:
-        """Close what the step opened: Escape, then a Close button, then its own button again when it says it is open; True when the page
-        has no panel it did not have before and the button is as it was."""
-        if self._closed(before, await self._state(step)):
+    async def _close(self, step: Step, before: Dict[str, Any]) -> Closed:
+        """Close what the step opened: the Close button inside the panel it opened, or Escape when that panel has none (Escape could
+        dismiss a box someone else is waiting on), then its own button again when it says it is open. True when the page is as it was
+        before; False when a panel is still open; UNKNOWN when no panel is, but the page did not come back as it was."""
+        now = await self._state(step)
+        if self._closed(before, now) is True:
             return True
-        for attempt in (self._escape, self._close_button, self._toggle_back):
-            if await attempt(step, before) and await self._wait_closed(step, before):
+        keys = [_key(panel) for panel in self._new_panels(before, now)]
+        if await self._close_button(keys):
+            if await self._wait_closed(step, before) is True:
                 return True
+        else:
+            await self._key("Escape")
+            if await self._wait_closed(step, before) is True:
+                return True
+        if await self._toggle_back(step, before) and await self._wait_closed(step, before) is True:
+            return True
         return self._closed(before, await self._state(step))
 
-    async def _escape(self, step: Step, before: Dict[str, Any]) -> bool:
-        await self._key("Escape")
-        return True
-
-    async def _close_button(self, step: Step, before: Dict[str, Any]) -> bool:
-        return await self._press(r"^close\b") is not None
+    async def _close_button(self, keys: List[str]) -> bool:
+        """Press the Close button inside the panels `keys` names; False when they have none (or there are none)."""
+        if not keys:
+            return False
+        try:
+            label = await self._eval(MARK_CLOSE, keys)
+            if not label or NEVER_PRESSED.search(label):
+                return False
+            await self._click(self.page.locator('[data-croom-capture="close"]').first, _clean(label))
+            return True
+        finally:
+            try:
+                await self._eval(UNMARK_CLOSE)
+            except Exception:  # noqa: BLE001 - the page gone: no mark is left on it
+                pass
 
     async def _toggle_back(self, step: Step, before: Dict[str, Any]) -> bool:
         if not self._opener_open(before, await self._state(step)):
             return False   # pressed again, a button that is not open would open its panel
         return await self._press(step.via or step.opener, own=step.own) is not None
 
-    async def _wait_closed(self, step: Step, before: Dict[str, Any]) -> bool:
+    async def _wait_closed(self, step: Step, before: Dict[str, Any]) -> Closed:
         end = time.monotonic() + self.CLOSE_WAIT_S
         while True:
-            if self._closed(before, await self._state(step)):
-                return True
-            if time.monotonic() >= end:
-                return False
+            closed = self._closed(before, await self._state(step))
+            if closed is True or time.monotonic() >= end:
+                return closed
             await asyncio.sleep(self.POLL_S)
 
     def _over(self) -> bool:
@@ -357,42 +418,56 @@ class MeetCapture:
         opener = now.get("opener")
         return bool(opener) and "true" in (opener.get("pressed"), opener.get("expanded")) and opener != before.get("opener")
 
-    def _closed(self, before: Dict[str, Any], now: Dict[str, Any]) -> bool:
-        opener, was = now.get("opener"), before.get("opener")
-        return not self._new_panels(before, now) and (opener is None or was is None or opener == was)
+    def _closed(self, before: Dict[str, Any], now: Dict[str, Any]) -> Closed:
+        if self._new_panels(before, now) or self._opener_open(before, now):
+            return False
+        return True if now.get("count") == before.get("count") else UNKNOWN
 
     async def _eval(self, script: str, arg: Any = None) -> Any:
         return await asyncio.wait_for(self.page.evaluate(script, arg), self.ANSWER_S)
 
     async def _key(self, key: str) -> None:
-        self.pressed.append(key)
-        await asyncio.wait_for(self.page.keyboard.press(key), self.ANSWER_S)
+        async with self._lock:
+            self.pressed.append(key)
+            await asyncio.wait_for(self.page.keyboard.press(key), self.ANSWER_S)
+
+    async def _click(self, element, label: str) -> None:
+        async with self._lock:
+            self.pressed.append(label)
+            await element.click(timeout=self.CLICK_TIMEOUT_MS)
 
     async def _press(self, pattern: str, roles: Tuple[str, ...] = ("button",), own: bool = False) -> Optional[str]:
-        """Press the first drawn element of those roles whose accessible name matches `pattern` (any case), or with `own` the one that names
-        the room or "you" when there is one; its label, or None when there is none. Never one that NEVER_PRESSED names."""
+        """Press the first drawn element of those roles whose name matches `pattern` (any case), or with `own` the one whose name holds the
+        room's name or "you" (None when no such one: another person's tile is never opened); its name, or None. The name is read as it was
+        matched (aria-labelledby, aria-label, text, title), and one that NEVER_PRESSED names in any of those words is never pressed."""
+        matcher = re.compile(pattern, re.I)
         found: List[Tuple[Any, str]] = []
         for role in roles:
-            candidates = self.page.get_by_role(role, name=re.compile(pattern, re.I))
+            candidates = self.page.get_by_role(role, name=matcher)
             for i in range(await candidates.count()):
                 element = candidates.nth(i)
-                if not await element.is_visible():
+                try:
+                    if not await element.is_visible():
+                        continue
+                    names = await element.evaluate(NAMES_OF, timeout=self.CLICK_TIMEOUT_MS)
+                except Exception:  # noqa: BLE001 - Meet drew it again in the meantime: not this one
                     continue
-                label = _clean(await element.get_attribute("aria-label") or await element.inner_text())
-                if NEVER_PRESSED.search(label):
-                    logger.warning(f"The capture does not press {label!r}")
+                name = _clean(names.get("name"))
+                if not matcher.search(name):
+                    continue   # matched by a name not read the same way here: left alone
+                if any(NEVER_PRESSED.search(_clean(words)) for words in names.get("words") or []):
+                    logger.warning(f"The capture does not press {name!r}")
                     continue
-                found.append((element, label))
+                found.append((element, name))
             if found:
                 break
+        if own:
+            room = self.room_name.lower()
+            found = [(e, n) for e, n in found if (room and room in n.lower()) or re.search(r"\byou\b", n, re.I)]
         if not found:
             return None
         element, label = found[0]
-        if own:
-            room = self.room_name.lower()
-            element, label = next(((e, l) for e, l in found if (room and room in l.lower()) or re.search(r"\byou\b", l, re.I)), found[0])
-        self.pressed.append(label)
-        await element.click(timeout=self.CLICK_TIMEOUT_MS)
+        await self._click(element, label)
         return label
 
 
@@ -408,7 +483,9 @@ def save_capture(capture: Dict[str, Any], images: Dict[str, bytes], directory: P
         for name, data in images.items():
             archive.writestr(name, data)   # a PNG is compressed already
     part.replace(path)
-    for old in sorted(directory.glob(FILE_PATTERN))[:-KEEP]:
+    # The newest by when they were written (a clock set back before NTP would sort the names wrong), and never the one just written.
+    older = sorted((p for p in directory.glob(FILE_PATTERN) if p != path), key=lambda p: p.stat().st_mtime)
+    for old in older[:max(0, len(older) - (KEEP - 1))]:
         old.unlink(missing_ok=True)
     return path
 
@@ -417,5 +494,5 @@ def newest_capture(directory: Optional[Path]) -> Optional[Path]:
     """The newest capture in `directory`, or None."""
     if directory is None or not Path(directory).is_dir():
         return None
-    found = sorted(Path(directory).glob(FILE_PATTERN))
+    found = sorted(Path(directory).glob(FILE_PATTERN), key=lambda p: p.stat().st_mtime)
     return found[-1] if found else None

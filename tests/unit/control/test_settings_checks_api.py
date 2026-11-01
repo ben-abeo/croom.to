@@ -186,3 +186,32 @@ async def test_the_meet_capture_asks_for_the_pin_and_a_meet_call(client_factory,
     assert response.status == 409 and (await response.json())["error"] == "Join a Google Meet call first"
     response = await client.get("/api/settings/meet-capture", headers=unlocked)
     assert response.status == 404 and (await response.json())["error"] == "No capture of Google Meet yet"
+
+
+async def test_one_meet_capture_at_a_time_and_a_failed_one_lets_the_next_run(client_factory, pins, unlocked, tmp_path):  # noqa: F811
+    from croom.meeting.providers.base import MeetingInfo
+
+    meeting = StubMeeting()
+    meeting.state = MeetingState.CONNECTED
+    meeting.current_meeting = MeetingInfo(platform="google_meet", meeting_id="abc-defg-hij", meeting_url="https://meet.google.com/abc-defg-hij")
+    release, runs = asyncio.Event(), []
+
+    async def capture_meet(directory, screenshots=True):
+        runs.append(screenshots)
+        if len(runs) == 2:
+            raise RuntimeError("the TV page went away")
+        await release.wait()
+        return {"file": "meet-capture-x.zip", "steps": []}
+
+    meeting.capture_meet = capture_meet
+    client = await client_factory(make_service(pin_store=pins, meeting=meeting, capture_dir=str(tmp_path)))
+    first = asyncio.create_task(client.post("/api/settings/meet-capture", json={}, headers=unlocked))
+    await until(lambda: runs)
+    response = await client.post("/api/settings/meet-capture", json={}, headers=unlocked)
+    assert response.status == 409 and (await response.json())["error"] == "A capture of Google Meet is running already"
+    release.set()
+    assert (await first).status == 200
+    response = await client.post("/api/settings/meet-capture", json={"screenshots": False}, headers=unlocked)
+    assert response.status == 409 and (await response.json())["error"] == "The capture failed: the TV page went away"
+    response = await client.post("/api/settings/meet-capture", json={}, headers=unlocked)   # the failure let go of the turn
+    assert response.status == 200 and runs == [True, False, True]

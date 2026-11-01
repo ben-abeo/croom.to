@@ -20,7 +20,8 @@ MENU_ITEMS = '<div role="menuitem" id="layout-item">Change layout</div><div role
 
 # The call: two tiles (Pat Doe's, the room's), a knock waiting, Meet's bar, and the panels the bar opens. The chat closes by its Close
 # button, the people panel only by its button again, the menus and Change layout by Escape, the host controls by their Close button. The
-# reactions button opens nothing. Every click and key is kept in window.__clicks and window.__keys.
+# reactions button opens a bar of plain divs (no role, no pressed state: only the count of labelled elements shows it), which Escape closes
+# unless window.__sticky. Every click and key is kept in window.__clicks and window.__keys.
 FAKE_MEET = """<!DOCTYPE html><html lang="en"><head><title>Meet - abc-defg-hij</title></head><body>
 <div id="tiles">
   <div data-participant-id="p1"><span>Pat Doe</span><i>mic_off</i><button aria-label="More options for Pat Doe">more_vert</button></div>
@@ -30,7 +31,7 @@ FAKE_MEET = """<!DOCTYPE html><html lang="en"><head><title>Meet - abc-defg-hij</
 <div id="bar">
   <button aria-label="Chat with everyone" aria-pressed="false" data-panel="chat">chat</button>
   <button aria-label="Show everyone (3)" aria-pressed="false" data-panel="people">people</button>
-  <button aria-label="Send a reaction">mood</button>
+  <button aria-label="Send a reaction" id="react">mood</button>
   <button aria-label="More options" aria-expanded="false" data-panel="menu">more_vert</button>
   <button aria-label="Host controls" aria-pressed="false" data-panel="host">shield</button>
   <button aria-label="Leave call">call_end</button>
@@ -47,6 +48,7 @@ FAKE_MEET = """<!DOCTYPE html><html lang="en"><head><title>Meet - abc-defg-hij</
     <div role="listitem" aria-label="Lee Roe">Lee Roe<br>lee.roe@example.org</div>
   </div>
 </div>
+<div id="reactions-bar" hidden><div><button aria-label="Thumbs up">1</button><button aria-label="Heart">2</button></div></div>
 <div id="menu" class="panel" role="menu" hidden>MENU_ITEMS</div>
 <div id="layout" class="panel" role="dialog" aria-modal="true" aria-label="Change layout" hidden>
   <label><input type="radio" name="l" aria-label="Auto">Auto</label><label><input type="radio" name="l" aria-label="Tiled">Tiled</label>
@@ -71,10 +73,12 @@ document.addEventListener('click', (e) => {
 document.querySelectorAll('[data-panel]').forEach((b) => b.addEventListener('click', () => setOpen(b.dataset.panel, panel(b.dataset.panel).hidden)));
 document.querySelectorAll('#chat [aria-label="Close"], #layout [aria-label="Close"], #host [aria-label="Close"]')
   .forEach((b) => b.addEventListener('click', () => setOpen(b.closest('.panel').id, false)));
+document.getElementById('react').addEventListener('click', () => { const bar = panel('reactions-bar'); bar.hidden = !bar.hidden; });
 const item = document.getElementById('layout-item');
 if (item) item.addEventListener('click', () => { setOpen('menu', false); setOpen('layout', true); });
 document.addEventListener('keydown', (e) => {
   window.__keys.push(e.key);
+  if (e.key === 'Escape' && !window.__sticky && !panel('reactions-bar').hidden) { panel('reactions-bar').hidden = true; return; }
   if (e.key === 'Escape') for (const id of ['layout', 'menu', 'tile-menu']) if (!panel(id).hidden) { setOpen(id, false); break; }
 });
 </script></body></html>"""
@@ -120,11 +124,11 @@ async def test_every_panel_opens_is_recorded_and_closes_and_nothing_else_is_pres
     steps = {step["name"]: step for step in result["steps"]}
 
     assert list(steps) == ["call", "chat", "people", "reactions", "more_options", "layout", "own_tile", "host_controls", "dialogs"]
-    for name in ("chat", "people", "more_options", "layout", "own_tile", "host_controls"):
+    for name in ("chat", "people", "reactions", "more_options", "layout", "own_tile", "host_controls"):
         assert steps[name]["opened"] is True and steps[name]["closed"] is True, steps[name]
         assert steps[name]["elements"] and steps[name]["screenshot"] == f"{list(steps).index(name) + 1:02d}-{name}.png"
-    assert steps["reactions"]["opened"] is False and steps["reactions"]["why"] == "Send a reaction opened nothing"
-    assert steps["reactions"]["closed"] is True
+    assert steps["reactions"]["panels"] == []                                              # seen by the count alone, and closed
+    assert await page.evaluate("document.getElementById('reactions-bar').hidden")
     assert steps["layout"]["by"] == "More options › Change layout"
     assert steps["layout"]["panels"] == [{"role": "dialog", "label": "Change layout", "modal": "true"}]   # its role and aria-modal
     assert "More options for Room 1 (You)" in capture.pressed and "More options for Pat Doe" not in capture.pressed   # the room's own
@@ -139,24 +143,29 @@ async def test_every_panel_opens_is_recorded_and_closes_and_nothing_else_is_pres
     path = save_capture(result, capture.images, tmp_path)
     with zipfile.ZipFile(path) as archive:
         names = archive.namelist()
-        assert names[0] == "capture.json" and "02-chat.png" in names and "04-reactions.png" not in names
+        assert names[0] == "capture.json" and "02-chat.png" in names and "04-reactions.png" in names
         assert json.loads(archive.read("capture.json"))["versions"]["meet_lang"] == "en"
 
 
 async def test_a_step_that_fails_is_recorded_its_panel_closed_and_the_run_goes_on(fake_meet):
     page = await fake_meet(FAKE_MEET.replace("MENU_ITEMS", '<div role="menuitem">Report a problem</div>'))   # no Change layout
+    await page.evaluate("window.__sticky = true")                     # the reactions bar does not go: nothing says it went
     capture = quick(page, screenshots=False)
-    take = capture._take
+    gather = capture._gather
 
-    async def people_breaks(number, step, record, keys):
+    async def people_breaks(step, keys):
         if step.name == "people":
             raise RuntimeError("the page went away")
-        await take(number, step, record, keys)
+        return await gather(step, keys)
 
-    capture._take = people_breaks
-    steps = {step["name"]: step for step in (await capture.run())["steps"]}
+    capture._gather = people_breaks
+    result = await capture.run()
+    steps = {step["name"]: step for step in result["steps"]}
 
-    assert steps["people"]["why"] == "Could not record it: the page went away" and steps["people"]["closed"] is True
+    # Redaction fails closed: the people panel's names could not be read, so none of its elements is kept.
+    assert steps["people"]["why"] == "Could not read the names on it (the page went away); its elements are left out"
+    assert "elements" not in steps["people"] and "Lee Roe" not in json.dumps(result) and steps["people"]["closed"] is True
+    assert steps["reactions"]["opened"] is True and steps["reactions"]["closed"] == "unknown"   # Ben is told to look at the TV
     assert steps["layout"]["opened"] is False and steps["layout"]["why"] == "Meet's More options menu has no Change layout item"
     assert steps["layout"]["closed"] is True                                                # the menu it opened is closed
     assert steps["host_controls"]["opened"] is True and steps["host_controls"]["closed"] is True

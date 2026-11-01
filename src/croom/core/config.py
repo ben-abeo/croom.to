@@ -59,9 +59,11 @@ class RoomConfig:
         self.location = without_placeholder(self.location)
 
 
-# Dialogs Zoom draws over the TV that are only a notice (one button): pressed at once and kept on the table as a line under the title.
+# Dialogs Zoom and Google Meet draw over the TV that are only a notice (one button): pressed at once and kept on the table as a line under
+# the title. Meet's "Others may see your video differently … Got it" shows as the room joins (spec 2026-10-30 Meet controls, section 3).
 DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on",
-                       "has been muted", "has been unmuted", "recording has started", "recording has stopped"]
+                       "has been muted", "has been unmuted", "recording has started", "recording has stopped",
+                       "others may see your video differently"]
 # Zoom 6.5.0's reaction picker has no emoji: its items are named, and the table offers them by those names.
 DEFAULT_REACTIONS = ["Thumbs Up", "Clap", "Heart", "Joy", "Open Mouth", "Tada"]
 # The platforms a room joins when its config does not say.

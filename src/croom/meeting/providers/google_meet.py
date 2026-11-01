@@ -10,9 +10,13 @@ import re
 import tempfile
 import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List, Tuple
 
+from croom.core.config import DEFAULT_ACKNOWLEDGE
+from croom.core.logs import DIALOGS_LOGGER
+from croom.meeting.meet_page import PRESS_DIALOG, READ_DIALOGS
 from croom.meeting.providers.base import (
+    DialogPolicy,
     MeetingControlError,
     MeetingInfo,
     MeetingProvider,
@@ -21,6 +25,8 @@ from croom.meeting.providers.base import (
 )
 
 logger = logging.getLogger(__name__)
+# What Meet draws over the call, and what became of it, goes to the dialogs' own logger, as Zoom's does (core/logs.py).
+dialog_log = logging.getLogger(DIALOGS_LOGGER)
 
 # Playwright is optional - used for browser automation
 try:
@@ -63,6 +69,12 @@ READ_CALL = r"""() => {
 }"""
 # What the table is told when the bare C key cannot go to the page: it would be typed into whatever has the keyboard (the chat box).
 KEYBOARD_TAKEN_WORDS = "Meet's chat box has the keyboard; close it on the TV first"
+# What a tap on a box that Meet has taken off the screen is told.
+DIALOG_GONE_WORDS = "That box is no longer on Meet's screen"
+
+
+class _DialogGone(MeetingControlError):
+    """The box a press was for is not on the screen (it went by itself, or someone at the TV answered it)."""
 
 
 def meet_controls(buttons: Dict[str, Dict[str, Any]], muted: bool) -> Dict[str, Any]:
@@ -121,6 +133,10 @@ class GoogleMeetProvider(MeetingProvider):
     PRESS_WAIT_S = 2      # a press waits this long for its button's label to change ...
     PRESS_POLL_S = 0.05   # ... looking this often
     LOOK_TIMEOUT_S = 10   # one reading of the page answers within this, or the page is stuck (a frozen tab would hold the press lock for good)
+    # Meet's boxes (spec 2026-10-30 Meet controls, section 3): read this often while connected, and once right after the join.
+    DIALOG_INTERVAL_S = 2
+    ANSWER_SPACING_S = 1   # the provider presses at most one notice's button in this time by itself, whatever Meet draws
+    DIALOG_POLL_S = 0.2    # after a box's button is pressed, the boxes are read this often until it has gone
 
     def __init__(self, display=None, room_name: str = "Conference Room"):
         super().__init__()
@@ -135,10 +151,19 @@ class GoogleMeetProvider(MeetingProvider):
         self._reader: Optional[asyncio.Task] = None
         self._read_warned = False         # a read that fails is said once for a call
         self._pressing = asyncio.Lock()   # one press at a time: two shortcuts sent at once could meet in the middle (Ctrl still down for the C)
+        # Meet's boxes: the policy, the regular reading of them, and one reading or answer at a time (a stale reading taken while a tap
+        # answered a box would see it as a new one).
+        self.dialog_policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+        self._dialog_reader: Optional[asyncio.Task] = None
+        self._dialog_turn = asyncio.Lock()
+        self._next_dialog_id = 0
+        self._reset_dialogs()
 
     @classmethod
     def from_config(cls, config, display=None) -> "GoogleMeetProvider":
-        return cls(display, room_name=config.room.name or "Conference Room")
+        provider = cls(display, room_name=config.room.name or "Conference Room")
+        provider.dialog_policy = DialogPolicy(config.meeting.dialogs.acknowledge, config.meeting.dialogs.ask_everything)
+        return provider
 
     @property
     def display(self):
@@ -260,6 +285,7 @@ class GoogleMeetProvider(MeetingProvider):
             await self._read_controls()
             self._set_state(MeetingState.CONNECTED)
             self._reader = asyncio.create_task(self._read_regularly())
+            self._dialog_reader = asyncio.create_task(self._read_dialogs_regularly())   # its first reading is at once
             logger.info(f"Connected to Google Meet: {meeting_id}")
 
             return self._current_meeting
@@ -471,8 +497,8 @@ class GoogleMeetProvider(MeetingProvider):
 
     async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
         """A control from the table, carried out with Meet's own keyboard shortcut (see MeetingProvider.control): the microphone, the
-        camera, the raised hand and the captions. Everything else Meet's page does not offer here is refused in words. The answer is the
-        control model as it is afterwards."""
+        camera, the raised hand and the captions; and "dialog", a tap on a button of the box waiting on the table ({"id", "button"}).
+        Everything else Meet's page does not offer here is refused in words. The answer is the control model as it is afterwards."""
         if self._page is None or self._state != MeetingState.CONNECTED:
             raise MeetingControlError("Not in a meeting")
         if name == "mute":
@@ -484,6 +510,8 @@ class GoogleMeetProvider(MeetingProvider):
             return {}
         elif name == "chat.seen":
             return {"chat": self._current_meeting.chat}   # the agent reads no chat from Meet: nothing to mark
+        elif name == "dialog":
+            return await self._answer_from_table(value)
         else:
             raise MeetingControlError("Not available in a Meet call")
         return await self._read_controls()
@@ -588,10 +616,158 @@ class GoogleMeetProvider(MeetingProvider):
                 return
             await self._read_controls()
 
-    async def _stop_reading(self) -> None:
-        """Stop the regular reading and wait for it to be over: what the provider starts on its own never outlives the call."""
-        reader, self._reader = self._reader, None
-        if reader is None or reader is asyncio.current_task():
+    # ------------------------------------------------------------------
+    # Meet's boxes (spec 2026-10-30 Meet controls, section 3): its notices, "Someone wants to join", "Leave call?"
+    # ------------------------------------------------------------------
+
+    def _reset_dialogs(self) -> None:
+        """What one call leaves of Meet's boxes that the next must not find."""
+        self._on_screen: Dict[Tuple[str, str], Dict[str, Any]] = {}   # every box on the screen, by its title and words, as the table is given it
+        self._dialogs: List[Dict[str, Any]] = []                      # the boxes waiting for a tap on the table, oldest first
+        self._last_answer = float("-inf")                             # when the provider last pressed a notice's button by itself
+        self._dialogs_warned = False                                  # a reading that fails is said once for a call
+        if self._current_meeting is not None:
+            self._current_meeting.dialog = None
+
+    @staticmethod
+    def _dialog_key(dialog: Dict[str, Any]) -> Tuple[str, str]:
+        """How a box is known while it is on the screen: Meet gives its boxes no ids, so by its title and its words."""
+        return (str(dialog.get("title") or ""), str(dialog.get("text") or ""))
+
+    async def _read_dialogs_regularly(self) -> None:
+        """For as long as the call lasts, read Meet's boxes: at once (a notice Meet shows as the call opens), then every DIALOG_INTERVAL_S."""
+        while self._state == MeetingState.CONNECTED:
+            await self._read_dialogs()
+            await asyncio.sleep(self.DIALOG_INTERVAL_S)
+
+    async def _read_dialogs(self) -> None:
+        """One reading of Meet's boxes, taken in: a box not seen before is judged by the policy (a notice is pressed for the room, any other
+        waits on the table) and one no longer on the screen is forgotten. A box stays known by its words while it is on the screen, so a
+        notice is pressed once, never again and again. A reading that fails changes nothing and is said once for the call; it never raises."""
+        async with self._dialog_turn:
+            if self._page is None or self._current_meeting is None:
+                return
+            try:
+                reading = await self._answered(self._page.evaluate(READ_DIALOGS))
+            except Exception as e:  # noqa: BLE001 - the page gone or navigating: the next reading will tell
+                if not self._dialogs_warned:
+                    self._dialogs_warned = True
+                    logger.warning(f"Could not read Meet's boxes ({_first_line(e)}); trying again")
+                return
+            seen = {}
+            for dialog in reading or []:
+                if isinstance(dialog, dict):
+                    seen.setdefault(self._dialog_key(dialog), dialog)
+            for key in [key for key in self._on_screen if key not in seen]:
+                self._forget_dialog(key)
+            for key, dialog in seen.items():
+                if key not in self._on_screen and self._state == MeetingState.CONNECTED:
+                    await self._on_dialog(key, dialog)
+
+    async def _on_dialog(self, key: Tuple[str, str], dialog: Dict[str, Any]) -> None:
+        """A box Meet has just drawn. By the policy Zoom's dialogs have, a one-button notice whose words are on the list is pressed for the
+        room (at most one press in ANSWER_SPACING_S) and its sentence kept on the notice line; any other, and a notice whose press fails,
+        waits on the table for a tap."""
+        info = self._current_meeting
+        if info is None:
             return
-        reader.cancel()
-        await asyncio.gather(reader, return_exceptions=True)
+        self._next_dialog_id += 1
+        words = {"id": self._next_dialog_id, "title": key[0], "text": key[1],
+                 "buttons": [str(label) for label in dialog.get("buttons") or []]}
+        self._on_screen[key] = words
+        dialog_log.info(f"Meet dialog: {words['title']!r} {words['text']!r} buttons {words['buttons']}")
+        if self.dialog_policy.decide(words) != "acknowledge":
+            self._wait_on_the_table(words)
+            dialog_log.info("The dialog waits on the table")
+            return
+        label = self.dialog_policy.answer(words)
+        sentence = self.dialog_policy.disclosure(words)
+        if sentence and sentence not in info.notice:
+            info.notice = f"{info.notice} {sentence}".strip()
+        wait = self._last_answer + self.ANSWER_SPACING_S - time.monotonic()
+        if wait > 0:
+            await asyncio.sleep(wait)
+        self._last_answer = time.monotonic()
+        try:
+            await self._press_dialog(key, label)
+        except _DialogGone:
+            logger.debug(f"Meet's box {words['title']!r} went before {label!r} was pressed")
+            self._forget_dialog(key)
+        except MeetingControlError as e:
+            logger.warning(f"Could not press {label!r} on Meet's box {words['title']!r} {words['text']!r} ({e}): it waits on the table")
+            self._wait_on_the_table(words)
+        else:
+            dialog_log.info(f"Acknowledged Meet's dialog with {label!r}")
+
+    def _wait_on_the_table(self, words: Dict[str, Any]) -> None:
+        self._dialogs.append(words)
+        if self._current_meeting is not None:
+            self._current_meeting.dialog = dict(self._dialogs[0])
+
+    def _forget_dialog(self, key: Tuple[str, str]) -> None:
+        """The box is off the screen: the table shows the oldest of those still waiting."""
+        words = self._on_screen.pop(key, None)
+        if words is not None:
+            self._take_off_the_table(words["id"])
+
+    def _take_off_the_table(self, dialog_id: int) -> None:
+        self._dialogs = [dialog for dialog in self._dialogs if dialog["id"] != dialog_id]
+        if self._current_meeting is not None:
+            self._current_meeting.dialog = dict(self._dialogs[0]) if self._dialogs else None
+
+    async def _press_dialog(self, key: Tuple[str, str], label: str) -> None:
+        """Press the button the label names in the box the key names, one press at a time with the shortcuts, and see the box go (for
+        PRESS_WAIT_S at most): a press Meet does not take is a refusal in words, never a success. _DialogGone when the box is not there."""
+        async with self._pressing:
+            try:
+                result = await self._answered(self._page.evaluate(PRESS_DIALOG, [key[0], key[1], label]))
+            except MeetingControlError:
+                raise
+            except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
+                raise MeetingControlError(f"Could not press {label}: {_first_line(e)}") from e
+            if result == "gone":
+                raise _DialogGone(DIALOG_GONE_WORDS)
+            if result != "pressed":
+                raise MeetingControlError(f"Meet's box has no {label} button")
+            deadline = time.monotonic() + self.PRESS_WAIT_S
+            while True:
+                try:
+                    reading = await self._answered(self._page.evaluate(READ_DIALOGS))
+                except Exception:  # noqa: BLE001 - the page moved on (Leave call navigates): the box went with it
+                    return
+                if key not in {self._dialog_key(dialog) for dialog in reading or [] if isinstance(dialog, dict)}:
+                    return
+                if time.monotonic() >= deadline:
+                    raise MeetingControlError(f"Meet did not close the box after {label}; try again")
+                await asyncio.sleep(self.DIALOG_POLL_S)
+
+    async def _answer_from_table(self, value: Any) -> Dict[str, Any]:
+        """A tap on one of the waiting box's buttons: the page presses it, and the box is off the table. One that has gone is refused in
+        words."""
+        try:
+            dialog_id, label = int(value["id"]), str(value["button"])
+        except (KeyError, TypeError, ValueError):
+            raise MeetingControlError("Say which dialog and which button") from None
+        async with self._dialog_turn:
+            key = next((key for key, words in self._on_screen.items() if words["id"] == dialog_id), None)
+            if key is None:
+                raise MeetingControlError(DIALOG_GONE_WORDS)
+            try:
+                await self._press_dialog(key, label)
+            except _DialogGone:
+                self._forget_dialog(key)
+                raise
+            self._take_off_the_table(dialog_id)   # the box itself is forgotten by the reading that no longer sees it
+        info = self._current_meeting
+        return {"dialog": info.dialog if info is not None else None}
+
+    async def _stop_reading(self) -> None:
+        """Stop the regular readings (the buttons and the boxes) and wait for them to be over: what the provider starts on its own never
+        outlives the call. What it kept of the call's boxes goes with them."""
+        readers = [self._reader, self._dialog_reader]
+        self._reader = self._dialog_reader = None
+        readers = [reader for reader in readers if reader is not None and reader is not asyncio.current_task()]
+        for reader in readers:
+            reader.cancel()
+        await asyncio.gather(*readers, return_exceptions=True)
+        self._reset_dialogs()

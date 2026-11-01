@@ -115,6 +115,11 @@ async def meet_page():
             page.goto = goto                  # the provider asks for meet.google.com; this browser is sent to the replica instead
             provider = GoogleMeetProvider(FakeDisplay(page))
             provider.READ_INTERVAL_S = read_interval
+
+            async def no_box_readings():     # nor Meet's boxes, read at once after the join and every 2 s (test_meet_dialogs.py tests them)
+                return None
+
+            provider._read_dialogs_regularly = no_box_readings
             provider.PAGE_SETTLE_S = provider.LEAVE_SETTLE_S = 0.05      # the provider's own waits for a real page: not needed for the replica
             providers.append(provider)
             if setup is not None:
@@ -272,7 +277,7 @@ async def test_the_people_count_is_the_number_in_the_label_or_the_text_and_zero_
 
 
 @pytest.mark.parametrize("name, value", [
-    ("reactions", "Clap"), ("layout", "gallery"), ("hide_self", None), ("pin", None), ("dialog", {"id": 1, "button": "OK"}),
+    ("reactions", "Clap"), ("layout", "gallery"), ("hide_self", None), ("pin", None),
     ("host.mute_all", None), ("host.record", None), ("host.end", None), ("host.mute_one", "5"),
 ])
 async def test_what_meet_does_not_offer_is_refused_in_words_and_nothing_is_pressed(meet_page, name, value):

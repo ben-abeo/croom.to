@@ -30,6 +30,7 @@ meeting:
       - "has been unmuted"
       - "recording has started"
       - "recording has stopped"
+      - "others may see your video differently"
     ask_everything: false
   # The Reactions button offers these, by the names Zoom's reaction picker gives them.
   controls:

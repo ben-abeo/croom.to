@@ -205,6 +205,7 @@ class MeetCapture:
         self._facts: Dict[str, str] = {}
         self._deadline = float("inf")
         self._left_open: List[Tuple[Step, Dict[str, Any], Dict[str, Any]]] = []   # (step, the page before it, its record)
+        self._by_count = False   # the step's opening was seen only by the count of drawn elements (no panel, no opener)
 
     async def run(self) -> Dict[str, Any]:
         # The minute is kept by each step looking at the clock before it opens anything and while it waits for a panel, never by cancelling
@@ -220,7 +221,7 @@ class MeetCapture:
                     continue
                 await self._step(number, step, record)
         finally:
-            for step, before, record in self._left_open:   # what a step could not close: once more, whatever happened since
+            for step, before, record in self._left_open:   # a panel a step could not close: once more, whatever happened since
                 try:
                     record["closed"] = await self._close(step, before)
                 except Exception as e:  # noqa: BLE001 - the page gone: nothing is open on it
@@ -275,11 +276,11 @@ class MeetCapture:
             record["why"] = _why(e)
         finally:
             try:
-                record["closed"] = await self._close(step, before)
+                record["closed"] = await self._close(step, before, count_only=bool(record.get("opened")) and self._by_count)
             except Exception as e:  # noqa: BLE001 - tried again at the end
                 logger.warning(f"Could not close Meet's {step.words}: {_first_line(e)}")
                 record["closed"] = False
-            if record["closed"] is not True:
+            if record["closed"] is False:   # a panel or the opener says open; "unknown" is not pressed at again
                 self._left_open.append((step, before, record))
 
     async def _take(self, number: int, step: Step, record: Dict[str, Any], keys: List[str]) -> None:
@@ -307,6 +308,7 @@ class MeetCapture:
 
     async def _open(self, step: Step, before: Dict[str, Any]) -> Tuple[Optional[str], str]:
         """Open the step's panel: by its button, then by Meet's shortcut. (how it was opened, "") or (None, why not)."""
+        self._by_count = False
         if step.via:
             via = await self._press(step.via)
             if via is None:
@@ -343,8 +345,11 @@ class MeetCapture:
         while True:
             now = await self._state(step)
             panels = now.get("panels") or []
-            if ([p for p in self._new_panels(before, now) if _key(p) not in besides] or (by_opener and self._opener_open(before, now))
-                    or (now.get("count") != before.get("count") and not any(_key(p) in besides for p in panels))):
+            if [p for p in self._new_panels(before, now) if _key(p) not in besides] or (by_opener and self._opener_open(before, now)):
+                self._by_count = False
+                return True
+            if now.get("count") != before.get("count") and not any(_key(p) in besides for p in panels):
+                self._by_count = True
                 return True
             if time.monotonic() >= end:
                 return False
@@ -352,13 +357,20 @@ class MeetCapture:
 
     # --- closing
 
-    async def _close(self, step: Step, before: Dict[str, Any]) -> Closed:
+    async def _close(self, step: Step, before: Dict[str, Any], count_only: bool = False) -> Closed:
         """Close what the step opened: the Close button inside the panel it opened, or Escape when that panel has none (Escape could
         dismiss a box someone else is waiting on), then its own button again when it says it is open. True when the page is as it was
-        before; False when a panel is still open; UNKNOWN when no panel is, but the page did not come back as it was."""
+        before; False when a panel is still open; UNKNOWN when no panel is, but the page did not come back as it was.
+
+        Something is pressed only on evidence that the capture opened it: a panel it did not have before, its opener saying open, or, with
+        `count_only` (the step's opening was seen by the count alone), the elements that came with its press. A count that moved with
+        nothing of the capture's open (a toast, someone joining, a knock box arriving) is UNKNOWN, and nothing is pressed."""
         now = await self._state(step)
-        if self._closed(before, now) is True:
+        closed = self._closed(before, now)
+        if closed is True:
             return True
+        if closed == UNKNOWN and not count_only:
+            return UNKNOWN
         keys = [_key(panel) for panel in self._new_panels(before, now)]
         if await self._close_button(keys):
             if await self._wait_closed(step, before) is True:

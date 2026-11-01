@@ -73,7 +73,7 @@ document.addEventListener('click', (e) => {
 document.querySelectorAll('[data-panel]').forEach((b) => b.addEventListener('click', () => setOpen(b.dataset.panel, panel(b.dataset.panel).hidden)));
 document.querySelectorAll('#chat [aria-label="Close"], #layout [aria-label="Close"], #host [aria-label="Close"]')
   .forEach((b) => b.addEventListener('click', () => setOpen(b.closest('.panel').id, false)));
-document.getElementById('react').addEventListener('click', () => { const bar = panel('reactions-bar'); bar.hidden = !bar.hidden; });
+document.getElementById('react').addEventListener('click', () => { if (window.__inert) return; const bar = panel('reactions-bar'); bar.hidden = !bar.hidden; });
 const item = document.getElementById('layout-item');
 if (item) item.addEventListener('click', () => { setOpen('menu', false); setOpen('layout', true); });
 document.addEventListener('keydown', (e) => {
@@ -186,3 +186,27 @@ async def test_names_email_addresses_and_chat_are_redacted_in_labels_and_texts(f
     assert any("person1@example.com" in text or "person2@example.com" in text for text in texts)
     assert any(re.search(r"Message \d", text) for text in texts)
     assert "Chat with everyone" in labels and "Change layout" in labels                     # Meet's own words stay
+
+
+async def test_a_count_that_moves_with_nothing_opened_presses_nothing(fake_meet):
+    """Someone joins (a labelled element appears) after Send a reaction opened nothing: the capture cannot say the page is as it was, but
+    nothing of its own is open, so it presses no Escape for it, then or at the end."""
+    page = await fake_meet(FAKE_MEET.replace("MENU_ITEMS", MENU_ITEMS))
+    await page.evaluate("window.__inert = true")
+    capture = quick(page, screenshots=False)
+    real_open = capture._open
+
+    async def someone_joins(step, before):
+        answer = await real_open(step, before)
+        if step.name == "reactions":
+            await page.evaluate("""() => { const toast = document.createElement('div'); toast.setAttribute('role', 'status');
+                                           toast.textContent = 'Lee Roe joined'; document.body.append(toast); }""")
+        return answer
+
+    capture._open = someone_joins
+    steps = {step["name"]: step for step in (await capture.run())["steps"]}
+
+    assert steps["reactions"]["opened"] is False and steps["reactions"]["closed"] == "unknown"
+    after = capture.pressed[capture.pressed.index("Send a reaction") + 1:]
+    assert after[0] == "More options"                                   # no Escape for the step that opened nothing
+    assert capture.pressed[-1] == "Close"                               # nor at the end (the host controls' Close was the last press)

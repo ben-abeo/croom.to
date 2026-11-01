@@ -161,7 +161,7 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
         "A section with nothing under it (meeting: with its lines deleted) is that section's defaults, in every section of the file, with no warning and the rest of the file in force.",
         "The list under platforms is read the same way: a bare word is that one platform, and a value that is not a list (platforms: no) is the default list, with a warning.",
         "Inside any other section an unknown key makes the agent set the whole file aside: none of the file's settings take effect and the agent runs on its built-in defaults (the one line it prints about it is block-buffered and reaches the journal only when the service stops); an unknown key at the top of the file, outside every section, is ignored without a word.",
-        "A room installed before this release has no such lines and runs the defaults",
+        "A room installed before mid-October 2026 has no such lines and runs the defaults",
     ):
         assert needle in text, needle
 

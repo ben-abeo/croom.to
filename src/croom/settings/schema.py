@@ -120,7 +120,7 @@ SCHEMA: List[Setting] = [
     Setting("meeting.mic_default_on", "Microphone on at join", "meetings", "switch"),
     Setting("meeting.kiosk", "Kiosk", "meetings", "switch", help="The TV's browser fills the screen with no window around it"),
     Setting("meeting.dialogs.acknowledge", "Dialogs the room answers", "meetings", "list", max_items=40,
-            help="Zoom's one-button notices, by words in them: pressed at once"),
+            help="Zoom's and Google Meet's one-button notices, by words in them: pressed at once"),
     Setting("meeting.dialogs.ask_everything", "Ask about every dialog", "meetings", "switch",
             help="Every dialog waits for a tap at the table, the ones above too"),
     Setting("meeting.controls.reactions", "Reactions", "meetings", "list", max_items=12, max_length=40,

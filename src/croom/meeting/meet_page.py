@@ -332,13 +332,14 @@ _WORDS = r"""
   };
 """
 
-# One reading of Meet's call page (spec 2026-10-13, section 4.5; Phase B adds the last three). Each control's button is found by a label that
+# One reading of Meet's call page (spec 2026-10-13, section 4.5; Phase B adds the last four). Each control's button is found by a label that
 # names what pressing it does, and its state is what that label says: "Turn off camera" means the camera is on, "Lower hand" means the hand is
 # up. A button the page does not have, or whose label names no such action, reads as null. `people` is the people button with the number in its
 # label or its text; `taken` is whether something that takes typing has the keyboard (a text field, the chat box, an editable area, a frame,
 # say); `chat_unread` is the number on the chat button's label or badge (0 without one); `hosting` is whether the host controls button is drawn
 # (Meet draws it for a host and a co-host alike); `panels` is which of "chat", "people" and "host" is open now, in that order: a side panel drawn
-# by its structure (_SIDE), or its button saying it is pressed or expanded. Run with MEET (the table's words); without it, with this file's MEET.
+# by its structure (_SIDE), or its button saying it is pressed or expanded; `drawn` says whether the chat, reactions and more options buttons are
+# on the screen. Run with MEET (the table's words); without it, with this file's MEET.
 READ_CALL = "(meet) => {  const M = meet || " + json.dumps(MEET) + ";\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
   // Only what is drawn counts: a copy the page keeps out of sight is not the button. Two drawn buttons that say different things say nothing (null).
   const labelled = [...document.querySelectorAll("[aria-label]")].filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
@@ -383,7 +384,21 @@ READ_CALL = "(meet) => {  const M = meet || " + json.dumps(MEET) + ";\n  const P
     chat_unread: unread,
     hosting: Boolean(openers.host),
     panels: ["chat", "people", "host"].filter((name) => open[name] || pressed(openers[name])),
+    drawn: { chat: Boolean(chat), reactions: Boolean(opener(M.reactions)), more_options: Boolean(opener(M.more_options)) },
   };
+}"""
+
+# Which of the side panels "chat", "people" and "host" is open, told apart the two ways it can be known: `open` by the panel's own structure
+# (_SIDE: what is drawn), `pressed` by its button saying it is pressed or expanded (which Meet could leave stale). The provider decides a panel
+# is closed only when neither says it is open, and presses to close only what its structure shows (Meet controls plan Phase B, Task 2).
+# Run with MEET.
+READ_PANELS = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(drawn);
+  const opener = (words) => buttons.find((b) => starts(nameOf(b), words));
+  const openers = { chat: opener(M.chat.labels), people: opener(M.people.labels), host: opener(M.host_controls) };
+  const pressed = (b) => Boolean(b) && (b.getAttribute("aria-pressed") === "true" || b.getAttribute("aria-expanded") === "true");
+  const open = openPanels(), KINDS = ["chat", "people", "host"];
+  return { open: KINDS.filter((k) => open[k]), pressed: KINDS.filter((k) => pressed(openers[k])) };
 }"""
 
 # The people panel, as READ_PEOPLE and PRESS_BY_LABEL both find a person in it: `peopleRows()` is each drawn row of the people panel
@@ -502,6 +517,7 @@ READ_HOST_SWITCHES = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _
 #   null (or missing)     anywhere on the page;
 #   "panel"               inside the open side panels (chat, people, host controls, activities, any <aside>);
 #   "menu"                inside the open menus ([role=menu], [role=listbox]);
+#   {"panel": kind}       inside the open side panel of that kind ("chat", "people", "host": by its structure, _SIDE), and nowhere else;
 #   {"person": id}        inside the people panel's row with that id (as READ_PEOPLE gives it) and what the row's own buttons control
 #                         (aria-controls: its menu). An id that no row has, or that more than one row has ("name:" + a name two people
 #                         share), presses nothing: the caller says so in words. A text field is never pressed (only the elements above are).
@@ -510,6 +526,7 @@ PRESS_BY_LABEL = "({ meet, labels, container }) => {  const M = meet;\n  const P
   let roots = [document];
   if (container === "panel") roots = sidePanels();
   else if (container === "menu") roots = [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(drawn);
+  else if (container && typeof container === "object" && container.panel) roots = [openPanels()[container.panel]].filter(Boolean);
   else if (container && typeof container === "object") {
     const rows = peopleRows().filter((row) => row.id === container.person);
     if (rows.length !== 1) return null;

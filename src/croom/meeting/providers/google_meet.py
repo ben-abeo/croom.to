@@ -9,13 +9,24 @@ import logging
 import re
 import tempfile
 import time
+from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Optional, Dict, Any, Callable, List, Tuple
 
-from croom.core.config import DEFAULT_ACKNOWLEDGE
+from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
 from croom.core.logs import DIALOGS_LOGGER
 from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
-from croom.meeting.meet_page import MEET, PRESS_DIALOG, READ_CALL, READ_DIALOGS
+from croom.meeting.meet_page import (
+    MEET,
+    PRESS_BY_LABEL,
+    PRESS_DIALOG,
+    READ_CALL,
+    READ_CHAT,
+    READ_DIALOGS,
+    READ_HOST_SWITCHES,
+    READ_PANELS,
+    READ_PEOPLE,
+)
 from croom.meeting.providers.base import (
     DialogPolicy,
     MeetingControlError,
@@ -42,19 +53,56 @@ KEYBOARD_TAKEN_WORDS = "Meet's chat box has the keyboard; close it on the TV fir
 DIALOG_GONE_WORDS = "That box is no longer on Meet's screen"
 # What a tap on a box is told while Settings' capture of Meet's page runs (it holds the boxes for up to a minute).
 CAPTURING_WORDS = "The room is capturing Meet's page; try again in a minute"
+# What a screen the touch Pi names that Meet has no panel for is told.
+SCREEN_WORDS = "Say which Meet screen is open: chat, participants, host, or none"
+
+# The touch Pi's Meet screens (Meet controls plan Phase B, Task 2) and the side panel of Meet's each shows on the TV; Meet shows one at a time.
+SCREEN_PANELS = {"chat": "chat", "participants": "people", "host": "host"}
+# Each panel's button, by MEET's words, and Meet's own shortcut for it where it has one (the host controls have none); its name in words.
+PANEL_OPENERS = {"chat": MEET["chat"]["labels"], "people": MEET["people"]["labels"], "host": MEET["host_controls"]}
+PANEL_SHORTCUTS = {"chat": MEET["chat"]["shortcut"], "people": MEET["people"]["shortcut"]}
+PANEL_WORDS = {"chat": "chat", "people": "people", "host": "host controls"}
+CLOSE_WORDS = ["Close"]           # the Close button inside a panel
+LAYOUTS = ["auto", "tiled", "spotlight", "sidebar"]
+PEOPLE_LISTED = 50                # the roster the table is given, at most
+CHAT_KEPT = 20                    # the last messages the table is given
 
 
 class _DialogGone(MeetingControlError):
     """The box a press was for is not on the screen (it went by itself, or someone at the TV answered it)."""
 
 
-def meet_controls(buttons: Dict[str, Dict[str, Any]], muted: bool) -> Dict[str, Any]:
-    """The table's control model (spec 2026-10-13, section 3) for what Meet's page offers a participant: the buttons it has (camera, raise_hand,
-    captions, each with its state), the microphone's state, and nothing else. The room is never a host here, Meet's reactions, views and pinning are
-    not driven, and the agent does not read Meet's chat: the table draws only what is available."""
-    model = controls_from({"me": {"muted": muted}, "role": "participant", "buttons": buttons, "participants": [], "recording": False}, [])
-    model["reactions"] = {"available": False}
-    model["chat"] = {"available": False}
+def meet_controls(buttons: Dict[str, Dict[str, Any]], muted: bool, *, drawn: Optional[Dict[str, bool]] = None, people: bool = False,
+                  hosting: bool = False, reactions: Optional[List[str]] = None, layout: Optional[str] = None, hide_self: bool = False,
+                  switches: Optional[List[Dict[str, Any]]] = None, waiting: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """The table's control model (spec 2026-10-13, section 3; Meet controls plan Phase B, Task 2) for what Meet's page offers: Zoom's shape,
+    from the buttons the page has (camera, raise_hand, captions, each with its state) and the microphone's state, plus what Meet's call page
+    says of itself: `drawn` (READ_CALL's: the chat, reactions and more options buttons on the screen), `people` (the people button is),
+    `hosting` (the host controls button is). The room's own choices this call (`layout`, `hide_self`), the reactions the picker held the last
+    time it was open (else the configured ones), the host panel's `switches` and the people panel's `waiting` are the provider's.
+
+    Added to Zoom's shape: `chat_send` {"available"}; `layout.choices` Meet's four and `layout.value` the room's last choice or None (Meet shows
+    the current one only inside its dialog); `host.waiting_room.deny` (Meet's knock has Deny); `host.switches` (the host panel's switches as
+    read, [] until it has been open). Meet does not tell a host from a co-host on the call page (both have the host controls): the role is
+    "host" with them. Recording, locking, asking to unmute and muting one person are not driven in Meet."""
+    drawn = drawn or {}
+    model = controls_from({"me": {"muted": muted}, "role": "host" if hosting else "participant", "buttons": buttons, "participants": [],
+                           "recording": False}, [])
+    choices = list(reactions or [])
+    model["reactions"] = {"available": bool(drawn.get("reactions")) and bool(choices), "choices": choices}
+    model["chat"] = {"available": bool(drawn.get("chat"))}
+    model["chat_send"] = {"available": bool(drawn.get("chat"))}
+    model["layout"] = {"available": bool(drawn.get("more_options")), "choices": list(LAYOUTS), "value": layout}
+    model["hide_self"] = {"available": bool(drawn.get("more_options")), "on": bool(hide_self)}
+    model["pin"] = {"available": bool(people)}
+    host = model["host"]
+    host["waiting_room"] = {"available": hosting, "deny": True,
+                            "waiting": [{"id": p.get("id"), "name": p.get("name", "")} for p in waiting or [] if isinstance(p, dict)]}
+    host["record"] = {"available": False, "on": False}
+    host["lock"] = {"available": False, "on": False}
+    host["ask_unmute"] = {"available": False}
+    host["mute_one"] = {"available": False}
+    host["switches"] = [dict(switch) for switch in switches or [] if isinstance(switch, dict)]
     return model
 
 
@@ -108,9 +156,14 @@ class GoogleMeetProvider(MeetingProvider):
     DIALOG_INTERVAL_S = 2
     ANSWER_SPACING_S = 1   # the provider presses at most one notice's button in this time by itself, whatever Meet draws
     DIALOG_POLL_S = 0.2    # after a box's button is pressed, the boxes are read this often until it has gone
+    # The touch Pi's Meet screens (Meet controls plan Phase B, Task 2): the page renews the one it has open every 60 s; a screen not renewed for
+    # this long is taken as closed (the page went away) and the panel the room opened for it is closed.
+    SCREEN_TIMEOUT_S = 180
 
-    def __init__(self, display=None, room_name: str = "Conference Room"):
+    def __init__(self, display=None, room_name: str = "Conference Room", clock: Callable[[], float] = time.monotonic):
         super().__init__()
+        self._clock = clock               # when the touch Pi last said which screen it has open (a test gives its own)
+        self.reactions: List[str] = list(DEFAULT_REACTIONS)   # offered until Meet's picker has been seen
         # The TV display (spec 2026-10-07 TV, section 4.3) owns the browser and, when configured, the
         # signed-in Google profile (spec 2026-10-07 Google Meet, section 4.2); this provider borrows its page.
         self._display = display
@@ -130,11 +183,13 @@ class GoogleMeetProvider(MeetingProvider):
         self._capturing = False   # Settings' capture of Meet's page is running (it holds _dialog_turn for up to a minute)
         self._next_dialog_id = 0
         self._reset_dialogs()
+        self._reset_panels()
 
     @classmethod
     def from_config(cls, config, display=None) -> "GoogleMeetProvider":
         provider = cls(display, room_name=config.room.name or "Conference Room")
         provider.dialog_policy = DialogPolicy(config.meeting.dialogs.acknowledge, config.meeting.dialogs.ask_everything)
+        provider.reactions = list(config.meeting.controls.reactions)
         return provider
 
     @property
@@ -226,6 +281,7 @@ class GoogleMeetProvider(MeetingProvider):
 
         await self._stop_reading()   # never two readers: a join over a call still going stops that call's first
         self._read_warned = False
+        self._reset_panels()
         self._current_meeting = MeetingInfo(
             platform=self.name,
             meeting_id=meeting_id,
@@ -408,6 +464,7 @@ class GoogleMeetProvider(MeetingProvider):
         await self._stop_reading()
         self._set_state(MeetingState.LEAVING)
         logger.info("Leaving Google Meet...")
+        await self._close_room_panel_at_the_end()
 
         try:
             # Click leave button
@@ -423,6 +480,7 @@ class GoogleMeetProvider(MeetingProvider):
             logger.error(f"Error leaving meeting: {e}")
 
         self._current_meeting = None
+        self._reset_panels()
         self._set_state(MeetingState.IDLE)
         logger.info("Left Google Meet")
 
@@ -469,10 +527,13 @@ class GoogleMeetProvider(MeetingProvider):
 
     async def control(self, name: str, value: Any = None) -> Dict[str, Any]:
         """A control from the table, carried out with Meet's own keyboard shortcut (see MeetingProvider.control): the microphone, the
-        camera, the raised hand and the captions; and "dialog", a tap on a button of the box waiting on the table ({"id", "button"}).
-        Everything else Meet's page does not offer here is refused in words. The answer is the control model as it is afterwards."""
+        camera, the raised hand and the captions; "dialog", a tap on a button of the box waiting on the table ({"id", "button"}); and
+        "screen", the touch Pi's Meet screen that is open ("chat", "participants", "host", or "" for none; _on_screen_said). Everything else
+        Meet's page does not offer here is refused in words. The answer is the control model as it is afterwards."""
         if self._page is None or self._state != MeetingState.CONNECTED:
             raise MeetingControlError("Not in a meeting")
+        if name == "screen":
+            return await self._on_screen_said(value)
         if name == "mute":
             await self.toggle_mute()
         elif name in self.SHORTCUTS:
@@ -565,9 +626,8 @@ class GoogleMeetProvider(MeetingProvider):
         return info.controls
 
     def _take(self, reading: Dict[str, Any]) -> None:
-        """Take a reading of the page into the meeting. A button the page does not show, or whose label says no state, leaves the
-        microphone and camera as they last were (the model offers the control only when its button reads); the people count is the number the
-        people button shows, and 0 without one: Meet's roster is not read."""
+        """Take a reading of the page (READ_CALL) into the meeting. A button the page does not show, or whose label says no state, leaves the
+        microphone and camera as they last were (the model offers the control only when its button reads). The rest is _publish's."""
         info = self._current_meeting
         if info is None:
             return
@@ -575,10 +635,24 @@ class GoogleMeetProvider(MeetingProvider):
             info.is_muted = not reading["mute"]["on"]
         if reading["camera"] is not None:
             info.is_camera_on = reading["camera"]["on"]
-        buttons = {name: {"on": reading[name]["on"]} for name in ("camera", "raise_hand", "captions") if reading[name] is not None}
-        info.controls = meet_controls(buttons, info.is_muted)
-        people = reading["people"]
-        info.people = {"count": int(people["count"] or 0) if people is not None else 0, "list": []}
+        self._reading = reading
+        self._publish()
+
+    def _publish(self) -> None:
+        """The model the table draws from, from the last reading of the call page and what the panels last read: the people count is the
+        number the people button shows (0 without one) and the list is the people panel's while it is open (at most PEOPLE_LISTED); the chat's
+        unread count is the chat button's, 0 while the touch Pi's chat screen is open (as chat.seen does for Zoom)."""
+        info, reading = self._current_meeting, self._reading
+        if info is None or reading is None:
+            return
+        buttons = {name: {"on": reading[name]["on"]} for name in ("camera", "raise_hand", "captions") if reading.get(name) is not None}
+        people = reading.get("people")
+        info.controls = meet_controls(
+            buttons, info.is_muted, drawn=reading.get("drawn") or {}, people=people is not None, hosting=bool(reading.get("hosting")),
+            reactions=self._reaction_choices if self._reaction_choices is not None else self.reactions, layout=self._layout,
+            hide_self=self._hide_self, switches=self._switches, waiting=self._waiting)
+        info.people = {"count": int(people["count"] or 0) if people is not None else 0, "list": list(self._panel_people or [])[:PEOPLE_LISTED]}
+        info.chat["unread"] = 0 if self._screen == "chat" else int(reading.get("chat_unread") or 0)
 
     async def _read_regularly(self) -> None:
         """For as long as the call lasts, read Meet's buttons again every READ_INTERVAL_S."""
@@ -608,15 +682,17 @@ class GoogleMeetProvider(MeetingProvider):
         return (str(dialog.get("title") or ""), str(dialog.get("text") or ""))
 
     async def _read_dialogs_regularly(self) -> None:
-        """For as long as the call lasts, read Meet's boxes: at once (a notice Meet shows as the call opens), then every DIALOG_INTERVAL_S.
-        A reading that fails in a way nobody expected is said once for the call (with its trace), and the readings go on."""
+        """For as long as the call lasts, read Meet's boxes: at once (a notice Meet shows as the call opens), then every DIALOG_INTERVAL_S;
+        and in the same turn, the panels the touch Pi's screens have open (_panel_turn). A reading that fails in a way nobody expected is said
+        once for the call (with its trace), and the readings go on."""
         while self._state == MeetingState.CONNECTED:
-            try:
-                await self._read_dialogs()
-            except Exception:  # noqa: BLE001 - one bad reading must not end the readings for the rest of the call
-                if not self._dialog_loop_warned:
-                    self._dialog_loop_warned = True
-                    logger.exception("Reading Meet's boxes failed; the readings go on")
+            for turn in (self._read_dialogs, self._panel_turn):
+                try:
+                    await turn()
+                except Exception:  # noqa: BLE001 - one bad reading must not end the readings for the rest of the call
+                    if not self._dialog_loop_warned:
+                        self._dialog_loop_warned = True
+                        logger.exception("Reading Meet's boxes or panels failed; the readings go on")
             await asyncio.sleep(self.DIALOG_INTERVAL_S)
 
     async def _read_dialogs(self) -> None:
@@ -743,6 +819,225 @@ class GoogleMeetProvider(MeetingProvider):
         return {"dialog": info.dialog if info is not None else None}
 
     # ------------------------------------------------------------------
+    # The touch Pi's Meet screens and Meet's side panels (Meet controls plan Phase B, Task 2; Review Focus 1 and 2)
+    # ------------------------------------------------------------------
+    #
+    # The touch Pi says which of its Meet screens is open ("screen": chat, participants, host, or ""), and renews it every 60 s. The room
+    # opens the matching side panel on the TV, and closes the one it opened (_room_panel: Meet shows one at a time) when the screen changes,
+    # when no renewal comes for SCREEN_TIMEOUT_S, when the call ends and before the capture. A panel the room did not open is never closed.
+    #
+    # Opening: the panel's button, pressed by MEET's words (PRESS_BY_LABEL), or Meet's shortcut when the button is missing (the chat and
+    # people panels have one) and nothing that takes typing has the keyboard. Closing: the Close button inside that panel (found inside the
+    # panel by its structure, it can open nothing), else the panel's button again; never Escape. Whether a panel is open is read both ways
+    # (READ_PANELS): by its structure, and by its button's pressed or expanded state, which Meet could leave stale. Nothing is pressed to close
+    # a panel that neither says is open; one only its button says is open is pressed once, and pressed again if that press drew it (the state
+    # was stale). Every press and wait here is made with _dialog_turn and then _pressing held (_panel_locks), so no box reading or other press
+    # comes between.
+    #
+    # For Task 3's controls: `async with self._panel_locks():` then `opened = await self._open_panel(kind)` (True when the room opened it now),
+    # and in a `finally`: `if opened and self._screen_panel() != kind: await self._close_panel(kind)`, then `await self._follow_screen()`
+    # (opens again the screen's panel if the action's panel took its place). `_room_opened(kind)`: the room opened that panel and it is open
+    # as far as the room knows. `_screen_panel()`: the panel the touch Pi's open screen wants now (None without one, or once it has lapsed).
+
+    def _reset_panels(self) -> None:
+        """What one call leaves of the touch Pi's screens and Meet's panels that the next must not find."""
+        self._screen = ""                                         # the touch Pi's open Meet screen, as it last said ("" for none)
+        self._screen_at = float("-inf")                           # when it last said so (self._clock)
+        self._room_panel: Optional[str] = None                    # the panel the room opened and has not closed ("chat", "people", "host")
+        self._reading: Optional[Dict[str, Any]] = None            # the last reading of the call page (READ_CALL)
+        self._panel_people: Optional[List[Dict[str, Any]]] = None  # the people panel's list, while it is open
+        self._waiting: List[Dict[str, Any]] = []                  # the people panel's knocks, while it is open
+        self._switches: List[Dict[str, Any]] = []                 # the host panel's switches, as last read
+        self._reaction_choices: Optional[List[str]] = None        # the emoji Meet's picker held the last time it was open (Task 3)
+        self._layout: Optional[str] = None                        # the layout the room last chose this call (Task 3)
+        self._hide_self = False                                   # whether the room hid its own tile this call (Task 3)
+        self._panels_warned = False                               # a panel reading that fails is said once for a call
+
+    def _screen_panel(self) -> Optional[str]:
+        """The panel the touch Pi's open screen wants on the TV now: None with no screen open, or once it has not been renewed for
+        SCREEN_TIMEOUT_S."""
+        if not self._screen or self._clock() - self._screen_at >= self.SCREEN_TIMEOUT_S:
+            return None
+        return SCREEN_PANELS.get(self._screen)
+
+    def _room_opened(self, kind: str) -> bool:
+        """The room opened this panel and, as far as it knows, it is open still."""
+        return self._room_panel == kind
+
+    @asynccontextmanager
+    async def _panel_locks(self):
+        """The provider's two locks in their order (_dialog_turn, then _pressing), for a turn that opens or closes a panel."""
+        async with self._dialog_turn:
+            async with self._pressing:
+                yield
+
+    async def _on_screen_said(self, value: Any) -> Dict[str, Any]:
+        """The touch Pi says which Meet screen it has open (or renews it): the room's panel follows it, the panel is read, and the answer is the
+        control model. While the capture runs it is kept (the panel follows it after the capture) and refused at once in words."""
+        screen = "" if value is None else value
+        if not isinstance(screen, str) or (screen and screen not in SCREEN_PANELS):
+            raise MeetingControlError(SCREEN_WORDS)
+        self._screen, self._screen_at = screen, self._clock()
+        if self._capturing:
+            raise MeetingControlError(CAPTURING_WORDS)
+        async with self._panel_locks():
+            if self._state != MeetingState.CONNECTED:
+                raise MeetingControlError("Not in a meeting")
+            await self._follow_screen()
+            await self._read_panels()
+        return await self._read_controls()
+
+    async def _follow_screen(self) -> None:
+        """Put Meet's panels as the touch Pi's screen wants them: the room's panel closed if the screen wants another or none, and the screen's
+        panel opened unless it is open already. The caller holds _panel_locks."""
+        wanted = self._screen_panel()
+        if self._room_panel is not None and self._room_panel != wanted:
+            await self._close_panel(self._room_panel)
+        if wanted is not None:
+            await self._open_panel(wanted)
+
+    async def _panel_state(self) -> Dict[str, List[str]]:
+        """Which panels are open, both ways (READ_PANELS): {"open": by structure, "pressed": by their buttons}."""
+        state = await self._answered(self._page.evaluate(READ_PANELS, MEET))
+        return {"open": list(state.get("open") or []), "pressed": list(state.get("pressed") or [])}
+
+    async def _press_label(self, labels: List[str], container: Any = None) -> Optional[str]:
+        """Press what PRESS_BY_LABEL finds for the words, where the container says: the label pressed, or None (nothing was pressed)."""
+        return await self._answered(self._page.evaluate(PRESS_BY_LABEL, {"meet": MEET, "labels": list(labels), "container": container}))
+
+    async def _wait_panel(self, kind: str, open_: bool) -> bool:
+        """Wait (PRESS_WAIT_S at most) for the panel's structure to show it open or closed; whether it did."""
+        deadline = time.monotonic() + self.PRESS_WAIT_S
+        while True:
+            if (kind in (await self._panel_state())["open"]) == open_:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(self.PRESS_POLL_S)
+
+    async def _open_panel(self, kind: str) -> bool:
+        """Open Meet's side panel `kind` ("chat", "people", "host") on the TV, and wait for it to show (PRESS_WAIT_S at most). True when the
+        room opened it now (it is the room's to close), False when it was open already (by its structure, or its button says so: then it is
+        not the room's, and nothing is pressed). Another panel the room had open is closed first. A panel whose button is not on the screen
+        and that has no shortcut that may be pressed now, or that does not show, is a refusal in words. The caller holds _panel_locks."""
+        words = PANEL_WORDS[kind]
+        if self._room_panel is not None and self._room_panel != kind:
+            await self._close_panel(self._room_panel)     # only forgotten when it has gone already (Meet shows one side panel at a time)
+        state = await self._panel_state()
+        if kind in state["open"] or kind in state["pressed"]:
+            return False
+        pressed = await self._press_label(PANEL_OPENERS[kind])
+        if pressed is None:
+            shortcut = PANEL_SHORTCUTS.get(kind)
+            if shortcut is None or (await self._look()).get("taken"):
+                raise MeetingControlError(f"Meet's {words} button isn't on the screen")
+            await self._page.keyboard.press(shortcut)
+        self._room_panel = kind        # from the press on, it is the room's to close, whatever the wait below finds
+        logger.info(f"Opened Meet's {words} panel for the touch Pi")
+        if not await self._wait_panel(kind, True) and kind not in (await self._panel_state())["pressed"]:
+            raise MeetingControlError(f"Meet did not open its {words} panel; try again")
+        return True
+
+    async def _close_panel(self, kind: str) -> bool:
+        """Close Meet's side panel `kind` if the room opened it (a panel the room did not open is never closed: False), and wait for it to go
+        (PRESS_WAIT_S at most). It is closed by the Close button inside it, else by its button again; one that neither its structure nor its
+        button says is open is only forgotten. A panel that stays is a refusal in words, and stays the room's to close. The caller holds
+        _panel_locks."""
+        if self._room_panel != kind:
+            return False
+        words = PANEL_WORDS[kind]
+        state = await self._panel_state()
+        if kind not in state["open"]:
+            if kind in state["pressed"]:
+                # Only its button says it is open: it may be a panel whose structure is not known, or the button's state may be stale. One
+                # press; if that drew the panel, the state was stale, and the panel just drawn is closed as any other.
+                await self._press_label(PANEL_OPENERS[kind])
+                if await self._wait_panel(kind, True):
+                    await self._close_drawn_panel(kind)
+            self._room_panel = None
+            logger.info(f"Closed Meet's {words} panel")
+            return True
+        await self._close_drawn_panel(kind)
+        self._room_panel = None
+        logger.info(f"Closed Meet's {words} panel")
+        return True
+
+    async def _close_drawn_panel(self, kind: str) -> None:
+        """Close the panel `kind` that is drawn: its Close button, else its button; then wait for it to go."""
+        words = PANEL_WORDS[kind]
+        if await self._press_label(CLOSE_WORDS, {"panel": kind}) is None and await self._press_label(PANEL_OPENERS[kind]) is None:
+            raise MeetingControlError(f"Meet's {words} panel has no Close button and its button isn't on the screen")
+        if not await self._wait_panel(kind, False):
+            raise MeetingControlError(f"Meet did not close its {words} panel; try again")
+
+    async def _put_room_panel_away(self, why: str) -> None:
+        """Close the panel the room opened, if any (before the capture; the caller holds _dialog_turn). A failure is logged, not raised."""
+        if self._room_panel is None or self._page is None:
+            return
+        try:
+            async with self._pressing:
+                await self._close_panel(self._room_panel)
+        except Exception as e:  # noqa: BLE001 - the page gone or a panel that stays: logged; the call goes on
+            logger.warning(f"Could not close Meet's {PANEL_WORDS.get(self._room_panel, 'side')} panel {why} ({_first_line(e)})")
+
+    async def _close_room_panel_at_the_end(self) -> None:
+        """The call ends: the panel the room opened is closed before Leave is pressed. While the capture runs the room has none open (it was
+        closed before the capture, and is not opened again once the call is no longer connected). The box loop has been stopped by now:
+        when _dialog_turn is still held, the holder is an action that ends the call (host.end, which then leaves) and the panel is left to
+        go with the page (the TV goes back to the screensaver), rather than wait on a lock its own task holds."""
+        if self._room_panel is None or self._page is None or self._capturing or self._dialog_turn.locked():
+            return
+        async with self._dialog_turn:
+            await self._put_room_panel_away("as the call ends")
+
+    async def _panel_turn(self) -> None:
+        """The panels' turn in the 2 s box loop, under _dialog_turn: a screen not renewed for SCREEN_TIMEOUT_S is taken as closed, the room's
+        panel that no screen wants is closed, and the panels the screens have open are read."""
+        async with self._dialog_turn:
+            if self._page is None or self._current_meeting is None or self._state != MeetingState.CONNECTED:
+                return
+            if self._screen and self._screen_panel() is None:
+                logger.info(f"The touch Pi's Meet {self._screen} screen was not renewed for {self.SCREEN_TIMEOUT_S} s: taken as closed")
+                self._screen = ""
+            if self._room_panel is not None and self._room_panel != self._screen_panel():
+                await self._put_room_panel_away("that no screen wants")
+            await self._read_panels()
+
+    async def _read_panels(self) -> None:
+        """Read the side panels that are open while a screen is open or the room has a panel open (the caller holds _dialog_turn): the people
+        panel's list and knocks, the chat's last CHAT_KEPT messages, the host panel's switches; then the model. A panel the room opened that
+        neither way says is open any more (closed at the TV) is forgotten. A reading that fails is said once for the call; it never raises."""
+        info = self._current_meeting
+        if info is None or self._page is None:
+            return
+        if not self._screen and self._room_panel is None:
+            self._panel_people, self._waiting = None, []
+            self._publish()
+            return
+        try:
+            state = await self._panel_state()
+            if "people" in state["open"]:
+                people = await self._answered(self._page.evaluate(READ_PEOPLE, MEET))
+                self._panel_people = [p for p in people.get("people") or [] if isinstance(p, dict)][:PEOPLE_LISTED]
+                self._waiting = [p for p in people.get("waiting") or [] if isinstance(p, dict)]
+            else:
+                self._panel_people, self._waiting = None, []
+            if "chat" in state["open"]:
+                messages = await self._answered(self._page.evaluate(READ_CHAT, MEET))
+                info.chat["messages"] = [dict(m) for m in messages or [] if isinstance(m, dict)][-CHAT_KEPT:]
+            if "host" in state["open"]:
+                self._switches = [dict(s) for s in await self._answered(self._page.evaluate(READ_HOST_SWITCHES, MEET)) or [] if isinstance(s, dict)]
+            if self._room_panel is not None and self._room_panel not in state["open"] and self._room_panel not in state["pressed"]:
+                logger.info(f"Meet's {PANEL_WORDS[self._room_panel]} panel was closed on the TV")
+                self._room_panel = None
+        except Exception as e:  # noqa: BLE001 - the page gone or navigating: the next reading will tell
+            if not self._panels_warned:
+                self._panels_warned = True
+                logger.warning(f"Could not read Meet's panels ({_first_line(e)}); trying again")
+            return
+        self._publish()
+
+    # ------------------------------------------------------------------
     # The capture (spec 2026-10-30 Meet controls, section 3)
     # ------------------------------------------------------------------
 
@@ -762,7 +1057,18 @@ class GoogleMeetProvider(MeetingProvider):
         self._capturing = True   # a tap on the table's box is refused in words meanwhile, not held for the minute
         try:
             async with self._dialog_turn:
-                result = await capture.run()
+                # The panel the room opened for a touch Pi screen is put away first (the capture opens Meet's panels itself and must find
+                # none of the room's), and opened again after, if the screen is still open.
+                await self._put_room_panel_away("before the capture")
+                try:
+                    result = await capture.run()
+                finally:
+                    if self._state == MeetingState.CONNECTED:
+                        try:
+                            async with self._pressing:
+                                await self._follow_screen()
+                        except Exception as e:  # noqa: BLE001 - the capture's own outcome is what the caller is told
+                            logger.warning(f"Could not open Meet's panel again after the capture ({_first_line(e)})")
         finally:
             self._capturing = False
         path = await asyncio.to_thread(save_capture, result, capture.images, Path(directory))

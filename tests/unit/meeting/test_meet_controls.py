@@ -201,12 +201,14 @@ async def test_the_model_is_what_meet_offers_a_participant_and_no_more(meet_page
     assert controls["mute"] == {"available": True, "on": True}              # the microphone is live: its label says "Turn off"
     assert info.is_muted is False and info.is_camera_on is False            # the buttons' own words, not what the join asked for
     assert controls["leave"] == {"available": True}
-    assert controls["chat"] == {"available": False} and info.chat == {"unread": 0, "messages": []}   # the agent does not read Meet's chat
-    assert controls["reactions"] == {"available": False}
-    assert [name for name in ("layout", "hide_self", "pin") if controls[name]["available"]] == []
+    assert controls["chat"] == {"available": False} and controls["chat_send"] == {"available": False}   # no chat button on this page
+    assert info.chat == {"unread": 0, "messages": []}
+    assert controls["reactions"]["available"] is False                      # no reactions button
+    assert [name for name in ("layout", "hide_self") if controls[name]["available"]] == []   # no more options button
+    assert controls["pin"] == {"available": True}                           # pinned from the people panel, whose button is drawn
     host = controls["host"]
-    assert host["role"] == "participant"
-    assert [name for name, item in host.items() if name != "role" and item["available"]] == []
+    assert host["role"] == "participant" and host["switches"] == []
+    assert [name for name, item in host.items() if name not in ("role", "switches") and item["available"]] == []
     assert info.people == {"count": 3, "list": []} and info.recording is False and info.locked is False
 
 
@@ -675,7 +677,8 @@ async def test_meet_diagnostics_list_the_labels_the_page_draws_what_the_reader_m
         ("button", "", "Turn off microphone (ctrl + d)"), ("button", "", "Turn on camera (ctrl + e)"), ("button", "", "Raise hand (ctrl + alt + h)"),
         ("button", "", "Turn on captions (c)"), ("button", "", "Show everyone (3)"), ("button", "", "Leave call"), ("input", "", "Send a message")]
     assert data["reading"] == {"mute": {"on": True}, "camera": {"on": False}, "raise_hand": {"on": False}, "captions": {"on": False},
-                               "people": {"count": 3}, "taken": False, "chat_unread": 0, "hosting": False, "panels": []}
+                               "people": {"count": 3}, "taken": False, "chat_unread": 0, "hosting": False, "panels": [],
+                               "drawn": {"chat": False, "reactions": False, "more_options": False}}
     assert data["focus"] == "body"
     page = provider._page
     await page.focus("#chat")

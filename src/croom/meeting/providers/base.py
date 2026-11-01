@@ -114,7 +114,7 @@ def controls_from(reading: Dict[str, Any], reactions: List[str]) -> Dict[str, An
         "captions": button("captions"),
         "layout": button("layout", choices=["speaker", "gallery"]),
         "hide_self": button("hide_self"),
-        "pin": {"available": False},   # the client's per-participant menu is not driven in this version
+        "pin": {"available": True},   # Zoom: the SDK's operatePin (the bridge); Meet sets its own
         "leave": {"available": True},
         "host": {
             "role": role,

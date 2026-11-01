@@ -370,7 +370,7 @@ async def test_read_meeting_reports_me_the_room_and_the_clients_buttons():
         assert m["me"] == {"userId": 16777216, "muted": False, "videoOn": True, "isHost": True, "isCoHost": False, "raisedHand": False}
         assert m["role"] == "host" and m["count"] == 3 and m["recording"] is False
         assert [p["name"] for p in m["participants"]] == ["Room 1", "Ann Lee", "Raj Patel"]
-        assert m["participants"][2] == {"id": 16777218, "name": "Raj Patel", "muted": True, "video": False, "hand": True, "host": False, "waiting": False, "me": False}
+        assert m["participants"][2] == {"id": 16777218, "name": "Raj Patel", "muted": True, "video": False, "hand": True, "host": False, "waiting": False, "me": False, "pinned": False}
         assert m["participants"][0]["me"] is True
         assert m["buttons"] == {"camera": {"on": True}, "raise_hand": {"on": False}, "reactions": {}, "captions": {"on": False},
                                 "layout": {"value": "speaker"}, "hide_self": {"on": False}}
@@ -535,7 +535,7 @@ async def test_an_older_builds_field_names_are_still_read():
         }""")
         m = await run.page.evaluate("window.crystalMeet.readMeeting()")
         assert m["me"] == {"userId": 16777216, "muted": True, "videoOn": False, "isHost": True, "isCoHost": False, "raisedHand": True}
-        assert m["participants"] == [{"id": 5, "name": "Old", "muted": False, "video": True, "hand": True, "host": False, "waiting": True, "me": False}]
+        assert m["participants"] == [{"id": 5, "name": "Old", "muted": False, "video": True, "hand": True, "host": False, "waiting": True, "me": False, "pinned": False}]
 
 
 async def test_an_attendee_whose_camera_zoom_does_not_speak_of_is_unknown_and_not_off():
@@ -2064,6 +2064,22 @@ async def test_a_host_call_without_a_participant_and_a_rename_without_a_name_are
         assert said == "Say which participant"                                                              # a rejected promise, as every control gives, not a throw
         await control(run, "host.remove", "16777218")                                                       # an id that came as text is the number
         assert asked(await run.page.evaluate("window.__zoomCalls")) == [["expel", {"userId": 16777218}]]
+
+
+async def test_a_pin_without_a_participant_is_refused_before_anything_is_asked_of_zoom():
+    """Pin and Unpin act on the person the id names, as Zoom's operatePin takes it: a whole number. A missing or non-numeric id
+    is refused in words and operatePin is not called. A participant, not only a host, may pin."""
+    async with PageRun() as run:
+        await run.wait_for("connected")
+        for name in ["pin", "unpin"]:
+            for value in [None, "", "  ", "everyone", "Raj Patel", 0, -1, 1.5, "0x10", "1e3", 2 ** 53]:
+                with pytest.raises(Exception, match="Say which participant"):
+                    await control(run, name, value)
+        assert await run.calls("operatePin") == []
+        await control(run, "pin", "16777218")                                        # an id that came as text is the number
+        assert [c[1] for c in await run.calls("operatePin")] == [{"operate": "add", "userId": 16777218}]
+        m = await run.page.evaluate("window.crystalMeet.readMeeting()")
+        assert {p["id"]: p["pinned"] for p in m["participants"] if p["id"] != 16777216} == {16777217: False, 16777218: True}
 
 
 async def test_the_names_every_object_has_are_not_controls():

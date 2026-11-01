@@ -992,7 +992,7 @@ def test_controls_from_a_participant_reading_hides_host_items_and_absent_buttons
     assert c["raise_hand"] == {"available": False} and c["captions"] == {"available": True, "on": True}
     assert c["reactions"] == {"available": False, "choices": ["Thumbs Up"]}
     assert c["layout"] == {"available": False, "choices": ["speaker", "gallery"]} and c["hide_self"] == {"available": False}
-    assert c["pin"] == {"available": False} and c["leave"] == {"available": True}
+    assert c["pin"] == {"available": True} and c["leave"] == {"available": True}
     assert c["host"]["role"] == "participant" and c["host"]["record"] == {"available": False, "on": False} and c["host"]["end"]["available"] is False
     assert not [name for name, item in c["host"].items() if name != "role" and item["available"]]
 
@@ -1027,7 +1027,8 @@ def test_controls_from_an_empty_reading_offers_only_what_needs_no_button():
     what Zoom last said, puts that in the reading before it asks (test_the_mute_control_agrees_with_the_status_when_zoom_has_not_said)."""
     c = controls_from({}, DEFAULT_REACTIONS)
     assert c["mute"] == {"available": True, "on": True} and c["leave"] == {"available": True}
-    assert [name for name in ("camera", "raise_hand", "reactions", "captions", "layout", "hide_self", "pin") if c[name]["available"]] == []
+    assert [name for name in ("camera", "raise_hand", "reactions", "captions", "layout", "hide_self") if c[name]["available"]] == []
+    assert c["pin"] == {"available": True}      # Zoom's operatePin needs no button of the client's
     assert c["host"]["role"] == "participant" and c["host"]["waiting_room"] == {"available": False, "waiting": []}
 
 

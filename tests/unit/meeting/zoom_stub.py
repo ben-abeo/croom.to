@@ -149,9 +149,9 @@ window.ZoomMtg = {
   _muted: false, _videoOn: true, _hand: false, _captions: false, _layout: "speaker", _selfHidden: false,
   _attendeeView: "speaker", _name: "Room 1", _locked: false, _skew: 0, _lastCall: {},
   _takes: { mute: ["userId", "mute"], muteAll: ["muteAll"], record: ["record"], lockMeeting: ["lockMeeting"], putOnHold: ["userId", "hold"],
-            expel: ["userId"], endMeeting: [], rename: ["userId", "oldName", "newName"] },
+            expel: ["userId"], endMeeting: [], rename: ["userId", "oldName", "newName"], operatePin: ["operate", "userId"] },
   _windowMs: { mute: 1000, muteAll: 5000, rename: 5000, expel: 5000, record: 5000, lockMeeting: 5000, putOnHold: 100 },
-  _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
+  _pins: [], _attendees: [], _dispatching: false, _joinedAt: 0, _videoBusy: false, _videoButton: null,
   _open: { picker: false, view: false }, _shown: { picker: null, view: null }, _where: { picker: null, view: null },
   _pop: {}, _viewItems: null, _bystander: null, _bystanderWhere: null, _dialogs: 0, _banners: 0, _messages: 0, _owned: {},
   _status(code) { const data = {}; data[this._behaviour.statusField] = code; this._fire("onMeetingStatus", data); },
@@ -621,6 +621,20 @@ window.ZoomMtg = {
   lockMeeting(opts) { return this._hostCall("lockMeeting", opts, () => { this._locked = !!opts.lockMeeting; }); },
   putOnHold(opts) { return this._hostCall("putOnHold", opts, () => { const a = this._attendees.find((x) => x.userId === opts.userId); if (a) a.waiting = !!opts.hold; }); },
   expel(opts) { return this._hostCall("expel", opts, () => { this._attendees = this._attendees.filter((a) => a.userId !== opts.userId); }); },
+  // operatePin is any participant's (a pin is the pinner's own view): add, replace and remove, refused in the SDK's words (a plain
+  // string) for a user it does not list or one already pinned. getPinList hands back the userIds, as its typings say.
+  operatePin(opts) {
+    const drop = this._gate("operatePin", opts);
+    if (drop) return drop.answer;
+    const said = (text) => this._answer("operatePin", () => opts.error && opts.error(text));
+    if (!this._attendees.some((a) => a.userId === opts.userId)) return said("not find user");
+    if (opts.operate === "add" && this._pins.includes(opts.userId)) return said("user has been pinned");
+    if (opts.operate === "remove") this._pins = this._pins.filter((id) => id !== opts.userId);
+    else this._pins = opts.operate === "add" ? this._pins.concat(opts.userId) : [opts.userId];
+    this._fire("onUserUpdate", { userId: opts.userId });
+    this._answer("operatePin", () => opts.success && opts.success());
+  },
+  getPinList() { return this._pins.slice(); },
   endMeeting(opts) { return this._hostCall("endMeeting", opts, () => setTimeout(() => this._status(3), 10)); },
   // rename runs the SDK's host check first and goes on: a participant is told so by error and then, with their own id, is renamed
   // and told by success. Any participant may rename themselves: the room's name follows, and Zoom says so as it does of every

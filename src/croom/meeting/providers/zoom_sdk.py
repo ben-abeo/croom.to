@@ -57,6 +57,8 @@ HOST_CALLS = {
     "host.admit": ("putOnHold", "Admit"),
     "host.remove": ("expel", "Remove"),
     "host.end": ("endMeeting", "End meeting for everyone"),
+    "pin": ("operatePin", "Pin"),
+    "unpin": ("operatePin", "Unpin"),
 }
 # What the page says of a dialog it was asked to press that is no longer there (meeting.js, answerNow()).
 DIALOG_GONE = "no longer on the screen"

@@ -260,8 +260,10 @@
       isCoHost: !!pick(user, ["isCoHost", "isCohost", "bCoHost"]),
       raisedHand: handUp(user),
     };
+    const pins = pinnedIds();
     const participants = list.map((a) => ({
       id: pick(a, ["userId"]), name: String(pick(a, ["userName", "displayName", "name"]) || ""),
+      pinned: pins ? pins.includes(pick(a, ["userId"])) : bridge._pinned.has(pick(a, ["userId"])),
       muted: !!pick(a, ["muted", "bMuted"]), video: knownOrNull(pick(a, ["video", "bVideoOn", "videoOn"])),
       hand: !!pick(a, ["raiseHand", "bRaiseHand", "bHandRaised"]), host: !!pick(a, ["isHost", "bHost"]),
       waiting: !!pick(a, ["isHold", "waiting", "bHold", "isInWaitingRoom"]), me: pick(a, ["userId"]) === me.userId,
@@ -272,6 +274,18 @@
       recording: !!bridge._recording, locked: !!bridge._locked, keys: user ? Object.keys(user) : [],
     };
   };
+  // Who is pinned. Zoom's getPinList says (the userIds); what it cannot say (a build without it, or an answer that is no list) is the
+  // bridge's own record of what it pinned and unpinned this call, a Set of userIds. Read at once: the SDK answers from its store.
+  bridge._pinned = new Set();
+  function pinnedIds() {
+    if (typeof ZoomMtg.getPinList !== "function") return null;
+    try {
+      let heard = null;
+      const listed = (x) => (Array.isArray(x) ? x : (x && Array.isArray(x.pinVideoList) ? x.pinVideoList : (x && Array.isArray(x.result) ? x.result : null)));
+      const returned = ZoomMtg.getPinList({ success: (x) => { heard = listed(x); }, error: () => {} });
+      return listed(returned) || heard;
+    } catch (e) { return null; }
+  }
   bridge._recording = false;
   bridge._locked = false;      // Zoom's calls do not say whether the meeting is locked: it is kept as the lock call last went
   bridge._layout = null;
@@ -571,6 +585,7 @@
     // Zoom's words; a refusal with none (endMeeting's, for a co-host, is {errorCode: 3003, errorMessage: null}) is named by the call.
     const refusal = (e) => {
       if (timedOut(e)) return "Zoom did not confirm " + method + " in time";
+      if (typeof e === "string" && e.trim()) return e.trim();      // operatePin, getPinList: a plain sentence ("user has been pinned")
       if (e && (e.errorMessage || e.reason || e.message)) return words(e);
       return "Zoom refused " + method + (e && known(e.errorCode) ? " (code " + e.errorCode + ")" : "");
     };
@@ -615,6 +630,26 @@
     await sdk("record", { record: want });
     if (!await settle(() => bridge._recording === want, RECORD_MS)) throw new Error("Zoom did not " + (want ? "start" : "stop") + " recording");
   }
+  // Pin and Unpin: the SDK has the call, so the client's own participant menu is not pressed. Source: the Meeting SDK for Web typings,
+  // @zoom/meetingsdk 6.5.0 index.d.ts (https://unpkg.com/@zoom/meetingsdk@6.5.0/index.d.ts), ZoomMtg.operatePin({operate: "add" |
+  // "replace" | "remove", userId}) and ZoomMtg.getPinList(), with the SDK's own code (dist/zoom-meeting-6.5.0.min.js) for its refusals:
+  // "user has been pinned", "not find user", "Can not add pin because of role restriction or spotlight" (plain strings, passed on as
+  // Zoom's words). Any participant may pin (it is their own view: only a webinar attendee has no permission), so there is no host check.
+  // Pinning when someone else is pinned replaces that pin (the client's own menu does the same); pinning the pinned, or unpinning one
+  // who is not, has nothing to ask of Zoom.
+  async function pin(id) {
+    const now = pinnedIds();
+    if (now && now.includes(id)) { bridge._pinned = new Set(now); return; }
+    const others = now ? now.length > 0 : bridge._pinned.size > 0;
+    await sdk("operatePin", { operate: others ? "replace" : "add", userId: id });
+    bridge._pinned = others ? new Set([id]) : new Set(bridge._pinned).add(id);
+  }
+  async function unpin(id) {
+    const now = pinnedIds();
+    if (now ? !now.includes(id) : !bridge._pinned.has(id)) return;
+    await sdk("operatePin", { operate: "remove", userId: id });
+    bridge._pinned.delete(id);
+  }
   // By the control's name, in a table with no prototype: no name an object has (constructor, toString) is a control. Recording
   // is asked for as the opposite of what Zoom last said of it (its event), locking as the opposite of how it last went.
   const HOST = Object.assign(Object.create(null), {
@@ -627,6 +662,8 @@
     "host.remove": ofPerson((id) => sdk("expel", { userId: id })),
     "host.mute_one": ofPerson((id) => sdk("mute", { userId: id, mute: true })),
     "host.end": () => sdk("endMeeting", {}),
+    "pin": ofPerson(pin),
+    "unpin": ofPerson(unpin),
     "rename": rename,
   });
   bridge.control = async function (name, value) {

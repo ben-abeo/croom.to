@@ -2617,6 +2617,7 @@ class ControlService(Service):
         except ValueError as e:
             return self._error_response(str(e), 400)
         title = ""
+        organizer = ""
         url = str(data.get("url") or "").strip()
         event_id = str(data.get("event_id") or "").strip()
         if event_id:
@@ -2627,6 +2628,7 @@ class ControlService(Service):
                 return self._error_response("That meeting has no video link", 400)
             url = event.meeting_url
             title = event.title
+            organizer = event.organizer
             passcode = passcode or event.meeting_passcode   # a passcode sent with the join wins over the booking's own
         if not url:
             return self._error_response("Meeting link required", 400)
@@ -2644,12 +2646,14 @@ class ControlService(Service):
             return self._error_response(UPDATING, 409)
         self._last_error = None
         self._title = title
-        self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode))
+        self._task = self._join_task = asyncio.create_task(self._run_join(url, passcode, organizer))
         return web.json_response({"state": "joining", "url": url}, status=202)
 
-    async def _run_join(self, url: str, passcode: Optional[str] = None) -> None:
+    async def _run_join(self, url: str, passcode: Optional[str] = None, organizer: str = "") -> None:
         try:
-            await self._meeting.join_meeting(url, display_name=self._room_name, passcode=passcode)
+            # The organizer goes only when the booking has one (Google Meet's participants list is read as them)
+            extra = {"organizer": organizer} if organizer else {}
+            await self._meeting.join_meeting(url, display_name=self._room_name, passcode=passcode, **extra)
         except asyncio.CancelledError:
             raise
         except Exception as e:

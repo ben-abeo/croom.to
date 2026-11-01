@@ -246,7 +246,8 @@ class MeetingService(Service):
         display_name: Optional[str] = None,
         camera_on: Optional[bool] = None,
         mic_on: Optional[bool] = None,
-        passcode: Optional[str] = None
+        passcode: Optional[str] = None,
+        organizer: str = ""
     ) -> MeetingInfo:
         """
         Join a meeting.
@@ -261,6 +262,7 @@ class MeetingService(Service):
             camera_on: Start with camera (default: config setting)
             mic_on: Start with mic (default: config setting)
             passcode: The meeting's passcode (Zoom uses it, over the link's own pwd)
+            organizer: The calendar's organizer of the meeting, when it is a booked one (Google Meet asks its API about the call as them)
 
         Returns:
             MeetingInfo with connection details
@@ -318,6 +320,9 @@ class MeetingService(Service):
             )
         finally:
             self._starting -= 1
+
+        if organizer and not meeting_info.organizer:
+            meeting_info.organizer = organizer
 
         return meeting_info
 

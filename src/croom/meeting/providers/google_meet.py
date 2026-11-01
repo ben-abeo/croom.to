@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any, Callable, List, Tuple
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
 from croom.core.logs import DIALOGS_LOGGER
+from croom.meeting.meet_api import MeetParticipants
 from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
 from croom.meeting.meet_page import (
     CHAT_BOX_STATE,
@@ -189,6 +190,8 @@ class GoogleMeetProvider(MeetingProvider):
     MEET_ACTIONS = {"chat.send": "_send_chat", "reactions": "_react", "layout": "_set_layout", "hide_self": "_set_hide_self",
                     "pin": "_on_person", "unpin": "_on_person", "host.admit": "_on_person", "host.deny": "_on_person",
                     "host.remove": "_on_person", "host.mute_all": "_mute_all", "host.end": "_end_for_everyone", "host.switch": "_host_switch"}
+    # Who is in the call, from Google's Meet API when the organization has granted it (Phase B, Task 6): asked this often while connected.
+    API_PEOPLE_INTERVAL_S = 15
     ACTION_WAIT_S = 3
     MENU_SETTLE_S = 0.5
 
@@ -205,6 +208,9 @@ class GoogleMeetProvider(MeetingProvider):
         self._page: Optional["Page"] = None
         # What the provider starts on its own, kept so that the end of the call stops it: the regular reading of Meet's buttons.
         self._reader: Optional[asyncio.Task] = None
+        self._people_reader: Optional[asyncio.Task] = None   # the Meet API's participants, read every API_PEOPLE_INTERVAL_S
+        self._meet_api_domain = ""        # meeting.meet_api_domain; blank is off
+        self._meet_api_key = ""           # the calendar's service-account key file
         self._read_warned = False         # a read that fails is said once for a call
         self._pressing = asyncio.Lock()   # one press at a time: two shortcuts sent at once could meet in the middle (Ctrl still down for the C)
         # Meet's boxes: the policy, the regular reading of them, and one reading or answer at a time (a stale reading taken while a tap
@@ -222,6 +228,8 @@ class GoogleMeetProvider(MeetingProvider):
         provider = cls(display, room_name=config.room.name or "Conference Room")
         provider.dialog_policy = DialogPolicy(config.meeting.dialogs.acknowledge, config.meeting.dialogs.ask_everything)
         provider.reactions = list(config.meeting.controls.reactions)
+        provider._meet_api_domain = config.meeting.meet_api_domain
+        provider._meet_api_key = config.calendar.google_credentials_path
         return provider
 
     @property
@@ -346,6 +354,8 @@ class GoogleMeetProvider(MeetingProvider):
             self._set_state(MeetingState.CONNECTED)
             self._reader = asyncio.create_task(self._read_regularly())
             self._dialog_reader = asyncio.create_task(self._read_dialogs_regularly())   # its first reading is at once
+            if self._meet_api_domain and self._meet_api_key:
+                self._people_reader = asyncio.create_task(self._read_people_regularly(MeetParticipants(self._meet_api_domain, self._meet_api_key)))
             logger.info(f"Connected to Google Meet: {meeting_id}")
 
             return self._current_meeting
@@ -686,7 +696,12 @@ class GoogleMeetProvider(MeetingProvider):
             buttons, info.is_muted, drawn=reading.get("drawn") or {}, people=people is not None, hosting=bool(reading.get("hosting")),
             reactions=self._reaction_choices if self._reaction_choices is not None else self.reactions, layout=self._layout,
             hide_self=self._hide_self, switches=self._switches, waiting=self._waiting)
-        info.people = {"count": int(people["count"] or 0) if people is not None else 0, "list": list(self._panel_people or [])[:PEOPLE_LISTED]}
+        if self._panel_people is None and self._api_people is not None:
+            # The people panel is closed and the Meet API answered: its list is the touch Pi's Participants before the panel opens. The panel's
+            # list, with Meet's own ids, wins while it is open (Pin and Remove find the person by it).
+            info.people = {"count": len(self._api_people), "list": list(self._api_people)[:PEOPLE_LISTED]}
+        else:
+            info.people = {"count": int(people["count"] or 0) if people is not None else 0, "list": list(self._panel_people or [])[:PEOPLE_LISTED]}
         info.chat["unread"] = 0 if self._screen == "chat" else int(reading.get("chat_unread") or 0)
 
     async def _read_regularly(self) -> None:
@@ -696,6 +711,23 @@ class GoogleMeetProvider(MeetingProvider):
             if self._state != MeetingState.CONNECTED:
                 return
             await self._read_controls()
+
+    async def _read_people_regularly(self, api: MeetParticipants) -> None:
+        """For as long as the call lasts, ask Google's Meet API who is in it every API_PEOPLE_INTERVAL_S (croom.meeting.meet_api: off unless the
+        organizer is in the configured domain; a refusal is logged once and not asked again for 5 minutes). What it says is kept as the people
+        list, with ids "name:<name>" (a person is found again by name at the moment of a press); when it says nothing the panel's list serves."""
+        try:
+            while self._state == MeetingState.CONNECTED:
+                info = self._current_meeting
+                names = await api.names(info.organizer, info.meeting_id) if info is not None else None
+                if self._state != MeetingState.CONNECTED:
+                    return
+                self._api_people = None if names is None else [
+                    {"id": f"name:{name}", "name": name, "me": False, "pinned": False, "muted": False} for name in names]
+                self._publish()
+                await asyncio.sleep(self.API_PEOPLE_INTERVAL_S)
+        finally:
+            await api.close()
 
     # ------------------------------------------------------------------
     # Meet's boxes (spec 2026-10-30 Meet controls, section 3): its notices, "Someone wants to join", "Leave call?"
@@ -891,6 +923,7 @@ class GoogleMeetProvider(MeetingProvider):
         self._layout: Optional[str] = None                        # the layout the room last chose this call (Task 3)
         self._hide_self = False                                   # whether the room hid its own tile this call (Task 3)
         self._panels_warned = False                               # a panel reading that fails is said once for a call
+        self._api_people: Optional[List[Dict[str, Any]]] = None   # who the Meet API says is in the call (ids "name:<name>"), None while it does not say
 
     def _screen_panel(self) -> Optional[str]:
         """The panel the touch Pi's open screen wants on the TV now: None with no screen open, or once it has not been renewed for
@@ -1563,8 +1596,8 @@ class GoogleMeetProvider(MeetingProvider):
     async def _stop_reading(self) -> None:
         """Stop the regular readings (the buttons and the boxes) and wait for them to be over: what the provider starts on its own never
         outlives the call. What it kept of the call's boxes goes with them."""
-        readers = [self._reader, self._dialog_reader]
-        self._reader = self._dialog_reader = None
+        readers = [self._reader, self._dialog_reader, self._people_reader]
+        self._reader = self._dialog_reader = self._people_reader = None
         readers = [reader for reader in readers if reader is not None and reader is not asyncio.current_task()]
         for reader in readers:
             reader.cancel()

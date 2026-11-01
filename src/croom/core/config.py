@@ -158,6 +158,7 @@ class MeetingConfig:
     zoom_credentials_path: str = ""  # /etc/croom/zoom-credentials.json on a room device
     google_profile_dir: str = ""  # /var/lib/croom/meet-profile on a room device; empty means a guest browser
     kiosk: bool = True  # the TV browser fills the screen with no window chrome
+    meet_api_domain: str = ""  # e.g. crystalpm.com: Meet's participants list from Google's API for meetings organized in this domain; blank is off
     dialogs: DialogsConfig = field(default_factory=DialogsConfig)
     controls: ControlsConfig = field(default_factory=ControlsConfig)
 
@@ -361,6 +362,7 @@ class Config:
                 "zoom_credentials_path": self.meeting.zoom_credentials_path,
                 "google_profile_dir": self.meeting.google_profile_dir,
                 "kiosk": self.meeting.kiosk,
+                "meet_api_domain": self.meeting.meet_api_domain,
                 "dialogs": {"acknowledge": list(self.meeting.dialogs.acknowledge), "ask_everything": self.meeting.dialogs.ask_everything},
                 "controls": {"reactions": list(self.meeting.controls.reactions)},
             },

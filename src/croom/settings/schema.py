@@ -126,6 +126,10 @@ SCHEMA: List[Setting] = [
     Setting("meeting.controls.reactions", "Reactions", "meetings", "list", max_items=12, max_length=40,
             help="By the names Zoom's picker gives them"),
     Setting("meeting.zoom_credentials_path", "Zoom SDK keys", "meetings", "credential", max_length=4096),
+    Setting("meeting.meet_api_domain", "Meet participants domain", "meetings", "text", max_length=253, pattern=r"[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?",
+            pattern_words="a domain such as crystalpm.com",
+            help="Your organization's domain: Meet's people list comes from Google's API for meetings organized there (needs the admin's grant, "
+                 "see the README); blank is off"),
     Setting("meeting.google_profile_dir", "Google sign-in", "meetings", "signin", max_length=4096,
             help="The room's own Google account, for Google Meet: signed in on the TV"),
     # Devices

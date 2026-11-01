@@ -18,11 +18,11 @@
   // for something else. Zoom's refusal over the passcode comes later, in the status, and the card gives that link back.
   // lastEvent: the booking, when that join was a booking's, for the same time: Join again on its card joins the booking again.
   // reactionsUntil: when the reaction row closes (a time, 0 for closed). ignoreUntil, dialogIgnoreUntil: until when the secondary row's buttons and the
-  // dialog card's ignore a tap. pending: the requests of the meeting screen that are out, by name (a control's, or "dialog"). confirmEnd, confirmRemove:
-  // End meeting for everyone, and Remove on the row of the person with that key, have been asked about and wait for their second tap. errorOn: the
+  // dialog card's ignore a tap. layoutUntil: the same for the row of Meet's layouts. pending: the requests of the meeting screen that are out, by name (a control's, or "dialog"). confirmEnd, confirmMuteAll, confirmRemove:
+  // End meeting for everyone, Mute everyone (Meet), and Remove on the row of the person with that key, have been asked about and wait for their second tap. errorOn: the
   // view the refusal in `error` was met on (a sub-screen says the refusals of its own controls, and not the meeting screen's).
-  const model = { status: null, events: [], offline: false, busy: false, error: "", errorOn: "", confirmLeave: false, confirmEnd: false, confirmRemove: null,
-                  screensaver: null, settings: null, lastLink: "", lastEvent: "", reactionsUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
+  const model = { status: null, events: [], offline: false, busy: false, error: "", errorOn: "", confirmLeave: false, confirmEnd: false, confirmMuteAll: false, confirmRemove: null,
+                  screensaver: null, settings: null, lastLink: "", lastEvent: "", reactionsUntil: 0, layoutUntil: 0, ignoreUntil: 0, dialogIgnoreUntil: 0, pending: new Set() };
   const renderHooks = [];   // devices.js and remote.js register their rendering here; render() calls each with the status
   const viewHooks = [];     // devices.js, keyboard.js and remote.js register here; called after every view change
   let cameraMode = "idle";  // the mode that opened the camera view
@@ -100,6 +100,7 @@
     // the return goes first and the hook that ends the preview clears the renewal before it is sent.
     armIdleReturn();
     for (const fn of viewHooks) fn(name, Boolean(automatic));
+    syncScreen();   // a Meet call is told which of its screens is open (below)
   }
   function setView(name, automatic) {
     if (view() === name) return;
@@ -134,7 +135,7 @@
   // A second tap within half a second of the ask is not the one that was asked for: the bounce of a finger, or the second of a double tap, on a
   // button whose words have just changed under it. Leave, End meeting for everyone and Remove are the buttons that ask; each has its own time.
   const ARMED_BOUNCE_MS = 500;
-  const askedAt = { leave: 0, end: 0, remove: 0 };
+  const askedAt = { leave: 0, end: 0, muteAll: 0, remove: 0 };
   const bounced = (which) => Date.now() < askedAt[which] + ARMED_BOUNCE_MS;
   let lastEventsKey = null;
   let lastPickerKey = null;
@@ -450,9 +451,17 @@
   }
   const reactionChoices = (c) => (c.reactions && c.reactions.available && Array.isArray(c.reactions.choices) ? c.reactions.choices : []);
   const reactionsOpen = () => Date.now() < model.reactionsUntil;
-  function openReactions() { model.reactionsUntil = Date.now() + REACTIONS_OPEN_MS; render(); }
+  function openReactions() { model.layoutUntil = 0; model.reactionsUntil = Date.now() + REACTIONS_OPEN_MS; render(); }
   function closeReactions() { model.reactionsUntil = 0; render(); }
   function pickReaction(name) { closeReactions(); control("reactions", name); }
+  // Meet's layouts (controls.layout.choices: auto, tiled, spotlight, sidebar, with `value` the room's last choice, or null while it is not known): a
+  // row in the reaction row's place and way, one button per choice and Cancel. Zoom's two (speaker and gallery) are the toggle's, not a row.
+  const LAYOUT_LABELS = { auto: "Auto", tiled: "Tiled", spotlight: "Spotlight", sidebar: "Sidebar" };
+  const layoutChoices = (c) => (c.layout && c.layout.available && Array.isArray(c.layout.choices) && c.layout.choices.length > 2 ? c.layout.choices : []);
+  const layoutsOpen = () => Date.now() < model.layoutUntil;
+  function openLayouts() { model.reactionsUntil = 0; model.layoutUntil = Date.now() + REACTIONS_OPEN_MS; render(); }
+  function closeLayouts() { model.layoutUntil = 0; render(); }
+  function pickLayout(name) { closeLayouts(); control("layout", name); }
 
   // What the three routes (control, dialog, chat/seen) answer with: the meeting block as it is after the request, the one the poll carries.
   // It goes into the model at once, with an epoch, so that a poll already on its way cannot put an older block back over it.
@@ -465,25 +474,69 @@
   // key), every other button works, and the request gives up at 35 s. A refusal comes in words, for #meeting-message (or the dialog
   // card's own line while a card shows).
   async function request(key, path, body) {
-    if (model.pending.has(key)) return;     // one request per tap: the button is inert already, and this is the guard behind it
+    if (model.pending.has(key)) return false;   // one request per tap: the button is inert already, and this is the guard behind it
     const on = view();                      // the screen the tap was made on: a refusal that comes later belongs to it
     model.pending.add(key);
     model.error = "";
     render();
     const cutoff = new AbortController();
     const timer = setTimeout(() => cutoff.abort(), CONTROL_TIMEOUT_MS);
+    let done = true;
     try {
       takeMeeting(await post(path, body, { signal: cutoff.signal }));
     } catch (e) {
       model.error = e.name === "AbortError" ? NO_ANSWER : e.message;
       model.errorOn = on;
+      done = false;
     } finally {
       clearTimeout(timer);
       model.pending.delete(key);
     }
     render();
+    return done;   // whether the agent carried it out (a refusal is said in model.error)
   }
   const control = (name, value) => request(name, "/api/meeting/control", { name: name, value: value });
+
+  // Which Meet screen is open (Meet controls plan Phase B): the room's Meet shows one side panel at a time, and the agent opens the one the
+  // touch Pi's screen wants (and closes it when the screen goes), so the page says "participants", "chat" or "host" on entering the screen,
+  // renews it every minute while the screen stays (the agent lets a screen it has not heard of for three minutes go), and says "" on leaving
+  // it (Back, the two-minute return, a dialog's card, a call that ends). A Zoom call is told nothing. Not a request() of the page: it holds
+  // no button inert, one is sent at a time (a Back pressed while the panel is opening is said when that answer is in), and its refusal is said
+  // on the screen it was about. screenSaid is what the agent was last told; null when the last telling did not reach it.
+  const SCREEN_VIEWS = ["participants", "chat", "host"];
+  const SCREEN_RENEW_MS = 60 * 1000;
+  const SCREEN_RETRY_MS = 5 * 1000;
+  let screenSaid = "", screenBusy = false, screenRenewTimer = null, screenHoldUntil = 0;
+  const meetCall = () => Boolean(model.status) && model.status.meeting.platform === "google_meet" && model.status.meeting.state === "connected";
+  const wantedScreen = () => (meetCall() && mode() === "meeting" && SCREEN_VIEWS.includes(view()) ? view() : "");
+  function syncScreen() {
+    const want = wantedScreen();
+    if (screenBusy || want === screenSaid || Date.now() < screenHoldUntil) return;
+    if (!want && !meetCall()) { screenSaid = ""; clearTimeout(screenRenewTimer); return; }   // a Zoom call, or the call is over (the agent closes its panel then): nothing to say
+    sendScreen(want);
+  }
+  async function sendScreen(value) {
+    screenBusy = true;
+    screenSaid = value;
+    clearTimeout(screenRenewTimer);
+    const cutoff = new AbortController();
+    const timer = setTimeout(() => cutoff.abort(), CONTROL_TIMEOUT_MS);
+    try {
+      takeMeeting(await post("/api/meeting/control", { name: "screen", value: value }, { signal: cutoff.signal }));
+    } catch (e) {
+      if (e.name === "AbortError" || e instanceof TypeError) { screenSaid = null; screenHoldUntil = Date.now() + SCREEN_RETRY_MS; }   // not heard: told again at a later render
+      else if (value) { model.error = e.message; model.errorOn = value; }   // a refusal in the agent's words, on the screen it was about (the agent has the screen all the same)
+    } finally {
+      clearTimeout(timer);
+      screenBusy = false;
+    }
+    if (screenSaid) screenRenewTimer = setTimeout(renewScreen, SCREEN_RENEW_MS);
+    render();
+  }
+  function renewScreen() {
+    if (!screenBusy && screenSaid && wantedScreen() === screenSaid) sendScreen(screenSaid);
+    else syncScreen();
+  }
   // Mute and Camera keep their own routes, and send the state the button names: a tap on Mute asks for muted, on Turn camera off for off, whatever the
   // room is by the time the request arrives (the host may have muted it, or the camera gone off at the TV, since the poll that drew the button), so a
   // tap made a moment late ends as the person asked and cannot undo what someone else just did. The agent sets that state. They are requests of the
@@ -518,14 +571,21 @@
     const specs = [];
     if (has("captions")) specs.push(controlSpec("captions", c.captions.on ? "Captions off" : "Captions on", "captions", "quiet"));
     if (has("layout")) {
-      const gallery = c.layout.value === "gallery";
-      specs.push(controlSpec("layout", gallery ? "Speaker view" : "Gallery view", "layout", "quiet", gallery ? "speaker" : "gallery"));
+      // Meet offers four layouts: Layout opens a row of them, as Reactions does. Zoom's two keep the toggle.
+      if (layoutChoices(c).length) specs.push({ id: "layout", label: "Layout", icon: "layout", className: "quiet", disabled: model.pending.has("layout"), onClick: openLayouts });
+      else {
+        const gallery = c.layout.value === "gallery";
+        specs.push(controlSpec("layout", gallery ? "Speaker view" : "Gallery view", "layout", "quiet", gallery ? "speaker" : "gallery"));
+      }
     }
     if (has("hide_self")) specs.push(controlSpec("hide_self", c.hide_self.on ? "Show self view" : "Hide self view", "user", "quiet"));
-    // A platform that reports a count and no roster (Meet) has no Participants screen to open, and one whose chat the agent does not read says so
-    // (controls.chat.available is false): a button that opens nothing is not drawn. Zoom's model has no chat key, and keeps its button.
+    // Zoom's Participants is offered when it has a roster to list. Meet's roster exists only while its people panel is open on the TV (the page
+    // opens it by entering the screen, and the list fills a moment later), so a Meet call offers the screen whenever it counts people. One whose
+    // chat the agent does not read says so (controls.chat.available is false): a button that opens nothing is not drawn. Zoom's model has no chat
+    // key, and keeps its button.
     const people = m.participants && Array.isArray(m.participants.list) ? m.participants.list : [];
-    if (modelled && people.length) specs.push({ id: "participants", label: "Participants (" + (m.participants.count || people.length) + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
+    const counted = m.platform === "google_meet" ? Boolean(m.participants && m.participants.count > 0) : people.length > 0;
+    if (modelled && counted) specs.push({ id: "participants", label: "Participants (" + (m.participants.count || people.length) + ")", icon: "users", className: "quiet", onClick: () => setView("participants") });
     if (modelled && m.chat && !(c.chat && c.chat.available === false)) specs.push({ id: "chat", label: "Chat" + (m.chat.unread ? " (" + m.chat.unread + ")" : ""), icon: "message", className: "quiet", onClick: () => setView("chat") });
     if (c.host && c.host.role && c.host.role !== "participant") specs.push({ id: "host", label: "Host", icon: "lock", className: "quiet", onClick: () => setView("host") });
     // The TV and the Touchpad are the room's, not the platform's: they are in the top bar in a meeting (render), not in this row.
@@ -539,28 +599,38 @@
   const secondaryKey = { key: null };
   let shownReactionRow = false;
   const reactionKey = { key: null };
-  function renderReactionRow(choices) {
-    let row = el("reaction-row");
-    if (!choices) {
+  const layoutKey = { key: null };
+  // One of these rows (the reactions', Meet's layouts'): a div in the secondary row's place while specs are given, and none in the page for null.
+  function renderChoiceRow(id, label, specs, holder) {
+    let row = el(id);
+    if (!specs) {
       if (row) row.remove();
-      reactionKey.key = reactionKey.ids = null;
+      holder.key = holder.ids = null;
       return;
     }
     if (!row) {
       row = document.createElement("div");
-      row.id = "reaction-row";
+      row.id = id;
       row.className = "actions meeting-secondary";
       row.setAttribute("role", "group");
-      row.setAttribute("aria-label", "Reactions");
+      row.setAttribute("aria-label", label);
       el("meeting-secondary").before(row);
-      reactionKey.key = reactionKey.ids = null;           // a row that is new has no buttons to patch
+      holder.key = holder.ids = null;           // a row that is new has no buttons to patch
     }
-    const specs = choices.map((name) => {
+    setActions(specs, id, holder);
+  }
+  function renderReactionRow(choices) {
+    renderChoiceRow("reaction-row", "Reactions", choices && choices.map((name) => {
       const look = reactionLook(name);
       return { id: "reaction:" + name, label: look.label, icon: look.icon, className: "quiet", target: name, onClick: () => pickReaction(name) };
-    });
-    specs.push({ id: "cancel", label: "Cancel", icon: "x-circle", className: "quiet", onClick: closeReactions });
-    setActions(specs, "reaction-row", reactionKey);
+    }).concat([{ id: "cancel", label: "Cancel", icon: "x-circle", className: "quiet", onClick: closeReactions }]), reactionKey);
+  }
+  // The current layout is marked (a check, and its state) when the room's last choice is known.
+  function renderLayoutRow(choices, value) {
+    renderChoiceRow("layout-row", "Layout", choices && choices.map((name) => {
+      const current = value === name;
+      return { id: "layout:" + name, label: LAYOUT_LABELS[name] || String(name), icon: current ? "check" : "layout", className: current ? "" : "quiet", target: name, onClick: () => pickLayout(name) };
+    }).concat([{ id: "cancel", label: "Cancel", icon: "x-circle", className: "quiet", onClick: closeLayouts }]), layoutKey);
   }
 
   // The dialog card (spec 2026-10-13, section 5). A dialog Zoom drew that the agent did not answer by its policy waits for a tap on the
@@ -644,12 +714,15 @@
     el("meeting-notice").title = notice;   // the whole of it, for when the line cuts it short at two lines (read by nobody on a kiosk, and harmless)
     renderDialog(live ? m.dialog : null, live ? m.platform : "");
     const choices = live ? reactionChoices(m.controls || {}) : [];
+    const layouts = live ? layoutChoices(m.controls || {}) : [];
     const picking = choices.length > 0 && reactionsOpen();
-    if (shownReactionRow && !picking) model.ignoreUntil = Date.now() + UNCOVERED_TAP_MS;
-    shownReactionRow = picking;
+    const choosing = !picking && layouts.length > 0 && layoutsOpen();
+    if (shownReactionRow && !picking && !choosing) model.ignoreUntil = Date.now() + UNCOVERED_TAP_MS;
+    shownReactionRow = picking || choosing;
     setActions(live ? meetingSecondary(m) : [], "meeting-secondary", secondaryKey);
-    el("meeting-secondary").hidden = picking;
+    el("meeting-secondary").hidden = picking || choosing;
     renderReactionRow(picking ? choices : null);
+    renderLayoutRow(choosing ? layouts : null, choosing ? m.controls.layout.value : null);
   }
   // The screen's controls are under a finger that was aimed at where they were: when the screen's layout shifts (a dialog's card comes up
   // or goes, a notice or a refusal appears, the secondary row wraps, the Sound strip comes or goes, a person above the one a finger is aimed at
@@ -694,7 +767,7 @@
   // lift, and a list does not jump under the reader. What the meeting says (names, chat lines) goes in as text and never as markup.
 
   const can = (host, name) => Boolean(host[name] && host[name].available);   // the model says that the client, or the role, offers it
-  let removeTimer = null, endTimer = null;
+  let removeTimer = null, endTimer = null, muteAllTimer = null;
 
   // Keys for things that may repeat (a name that two people have, the same line said twice in a second): the second of two is told apart by its turn.
   function uniqueKeys(items, keyOf) {
@@ -710,12 +783,23 @@
   // someone out or end the meeting for all; asking about one person's Remove moves the ask from another's. Each has a timer of its own, so that the one
   // never strands the other's lapse. What a screen was asking is not carried to the next visit (leftView).
   function forgetEnd() { clearTimeout(endTimer); model.confirmEnd = false; }
+  function forgetMuteAll() { clearTimeout(muteAllTimer); model.confirmMuteAll = false; }
   function forgetRemove() { clearTimeout(removeTimer); model.confirmRemove = null; }
   function askToEnd() {
     forgetEnd();
+    forgetMuteAll();   // one ask at a time on the Host screen: a tap that is waiting for its second is for the button just asked about
     askedAt.end = Date.now();
     model.confirmEnd = true;
     endTimer = setTimeout(() => { model.confirmEnd = false; render(); }, CONFIRM_MS);
+    render();
+  }
+  // Mute everyone (Meet's host): it silences the whole call, so it asks as End does. Zoom's Mute all keeps its single tap.
+  function askToMuteAll() {
+    forgetMuteAll();
+    forgetEnd();
+    askedAt.muteAll = Date.now();
+    model.confirmMuteAll = true;
+    muteAllTimer = setTimeout(() => { model.confirmMuteAll = false; render(); }, CONFIRM_MS);
     render();
   }
   function askToRemove(key) {
@@ -727,9 +811,9 @@
   }
   // What a screen was asking, or saying, belongs to it: not the second tap on End or Remove, nor a refusal, goes with the person to the next screen.
   function leftView(was) {
-    if (was === "host") forgetEnd();
+    if (was === "host") { forgetEnd(); forgetMuteAll(); }
     if (was === "participants") forgetRemove();
-    if ((was === "host" || was === "participants") && model.errorOn === was) model.error = "";
+    if ((was === "host" || was === "participants" || was === "chat") && model.errorOn === was) model.error = "";
   }
 
   // --- Participants: the room's people, and for a host or co-host the buttons that act on them, and the waiting room.
@@ -758,19 +842,31 @@
 
   // What a host can do to this person, as the model offers it: Mute (not to one who is muted already) and Remove, on every row but the room's own,
   // and Admit on a person in the waiting room. A participant's model offers none of it.
-  function personSpecs(p, key, host, waiting) {
+  // Which person an action is for, as the agent finds them again at the press: Meet's id, or "name:<their name>" for a person it gave none (a
+  // name that two people have, or none, is the agent's refusal in words). Zoom's people all have a number.
+  const personId = (p) => (p.id === undefined || p.id === null ? "name:" + p.name : p.id);
+  function personSpecs(p, key, host, waiting, controls) {
     if (waiting) {
-      return can(host, "waiting_room") ? [{ id: "admit", label: "Admit", icon: "door", className: "primary", disabled: model.pending.has("host.admit"), onClick: () => control("host.admit", p.id) }] : [];
+      if (!can(host, "waiting_room")) return [];
+      const specs = [{ id: "admit", label: "Admit", icon: "door", className: "primary", disabled: model.pending.has("host.admit"), onClick: () => control("host.admit", personId(p)) }];
+      // Meet's knock has Deny beside Admit (the model says so: waiting_room.deny); Zoom's waiting room has none.
+      if (host.waiting_room.deny) specs.push({ id: "deny", label: "Deny", icon: "x-circle", className: "quiet", disabled: model.pending.has("host.deny"), onClick: () => control("host.deny", personId(p)) });
+      return specs;
     }
     if (p.me) return [];
     const specs = [];
+    // Pin or Unpin by what the row says now (p.pinned), when the model offers it (Meet's; Zoom's comes with its own pin).
+    if (controls.pin && controls.pin.available) {
+      const name = p.pinned ? "unpin" : "pin";
+      specs.push({ id: "pin", label: p.pinned ? "Unpin" : "Pin", icon: "locate", className: "quiet", disabled: model.pending.has(name), onClick: () => control(name, personId(p)) });
+    }
     if (can(host, "mute_one") && !p.muted) {
       specs.push({ id: "mute", label: "Mute", icon: "mic-off", className: "quiet", disabled: model.pending.has("host.mute_one"), onClick: () => control("host.mute_one", p.id) });
     }
     if (can(host, "remove")) {
       const asking = model.confirmRemove === key;
-      specs.push({ id: "remove", label: asking ? "Tap again to remove" : "Remove", icon: "x-circle", className: asking ? "danger" : "quiet", disabled: model.pending.has("host.remove"),
-        onClick: () => { if (model.confirmRemove !== key) askToRemove(key); else if (!bounced("remove")) { forgetRemove(); control("host.remove", p.id); } } });
+      specs.push({ id: "remove", label: asking ? "Tap again to remove" : "Remove", icon: "x-circle", className: (asking ? "danger" : "quiet") + " remove", disabled: model.pending.has("host.remove"),
+        onClick: () => { if (model.confirmRemove !== key) askToRemove(key); else if (!bounced("remove")) { forgetRemove(); control("host.remove", personId(p)); } } });
     }
     return specs;
   }
@@ -793,7 +889,7 @@
 
   // The list shows these people in this order: a row that is there is kept and patched, one that is not is drawn, one that has gone is removed.
   // A row is moved only when it is not where it should be, and a row that comes in at the foot or goes from it moves none of the others.
-  function syncPeople(list, rows, people, keys, host, waiting) {
+  function syncPeople(list, rows, people, keys, host, waiting, controls) {
     const wanted = new Set(keys);
     for (const [key, row] of rows) {
       if (!wanted.has(key)) { row.li.remove(); rows.delete(key); }
@@ -801,7 +897,7 @@
     people.forEach((p, i) => {
       let row = rows.get(keys[i]);
       if (!row) { row = personRow(); rows.set(keys[i], row); }
-      patchPerson(row, p, waiting ? [] : marksOf(p), personSpecs(p, keys[i], host, waiting));
+      patchPerson(row, p, waiting ? [] : marksOf(p), personSpecs(p, keys[i], host, waiting, controls));
       if (list.children[i] !== row.li) list.insertBefore(row.li, list.children[i] || null);
     });
   }
@@ -813,9 +909,12 @@
     const waiting = m && can(host, "waiting_room") && Array.isArray(host.waiting_room.waiting) ? host.waiting_room.waiting : [];
     const keys = uniqueKeys(people, personKey), waitingKeys = uniqueKeys(waiting, personKey);
     if (model.confirmRemove !== null && !keys.includes(model.confirmRemove)) forgetRemove();   // the person it was about has gone
-    syncPeople(el("participant-list"), rosterRows.people, people, keys, host, false);
-    syncPeople(el("waiting-list"), rosterRows.waiting, waiting, waitingKeys, host, true);
+    const controls = (m && m.controls) || {};
+    syncPeople(el("participant-list"), rosterRows.people, people, keys, host, false, controls);
+    syncPeople(el("waiting-list"), rosterRows.waiting, waiting, waitingKeys, host, true, controls);
     el("waiting-kicker").hidden = waiting.length === 0;
+    // Meet's list fills a moment after the screen is entered (its people panel opens on the TV then): until it does the screen says so.
+    el("participants-empty").hidden = !(m && m.platform === "google_meet" && people.length === 0 && waiting.length === 0);
   }
 
   // --- Chat: the last messages, newest at the foot.
@@ -859,6 +958,23 @@
     else if (atFoot) list.scrollTop = list.scrollHeight;
   }
 
+  // Send, for a platform that lets the room write in its chat (controls.chat_send; Meet's): the message goes to the agent as typed, 1 to 500
+  // characters, and the box is emptied only when it was carried out (a refusal is said under the box, and the words stay to be sent again).
+  // Send is inert while its request is out.
+  const chatInput = el("chat-input");
+  function sendChat() {
+    const text = chatInput.value.trim();
+    if (!text || model.pending.has("chat.send")) return;
+    control("chat.send", text).then((done) => { if (done && chatInput.value.trim() === text) chatInput.value = ""; });
+  }
+  el("chat-form").addEventListener("submit", (e) => { e.preventDefault(); sendChat(); });
+  const chatSendable = (m) => Boolean(m && m.controls && m.controls.chat_send && m.controls.chat_send.available);
+  function renderChatSend(m) {
+    el("chat-form").hidden = !chatSendable(m);
+    el("chat-send").disabled = model.pending.has("chat.send") || model.busy;
+    el("chat-message").textContent = chatSendable(m) && view() === "chat" && model.errorOn === "chat" ? model.error : "";
+  }
+
   // The unread count is the agent's: opening the screen marks what is there as seen, and so does every poll that finds more while the screen is up (the
   // count would otherwise climb on the button under the reader's nose). A count that does not fall is not asked about again until it rises.
   function keepChatSeen(m) {
@@ -876,7 +992,14 @@
   function hostSpecs(m) {
     const h = (m.controls && m.controls.host) || {};
     const specs = [];
-    if (can(h, "mute_all")) specs.push(controlSpec("host.mute_all", "Mute all", "mic-off", ""));
+    const meet = m.platform === "google_meet";
+    if (can(h, "mute_all")) {
+      // Meet's host: Mute everyone silences the whole call, so it asks for a second tap, as End does. Zoom's Mute all is one tap.
+      if (!meet) specs.push(controlSpec("host.mute_all", "Mute all", "mic-off", ""));
+      else specs.push({ id: "host.mute_all", label: model.confirmMuteAll ? "Tap again to mute everyone" : "Mute everyone", icon: "mic-off", className: model.confirmMuteAll ? "danger ask" : "ask",
+        disabled: model.pending.has("host.mute_all"),
+        onClick: () => { if (!model.confirmMuteAll) askToMuteAll(); else if (!bounced("muteAll")) { forgetMuteAll(); control("host.mute_all"); } } });
+    }
     if (can(h, "ask_unmute")) specs.push(controlSpec("host.ask_unmute", "Ask all to unmute", "mic", ""));
     if (can(h, "record")) specs.push(controlSpec("host.record", h.record.on ? "Stop recording" : "Start recording", "record", ""));
     if (can(h, "lock")) specs.push(controlSpec("host.lock", h.lock.on ? "Unlock meeting" : "Lock meeting", h.lock.on ? "lock" : "unlock", ""));
@@ -884,9 +1007,19 @@
       const end = { id: "host.end", icon: "x-circle", className: "danger", disabled: model.pending.has("host.end") };
       specs.push(model.confirmEnd
         ? Object.assign(end, { label: "Tap again to end", onClick: () => { if (bounced("end")) return; forgetEnd(); control("host.end"); } })
-        : Object.assign(end, { label: "End meeting for everyone", onClick: askToEnd }));
+        : Object.assign(end, { label: meet ? "End call for everyone" : "End meeting for everyone", onClick: askToEnd }));
     }
     return specs;
+  }
+
+  // Meet's host switches (controls.host.switches: what the host panel lets everyone do, as read from it, empty until the panel has been open): one
+  // button each, saying its state, and a tap sends the other way: host.switch {key, on}.
+  const switchKey = { key: null };
+  function switchSpecs(m) {
+    const h = (m && m.controls && m.controls.host) || {};
+    const switches = Array.isArray(h.switches) ? h.switches.filter((sw) => sw && sw.key) : [];
+    return switches.map((sw) => ({ id: "switch:" + sw.key, label: String(sw.label || sw.key) + ": " + (sw.on ? "On" : "Off"), icon: sw.on ? "check" : "", className: sw.on ? "" : "quiet",
+      disabled: model.pending.has("host.switch"), onClick: () => control("host.switch", { key: sw.key, on: !sw.on }) }));
   }
 
   // Called from render() with the connected meeting, or with none (the lists are emptied: nothing is known of who is in it).
@@ -894,6 +1027,10 @@
     renderParticipants(m);
     renderChat(m);
     setActions(m ? hostSpecs(m) : [], "host-actions", hostKey);
+    const switches = switchSpecs(m);
+    el("host-switches-kicker").hidden = switches.length === 0;
+    setActions(switches, "host-switches", switchKey);
+    renderChatSend(m);
     keepChatSeen(m);
     // A refusal is said on the screen it was met on (the meeting screen's own line is not in sight from here), and a screen says its own and not another's:
     // not the one the meeting screen's Raise hand drew before the person came, nor the one it draws after they have.
@@ -908,8 +1045,10 @@
     model.error = "";
     model.confirmLeave = false;
     model.reactionsUntil = 0;
+    model.layoutUntil = 0;
     clearTimeout(confirmTimer);
     forgetEnd();
+    forgetMuteAll();
     forgetRemove();
     if (mode() === "meeting") { linkInput.value = ""; showPasscodeField(false); }   // the idle screen's boxes were for the call that has begun
     applyView(MAIN_SCREEN[mode()], true);
@@ -1101,6 +1240,7 @@
     renderPicker();
     renderDoorSign();
     for (const fn of renderHooks) fn(s);
+    syncScreen();         // the Meet screen the page is on, said to the agent when it has changed or not been heard
     guardLayoutShift();   // last: the Sound strip (devices.js) and the rest have moved the screen by now
     if (landing && kiosk && view() === "idle") focusPasscode();
   }
@@ -1345,6 +1485,7 @@
       }
     }
     if (model.reactionsUntil && !reactionsOpen()) closeReactions();   // the row's ten seconds are over
+    if (model.layoutUntil && !layoutsOpen()) closeLayouts();          // and the layouts' row's
   }
 
   el("link-form").addEventListener("submit", (e) => {

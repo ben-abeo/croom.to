@@ -244,6 +244,7 @@
     <section class="list-box">
       <p class="kicker">Participants</p>
       <div class="list-scroll">
+        <p id="participants-empty" class="note" hidden>Reading the list from Meet</p>
         <ul id="participant-list" class="participants"></ul>
         <p id="waiting-kicker" class="kicker" hidden>Waiting room</p>
         <ul id="waiting-list" class="participants"></ul>
@@ -258,6 +259,12 @@
       <p class="kicker">Chat</p>
       <ul id="chat-list" class="chat"></ul>
       <p id="chat-empty" class="note" hidden>No messages yet</p>
+      <form id="chat-form" class="chat-form" hidden>
+        <label class="visually-hidden" for="chat-input">Message</label>
+        <input id="chat-input" type="text" data-keyboard="chat" maxlength="500" autocomplete="off" spellcheck="true" placeholder="Message to everyone">
+        <button type="submit" id="chat-send" class="button primary" data-icon="message">Send</button>
+      </form>
+      <p id="chat-message" class="message" role="status"></p>
     </section>
   </section>
 
@@ -266,6 +273,8 @@
     <section class="list-box">
       <p class="kicker">Host controls</p>
       <div id="host-actions" class="actions host-actions"></div>
+      <p id="host-switches-kicker" class="kicker" hidden>Meeting settings</p>
+      <div id="host-switches" class="actions host-switches"></div>
       <p id="host-message" class="message" role="status"></p>
     </section>
   </section>

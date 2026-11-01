@@ -150,6 +150,16 @@ body[data-state="meeting"] .participant .button.primary { background: var(--blue
 .chat { gap: 10px; }
 .chat-message .chat-from { margin: 0; color: var(--periwinkle-300); font-size: 0.9em; }
 .chat-message .chat-text { margin: 2px 0 0; overflow-wrap: anywhere; }
+/* Chat's message box and Send (a platform that lets the room write: Meet's), under the list; the box takes what Send leaves. */
+.chat-form { display: flex; gap: 12px; margin-top: 12px; flex: 0 0 auto; width: 100%; }
+.chat-form[hidden] { display: none; }
+.chat-form input { flex: 1 1 auto; min-width: 0; min-height: 56px; padding: 0 18px; border-radius: var(--radius); border: 2px solid var(--periwinkle-300); background: var(--surface-800); color: #fff; font: inherit; }
+.chat-form input::placeholder { color: rgba(189, 206, 255, 0.7); }
+.chat-form .button { min-height: 56px; padding: 0 28px; }
+.host-switches { display: grid; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); gap: 12px; margin-top: 8px; width: 100%; }
+.host-switches:empty { display: none; }
+.host-switches .button { min-height: 56px; padding: 0 18px; justify-content: flex-start; }
+#host-switches-kicker { margin-top: 18px; }
 .list-box .message { margin-top: 12px; flex: 0 0 auto; min-height: auto; }   /* a refusal of several lines keeps its height, and the list above it gives way */
 .host-actions .button { min-height: 72px; font-size: 1.2rem; padding: 0 28px; }
 .meeting-state { margin: 0; font-weight: 600; }
@@ -637,8 +647,8 @@ body.keyboard-open .schedule { display: none; }
      when it asks (a tap aimed at Mute, a moment after a mis-tap on Remove, would otherwise land on the ask). */
   #participant-list .row-actions:not(:empty) { min-width: 24rem; justify-content: flex-end; }
   #participant-list:has(.row-actions:not(:empty)) .row-actions:empty { min-width: 24rem; }   /* (a rule of its own: an engine without :has() drops the rule it is in, and the one above is not to go with it) */
-  #participant-list .row-actions .button:last-child { min-width: 16rem; }
-  .host-actions .button.danger { min-width: 23rem; }   /* End keeps the width of its longer words: the shorter ones would fit on the line above at 1280 by 800, and the button would jump from under the finger */
+  #participant-list .row-actions .button.remove { min-width: 16rem; }
+  .host-actions .button.danger, .host-actions .button.ask { min-width: 23rem; }   /* End keeps the width of its longer words: the shorter ones would fit on the line above at 1280 by 800, and the button would jump from under the finger */
 }
 @media (min-width: 1024px) and (min-height: 700px) and (max-height: 760px) {
   /* The fixed screen at its lowest (1024 by 700, 1280 by 720): the middle of the TV view gives way, so that nothing reaches into the row of pointer
@@ -732,7 +742,7 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button { background: 
 body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { background: #273244; }
 .meeting-main .actions.meeting-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .meeting-main .meeting-secondary .button { min-height: 56px; padding: 0 12px; justify-content: center; white-space: nowrap; }
-.meeting-main #reaction-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
+.meeting-main #reaction-row, .meeting-main #layout-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
 /* The dock: the device's name (or why there is no sound) with Camera and Upcoming meetings beside it, then the volume slider and its buttons. The
    Sound strip's parts take their places in the dock's grid (display: contents), so the strip keeps its markup and its script (devices.js). */
 .meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; grid-template-areas: "device device mic-open menu" "slider buttons buttons buttons";

@@ -12740,13 +12740,13 @@ def test_a_meet_call_draws_what_the_meet_provider_reports_and_nothing_else(brows
         page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
         assert server.meeting.current_meeting.platform == "google_meet"
         assert texts(page, "#meeting-actions") == ["Mute", "Turn camera off", "Raise hand"]
-        assert texts(page, "#meeting-secondary") == ["Captions on"]
+        assert texts(page, "#meeting-secondary") == ["Captions on", "Participants (3)"]      # a Meet call with a count offers its screen: the list fills when the panel is open (Phase B)
         page.locator("#meeting-secondary .button", has_text="Captions on").click()
         page.wait_for_function("document.getElementById('meeting-secondary').textContent.includes('Captions off')", timeout=5000)
         page.locator("#meeting-actions .button", has_text="Raise hand").click()
         page.wait_for_function("document.getElementById('meeting-actions').textContent.includes('Lower hand')", timeout=5000)
         assert server.meeting.controls_called == [("captions", None), ("raise_hand", None)]       # through the same control route as Zoom's
-        assert texts(page, "#meeting-secondary") == ["Captions off"]
+        assert texts(page, "#meeting-secondary") == ["Captions off", "Participants (3)"]
         assert fits(page)
         page.close()
 
@@ -13418,7 +13418,7 @@ def test_the_screens_empty_when_the_room_cannot_be_reached_and_fill_again_when_i
         page.route("**/api/status", lambda route: route.abort())
         page.wait_for_function("document.body.dataset.state === 'offline'", timeout=8000)
         assert page.evaluate("document.body.dataset.view") == view and page.locator(what).count() == 0
-        assert page.locator(".view[data-view='" + view + "'] .button:not(.back)").count() == 0
+        assert page.locator(".view[data-view='" + view + "'] .button:not(.back):visible").count() == 0    # (Chat's Send is in the page, in a form that is hidden)
         page.unroute("**/api/status")
         page.wait_for_function(f"document.querySelectorAll('{what}').length >= 2", timeout=8000)
         page.close()
@@ -13492,4 +13492,114 @@ def test_the_rooms_own_marks_sit_in_the_marks_column_with_the_others(browser):
         open_sub_screen(page, "Participants", "participants")
         ends = page.evaluate("[...document.querySelectorAll('#participant-list .participant')].map((r) => Math.round(r.querySelector('.marks').getBoundingClientRect().right))")
         assert len(ends) == 4 and len(set(ends)) == 1, ends
+        page.close()
+
+
+# ===== The touch Pi's screens for Meet (Meet controls plan Phase B, Task 4) =====
+
+def meet_controls_of(**kw):
+    """The model the Meet provider builds for a call whose page draws the chat, the people and the host controls buttons."""
+    from croom.meeting.providers.google_meet import meet_controls
+    kw.setdefault("drawn", {"chat": True})
+    return meet_controls({"camera": {"on": True}, "raise_hand": {"on": False}, "captions": {"on": False}}, muted=False, people=True, **kw)
+
+
+def page_in_a_meet_call(browser, server, **kw):
+    """The room page on a stopped clock, in a Meet call (a count of three people and no roster yet, as Meet reads it before its people panel
+    is open), settled and with its Chat, Participants and Host buttons drawn."""
+    server.meeting.controls = meet_controls_of(**kw)
+    server.meeting.people = {"count": 3, "list": []}
+    page = page_on_a_stopped_clock(browser, server)
+    page.fill("#link-input", "https://meet.google.com/abc-defg-hij")
+    page.click("#link-form button[type=submit]")
+    page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+    page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+    page.clock.run_for(600)
+    return page
+
+
+def screens_said(server):
+    return [value for name, value in server.meeting.controls_called if name == "screen"]
+
+
+def test_a_meet_call_is_told_which_screen_is_open_and_renewed_and_told_none_when_the_two_minute_return_comes(browser):
+    """The agent opens and closes Meet's panel on the TV by what the touch Pi says is open: entering Chat says "chat", a minute on says it again,
+    and the two-minute return to the meeting screen says "" (the panel must not stay on the TV)."""
+    with PageServer() as server:
+        page = page_in_a_meet_call(browser, server)
+        assert texts(page, "#meeting-secondary").count("Participants (3)") == 1             # R3: a count alone is a screen in a Meet call
+        open_sub_screen(page, "Chat", "chat")
+        wait_for_calls(page, server, 1)
+        assert screens_said(server) == ["chat"]
+        page.wait_for_timeout(300)                                                            # the answer is in, and the minute to the renewal has begun
+        page.clock.fast_forward(61_000)                                                       # the renewal: the agent lets a screen it hears nothing of go after three minutes
+        wait_for_calls(page, server, 2)
+        assert screens_said(server) == ["chat", "chat"]
+        page.clock.fast_forward(125_000)                                                      # nobody touches it: back to the meeting screen
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        for _ in range(100):
+            if screens_said(server)[-1:] == [""]:
+                break
+            page.wait_for_timeout(50)
+        assert screens_said(server)[-1] == ""
+        page.close()
+
+
+def test_a_zoom_call_is_told_no_screen_at_all(browser):
+    with PageServer(role="host") as server:
+        page = page_on_a_stopped_clock(browser, server)
+        join_by_id(page)
+        page.wait_for_function("document.querySelector('#meeting-secondary .button')", timeout=5000)
+        page.clock.run_for(600)
+        for words, view in (("Participants", "participants"), ("Chat", "chat"), ("Host", "host")):
+            open_sub_screen(page, words, view)
+            page.clock.run_for(600)
+            page.click(f"#back-from-{view}")
+            page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+            page.clock.run_for(600)
+        open_sub_screen(page, "Chat", "chat")
+        page.clock.fast_forward(125_000)
+        page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
+        page.wait_for_timeout(300)
+        assert screens_said(server) == []
+        page.close()
+
+
+def test_in_a_meet_call_mute_everyone_and_end_for_everyone_each_wait_for_a_second_tap(browser):
+    with PageServer() as server:
+        page = page_in_a_meet_call(browser, server, hosting=True)
+        open_sub_screen(page, "Host", "host")
+        page.clock.run_for(600)
+        assert texts(page, "#host-actions") == ["Mute everyone", "End call for everyone"]
+        page.locator("#host-actions .button", has_text="Mute everyone").click()
+        assert texts(page, "#host-actions")[0] == "Tap again to mute everyone"
+        page.locator("#host-actions .button", has_text="End call for everyone").click()       # the ask moves to End: Mute everyone has not been confirmed
+        assert texts(page, "#host-actions") == ["Mute everyone", "Tap again to end"]
+        page.wait_for_timeout(300)
+        assert [c for c in server.meeting.controls_called if c[0].startswith("host.")] == []     # two first taps have sent nothing
+        page.clock.run_for(600)
+        page.locator("#host-actions .button", has_text="Mute everyone").click()
+        page.clock.run_for(600)                                                               # the second tap is a deliberate one: within half a second it would be a bounce
+        page.locator("#host-actions .button", has_text="Tap again to mute everyone").click()
+        wait_for_calls(page, server, 2)
+        assert [c for c in server.meeting.controls_called if c[0].startswith("host.")] == [("host.mute_all", None)]
+        page.close()
+
+
+def test_chat_send_empties_the_box_only_when_it_was_carried_out_and_a_refusal_is_said_on_the_chat_screen(browser):
+    from croom.meeting.providers.base import MeetingControlError
+    with PageServer() as server:
+        page = page_in_a_meet_call(browser, server)
+        open_sub_screen(page, "Chat", "chat")
+        wait_for_calls(page, server, 1)                                                      # the screen's own signal is in before the refusal is set
+        page.clock.run_for(600)
+        page.fill("#chat-input", "see you at two")
+        server.meeting.fail_control = MeetingControlError("Meet's message box isn't ready; nothing was sent")
+        page.click("#chat-send")
+        page.wait_for_function("document.getElementById('chat-message').textContent.includes('nothing was sent')", timeout=5000)
+        assert page.input_value("#chat-input") == "see you at two"                           # still there, to send again
+        server.meeting.fail_control = None
+        page.click("#chat-send")
+        page.wait_for_function("document.getElementById('chat-input').value === ''", timeout=5000)
+        assert ("chat.send", "see you at two") in server.meeting.controls_called and page.locator("#chat-message").inner_text() == ""
         page.close()

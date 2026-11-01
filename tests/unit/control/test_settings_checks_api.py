@@ -175,3 +175,14 @@ async def test_logs_refusals(client_factory, admin, journal, pins, unlocked):  #
     admin.gone = True
     response = await client.get("/api/settings/logs", headers=unlocked)
     assert response.status == 503 and (await response.json())["error"] == "Not available on this device"
+
+
+async def test_the_meet_capture_asks_for_the_pin_and_a_meet_call(client_factory, pins, unlocked, tmp_path):  # noqa: F811
+    """POST/GET /api/settings/meet-capture (spec 2026-10-30 Meet controls, section 3): behind the PIN, and refused in words outside a Meet call."""
+    client = await client_factory(make_service(pin_store=pins, meeting=StubMeeting(), capture_dir=str(tmp_path)))
+    for response in (await client.post("/api/settings/meet-capture", json={}), await client.get("/api/settings/meet-capture")):
+        assert response.status == 401 and (await response.json())["error"] == "Enter the PIN"
+    response = await client.post("/api/settings/meet-capture", json={"screenshots": False}, headers=unlocked)
+    assert response.status == 409 and (await response.json())["error"] == "Join a Google Meet call first"
+    response = await client.get("/api/settings/meet-capture", headers=unlocked)
+    assert response.status == 404 and (await response.json())["error"] == "No capture of Google Meet yet"

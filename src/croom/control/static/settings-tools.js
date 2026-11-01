@@ -4,6 +4,10 @@
 // shows what it says in a block of its own, which scrolls inside itself; each check's last answer is kept while the page is open, and a
 // press on a check that is running shows it running. Check needs no root helper.
 //
+// Capture Google Meet (spec 2026-10-30 Meet controls, section 3), on the Check page: while the room is in a Meet call, the TV opens Meet's
+// panels one after another, records them and closes them; the page says what each step did, and Download takes the newest capture's zip.
+// The Screenshots switch (on unless turned off) leaves the screenshots out.
+//
 // Logs: the room software's log, newest first, through the root helper: All, or Warnings and errors; Load more adds the page before
 // the oldest shown. A room without the helper says "Not available on this device".
 (function () {
@@ -18,6 +22,10 @@
     { key: "google", label: "Google sign-in", icon: "user" },
     { key: "zoom", label: "Zoom keys", icon: "video" },
   ];
+  const CAPTURE = { key: "capture", label: "Capture Google Meet", busy: "capturing, about 30 seconds…" };
+  const DOWNLOAD = { key: "download", label: "Download", busy: "downloading…" };
+  const CAPTURE_STEPS = { call: "The call", chat: "Chat", people: "People", reactions: "Reactions", more_options: "More options",
+    layout: "Change layout", own_tile: "The room's tile menu", host_controls: "Host controls", dialogs: "Boxes on the screen" };
   const LEVELS = [
     { key: "all", label: "All" },
     { key: "warning", label: "Warnings and errors" },
@@ -64,7 +72,27 @@
       buttons[check.key] = b;
       bar.append(b);
     }
-    root.append(help, bar, verdict, output);
+    const captureBar = make("div", "tool-bar capture-bar");
+    captureBar.setAttribute("role", "group");
+    captureBar.setAttribute("aria-label", "Capture Google Meet");
+    const capture = button(CAPTURE.label, "quiet capture-run", "record");
+    capture.setAttribute("aria-pressed", "false");
+    capture.addEventListener("click", runCapture);
+    buttons[CAPTURE.key] = capture;
+    let screenshots = true;
+    const shots = button("", "quiet capture-screenshots");
+    shots.setAttribute("role", "switch");
+    const drawShots = () => { shots.setAttribute("aria-checked", String(screenshots)); shots.textContent = "Screenshots: " + (screenshots ? "On" : "Off"); };
+    shots.addEventListener("click", () => { screenshots = !screenshots; drawShots(); });
+    drawShots();
+    const download = button(DOWNLOAD.label, "quiet capture-download", "save");
+    download.setAttribute("aria-pressed", "false");
+    download.addEventListener("click", runDownload);
+    buttons[DOWNLOAD.key] = download;
+    captureBar.append(capture, shots, download);
+    const captureHelp = make("p", "tool-note", "Capture Google Meet works during a Meet call: the TV opens Meet's panels one by one and records them. " +
+      "Names, email addresses and chat are replaced in the recording; the screenshots show the TV as it is.");
+    root.append(help, bar, captureHelp, captureBar, verdict, output);
     host.append(root);
 
     function show(check) {
@@ -74,7 +102,7 @@
       verdict.classList.remove("ok", "failed");
       if (!result) { verdict.textContent = ""; output.hidden = true; return; }
       if (result.running) {
-        verdict.textContent = check.label + ": checking…";
+        verdict.textContent = check.label + ": " + (check.busy || "checking…");
         output.hidden = true;
         return;
       }
@@ -84,21 +112,21 @@
         output.hidden = true;
         return;
       }
-      verdict.textContent = check.label + ": " + (result.ok ? "passed" : "did not pass");
+      verdict.textContent = check.label + ": " + (result.verdict || (result.ok ? "passed" : "did not pass"));
       verdict.classList.add(result.ok ? "ok" : "failed");
-      output.textContent = result.text;
-      output.hidden = false;
+      output.textContent = result.text || "";
+      output.hidden = !result.text;
       output.scrollTop = 0;
     }
 
-    async function run(check) {
+    async function run(check, work) {
       if (results[check.key] && results[check.key].running) { show(check); return; }
       results[check.key] = { running: true };
       buttons[check.key].classList.add("running");
       show(check);
       let result;
       try {
-        result = await S.post("/api/settings/checks/" + encodeURIComponent(check.key), {});
+        result = await (work ? work() : S.post("/api/settings/checks/" + encodeURIComponent(check.key), {}));
       } catch (e) {
         if (gone || e.locked) return;
         result = { error: e.message };
@@ -107,6 +135,41 @@
       results[check.key] = result;
       buttons[check.key].classList.remove("running");
       if (shown === check) show(check);
+    }
+
+    // What each step of the capture did, a line each; the verdict says whether anything was left open on the TV.
+    function runCapture() {
+      run(CAPTURE, async () => {
+        const answer = await S.post("/api/settings/meet-capture", { screenshots: screenshots });
+        const steps = answer.steps || [];
+        const lines = steps.map((step) => (CAPTURE_STEPS[step.name] || step.name) + ": " + (
+          !step.opened ? "not opened" + (step.why ? " (" + step.why + ")" : "")
+            : step.closed === false ? "opened, and left open on the TV" : step.closed ? "opened and closed" : "recorded"));
+        const leftOpen = steps.some((step) => step.closed === false);
+        return { ok: !leftOpen, verdict: leftOpen ? "saved, but something was left open on the TV" : "saved; Download takes the file",
+                 text: ["File: " + answer.file].concat(lines).join("\n") };
+      });
+    }
+
+    // The newest capture's zip, with this screen's unlock (a plain link would not carry it).
+    function runDownload() {
+      run(DOWNLOAD, async () => {
+        const response = await fetch("/api/settings/meet-capture", { headers: { "x-croom-unlock": S.token() || "" } });
+        if (!response.ok) {
+          let words = "";
+          try { words = (await response.json()).error || ""; } catch (e) { words = ""; }
+          return { error: words || "Request failed (" + response.status + ")" };
+        }
+        const name = (/filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "") || [])[1] || "meet-capture.zip";
+        const link = make("a");
+        link.href = URL.createObjectURL(await response.blob());
+        link.download = name;
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+        return { ok: true, verdict: "saved as " + name };
+      });
     }
 
     return () => { gone = true; };

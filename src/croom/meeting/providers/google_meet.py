@@ -14,6 +14,7 @@ from typing import Optional, Dict, Any, List, Tuple
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE
 from croom.core.logs import DIALOGS_LOGGER
+from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
 from croom.meeting.meet_page import PRESS_DIALOG, READ_DIALOGS
 from croom.meeting.providers.base import (
     DialogPolicy,
@@ -626,6 +627,7 @@ class GoogleMeetProvider(MeetingProvider):
         self._dialogs: List[Dict[str, Any]] = []                      # the boxes waiting for a tap on the table, oldest first
         self._last_answer = float("-inf")                             # when the provider last pressed a notice's button by itself
         self._dialogs_warned = False                                  # a reading that fails is said once for a call
+        self._dialog_loop_warned = False                              # and one that fails unexpectedly, too
         if self._current_meeting is not None:
             self._current_meeting.dialog = None
 
@@ -635,9 +637,15 @@ class GoogleMeetProvider(MeetingProvider):
         return (str(dialog.get("title") or ""), str(dialog.get("text") or ""))
 
     async def _read_dialogs_regularly(self) -> None:
-        """For as long as the call lasts, read Meet's boxes: at once (a notice Meet shows as the call opens), then every DIALOG_INTERVAL_S."""
+        """For as long as the call lasts, read Meet's boxes: at once (a notice Meet shows as the call opens), then every DIALOG_INTERVAL_S.
+        A reading that fails in a way nobody expected is said once for the call (with its trace), and the readings go on."""
         while self._state == MeetingState.CONNECTED:
-            await self._read_dialogs()
+            try:
+                await self._read_dialogs()
+            except Exception:  # noqa: BLE001 - one bad reading must not end the readings for the rest of the call
+                if not self._dialog_loop_warned:
+                    self._dialog_loop_warned = True
+                    logger.exception("Reading Meet's boxes failed; the readings go on")
             await asyncio.sleep(self.DIALOG_INTERVAL_S)
 
     async def _read_dialogs(self) -> None:
@@ -760,6 +768,24 @@ class GoogleMeetProvider(MeetingProvider):
             self._take_off_the_table(dialog_id)   # the box itself is forgotten by the reading that no longer sees it
         info = self._current_meeting
         return {"dialog": info.dialog if info is not None else None}
+
+    # ------------------------------------------------------------------
+    # The capture (spec 2026-10-30 Meet controls, section 3)
+    # ------------------------------------------------------------------
+
+    async def capture(self, directory: Path, screenshots: bool = True) -> Dict[str, Any]:
+        """Record Meet's panels on the TV (croom.meeting.meet_capture) into a zip in `directory`: {"file", "steps": [{"name", "opened",
+        "why"?, "closed"?}]}. The box reader is held for the whole run, so a panel the capture opens that Meet draws as a dialog (Change
+        layout) is neither judged nor put on the table; it is closed before the reader reads again."""
+        if self._page is None or self._state != MeetingState.CONNECTED:
+            raise MeetingControlError(JOIN_MEET_FIRST)
+        capture = MeetCapture(self._page, screenshots=screenshots, room_name=self._room_name)
+        async with self._dialog_turn:
+            result = await capture.run()
+        path = await asyncio.to_thread(save_capture, result, capture.images, Path(directory))
+        logger.info(f"Captured Meet's page into {path}")
+        steps = [{key: step[key] for key in ("name", "opened", "why", "closed") if key in step} for step in result["steps"]]
+        return {"file": path.name, "steps": steps}
 
     async def _stop_reading(self) -> None:
         """Stop the regular readings (the buttons and the boxes) and wait for them to be over: what the provider starts on its own never

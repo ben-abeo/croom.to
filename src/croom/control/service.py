@@ -30,6 +30,7 @@ from croom.core.config import CONFIG_PATHS, DEFAULT_COMPANY, Config
 from croom.core.service import Service
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
+from croom.meeting.meet_capture import ALREADY_CAPTURING, JOIN_MEET_FIRST, NO_CAPTURE, newest_capture
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
 from croom.settings.apk import ApkError, ApkStore
@@ -340,6 +341,11 @@ class ControlService(Service):
                 Path(self.config["settings_file"]).parent / "door-sign" if self.config.get("settings_file") else None)
             apks = ApkStore(github, Path(apk_dir)) if apk_dir else None
         self._apks = apks
+        # Where Settings › Check's capture of Google Meet goes (the data directory), and whether one runs now
+        capture_dir = self.config.get("capture_dir") or (
+            Path(self.config["settings_file"]).parent if self.config.get("settings_file") else None)
+        self._capture_dir: Optional[Path] = Path(capture_dir) if capture_dir else None
+        self._capturing = False
         self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
                                                                 discover=discover)
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
@@ -385,6 +391,7 @@ class ControlService(Service):
                 "pin_file": str(data_dir / "settings-pin.json"),
                 "devices_file": str(data_dir / "devices.json"),
                 "apk_dir": str(data_dir / "door-sign"),
+                "capture_dir": str(data_dir),
                 "config_file": CONFIG_PATHS[0],
             },
             meeting=meeting,
@@ -481,6 +488,8 @@ class ControlService(Service):
         app.router.add_post("/api/settings/google/sign-in/cancel", self._handle_sign_in_cancel)
         app.router.add_post("/api/settings/checks/{name}", self._handle_check)
         app.router.add_get("/api/settings/logs", self._handle_logs)
+        app.router.add_post("/api/settings/meet-capture", self._handle_meet_capture)
+        app.router.add_get("/api/settings/meet-capture", self._handle_meet_capture_file)
         app.router.add_get("/api/settings/software", self._handle_software)
         app.router.add_post("/api/settings/software/update", self._handle_software_update)
         app.router.add_post("/api/settings/software/rollback", self._handle_software_rollback)
@@ -1610,6 +1619,48 @@ class ControlService(Service):
             return self._error_response(f"There is no check {name}", 404)
         except CheckBusy as e:
             return self._error_response(str(e), 409)
+
+    async def _handle_meet_capture(self, request: web.Request) -> web.Response:
+        """Settings › Check's Capture Google Meet (spec 2026-10-30 Meet controls, section 3): {"screenshots": bool, true unless said}. The
+        TV opens Meet's panels one after another, records them and closes them (within a minute): {"file", "steps": [{"name", "opened",
+        "why"?, "closed"?}]}. 409 "Join a Google Meet call first" unless the room is in one, and while a capture runs. Needs no helper."""
+        refused = self._require_unlock(request)
+        if refused is None:
+            refused = self._require_json(request)
+        if refused is not None:
+            return refused
+        data = await self._read_object(request)
+        if data is None:
+            return self._error_response("Send a JSON object", 400)
+        screenshots = data.get("screenshots", True)
+        if not isinstance(screenshots, bool):
+            return self._error_response("screenshots is true or false", 400)
+        meeting = self._meeting.current_meeting if self._meeting is not None else None
+        if self._meeting_state() != "connected" or meeting is None or getattr(meeting, "platform", None) != "google_meet":
+            return self._error_response(JOIN_MEET_FIRST, 409)
+        if self._capturing or self._capture_dir is None:
+            return self._error_response(ALREADY_CAPTURING if self._capturing else NOT_AVAILABLE, 409 if self._capturing else 503)
+        self._capturing = True
+        try:
+            return web.json_response(await self._meeting.capture_meet(self._capture_dir, screenshots=screenshots))
+        except MeetingControlError as e:
+            return self._error_response(first_line(e), 409)
+        except Exception as e:  # noqa: BLE001 - the call ending as the capture ran, say: words, never a 500
+            logger.warning(f"The capture of Google Meet failed: {first_line(e)}", exc_info=True)
+            return self._error_response(f"The capture failed: {first_line(e)}", 409)
+        finally:
+            self._capturing = False
+
+    async def _handle_meet_capture_file(self, request: web.Request) -> web.Response:
+        """The newest capture of Google Meet, as a download; 404 when there is none."""
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        path = newest_capture(self._capture_dir)
+        if path is None:
+            return self._error_response(NO_CAPTURE, 404)
+        return web.FileResponse(path, headers={"Content-Type": "application/zip",
+                                               "Content-Disposition": f'attachment; filename="{path.name}"'})
 
     LOG_LEVELS = ("all", "warning")
     LOG_LINES = 200

@@ -89,14 +89,14 @@ def in_a_call(page):
     return provider, provider._current_meeting
 
 
-async def test_the_photos_notice_is_pressed_once_and_its_sentence_kept_on_the_notice_line():
+async def test_the_photos_notice_is_pressed_once_with_no_notice_line():
     assert "others may see your video differently" in Config().meeting.dialogs.acknowledge
     page = StandInPage(NOTICE)
     provider, info = in_a_call(page)
     await provider._read_dialogs()
     await provider._read_dialogs()
     assert page.presses == [(NOTICE["title"], "Got it")]
-    assert info.notice == "Your self view tile may show less of your background than others see."
+    assert info.notice == ""                           # a tip, not a disclosure: nothing for the notice line
     assert info.dialog is None
 
 
@@ -145,5 +145,5 @@ async def test_the_notice_meet_shows_as_the_room_joins_is_pressed_right_after_th
             break
         await asyncio.sleep(0.05)
     assert await provider._page.evaluate(READ_DIALOGS) == []
-    assert info.notice == "Your self view tile may show less of your background than others see."
+    assert info.notice == ""                           # pressed, and a tip puts nothing on the notice line
     assert info.dialog is None

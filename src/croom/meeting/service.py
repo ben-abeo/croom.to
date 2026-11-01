@@ -19,6 +19,7 @@ from croom.meeting.providers.base import (
     MeetingState,
     detect_platform,
 )
+from croom.meeting.meet_capture import JOIN_MEET_FIRST
 from croom.meeting.providers import build_provider, get_all_providers
 from croom.meeting.display import TvDisplay
 from croom.meeting.signin_session import (
@@ -361,6 +362,14 @@ class MeetingService(Service):
             return {}
         reader = getattr(self._active_provider, "diagnostics", None)
         return await reader() if reader is not None else {}
+
+    async def capture_meet(self, directory: Path, screenshots: bool = True) -> Dict[str, Any]:
+        """Settings › Check's capture of Google Meet's page (spec 2026-10-30 Meet controls, section 3), into a zip in `directory`; refused
+        in words (a MeetingControlError) unless the room is in a Google Meet call."""
+        provider = self._active_provider
+        if provider is None or provider.name != "google_meet" or provider.state != MeetingState.CONNECTED:
+            raise MeetingControlError(JOIN_MEET_FIRST)
+        return await provider.capture(directory, screenshots=screenshots)
 
     async def set_camera(self, on: bool) -> bool:
         """Set camera state."""

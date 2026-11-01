@@ -573,9 +573,10 @@
   const dialogKey = { key: null };
   let shownDialog = "";   // the dialog the card showed at the last render, by its number and its labels ("" for none)
   const answerDialog = (id, label) => request("dialog", "/api/meeting/dialog", { id: id, button: label });
-  const dialogTitle = (d) => (String(d.title || "").trim() ? String(d.title) : "Zoom asks");   // only a title that is empty gets the fallback
+  // Only a title that is empty gets the fallback, which names the platform that asks (a Meet box has its own; anything else is Zoom's).
+  const dialogTitle = (d, platform) => (String(d.title || "").trim() ? String(d.title) : platform === "google_meet" ? "Meet asks" : "Zoom asks");
 
-  function renderDialog(d) {
+  function renderDialog(d, platform) {
     const labels = d && Array.isArray(d.buttons) ? d.buttons : [];
     const shown = d ? JSON.stringify([d.id, labels]) : "";
     if (shown !== shownDialog) {
@@ -594,7 +595,7 @@
       shownDialog = shown;
     }
     el("meeting-dialog").hidden = !d;
-    el("dialog-title").textContent = d ? dialogTitle(d) : "";
+    el("dialog-title").textContent = d ? dialogTitle(d, platform) : "";
     const text = d ? String(d.text || "") : "";
     el("dialog-text").textContent = text;
     el("dialog-text").title = text;   // the whole of it, for when the card cuts it short (read by nobody on a kiosk, and harmless)
@@ -641,7 +642,7 @@
     const notice = live ? m.notice || "" : "";
     el("meeting-notice").textContent = notice;
     el("meeting-notice").title = notice;   // the whole of it, for when the line cuts it short at two lines (read by nobody on a kiosk, and harmless)
-    renderDialog(live ? m.dialog : null);
+    renderDialog(live ? m.dialog : null, live ? m.platform : "");
     const choices = live ? reactionChoices(m.controls || {}) : [];
     const picking = choices.length > 0 && reactionsOpen();
     if (shownReactionRow && !picking) model.ignoreUntil = Date.now() + UNCOVERED_TAP_MS;

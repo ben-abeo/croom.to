@@ -140,6 +140,10 @@ class DialogPolicy:
     STATE_ONLY = ("has been muted", "has been unmuted", "have been muted", "have been unmuted",
                   "recording has stopped", "transcription has stopped")
 
+    # Notices that are a tip, not a disclosure: pressed as any other on the list, with no line under the title (Meet's "Others may see
+    # your video differently", which shows as a call opens).
+    TIPS = ("others may see your video differently",)
+
     # Buttons that are never pressed for the room, whatever the notice around them says: one that leaves or ends the meeting (Leave, Leave Meeting, End,
     # End Meeting, Exit, Quit), found as a whole word of its label, in any case. A notice whose only button is one of them would walk the room out of its
     # own meeting by policy, and the line under the title would say all was well. It waits on the table instead, where a person taps it or not.
@@ -189,7 +193,10 @@ class DialogPolicy:
         recorded, transcribed, AI Companion) without only saying that a state changed, else the first; empty when the one chosen only says
         a state changed. A stop is judged by its own sentence: the one beside it ("This meeting is being recorded again") may be what the
         meeting discloses, and the stop must not take it away. A sentence ends at a full stop, an exclamation mark or a question mark and the
-        space after it, and the line keeps the mark it ended with (a sentence with none, or a full stop, ends the line with a full stop)."""
+        space after it, and the line keeps the mark it ended with (a sentence with none, or a full stop, ends the line with a full stop).
+        A tip (TIPS) has no line."""
+        if any(tip in self._words(dialog) for tip in self.TIPS):
+            return ""   # a tip says nothing the room must be told
         text = (dialog.get("text") or dialog.get("title") or "").strip()
         sentences = [part.strip().rstrip(".") for part in self.SENTENCE_END.split(text)]
         sentences = [sentence for sentence in sentences if sentence]

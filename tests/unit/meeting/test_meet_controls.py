@@ -675,7 +675,7 @@ async def test_meet_diagnostics_list_the_labels_the_page_draws_what_the_reader_m
         ("button", "", "Turn off microphone (ctrl + d)"), ("button", "", "Turn on camera (ctrl + e)"), ("button", "", "Raise hand (ctrl + alt + h)"),
         ("button", "", "Turn on captions (c)"), ("button", "", "Show everyone (3)"), ("button", "", "Leave call"), ("input", "", "Send a message")]
     assert data["reading"] == {"mute": {"on": True}, "camera": {"on": False}, "raise_hand": {"on": False}, "captions": {"on": False},
-                               "people": {"count": 3}, "taken": False}
+                               "people": {"count": 3}, "taken": False, "chat_unread": 0, "hosting": False, "panels": []}
     assert data["focus"] == "body"
     page = provider._page
     await page.focus("#chat")

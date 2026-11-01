@@ -15,7 +15,7 @@ from typing import Optional, Dict, Any, List, Tuple
 from croom.core.config import DEFAULT_ACKNOWLEDGE
 from croom.core.logs import DIALOGS_LOGGER
 from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
-from croom.meeting.meet_page import PRESS_DIALOG, READ_DIALOGS
+from croom.meeting.meet_page import MEET, PRESS_DIALOG, READ_CALL, READ_DIALOGS
 from croom.meeting.providers.base import (
     DialogPolicy,
     MeetingControlError,
@@ -36,38 +36,6 @@ try:
 except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
-# One reading of Meet's call page (spec 2026-10-13, section 4.5). Each control's button is found by a label that names what pressing it does, and
-# its state is what that label says: "Turn off camera" means the camera is on, "Lower hand" means the hand is up. A button the page does not have,
-# or whose label names no such action, reads as null. `people` is the people button with the number in its label or its text; `taken` is whether
-# something that takes typing has the keyboard (a text field, the chat box, an editable area, a frame, say).
-READ_CALL = r"""() => {
-  // Only what is drawn counts: a copy the page keeps out of sight is not the button. Two drawn buttons that say different things say nothing (null).
-  const labelled = [...document.querySelectorAll("[aria-label]")].filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
-  const find = (pattern) => labelled.find((el) => pattern.test(el.getAttribute("aria-label")));
-  const state = (pattern, said) => {
-    const says = labelled.filter((el) => pattern.test(el.getAttribute("aria-label"))).map((el) => el.getAttribute("aria-label").match(pattern)[1].toLowerCase() === said);
-    return says.length && says.every((on) => on === says[0]) ? { on: says[0] } : null;
-  };
-  const people = find(/show everyone|participants|^people\b/i);
-  const count = people && (people.getAttribute("aria-label").match(/\d+/) || people.textContent.match(/\d+/));
-  // Whether something that takes typing has the keyboard (the bare C would be typed into it): a text field, a list that selects by typing, an editable
-  // area, an element that says it is one, or a frame (what it holds is not seen from here). A button, a link, a menu item, a container: the key goes on to the page.
-  const held = document.activeElement;
-  const kind = (held && held.getAttribute && (held.getAttribute("type") || "text").toLowerCase()) || "";
-  const role = (held && held.getAttribute && (held.getAttribute("role") || "").toLowerCase()) || "";
-  const typing = Boolean(held && held !== document.body && (
-    held.isContentEditable || ["TEXTAREA", "SELECT", "IFRAME"].includes(held.tagName)
-    || (held.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "color", "hidden"].includes(kind))
-    || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)));
-  return {
-    mute: state(/turn (on|off) microphone/i, "off"),
-    camera: state(/turn (on|off) camera/i, "off"),
-    raise_hand: state(/(raise|lower) hand/i, "lower"),
-    captions: state(/turn (on|off) captions?/i, "off"),
-    people: people ? { count: count ? Number(count[0]) : null } : null,
-    taken: typing,
-  };
-}"""
 # What the table is told when the bare C key cannot go to the page: it would be typed into whatever has the keyboard (the chat box).
 KEYBOARD_TAKEN_WORDS = "Meet's chat box has the keyboard; close it on the TV first"
 # What a tap on a box that Meet has taken off the screen is told.
@@ -569,7 +537,7 @@ class GoogleMeetProvider(MeetingProvider):
 
     async def _look(self) -> Dict[str, Any]:
         """One reading of Meet's call page (READ_CALL), which the page must answer within LOOK_TIMEOUT_S."""
-        return await self._answered(self._page.evaluate(READ_CALL))
+        return await self._answered(self._page.evaluate(READ_CALL, MEET))
 
     async def _answered(self, evaluation) -> Any:
         """What the page answers to a call, or, when it has not within LOOK_TIMEOUT_S (a frozen tab), the words for the table."""

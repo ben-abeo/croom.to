@@ -3,13 +3,85 @@ The page scripts Google Meet's call page is read and driven with (spec 2026-10-3
 Meet makes to its page is fixed here. Each is a function of the page, run with `page.evaluate`, that returns plain data.
 
 Phase A: the boxes Meet draws over the call (its notices, "Someone wants to join", "Leave call?").
+Phase B: the call's buttons (READ_CALL), the panels the room opens (people, chat, host controls), the reactions picker, and the two drivers
+that press by label (PRESS_BY_LABEL) and give the chat box the keyboard (FOCUS_CHAT_BOX).
+"""
+
+import json
+
+# Every word and shortcut the room drives Meet with (Meet's English, not yet confirmed on a room Pi: the capture is what corrects it, here
+# and nowhere else). It is a page script's argument, as `MEET` or as the "meet" of a dict that carries the script's own arguments.
+# A list of words is a list of alternatives: an element matches when its accessibility label (its aria-label, else what its aria-labelledby
+# names, else its drawn text, else its title) starts with one of them, in any case and at a word's end ("Pin" is "Pin Pat to your main
+# screen" and not "Pinned"). A label is looked for in the order its alternatives are listed.
+MEET = {
+    "chat": {"labels": ["Chat with everyone", "Chat"], "shortcut": "Control+Alt+c"},             # the button that opens the chat panel
+    "people": {"labels": ["Show everyone", "People"], "shortcut": "Control+Alt+p"},             # the button that opens the people panel
+    "host_controls": ["Host controls"],         # the button that opens the host panel (drawn only for a host or co-host)
+    "reactions": ["Send a reaction", "Reactions"],
+    "more_options": ["More options"],
+    "change_layout": ["Change layout"],        # the more-options menu's item
+    "layouts": {"auto": ["Auto", "Auto (dynamic)"], "tiled": ["Tiled"], "spotlight": ["Spotlight"], "sidebar": ["Sidebar"]},
+    "hide_self": ["Hide self view", "Hide yourself"],
+    "show_self": ["Show self view", "Show yourself"],
+    "pin": ["Pin"],
+    "unpin": ["Unpin"],
+    "chat_box": ["Send a message", "Send a message to everyone"],            # the message box (a text field) ...
+    "chat_send": ["Send a message", "Send message", "Send"],                 # ... and its button (a button: the box has the same words)
+    "admit": ["Admit"],
+    "deny": ["Deny", "Deny entry"],
+    "admit_all": ["Admit all"],
+    "remove": ["Remove from the call", "Remove"],
+    "mute_all": ["Mute all", "Mute everyone"],
+    "end_for_all": ["End the call for everyone", "End call for everyone"],
+    "waiting": ["Waiting to join", "Waiting to be admitted"],              # the heading or label of the people panel's section of knocks
+    "host_switches": {"share_screen": ["Share their screen"], "chat": ["Send chat messages"], "reactions": ["Send reactions"],
+                      "microphone": ["Turn on their microphone"], "video": ["Turn on their video"], "quick_access": ["Quick access"]},
+    # What names a side panel, kept to what only it is called: the whole title, label or first heading of a panel's container (Meet's
+    # "In-call messages", a trailing " panel" ignored). A container that is an <aside> or a [role=complementary] is a panel whatever it is called.
+    "panel_names": {"chat": ["In-call messages", "Chat"], "people": ["People", "Participants"], "host": ["Host controls"], "activities": ["Activities"]},
+    # What marks a person's row in the people panel: its microphone is off (a label or an icon's word on it), its tile is pinned.
+    "muted": ["Muted", "Microphone is off", "Mic is off", "mic_off"],
+    "pinned": ["Pinned"],
+}
+
+# The side panels the room opens (chat, people, host controls, activities), known by their structure and never taken for a box (Review Focus 2,
+# Meet controls plan Phase B): a container (an <aside>, a [role=complementary], a dialog, a region, a tab panel) is a panel when it is an <aside>
+# or [role=complementary], or when its aria-labelledby, aria-label or first drawn heading is the name of one (PANEL_NAMES: the whole title, in
+# any case, a trailing " panel" left off). `insideSide(el)` says an element is, or is inside, a panel; `openPanels()` gives the drawn panel
+# that is the chat, the people or the host controls, by kind (the first of each). It needs `clean`, `drawn` and PANEL_NAMES.
+_SIDE = r"""
+  const CONTAINERS = 'aside, [role="complementary"], [role="dialog"], [role="alertdialog"], [role="region"], [role="tabpanel"]';
+  const SIDE_TAGS = 'aside, [role="complementary"]';
+  const titlesOf = (el) => {
+    const by = (el.getAttribute("aria-labelledby") || "").split(/\s+/).map((id) => id && document.getElementById(id)).filter(Boolean)
+      .map((n) => clean(n.innerText || n.textContent));
+    const heading = [...el.querySelectorAll('h1, h2, h3, h4, [role="heading"]')].find((h) => drawn(h) && !h.closest("button"));
+    return [...by, clean(el.getAttribute("aria-label")), heading ? clean(heading.innerText || heading.textContent) : ""].filter(Boolean);
+  };
+  const panelKindOf = (el) => {
+    if (!el.matches(CONTAINERS)) return null;
+    for (const title of titlesOf(el)) {
+      const bare = title.toLowerCase().replace(/ panel$/, "");
+      for (const [kind, words] of Object.entries(PANEL_NAMES)) if (words.some((w) => w.toLowerCase() === bare)) return kind;
+    }
+    return null;
+  };
+  const isSide = (el) => el.matches(SIDE_TAGS) || panelKindOf(el) !== null;
+  const insideSide = (el) => { for (let p = el; p; p = p.parentElement) if (isSide(p)) return true; return false; };
+  const sidePanels = () => [...document.querySelectorAll(CONTAINERS)].filter((el) => drawn(el) && isSide(el));
+  const openPanels = () => {
+    const found = {};
+    for (const el of sidePanels()) { const kind = panelKindOf(el); if (kind && !found[kind]) found[kind] = el; }
+    return found;
+  };
 """
 
 # What the two scripts below share: the boxes on the screen, each with its words and its buttons.
 #
 # A box is a drawn [role=dialog] or [role=alertdialog] with at least one drawn button (one with none asks nothing of anyone), and not one
-# inside another (that is a part of the outer box). Drawn: it takes up room on the screen, is not made invisible, and is not inside
-# something the page hides from assistive technology. Meet gives its boxes no ids: a box is known by its title and its words.
+# inside another (that is a part of the outer box), and not a side panel or inside one (_SIDE: a panel the room opened is never a box).
+# Drawn: it takes up room on the screen, is not made invisible, and is not inside something the page hides from assistive technology. Meet gives its boxes no ids: a box is known by its title and its words.
 #
 # Its title is what its aria-labelledby names, else its first heading, else its aria-label. Its words are what its aria-describedby names,
 # else its drawn text without the title's and the buttons'. A button's label is its aria-label, else its drawn text.
@@ -33,7 +105,7 @@ _BOXES = r"""
     return found.filter(Boolean).join(" ");
   };
   const boxes = () => [...document.querySelectorAll(BOX)]
-    .filter((box) => !(box.parentElement && box.parentElement.closest(BOX)) && drawn(box))
+    .filter((box) => !(box.parentElement && box.parentElement.closest(BOX)) && drawn(box) && !insideSide(box))
     .map((box) => {
       const buttons = buttonsOf(box);
       const labelledBy = named(box, "aria-labelledby"), describedBy = named(box, "aria-describedby");
@@ -44,7 +116,7 @@ _BOXES = r"""
       return { el: box, buttons: buttons, info: { title: title, text: text.slice(0, 400), buttons: buttons.map(labelOf) } };
     })
     .filter((box) => box.buttons.length > 0);
-"""
+""" + "  const PANEL_NAMES = " + json.dumps(MEET["panel_names"]) + ";\n" + _SIDE
 
 # Every box on the screen now, as [{"title", "text", "buttons": [labels, in order]}].
 READ_DIALOGS = "() => {" + _BOXES + "  return boxes().map((box) => box.info);\n}"
@@ -225,4 +297,250 @@ GATHER_PRIVATE = "([kind, keys]) => {" + _DRAWN + _PANELS + r"""
     }
   }
   return { names: names.map(clean).filter(Boolean), messages: messages.map(clean).filter(Boolean) };
+}"""
+
+
+# --- Phase B (spec 2026-10-30 Meet controls, sections 4 and 5): the call's buttons and panels, read and driven by MEET's words.
+
+# What the scripts below share, on top of _DRAWN and _SIDE (and `M`, the MEET table, which each script is given): the words an element is
+# known by (`nameOf`: its aria-label, else what its aria-labelledby names, else its drawn text, else its title), `starts` (whether a text
+# starts with one of a list of words, in any case and at a word's end), the elements a press is made on, and the text drawn in an element
+# piece by piece (not an icon's, not a button's, not what is inside `skip`).
+_WORDS = r"""
+  const PRESSABLE = 'button, [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"], [role="option"], [role="switch"], [role="checkbox"]';
+  const ICONS = 'i, svg, [aria-hidden="true"], [class*="material-icons"], [class*="material-symbols"], [class*="google-material-icons"], [class*="google-symbols"]';
+  const nameOf = (el) => {
+    const by = (el.getAttribute("aria-labelledby") || "").split(/\s+/).map((id) => id && document.getElementById(id)).filter(Boolean)
+      .map((n) => clean(n.innerText || n.textContent)).join(" ");
+    return clean(el.getAttribute("aria-label")) || by || clean(el.innerText) || clean(el.getAttribute("title"));
+  };
+  const starts = (text, words) => {
+    const t = clean(text).toLowerCase();
+    return Boolean(t) && words.some((w) => { const x = w.toLowerCase(); return t.startsWith(x) && !/[a-z0-9]/.test(t.charAt(x.length)); });
+  };
+  const shown = (el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden";
+  const enabled = (el) => !el.disabled && el.getAttribute("aria-disabled") !== "true";
+  const pieces = (root, skip) => {
+    const found = [], walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const owner = walker.currentNode.parentElement, piece = clean(walker.currentNode.nodeValue);
+      if (!piece || !owner || !drawn(owner) || owner.closest(ICONS) || owner.closest('button, [role="button"]')) continue;
+      if ((skip || []).some((el) => el.contains(owner))) continue;
+      found.push(piece);
+    }
+    return found;
+  };
+"""
+
+# One reading of Meet's call page (spec 2026-10-13, section 4.5; Phase B adds the last three). Each control's button is found by a label that
+# names what pressing it does, and its state is what that label says: "Turn off camera" means the camera is on, "Lower hand" means the hand is
+# up. A button the page does not have, or whose label names no such action, reads as null. `people` is the people button with the number in its
+# label or its text; `taken` is whether something that takes typing has the keyboard (a text field, the chat box, an editable area, a frame,
+# say); `chat_unread` is the number on the chat button's label or badge (0 without one); `hosting` is whether the host controls button is drawn
+# (Meet draws it for a host and a co-host alike); `panels` is which of "chat", "people" and "host" is open now, in that order: a side panel drawn
+# by its structure (_SIDE), or its button saying it is pressed or expanded. Run with MEET (the table's words); without it, with this file's MEET.
+READ_CALL = "(meet) => {  const M = meet || " + json.dumps(MEET) + ";\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  // Only what is drawn counts: a copy the page keeps out of sight is not the button. Two drawn buttons that say different things say nothing (null).
+  const labelled = [...document.querySelectorAll("[aria-label]")].filter((el) => el.getClientRects().length > 0 && getComputedStyle(el).visibility !== "hidden");
+  const find = (pattern) => labelled.find((el) => pattern.test(el.getAttribute("aria-label")));
+  const state = (pattern, said) => {
+    const says = labelled.filter((el) => pattern.test(el.getAttribute("aria-label"))).map((el) => el.getAttribute("aria-label").match(pattern)[1].toLowerCase() === said);
+    return says.length && says.every((on) => on === says[0]) ? { on: says[0] } : null;
+  };
+  const people = find(/show everyone|participants|^people\b/i);
+  const count = people && (people.getAttribute("aria-label").match(/\d+/) || people.textContent.match(/\d+/));
+  // Whether something that takes typing has the keyboard (the bare C would be typed into it): a text field, a list that selects by typing, an editable
+  // area, an element that says it is one, or a frame (what it holds is not seen from here). A button, a link, a menu item, a container: the key goes on to the page.
+  const held = document.activeElement;
+  const kind = (held && held.getAttribute && (held.getAttribute("type") || "text").toLowerCase()) || "";
+  const role = (held && held.getAttribute && (held.getAttribute("role") || "").toLowerCase()) || "";
+  const typing = Boolean(held && held !== document.body && (
+    held.isContentEditable || ["TEXTAREA", "SELECT", "IFRAME"].includes(held.tagName)
+    || (held.tagName === "INPUT" && !["checkbox", "radio", "button", "submit", "reset", "image", "file", "range", "color", "hidden"].includes(kind))
+    || ["textbox", "searchbox", "combobox", "spinbutton"].includes(role)));
+  // Phase B: the buttons that open the panels, the unread count on the chat's, and which panels are open.
+  const buttons = [...document.querySelectorAll('button, [role="button"]')].filter(drawn);
+  const opener = (words) => buttons.find((b) => starts(nameOf(b), words));
+  const openers = { chat: opener(M.chat.labels), people: opener(M.people.labels), host: opener(M.host_controls) };
+  const chat = openers.chat;
+  let unread = 0;
+  if (chat) {
+    const label = clean(chat.getAttribute("aria-label"));
+    const said = label.match(/(\d+)\+?\s*(?:unread|new)/i) || label.match(/(?:unread|new)\D{0,12}(\d+)/i) || label.match(/\((\d+)\)/);
+    const badge = [...chat.querySelectorAll("*")].filter((el) => shown(el) && !el.children.length).map((el) => clean(el.textContent))
+      .find((piece) => /^\d{1,3}\+?$/.test(piece));
+    unread = said ? Number(said[1]) : badge ? parseInt(badge, 10) : 0;
+  }
+  const open = openPanels();
+  const pressed = (b) => Boolean(b) && (b.getAttribute("aria-pressed") === "true" || b.getAttribute("aria-expanded") === "true");
+  return {
+    mute: state(/turn (on|off) microphone/i, "off"),
+    camera: state(/turn (on|off) camera/i, "off"),
+    raise_hand: state(/(raise|lower) hand/i, "lower"),
+    captions: state(/turn (on|off) captions?/i, "off"),
+    people: people ? { count: count ? Number(count[0]) : null } : null,
+    taken: typing,
+    chat_unread: unread,
+    hosting: Boolean(openers.host),
+    panels: ["chat", "people", "host"].filter((name) => open[name] || pressed(openers[name])),
+  };
+}"""
+
+# The people panel, as READ_PEOPLE and PRESS_BY_LABEL both find a person in it: `peopleRows()` is each drawn row of the people panel
+# ([role=listitem] or <li> with none inside it, not in a menu) as {el, id, name, me, waiting, pinned, muted}. A row's `id` is Meet's own
+# participant id (data-participant-id, or data-requested-participant-id, on the row, its parent or something inside it), else "name:" + the name.
+# Its name is its first piece of text that is neither "(You)" nor an email address, with "(You)" taken off; `me` is "(You)" anywhere in it.
+# A row is `waiting` when the nearest heading before it (or the label of a section around it) starts with MEET.waiting: Meet's section of knocks.
+_ROWS = r"""
+  const HEADING = 'h1, h2, h3, h4, [role="heading"]';
+  const waitingRow = (row, panel) => {
+    for (let a = row.parentElement; a && panel.contains(a); a = a.parentElement) {
+      if (starts(a.getAttribute("aria-label"), M.waiting)) return true;
+      const before = [...a.children].filter((c) => c.matches(HEADING) && (c.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING));
+      if (before.length) return starts(before[before.length - 1].innerText || before[before.length - 1].textContent, M.waiting);
+    }
+    return false;
+  };
+  const peopleRows = () => {
+    const panel = openPanels().people;
+    if (!panel) return [];
+    const ROW = '[role="listitem"], li';
+    return [...panel.querySelectorAll(ROW)]
+      .filter((row) => drawn(row) && !row.querySelector(ROW) && !row.closest('[role="menu"], [role="listbox"]'))
+      .map((row) => {
+        const texts = pieces(row), label = clean(row.getAttribute("aria-label"));
+        const me = /\(you\)/i.test(label) || texts.some((t) => /\(you\)/i.test(t) || /^you$/i.test(t));
+        const bare = (t) => clean(t.replace(/\(you\)/gi, ""));
+        const name = bare(texts.find((t) => bare(t) && !/^you$/i.test(t) && !/@/.test(t)) || label);
+        const idEl = row.closest("[data-participant-id], [data-requested-participant-id]") || row.querySelector("[data-participant-id], [data-requested-participant-id]");
+        const own = idEl && (idEl.getAttribute("data-participant-id") || idEl.getAttribute("data-requested-participant-id"));
+        const inside = [...row.querySelectorAll("*")];
+        return {
+          el: row, name: name, me: me, id: own || "name:" + name, waiting: waitingRow(row, panel),
+          pinned: inside.some((el) => shown(el) && (starts(el.getAttribute("aria-label"), M.pinned) || (el.matches(ICONS) && starts(el.textContent, M.pinned)) || (el.matches(PRESSABLE) && drawn(el) && starts(nameOf(el), M.unpin)))),
+          muted: inside.some((el) => shown(el) && (starts(el.getAttribute("aria-label"), M.muted) || (el.matches(ICONS) && starts(el.textContent, M.muted)))),
+        };
+      })
+      .filter((row) => row.name);
+  };
+"""
+
+# With the people panel open: {"people": [{"id", "name", "me", "pinned", "muted"}], "waiting": [{"id", "name"}]} (see _ROWS), in the order
+# the panel draws them; empty lists when it is not open. Two people with one name have two ids (Meet's own, else "name:" + the name, which
+# is the same for both: whoever acts on such an id must see that more than one row has it). Run with MEET.
+READ_PEOPLE = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + r"""
+  const rows = peopleRows();
+  return {
+    people: rows.filter((r) => !r.waiting).map((r) => ({ id: r.id, name: r.name, me: r.me, pinned: r.pinned, muted: r.muted })),
+    waiting: rows.filter((r) => r.waiting).map((r) => ({ id: r.id, name: r.name })),
+  };
+}"""
+
+# With the chat panel open: its last 20 messages [{"from", "text", "at"}], oldest first. A message is what Meet marks as one
+# (data-message-id), else a list item; its text is what Meet marks (data-message-text), else what is left of its drawn text after the time
+# and the sender; `at` is the time it shows ("10:42 AM"), or "". Empty when the panel is not open. Run with MEET.
+READ_CHAT = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  const panel = openPanels().chat;
+  if (!panel) return [];
+  const TIME = /^\d{1,2}:\d{2}(?:\s?[ap]\.?m\.?)?$/i;
+  let items = [...panel.querySelectorAll("[data-message-id]")].filter(drawn);
+  if (!items.length) items = [...panel.querySelectorAll('[role="listitem"], li')].filter((el) => drawn(el) && !el.querySelector('[role="listitem"], li'));
+  const messages = [];
+  for (const item of items) {
+    const marked = [...item.querySelectorAll("[data-message-text]")].filter(drawn);
+    const rest = pieces(item, marked).filter((piece) => !TIME.test(piece));
+    const at = pieces(item, marked).find((piece) => TIME.test(piece)) || "";
+    const text = marked.length ? marked.map((el) => clean(el.innerText || el.textContent)).join("\n") : rest.slice(1).join(" ");
+    if (text) messages.push({ from: rest[0] || "", text: text, at: at });
+  }
+  return messages.slice(-20);
+}"""
+
+# With the reactions picker open: the emoji it holds, in order, as strings. An emoji is a drawn button (or option, or menu item) that
+# is nothing but one (data-emoji, an image's alt, or its text), not one inside a side panel. Empty when the picker is not open. Run with MEET.
+READ_REACTIONS = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  const ONLY = /^[\p{Extended_Pictographic}‍️\u{1F3FB}-\u{1F3FF}\s]+$/u;
+  const found = [];
+  for (const el of document.querySelectorAll(PRESSABLE)) {
+    if (!drawn(el) || insideSide(el)) continue;
+    const image = el.querySelector("img[alt]");
+    const emoji = [el.getAttribute("data-emoji"), image && image.getAttribute("alt"), clean(el.innerText)].map(clean).find((t) => t && ONLY.test(t));
+    if (emoji && !found.includes(emoji)) found.push(emoji);
+  }
+  return found;
+}"""
+
+# With the host controls panel open: [{"key", "label", "on"}] for each switch of MEET.host_switches drawn in it (a switch, a checkbox or a
+# toggle button), in MEET's order: `label` is what Meet calls it (its label, else the label element or row of text it sits in), `on` whether
+# it is on. Empty when the panel is not open. Run with MEET.
+READ_HOST_SWITCHES = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  const panel = openPanels().host;
+  if (!panel) return [];
+  const rowText = (el) => {
+    for (let a = el.parentElement; a && panel.contains(a) && a !== panel; a = a.parentElement) {
+      const text = clean(a.innerText);
+      if (text && text.length <= 100) return text;
+    }
+    return "";
+  };
+  const nameOfSwitch = (el) => nameOf(el) || (el.labels && el.labels[0] ? clean(el.labels[0].innerText) : "") || rowText(el);
+  const controls = [...panel.querySelectorAll('[role="switch"], [role="checkbox"], input[type="checkbox"], button[aria-pressed], [aria-checked]')]
+    .filter(drawn).map((el) => ({ el: el, name: nameOfSwitch(el) }));
+  const found = [];
+  for (const [key, words] of Object.entries(M.host_switches)) {
+    const control = controls.find((c) => starts(c.name, words));
+    if (!control) continue;
+    const el = control.el;
+    found.push({ key: key, label: control.name, on: el.getAttribute("aria-checked") === "true" || el.getAttribute("aria-pressed") === "true" || el.checked === true });
+  }
+  return found;
+}"""
+
+# Press the drawn, enabled button, menu item, option or switch whose label starts with one of `labels` (looked for in the order given) and give
+# back the label pressed, or null when there is none (nothing is pressed). It takes {"meet": MEET, "labels": [words], "container": ...} and
+# the container, which says where to look, is one of:
+#   null (or missing)     anywhere on the page;
+#   "panel"               inside the open side panels (chat, people, host controls, activities, any <aside>);
+#   "menu"                inside the open menus ([role=menu], [role=listbox]);
+#   {"person": id}        inside the people panel's row with that id (as READ_PEOPLE gives it) and what the row's own buttons control
+#                         (aria-controls: its menu). An id that no row has, or that more than one row has ("name:" + a name two people
+#                         share), presses nothing: the caller says so in words. A text field is never pressed (only the elements above are).
+# A container with nothing in it, or nothing open, presses nothing.
+PRESS_BY_LABEL = "({ meet, labels, container }) => {  const M = meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + r"""
+  let roots = [document];
+  if (container === "panel") roots = sidePanels();
+  else if (container === "menu") roots = [...document.querySelectorAll('[role="menu"], [role="listbox"]')].filter(drawn);
+  else if (container && typeof container === "object") {
+    const rows = peopleRows().filter((row) => row.id === container.person);
+    if (rows.length !== 1) return null;
+    roots = [rows[0].el];
+    for (const el of rows[0].el.querySelectorAll("[aria-controls]")) {
+      for (const id of el.getAttribute("aria-controls").split(/\s+/)) { const owned = id && document.getElementById(id); if (owned) roots.push(owned); }
+    }
+  }
+  const candidates = roots.flatMap((root) => [...(root.matches && root.matches(PRESSABLE) ? [root] : []), ...root.querySelectorAll(PRESSABLE)])
+    .filter((el) => drawn(el) && enabled(el));
+  for (const word of labels) {
+    const button = candidates.find((el) => starts(nameOf(el), [word]));
+    if (button) { const label = nameOf(button); button.click(); return label; }
+  }
+  return null;
+}"""
+
+# Give Meet's chat message box the keyboard and say whether it has it now. The box is a drawn, enabled text field (a <textarea>, a text
+# <input>, an editable area, a [role=textbox]) named by one of MEET.chat_box; with several, the one inside the open chat panel; with none, or
+# no way to choose, nothing is focused and the answer is false: the caller types nothing (keys typed elsewhere in Meet are its shortcuts).
+# Run with MEET.
+FOCUS_CHAT_BOX = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + r"""
+  const FIELD = 'textarea, input, [contenteditable=""], [contenteditable="true"], [role="textbox"]';
+  const fieldName = (el) => nameOf(el) || clean(el.getAttribute("placeholder"));
+  const boxes = [...document.querySelectorAll(FIELD)].filter((el) => drawn(el) && enabled(el) && !el.readOnly
+    && !(el.tagName === "INPUT" && !["text", "search", ""].includes((el.getAttribute("type") || "").toLowerCase()))
+    && starts(fieldName(el), M.chat_box));
+  const chat = openPanels().chat;
+  const inChat = chat ? boxes.filter((el) => chat.contains(el)) : [];
+  const box = inChat.length === 1 ? inChat[0] : boxes.length === 1 ? boxes[0] : null;
+  if (!box) return false;
+  box.focus();
+  return document.activeElement === box;
 }"""

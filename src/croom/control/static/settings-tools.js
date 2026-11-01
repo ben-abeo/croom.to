@@ -4,9 +4,11 @@
 // shows what it says in a block of its own, which scrolls inside itself; each check's last answer is kept while the page is open, and a
 // press on a check that is running shows it running. Check needs no root helper.
 //
-// Capture Google Meet (spec 2026-10-30 Meet controls, section 3), on the Check page: while the room is in a Meet call, the TV opens Meet's
-// panels one after another, records them and closes them; the page says what each step did, and Download takes the newest capture's zip.
-// The Screenshots switch (on unless turned off) leaves the screenshots out.
+// Capture the next Google Meet call (spec 2026-10-30 Meet controls, section 3), on the Check page. Settings closes when a meeting starts
+// (the screen is shared), so the capture is armed beforehand: once the room has been in a Meet call for the delay chosen (1, 3 or 5
+// minutes), the TV opens Meet's panels one after another, records them and closes them, once. The arm lasts two hours and is forgotten when
+// the room software restarts. The page says whether it is armed, and what the last capture found, step by step; Download takes the newest
+// capture's zip. The Screenshots switch (on unless turned off) leaves the screenshots out.
 //
 // Logs: the room software's log, newest first, through the root helper: All, or Warnings and errors; Load more adds the page before
 // the oldest shown. A room without the helper says "Not available on this device".
@@ -22,8 +24,7 @@
     { key: "google", label: "Google sign-in", icon: "user" },
     { key: "zoom", label: "Zoom keys", icon: "video" },
   ];
-  const CAPTURE = { key: "capture", label: "Capture Google Meet", busy: "capturing, about 30 seconds…" };
-  const DOWNLOAD = { key: "download", label: "Download", busy: "downloading…" };
+  const DELAYS = [1, 3, 5];
   const CAPTURE_STEPS = { call: "The call", chat: "Chat", people: "People", reactions: "Reactions", more_options: "More options",
     layout: "Change layout", own_tile: "The room's tile menu", host_controls: "Host controls", dialogs: "Boxes on the screen" };
   const LEVELS = [
@@ -72,27 +73,43 @@
       buttons[check.key] = b;
       bar.append(b);
     }
+    // Capture the next Google Meet call: the arm, its Screenshots switch and delay, Cancel and Download; what it says, and the last capture.
+    const captureHelp = make("p", "tool-note", "Capture the next Google Meet call: a few minutes into the room's next Meet call, the TV opens " +
+      "Meet's panels one by one and records them. Names, email addresses and chat are replaced in the recording; the screenshots show the TV " +
+      "as it is. Armed for 2 hours; a restart of the room software forgets it.");
     const captureBar = make("div", "tool-bar capture-bar");
     captureBar.setAttribute("role", "group");
-    captureBar.setAttribute("aria-label", "Capture Google Meet");
-    const capture = button(CAPTURE.label, "quiet capture-run", "record");
-    capture.setAttribute("aria-pressed", "false");
-    capture.addEventListener("click", runCapture);
-    buttons[CAPTURE.key] = capture;
+    captureBar.setAttribute("aria-label", "Capture the next Google Meet call");
+    const arm = button("Capture the next Google Meet call", "quiet capture-arm", "record");
     let screenshots = true;
+    let delay = 3;
     const shots = button("", "quiet capture-screenshots");
     shots.setAttribute("role", "switch");
-    const drawShots = () => { shots.setAttribute("aria-checked", String(screenshots)); shots.textContent = "Screenshots: " + (screenshots ? "On" : "Off"); };
-    shots.addEventListener("click", () => { screenshots = !screenshots; drawShots(); });
-    drawShots();
-    const download = button(DOWNLOAD.label, "quiet capture-download", "save");
-    download.setAttribute("aria-pressed", "false");
+    const delayButtons = DELAYS.map((minutes) => {
+      const b = button(minutes + " min", "quiet capture-delay");
+      b.dataset.minutes = String(minutes);
+      b.addEventListener("click", () => { delay = minutes; drawChoices(); });
+      return b;
+    });
+    const drawChoices = () => {
+      shots.setAttribute("aria-checked", String(screenshots));
+      shots.textContent = "Screenshots: " + (screenshots ? "On" : "Off");
+      for (const b of delayButtons) b.setAttribute("aria-pressed", String(Number(b.dataset.minutes) === delay));
+    };
+    shots.addEventListener("click", () => { screenshots = !screenshots; drawChoices(); });
+    drawChoices();
+    const cancel = button("Cancel", "quiet capture-cancel", "x-circle");
+    const download = button("Download", "quiet capture-download", "save");
+    captureBar.append(arm, shots, ...delayButtons, cancel, download);
+    const captureState = make("p", "check-verdict capture-state");
+    captureState.setAttribute("role", "status");
+    const captureOutput = make("pre", "tool-output capture-output");
+    captureOutput.tabIndex = 0;
+    captureOutput.hidden = true;
+    arm.addEventListener("click", () => captureAsk({ arm: true, after_minutes: delay, screenshots: screenshots }));
+    cancel.addEventListener("click", () => captureAsk({ arm: false }));
     download.addEventListener("click", runDownload);
-    buttons[DOWNLOAD.key] = download;
-    captureBar.append(capture, shots, download);
-    const captureHelp = make("p", "tool-note", "Capture Google Meet works during a Meet call: the TV opens Meet's panels one by one and records them. " +
-      "Names, email addresses and chat are replaced in the recording; the screenshots show the TV as it is.");
-    root.append(help, bar, captureHelp, captureBar, verdict, output);
+    root.append(help, bar, verdict, output, captureHelp, captureBar, captureState, captureOutput);
     host.append(root);
 
     function show(check) {
@@ -137,46 +154,72 @@
       if (shown === check) show(check);
     }
 
-    // What each step of the capture did, a line each; the verdict says whether anything was left open on the TV.
-    function runCapture() {
-      run(CAPTURE, async () => {
-        const answer = await S.post("/api/settings/meet-capture", { screenshots: screenshots });
-        const steps = answer.steps || [];
+    // What the arm and the last capture are, in words: the arm, then the last capture with a line for each step.
+    function drawCapture(state, said) {
+      if (state.armed) { delay = state.after_minutes; screenshots = state.screenshots; drawChoices(); }   // the arm as it was made
+      const armed = state.running ? "Capturing Meet's page now."
+        : state.armed && state.runs_at ? "Armed: runs at " + state.runs_at + ", " + state.after_minutes + " min into this Google Meet call."
+        : state.armed ? "Armed until " + state.until + ": runs " + state.after_minutes + " min into the next Google Meet call" +
+                        (state.screenshots ? "." : ", without screenshots.")
+        : "Not armed.";
+      const last = state.last;
+      let summary = "", lines = [];
+      if (last && last.error) summary = " Last capture, " + last.at + ": " + last.error + ".";
+      else if (last) {
+        const steps = last.steps || [];
+        const count = (test) => steps.filter(test).length;
+        const open = count((s) => s.closed === false), unknown = count((s) => s.closed === "unknown");
+        summary = " Last capture, " + last.at + ": " + count((s) => s.opened) + " opened, " + count((s) => s.opened && s.closed === true) + " closed" +
+          (unknown ? ", " + unknown + " unknown — look at the TV" : "") + (open ? ", " + open + " left open on the TV" : "") + ".";
         // closed: true, false (a panel is still open), "unknown" (the page did not come back as it was: someone looks at the TV)
-        const after = (step) => step.closed === false ? ", and left open on the TV" : step.closed === "unknown" ? "; can't tell it closed: look at the TV" : "";
-        const lines = steps.map((step) => (CAPTURE_STEPS[step.name] || step.name) + ": " + (
+        const after = (step) => step.closed === false ? ", and left open on the TV" : step.closed === "unknown" ? "; unknown — look at the TV" : "";
+        lines = ["File: " + last.file].concat(steps.map((step) => (CAPTURE_STEPS[step.name] || step.name) + ": " + (
           !step.opened ? "not opened" + (step.why ? " (" + step.why + ")" : "") + after(step)
-            : step.closed === true ? "opened and closed" : "closed" in step ? "opened" + after(step) : "recorded"));
-        const leftOpen = steps.some((step) => step.closed === false);
-        const unsure = steps.some((step) => step.closed === "unknown");
-        return { ok: !leftOpen && !unsure,
-                 verdict: leftOpen ? "saved, but something was left open on the TV" : unsure ? "saved; look at the TV, something may be left open"
-                   : "saved; Download takes the file",
-                 text: ["File: " + answer.file].concat(lines).join("\n") };
-      });
+            : step.closed === true ? "opened and closed" : "closed" in step ? "opened" + after(step) : "recorded")));
+      } else if (state.newest) summary = " Newest file: " + state.newest + ".";
+      captureState.textContent = (said ? said + " " : "") + armed + summary;
+      captureState.classList.toggle("failed", Boolean(last && (last.error || (last.steps || []).some((s) => s.closed !== undefined && s.closed !== true))));
+      cancel.disabled = !state.armed;
+      captureOutput.textContent = lines.join("\n");
+      captureOutput.hidden = !lines.length;
+    }
+
+    async function captureAsk(body) {
+      try {
+        drawCapture(body ? await S.post("/api/settings/meet-capture", body) : await S.api("/api/settings/meet-capture/state"));
+      } catch (e) {
+        if (gone || e.locked) return;
+        captureState.textContent = e.message;
+        captureState.classList.add("failed");
+      }
     }
 
     // The newest capture's zip, with this screen's unlock (a plain link would not carry it).
-    function runDownload() {
-      run(DOWNLOAD, async () => {
+    async function runDownload() {
+      let words;
+      try {
         const response = await fetch("/api/settings/meet-capture", { headers: { "x-croom-unlock": S.token() || "" } });
         if (!response.ok) {
-          let words = "";
           try { words = (await response.json()).error || ""; } catch (e) { words = ""; }
-          return { error: words || "Request failed (" + response.status + ")" };
+          words = words || "Request failed (" + response.status + ")";
+        } else {
+          const name = (/filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "") || [])[1] || "meet-capture.zip";
+          const link = make("a");
+          link.href = URL.createObjectURL(await response.blob());
+          link.download = name;
+          document.body.append(link);
+          link.click();
+          link.remove();
+          setTimeout(() => URL.revokeObjectURL(link.href), 60000);
+          words = "Download: saved as " + name + ".";
         }
-        const name = (/filename="([^"]+)"/.exec(response.headers.get("Content-Disposition") || "") || [])[1] || "meet-capture.zip";
-        const link = make("a");
-        link.href = URL.createObjectURL(await response.blob());
-        link.download = name;
-        document.body.append(link);
-        link.click();
-        link.remove();
-        setTimeout(() => URL.revokeObjectURL(link.href), 60000);
-        return { ok: true, verdict: "saved as " + name };
-      });
+      } catch (e) {
+        words = e.message;
+      }
+      if (!gone) captureState.textContent = words;
     }
 
+    captureAsk(null);
     return () => { gone = true; };
   }
 

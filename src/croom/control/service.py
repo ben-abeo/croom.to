@@ -25,6 +25,7 @@ from aiohttp import WSCloseCode, WSMsgType, web
 
 from croom.admin.client import NOT_AVAILABLE, AdminClient, AdminError, AdminUnavailable
 from croom.calendar.bookings import BookingError
+from croom.control.capture_arm import CaptureArm
 from croom.control.settings import SettingsStore
 from croom.core.config import CONFIG_PATHS, DEFAULT_COMPANY, Config
 from croom.core.service import Service
@@ -142,6 +143,14 @@ def read_setting(store, key: str) -> Any:
         return check(store.get(key, default))
     except ValueError:
         return check(default)
+
+
+class _CaptureRefused(Exception):
+    """The capture of Google Meet did not run or failed: its words and the answer's status."""
+
+    def __init__(self, words: str, status: int):
+        super().__init__(words)
+        self.status = status
 
 
 def first_line(error: BaseException) -> str:
@@ -346,6 +355,8 @@ class ControlService(Service):
             Path(self.config["settings_file"]).parent if self.config.get("settings_file") else None)
         self._capture_dir: Optional[Path] = Path(capture_dir) if capture_dir else None
         self._capturing = False
+        self._last_capture: Optional[Dict[str, Any]] = None
+        self._arm = CaptureArm(meeting, self._armed_capture) if meeting is not None else None
         self._checks = checks if checks is not None else Checks(self._editor.config, tv=tv, laptop=laptop, meeting=meeting,
                                                                 discover=discover)
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
@@ -490,6 +501,7 @@ class ControlService(Service):
         app.router.add_get("/api/settings/logs", self._handle_logs)
         app.router.add_post("/api/settings/meet-capture", self._handle_meet_capture)
         app.router.add_get("/api/settings/meet-capture", self._handle_meet_capture_file)
+        app.router.add_get("/api/settings/meet-capture/state", self._handle_meet_capture_state)
         app.router.add_get("/api/settings/software", self._handle_software)
         app.router.add_post("/api/settings/software/update", self._handle_software_update)
         app.router.add_post("/api/settings/software/rollback", self._handle_software_rollback)
@@ -541,6 +553,8 @@ class ControlService(Service):
             await self._runner.cleanup()
             self._runner = None
         self._task = self._join_task = self._search = None
+        if self._arm is not None:
+            self._arm.close()
         self._mouse.close()
         self._keyboard.close()
         self._registry.flush()
@@ -1621,9 +1635,14 @@ class ControlService(Service):
             return self._error_response(str(e), 409)
 
     async def _handle_meet_capture(self, request: web.Request) -> web.Response:
-        """Settings › Check's Capture Google Meet (spec 2026-10-30 Meet controls, section 3): {"screenshots": bool, true unless said}. The
-        TV opens Meet's panels one after another, records them and closes them (within a minute): {"file", "steps": [{"name", "opened",
-        "why"?, "closed"?}]}. 409 "Join a Google Meet call first" unless the room is in one, and while a capture runs. Needs no helper."""
+        """Settings › Check's capture of Google Meet (spec 2026-10-30 Meet controls, section 3), behind the PIN; needs no helper.
+
+        {"arm": true, "after_minutes": 1 | 3 | 5, "screenshots": bool}: Capture the next Google Meet call (Settings closes when a meeting
+        starts, so it is armed beforehand; arming again replaces it). {"arm": false}: Cancel. Both answer the state (GET …/state).
+
+        Otherwise {"screenshots": bool, true unless said} runs it now (curl, during a call): the TV opens Meet's panels one after another,
+        records them and closes them (within about a minute): {"file", "steps": [{"name", "opened", "why"?, "closed"?}]}. 409 "Join a
+        Google Meet call first" unless the room is in one, and while a capture runs."""
         refused = self._require_unlock(request)
         if refused is None:
             refused = self._require_json(request)
@@ -1635,21 +1654,78 @@ class ControlService(Service):
         screenshots = data.get("screenshots", True)
         if not isinstance(screenshots, bool):
             return self._error_response("screenshots is true or false", 400)
+        if "arm" in data:
+            if self._arm is None:
+                return self._error_response("Meeting service not available", 503)
+            if data["arm"] is True:
+                try:
+                    self._arm.arm(data.get("after_minutes", 3), screenshots)
+                except ValueError as e:
+                    return self._error_response(str(e), 400)
+            elif data["arm"] is False:
+                self._arm.cancel()
+            else:
+                return self._error_response("arm is true or false", 400)
+            return web.json_response(self._capture_state())
+        try:
+            return web.json_response(await self._run_capture(screenshots))
+        except _CaptureRefused as e:
+            return self._error_response(str(e), e.status)
+
+    async def _run_capture(self, screenshots: bool) -> Dict[str, Any]:
+        """Run the capture now, one at a time; what it found is kept for the Check page (the last capture). _CaptureRefused in words."""
         meeting = self._meeting.current_meeting if self._meeting is not None else None
         if self._meeting_state() != "connected" or meeting is None or getattr(meeting, "platform", None) != "google_meet":
-            return self._error_response(JOIN_MEET_FIRST, 409)
-        if self._capturing or self._capture_dir is None:
-            return self._error_response(ALREADY_CAPTURING if self._capturing else NOT_AVAILABLE, 409 if self._capturing else 503)
+            raise _CaptureRefused(JOIN_MEET_FIRST, 409)
+        if self._capturing:
+            raise _CaptureRefused(ALREADY_CAPTURING, 409)
+        if self._capture_dir is None:
+            raise _CaptureRefused(NOT_AVAILABLE, 503)
         self._capturing = True
+        at = datetime.now(timezone.utc).astimezone()
         try:
-            return web.json_response(await self._meeting.capture_meet(self._capture_dir, screenshots=screenshots))
+            result = await self._meeting.capture_meet(self._capture_dir, screenshots=screenshots)
+            self._last_capture = {"at": at, "file": result.get("file"), "steps": result.get("steps") or []}
+            return result
         except MeetingControlError as e:
-            return self._error_response(first_line(e), 409)
+            self._last_capture = {"at": at, "error": first_line(e)}
+            raise _CaptureRefused(first_line(e), 409) from e
         except Exception as e:  # noqa: BLE001 - the call ending as the capture ran, say: words, never a 500
             logger.warning(f"The capture of Google Meet failed: {first_line(e)}", exc_info=True)
-            return self._error_response(f"The capture failed: {first_line(e)}", 409)
+            self._last_capture = {"at": at, "error": f"The capture failed: {first_line(e)}"}
+            raise _CaptureRefused(f"The capture failed: {first_line(e)}", 409) from e
         finally:
             self._capturing = False
+
+    async def _armed_capture(self, screenshots: bool) -> None:
+        """What the armed capture runs once the Meet call has gone on for its delay."""
+        try:
+            await self._run_capture(screenshots)
+        except _CaptureRefused as e:
+            logger.warning(f"The armed capture of Google Meet did not run: {e}")
+
+    @staticmethod
+    def _clock_words(when: Optional[float]) -> Optional[str]:
+        return datetime.fromtimestamp(when).strftime("%H:%M") if when else None
+
+    def _capture_state(self) -> Dict[str, Any]:
+        """What Settings › Check says of the capture: the arm (until, its delay, when it runs in a call that is on), whether one runs now,
+        the last capture since the room software started, and the newest file."""
+        arm = self._arm.state() if self._arm is not None else {"armed": False, "until": None, "after_minutes": 3, "screenshots": True,
+                                                                "runs_at": None}
+        last = None
+        if self._last_capture is not None:
+            at = self._last_capture["at"]
+            last = {**{k: v for k, v in self._last_capture.items() if k != "at"}, "at": f"{at:%b} {at.day} {at:%H:%M}"}
+        newest = newest_capture(self._capture_dir)
+        return {**arm, "until": self._clock_words(arm["until"]), "runs_at": self._clock_words(arm["runs_at"]),
+                "running": self._capturing, "last": last, "newest": newest.name if newest else None}
+
+    async def _handle_meet_capture_state(self, request: web.Request) -> web.Response:
+        refused = self._require_unlock(request)
+        if refused is not None:
+            return refused
+        return web.json_response(self._capture_state())
 
     async def _handle_meet_capture_file(self, request: web.Request) -> web.Response:
         """The newest capture of Google Meet, as a download; 404 when there is none."""

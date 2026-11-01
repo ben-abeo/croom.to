@@ -215,3 +215,42 @@ async def test_one_meet_capture_at_a_time_and_a_failed_one_lets_the_next_run(cli
     assert response.status == 409 and (await response.json())["error"] == "The capture failed: the TV page went away"
     response = await client.post("/api/settings/meet-capture", json={}, headers=unlocked)   # the failure let go of the turn
     assert response.status == 200 and runs == [True, False, True]
+
+
+async def test_the_armed_capture_runs_once_when_a_meet_call_has_gone_on_for_its_delay(client_factory, pins, unlocked, tmp_path,  # noqa: F811
+                                                                                     monkeypatch):
+    """Capture the next Google Meet call: a call that ends before the delay leaves it armed; the next runs it once, and it disarms."""
+    from croom.control.capture_arm import CaptureArm
+    from croom.meeting.providers.base import MeetingInfo
+
+    monkeypatch.setattr(CaptureArm, "MINUTE_S", 0.2)
+    meeting, runs = StubMeeting(), []
+
+    async def capture_meet(directory, screenshots=True):
+        runs.append(screenshots)
+        return {"file": "meet-capture-x.zip", "steps": [{"name": "chat", "opened": True, "closed": "unknown"}]}
+
+    def a_meet_call():
+        meeting.current_meeting = MeetingInfo(platform="google_meet", meeting_id="abc-defg-hij", meeting_url="https://meet.google.com/abc-defg-hij")
+        meeting.set_state(MeetingState.CONNECTED)
+
+    meeting.capture_meet = capture_meet
+    client = await client_factory(make_service(pin_store=pins, meeting=meeting, capture_dir=str(tmp_path)))
+    response = await client.post("/api/settings/meet-capture", json={"arm": True, "after_minutes": 1, "screenshots": False}, headers=unlocked)
+    state = await response.json()
+    assert response.status == 200 and state["armed"] is True and state["until"] and state["runs_at"] is None
+
+    a_meet_call()                                         # a call that ends before its delay: nothing runs, and the arm stays
+    await asyncio.sleep(0.05)
+    meeting.set_state(MeetingState.IDLE)
+    await asyncio.sleep(0.3)
+    assert runs == [] and (await (await client.get("/api/settings/meet-capture/state", headers=unlocked)).json())["armed"] is True
+
+    a_meet_call()                                         # the next one goes on: the capture runs once, without screenshots
+    await until(lambda: runs, timeout=3)
+    state = await (await client.get("/api/settings/meet-capture/state", headers=unlocked)).json()
+    assert state["armed"] is False and state["last"]["steps"][0]["closed"] == "unknown"
+    meeting.set_state(MeetingState.IDLE)
+    a_meet_call()
+    await asyncio.sleep(0.4)
+    assert runs == [False]                                # once

@@ -3,7 +3,8 @@ Meet's controls carried out by the provider (Meet controls plan Phase B, Task 3;
 Chat Send types nothing anywhere when Meet's message box is not there (keys typed elsewhere in Meet are its shortcuts), and no key at all
 when it is; a person is acted on only when the id the touch Pi sent names exactly one row, and only inside that row or the menu that row's
 own button just opened; End the call for everyone answers Meet's own confirmation box itself, after its own first press, while the box
-reader queues nothing. Against the capture tests' fake Meet page in headless Chromium; nothing reaches meet.google.com.
+reader queues nothing, presses Leave call only when it opens a menu, and leaves a page that no longer shows the call. Chat Send never
+presses a switch of the chat panel (only a button). Against the capture tests' fake Meet page in headless Chromium; nothing reaches meet.google.com.
 """
 
 import asyncio
@@ -68,8 +69,33 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') { menu.hid
 # The same, but the menu cannot be told to be the row's: its buttons name no menu and do not say they opened one.
 UNTIED = PEOPLE.replace(' aria-controls="person-menu"', "").replace("window.__rowClicks = [];", "window.__untied = true; window.__rowClicks = [];")
 
+# The chat panel without its send button, and two switches in it whose words start as the send button's might ("Send"): Enter in the box
+# sends; a switch flips its aria-checked when pressed.
+SWITCHES = CALL.replace('<button aria-label="Send a message">send</button>',
+                        '<div role="switch" aria-checked="true" aria-label="Send chat messages">on</div>'
+                        '<div role="switch" aria-checked="true" aria-label="Send message notifications">on</div>').replace("</body>", """<script>
+document.querySelectorAll('#chat [role=switch]').forEach((s) => s.addEventListener('click', () => s.setAttribute('aria-checked', String(s.getAttribute('aria-checked') !== 'true'))));
+document.querySelector('#chat textarea').addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter' || !e.target.value.trim()) return;
+  e.preventDefault();
+  const sent = document.createElement('div'); sent.setAttribute('data-message-id', 'm9'); sent.className = 'sent';
+  sent.innerHTML = '<div>Room 1</div><div>10:50 AM</div><div data-message-text></div>';
+  sent.querySelector('[data-message-text]').textContent = e.target.value;
+  e.target.before(sent); e.target.value = '';
+});
+</script></body>""")
+
+# Meet's Leave call for a host: it says it opens a menu (aria-haspopup).
+LEAVE_MENU = '<button aria-label="Leave call" aria-haspopup="menu">call_end</button>'
+# A page whose Leave call says it opens a menu, but leaves the call at once (a co-host, another Meet build): the call's page is gone.
+LEAVES_AT_ONCE = CALL.replace('<button aria-label="Leave call">call_end</button>', LEAVE_MENU).replace("</body>", """<script>
+document.querySelector('[aria-label="Leave call"]').addEventListener('click', () => {
+  setTimeout(() => { document.body.innerHTML = '<h1>You left the meeting</h1><button>Rejoin</button>'; }, 100);
+});
+</script></body>""")
+
 # Meet's leave menu for a host, and its confirmation box, which comes a moment after "End the call for everyone" is pressed.
-END = CALL.replace("</body>", """
+END = CALL.replace('<button aria-label="Leave call">call_end</button>', LEAVE_MENU).replace("</body>", """
 <div id="leave-menu" role="menu" hidden><div role="menuitem">Just leave the call</div><div role="menuitem" id="end-all">End the call for everyone</div></div>
 <div id="end-box" role="alertdialog" hidden><h2>End the call for everyone?</h2><div>Everyone will be removed from the call.</div><button>Cancel</button><button id="end-call">End call</button></div>
 <script>
@@ -100,6 +126,16 @@ async def test_chat_send_types_nothing_anywhere_without_the_message_box_and_no_k
     assert await page.evaluate("[...document.querySelectorAll('.sent [data-message-text]')].map((m) => m.textContent)") == ["hello C"]
     assert await page.evaluate("document.querySelector('#chat textarea').value") == ""
     assert await shown(page) == []
+
+
+async def test_chat_send_presses_only_a_button_never_a_switch_of_the_chat_panel_and_gives_the_keyboard_back(fake_meet):  # noqa: F811
+    provider, page, clock = await in_a_call(fake_meet, SWITCHES)
+    await provider.control("screen", "chat")                    # the touch Pi's chat screen is open: the panel stays after the send
+    await provider.control("chat.send", "hello")
+    assert await page.evaluate("[...document.querySelectorAll('#chat [role=switch]')].map((s) => s.getAttribute('aria-checked'))") == ["true", "true"]
+    assert await page.evaluate("[...document.querySelectorAll('.sent [data-message-text]')].map((m) => m.textContent)") == ["hello"]   # by Enter
+    assert await page.evaluate("document.activeElement === document.querySelector('#chat textarea')") is False   # Captions' C is not refused
+    assert await shown(page) == ["chat"]
 
 
 async def test_a_name_that_two_rows_have_or_none_is_refused_and_nobody_is_pressed_for(fake_meet):  # noqa: F811
@@ -157,3 +193,28 @@ async def test_end_for_everyone_answers_meets_confirmation_itself_and_the_box_re
     assert await page.evaluate("window.__ended") is True
     assert seen == ["Someone wants to join this call"]          # Meet's confirmation was never read as a box of its own
     assert provider.state == MeetingState.IDLE
+
+
+async def test_end_for_everyone_leaves_a_page_that_no_longer_shows_the_call_and_presses_no_leave_call_that_opens_no_menu(fake_meet, monkeypatch):  # noqa: F811
+    # Leave call left at once: the room leaves too (it is not left connected to a dead page), and says the call may go on for the others.
+    provider, page, clock = await in_a_call(fake_meet, LEAVES_AT_ONCE)
+    monkeypatch.setattr(provider, "_show_idle", stay_on_the_page)
+    with pytest.raises(MeetingControlError, match="^Meet left the call; it may not have ended for everyone$"):
+        await provider.control("host.end")
+    assert await page.evaluate("window.__clicks") == ["Leave call"]
+    assert provider.state == MeetingState.IDLE
+
+    # End the call for everyone ended it without a confirmation box: the room leaves, and that is a success.
+    provider, page, clock = await in_a_call(fake_meet, END.replace("setTimeout(() => { document.getElementById('end-box').hidden = false; }, 300);",
+                                                                   "setTimeout(() => { document.body.innerHTML = '<h1>The call has ended</h1>'; }, 100);"))
+    monkeypatch.setattr(provider, "_show_idle", stay_on_the_page)
+    assert await provider.control("host.end") == {}
+    assert await page.evaluate("window.__clicks") == ["Leave call", "End the call for everyone"]
+    assert provider.state == MeetingState.IDLE
+
+    # A Leave call that says nothing of a menu would leave at once: refused before anything is pressed, and the room stays in the call.
+    provider, page, clock = await in_a_call(fake_meet, CALL)
+    with pytest.raises(MeetingControlError, match="^Meet's Leave call button does not open a menu here; nothing was pressed$"):
+        await provider.control("host.end")
+    assert await page.evaluate("window.__clicks") == []
+    assert provider.state == MeetingState.CONNECTED

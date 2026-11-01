@@ -19,6 +19,7 @@ from croom.core.logs import DIALOGS_LOGGER
 from croom.meeting.meet_api import MeetParticipants
 from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
 from croom.meeting.meet_page import (
+    BLUR_CHAT_BOX,
     CHAT_BOX_STATE,
     FOCUS_CHAT_BOX,
     MEET,
@@ -203,6 +204,7 @@ class GoogleMeetProvider(MeetingProvider):
         # signed-in Google profile (spec 2026-10-07 Google Meet, section 4.2); this provider borrows its page.
         self._display = display
         self._room_name = room_name or "Conference Room"
+        self._name_in_call = ""   # the name the room joined the call under (join_meeting's display_name)
         # Where a screenshot goes when a join fails, so the TV need not be watched.
         self.failure_screenshot: Path = Path(tempfile.gettempdir()) / "croom-meet-failure.png"
         self._page: Optional["Page"] = None
@@ -322,6 +324,7 @@ class GoogleMeetProvider(MeetingProvider):
         await self._stop_reading()   # never two readers: a join over a call still going stops that call's first
         self._read_warned = False
         self._reset_panels()
+        self._name_in_call = display_name   # the name the room joins under (a signed-in profile's own name may differ: the room's name is kept too)
         self._current_meeting = MeetingInfo(
             platform=self.name,
             meeting_id=meeting_id,
@@ -712,6 +715,11 @@ class GoogleMeetProvider(MeetingProvider):
                 return
             await self._read_controls()
 
+    def _is_room(self, name: str) -> bool:
+        """Whether a name the Meet API gives is the room's own in the call: the name it joined under, or the room's name (any case)."""
+        said = " ".join(str(name).split()).casefold()
+        return bool(said) and said in {" ".join(str(n).split()).casefold() for n in (self._name_in_call, self._room_name) if n}
+
     async def _read_people_regularly(self, api: MeetParticipants) -> None:
         """For as long as the call lasts, ask Google's Meet API who is in it every API_PEOPLE_INTERVAL_S (croom.meeting.meet_api: off unless the
         organizer is in the configured domain; a refusal is logged once and not asked again for 5 minutes). What it says is kept as the people
@@ -723,7 +731,7 @@ class GoogleMeetProvider(MeetingProvider):
                 if self._state != MeetingState.CONNECTED:
                     return
                 self._api_people = None if names is None else [
-                    {"id": f"name:{name}", "name": name, "me": False, "pinned": False, "muted": False} for name in names]
+                    {"id": f"name:{name}", "name": name, "me": self._is_room(name), "pinned": False, "muted": False} for name in names]
                 self._publish()
                 await asyncio.sleep(self.API_PEOPLE_INTERVAL_S)
         finally:
@@ -923,6 +931,7 @@ class GoogleMeetProvider(MeetingProvider):
         self._layout: Optional[str] = None                        # the layout the room last chose this call (Task 3)
         self._hide_self = False                                   # whether the room hid its own tile this call (Task 3)
         self._panels_warned = False                               # a panel reading that fails is said once for a call
+        self._panel_close_warned = False                          # and a panel of the room's that will not close, too
         self._api_people: Optional[List[Dict[str, Any]]] = None   # who the Meet API says is in the call (ids "name:<name>"), None while it does not say
 
     def _screen_panel(self) -> Optional[str]:
@@ -973,10 +982,15 @@ class GoogleMeetProvider(MeetingProvider):
         state = await self._answered(self._page.evaluate(READ_PANELS, MEET))
         return {"open": list(state.get("open") or []), "pressed": list(state.get("pressed") or [])}
 
-    async def _press_label(self, labels: List[str], container: Any = None, *, exact: bool = False, own: Optional[str] = None) -> Optional[str]:
+    async def _press_label(self, labels: List[str], container: Any = None, *, exact: bool = False, own: Optional[str] = None,
+                           buttons: bool = False) -> Optional[str]:
         """Press what PRESS_BY_LABEL finds for the words, where the container says (`exact`: the whole label; `own`: only one naming the room
-        or "you"): the label pressed, or None (nothing was pressed)."""
-        return await self._answered(self._page.evaluate(PRESS_BY_LABEL, self._by_label(labels, container, exact, own)))
+        or "you"; `buttons`: only a button, never a switch, check box, radio, option or menu item): the label pressed, or None (nothing was
+        pressed)."""
+        arg = self._by_label(labels, container, exact, own)
+        if buttons:
+            arg["buttons"] = True
+        return await self._answered(self._page.evaluate(PRESS_BY_LABEL, arg))
 
     async def _label_state(self, labels: List[str], container: Any = None) -> Optional[Dict[str, Any]]:
         """What _press_label would press, not pressed: {"label", "on"}, or None."""
@@ -1057,20 +1071,27 @@ class GoogleMeetProvider(MeetingProvider):
             raise MeetingControlError(f"Meet did not close its {words} panel; try again")
 
     async def _put_room_panel_away(self, why: str) -> None:
-        """Close the panel the room opened, if any (before the capture; the caller holds _dialog_turn). A failure is logged, not raised."""
+        """Close the panel the room opened, if any (before the capture; the caller holds _dialog_turn). A failure is logged, not raised: a
+        warning once for the call (the box loop tries again every 2 s), then at debug level."""
         if self._room_panel is None or self._page is None:
             return
         try:
             async with self._pressing:
                 await self._close_panel(self._room_panel)
         except Exception as e:  # noqa: BLE001 - the page gone or a panel that stays: logged; the call goes on
-            logger.warning(f"Could not close Meet's {PANEL_WORDS.get(self._room_panel, 'side')} panel {why} ({_first_line(e)})")
+            words = f"Could not close Meet's {PANEL_WORDS.get(self._room_panel, 'side')} panel {why} ({_first_line(e)})"
+            if self._panel_close_warned:
+                logger.debug(words)
+            else:
+                self._panel_close_warned = True
+                logger.warning(words)
 
     async def _close_room_panel_at_the_end(self) -> None:
         """The call ends: the panel the room opened is closed before Leave is pressed. While the capture runs the room has none open (it was
-        closed before the capture, and is not opened again once the call is no longer connected). The box loop has been stopped by now:
-        when _dialog_turn is still held, the holder is an action that ends the call (host.end, which then leaves) and the panel is left to
-        go with the page (the TV goes back to the screensaver), rather than wait on a lock its own task holds."""
+        closed before the capture, and is not opened again once the call is no longer connected). The box loop has been stopped by now.
+        Whenever _dialog_turn is still held, whoever holds it (an action such as host.end, which then leaves, or anything else that has it), it
+        is skipped: the panel is left to go with the page (the TV goes back to the screensaver), rather than wait on a lock that may be held by
+        the task that is leaving."""
         if self._room_panel is None or self._page is None or self._capturing or self._dialog_turn.locked():
             return
         async with self._dialog_turn:
@@ -1150,9 +1171,11 @@ class GoogleMeetProvider(MeetingProvider):
             except Exception as e:  # noqa: BLE001 - the page gone or navigating: words for the table
                 raise MeetingControlError(f"Meet's page did not answer ({_first_line(e)})") from e
 
-    async def _then_tidy(self, body, tidy, after_success: bool = True) -> Any:
+    async def _then_tidy(self, body, tidy, after_success: bool = True, quiet: bool = False) -> Any:
         """Run the action's body, then tidy away what it opened, also when it failed (then a tidy that fails is logged, and the body's
-        refusal is what the table is told). With `after_success` False, only a body that failed is tidied after (the call it ended is gone)."""
+        refusal is what the table is told). With `after_success` False, only a body that failed is tidied after (the call it ended is gone).
+        With `quiet`, a tidy that fails after a body that succeeded is logged too, not raised (a refusal then would invite the touch Pi to
+        do again what was done: a second chat message)."""
         try:
             result = await body()
         except BaseException:
@@ -1162,20 +1185,33 @@ class GoogleMeetProvider(MeetingProvider):
                 logger.warning(f"Could not put Meet's page back after a control that failed ({_first_line(e)})")
             raise
         if after_success:
-            await tidy()
+            try:
+                await tidy()
+            except Exception as e:  # noqa: BLE001 - quiet: what was done is done; the page is put back by the next screen or reading
+                if not quiet:
+                    raise
+                logger.warning(f"Could not put Meet's page back after a control that was carried out ({_first_line(e)})")
         return result
 
-    async def _in_panel(self, kind: str, body) -> Any:
+    async def _in_panel(self, kind: str, body, quiet: bool = False) -> Any:
         """Run the body with Meet's side panel `kind` open: opened if it was not, and then closed again unless the touch Pi's open screen
-        wants it; the screen's own panel is put back if this one took its place (Meet shows one at a time)."""
-        opened = await self._open_panel(kind)
+        wants it; the screen's own panel is put back if this one took its place (Meet shows one at a time), also when this one did not open.
+        `quiet`: as _then_tidy's."""
+        try:
+            opened = await self._open_panel(kind)
+        except BaseException:
+            try:
+                await self._follow_screen()
+            except Exception as e:  # noqa: BLE001 - the panel's own refusal is what the table is told
+                logger.warning(f"Could not put the touch Pi's Meet panel back after {PANEL_WORDS[kind]} did not open ({_first_line(e)})")
+            raise
 
         async def put_back():
             if opened and self._screen_panel() != kind:
                 await self._close_panel(kind)
             await self._follow_screen()
 
-        return await self._then_tidy(body, put_back)
+        return await self._then_tidy(body, put_back, quiet=quiet)
 
     async def _until(self, look, wait: Optional[float] = None) -> Any:
         """Ask `look` (a coroutine function) every PRESS_POLL_S until it answers something true, for ACTION_WAIT_S at most: its last answer."""
@@ -1248,7 +1284,7 @@ class GoogleMeetProvider(MeetingProvider):
             box = await self._chat_box()
             if box is None or " ".join(str(box.get("text") or "").split()) != " ".join(text.split()):
                 raise MeetingControlError("Meet's message box did not take the message; nothing was sent")
-            if await self._press_label(MEET["chat_send"], {"panel": "chat"}) is None:
+            if await self._press_label(MEET["chat_send"], {"panel": "chat"}, buttons=True) is None:   # a button only (R1), never a switch
                 box = await self._chat_box()
                 if not (box and box.get("focused")):
                     raise MeetingControlError("Meet's message box lost the keyboard; nothing was sent")
@@ -1260,9 +1296,13 @@ class GoogleMeetProvider(MeetingProvider):
 
             if not await self._until(emptied):
                 raise MeetingControlError("Meet did not send the message; try again")
+            try:   # the box gives the keyboard back: while it holds it, Captions' bare C is refused (it would be typed into it)
+                await self._answered(self._page.evaluate(BLUR_CHAT_BOX, MEET))
+            except Exception as e:  # noqa: BLE001 - the message is sent: that is what the table is told
+                logger.warning(f"Could not take the keyboard from Meet's message box after a send ({_first_line(e)})")
 
         async with self._action_turn():
-            await self._in_panel("chat", send)
+            await self._in_panel("chat", send, quiet=True)   # sent: a panel that will not close is logged, not a refusal (no second send)
             await self._read_panels()
         return await self._read_controls()
 
@@ -1497,25 +1537,59 @@ class GoogleMeetProvider(MeetingProvider):
     async def _end_for_everyone(self, name: str, value: Any) -> Dict[str, Any]:
         """End the call for everyone (the touch Pi has asked twice), the room being a host: Meet's End the call for everyone (in Meet's leave
         menu, opened by Leave call, unless it is on the screen already), then Meet's confirmation box's End call, with both locks held from
-        before the first press to the end; then the room leaves as `leave` does. A box that does not come is a refusal, and the room stays."""
+        before the first press to the end; then the room leaves as `leave` does. Leave call is pressed only when it says it opens a menu (a
+        Leave call that leaves at once is refused before anything is pressed). A box that does not come is a refusal, and the room stays,
+        unless Meet no longer shows the call after a press (Leave call left at once, or the call ended without asking): then the room leaves
+        as `leave` does, and says so in words when only Leave call was pressed (the call may go on for the others)."""
+        pressed: List[str] = []
+
         async def end():
             if not (await self._look()).get("hosting"):
                 raise MeetingControlError("Meet does not show the room as a host here; the call was not ended")
             if await self._label_state(MEET["end_for_all"]) is None:
+                leave = await self._label_state(MEET["leave"])
+                if leave is None:
+                    raise MeetingControlError("Meet's Leave call button isn't on the screen")
+                if not leave.get("menu"):
+                    raise MeetingControlError("Meet's Leave call button does not open a menu here; nothing was pressed")
                 if await self._press_label(MEET["leave"]) is None:
                     raise MeetingControlError("Meet's Leave call button isn't on the screen")
+                pressed.append("leave")
                 if not await self._until(lambda: self._label_state(MEET["end_for_all"])):
                     raise MeetingControlError("Meet's leave menu has no End the call for everyone")
             boxes = await self._box_keys()
             if await self._press_label(MEET["end_for_all"]) is None:
                 raise MeetingControlError("Meet's End the call for everyone isn't on the screen")
+            pressed.append("end")
             await self._confirm(boxes, MEET["confirm"]["end_for_all"], "ending the call for everyone")
 
+        words: Optional[str] = None
         async with self._action_turn():
             before = await self._popups()
-            await self._then_tidy(end, lambda: self._close_new_menus(before), after_success=False)
-        await self.leave_meeting()
+            try:
+                await self._then_tidy(end, lambda: self._close_new_menus(before), after_success=False)
+            except Exception:
+                # After a press, a page that no longer shows the call has left it: the room must not stay connected to a dead page.
+                if not pressed or await self._call_shown():
+                    raise
+                logger.warning("Meet no longer shows the call after End the call for everyone was asked for: leaving")
+                if "end" not in pressed:
+                    words = "Meet left the call; it may not have ended for everyone"
+        await self.leave_meeting()   # the locks are released: leave takes the box reader's turn to close the room's panel
+        if words is not None:
+            raise MeetingControlError(words)
         return {}
+
+    async def _call_shown(self) -> bool:
+        """Whether Meet's page still shows the call: its microphone button or its Leave call button is drawn. A page that does not answer is
+        taken as not showing it (it is on its way off the call)."""
+        try:
+            if (await self._look()).get("mute") is not None:
+                return True
+            return await self._label_state(MEET["leave"]) is not None
+        except Exception as e:  # noqa: BLE001 - see above
+            logger.info(f"Meet's page did not answer whether it still shows the call ({_first_line(e)})")
+            return False
 
     async def _host_switches(self) -> List[Dict[str, Any]]:
         self._switches = [dict(s) for s in await self._answered(self._page.evaluate(READ_HOST_SWITCHES, MEET)) or [] if isinstance(s, dict)]

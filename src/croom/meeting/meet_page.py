@@ -28,7 +28,8 @@ MEET = {
     "pin": ["Pin"],
     "unpin": ["Unpin"],
     "chat_box": ["Send a message", "Send a message to everyone"],            # the message box (a text field) ...
-    "chat_send": ["Send a message", "Send message", "Send"],                 # ... and its button (a button: the box has the same words)
+    "chat_send": ["Send a message", "Send message"],                         # ... and its button (a button: the box has the same words; no bare
+                                                                             # "Send", which a host switch "Send chat messages" starts with)
     "admit": ["Admit"],
     "deny": ["Deny", "Deny entry"],
     "admit_all": ["Admit all"],
@@ -546,7 +547,8 @@ READ_HOST_SWITCHES = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _
 #                         than one row has ("name:" + a name two people share), presses nothing: the caller says so in words.
 # A text field is never pressed (only the elements above are). A container with nothing in it, or nothing open, presses nothing. Two more
 # keys narrow the match: "exact": true, the whole label is one of the words (the bar's "More options", not "More options for Pat");
-# "own": the room's name, only an element whose label names the room or "you" (the room's own tile).
+# "own": the room's name, only an element whose label names the room or "you" (the room's own tile). And "buttons": true, only a <button> or a
+# [role=button] is pressed, never a switch, a check box, a radio, an option or a menu item (the chat's send button, ruling R1).
 _FIND = r"""
   const DIALOGS = '[role="dialog"], [role="alertdialog"]';
   const rootsOf = (container) => {
@@ -563,7 +565,8 @@ _FIND = r"""
   };
   const findByLabel = (arg) => {
     let candidates = rootsOf(arg.container)
-      .flatMap((root) => [...(root.matches && root.matches(PRESSABLE) ? [root] : []), ...root.querySelectorAll(PRESSABLE)])
+      .flatMap((root) => { const pool = arg.buttons ? 'button, [role="button"]' : PRESSABLE;
+        return [...(root.matches && root.matches(pool) ? [root] : []), ...root.querySelectorAll(pool)]; })
       .filter((el) => drawn(el) && enabled(el));
     if (arg.own) {
       const room = String(arg.own).toLowerCase();
@@ -586,11 +589,13 @@ PRESS_BY_LABEL = "(arg) => {  const M = arg.meet;\n  const PANEL_NAMES = M.panel
   return label;
 }"""
 
-# What PRESS_BY_LABEL would press for the same argument, without pressing it: {"label", "on"} (on: it says it is checked, pressed or
-# selected), or null when there is none.
+# What PRESS_BY_LABEL would press for the same argument, without pressing it: {"label", "on", "menu"} (on: it says it is checked, pressed or
+# selected; menu: it says it opens a menu, an aria-haspopup other than "false" or an aria-expanded), or null when there is none.
 STATE_BY_LABEL = "(arg) => {  const M = arg.meet;\n  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _ROWS + _FIND + r"""
   const el = findByLabel(arg);
-  return el ? { label: nameOf(el), on: isOn(el) } : null;
+  if (!el) return null;
+  const popup = (el.getAttribute("aria-haspopup") || "").toLowerCase();
+  return { label: nameOf(el), on: isOn(el), menu: (Boolean(popup) && popup !== "false") || el.hasAttribute("aria-expanded") };
 }"""
 
 # The menus and the dialogs on the screen that are not side panels: {"menus": [role|label of each drawn menu or listbox], "dialogs": [the
@@ -683,4 +688,13 @@ FOCUS_CHAT_BOX = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE
 CHAT_BOX_STATE = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _CHAT_BOX + r"""
   const box = chatBox();
   return box ? { text: textIn(box), focused: document.activeElement === box } : null;
+}"""
+
+# Take the keyboard from Meet's chat message box, if it has it (after a send: the bare C of Captions is refused while something that takes
+# typing has the keyboard). Whether the box had it. Run with MEET.
+BLUR_CHAT_BOX = "(M) => {  const PANEL_NAMES = M.panel_names;" + _DRAWN + _SIDE + _WORDS + _CHAT_BOX + r"""
+  const box = chatBox();
+  if (!box || document.activeElement !== box) return false;
+  box.blur();
+  return true;
 }"""

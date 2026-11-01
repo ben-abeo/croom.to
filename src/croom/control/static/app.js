@@ -502,17 +502,22 @@
   // renews it every minute while the screen stays (the agent lets a screen it has not heard of for three minutes go), and says "" on leaving
   // it (Back, the two-minute return, a dialog's card, a call that ends). A Zoom call is told nothing. Not a request() of the page: it holds
   // no button inert, one is sent at a time (a Back pressed while the panel is opening is said when that answer is in), and its refusal is said
-  // on the screen it was about. screenSaid is what the agent was last told; null when the last telling did not reach it.
+  // on the screen it was about. screenSaid is what the agent was last told; null when the last telling did not reach it, and when the page has
+  // just loaded (a page reloaded in a Meet call says "" once, so that a panel the page before it had open does not stay on the TV).
   const SCREEN_VIEWS = ["participants", "chat", "host"];
   const SCREEN_RENEW_MS = 60 * 1000;
   const SCREEN_RETRY_MS = 5 * 1000;
-  let screenSaid = "", screenBusy = false, screenRenewTimer = null, screenHoldUntil = 0;
+  let screenSaid = null, screenBusy = false, screenRenewTimer = null, screenHoldUntil = 0;
   const meetCall = () => Boolean(model.status) && model.status.meeting.platform === "google_meet" && model.status.meeting.state === "connected";
   const wantedScreen = () => (meetCall() && mode() === "meeting" && SCREEN_VIEWS.includes(view()) ? view() : "");
   function syncScreen() {
     const want = wantedScreen();
     if (screenBusy || want === screenSaid || Date.now() < screenHoldUntil) return;
-    if (!want && !meetCall()) { screenSaid = ""; clearTimeout(screenRenewTimer); return; }   // a Zoom call, or the call is over (the agent closes its panel then): nothing to say
+    if (!want && !meetCall()) {   // a Zoom call, or the call is over (the agent closes its panel then): nothing to say
+      if (model.status) screenSaid = "";   // (before the first status the page does not know yet: a Meet call is told "" once it does)
+      clearTimeout(screenRenewTimer);
+      return;
+    }
     sendScreen(want);
   }
   async function sendScreen(value) {
@@ -927,8 +932,10 @@
     li.className = "chat-message";
     const from = document.createElement("p");
     from.className = "chat-from";
+    // Zoom's time is a date; Meet's is the words its chat shows ("10:42 AM"), which no date reads: shown as they are.
     const sent = msg.at ? new Date(msg.at) : null;
-    from.textContent = String(msg.from || "") + (sent && !Number.isNaN(sent.getTime()) ? ", " + fmtTime(sent) : "");
+    const at = sent && !Number.isNaN(sent.getTime()) ? fmtTime(sent) : msg.at ? String(msg.at).trim() : "";
+    from.textContent = String(msg.from || "") + (at ? ", " + at : "");
     const text = document.createElement("p");
     text.className = "chat-text";
     text.textContent = String(msg.text || "");

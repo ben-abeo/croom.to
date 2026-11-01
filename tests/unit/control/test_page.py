@@ -12463,11 +12463,11 @@ def test_the_chat_screen_shows_messages_and_clears_the_unread_count(browser):
         join_by_id(page)
         server.meeting.current_meeting.chat = {"unread": 2, "messages": [
             {"from": "Ann", "text": "Can you hear us?", "at": "2026-10-13T20:00:00Z"}, {"from": "Raj", "text": "Yes", "at": "2026-10-13T20:00:30Z"},
-            {"from": "Sam", "text": "Loud and clear", "at": "some time ago"}]}         # the agent says "" when it does not know when; a time that cannot be read says nothing either
+            {"from": "Sam", "text": "Loud and clear", "at": "10:42 AM"}, {"from": "Lee", "text": "Hi", "at": ""}]}   # Meet's time is its chat's words, shown as they are; "" says nothing
         page.wait_for_function("document.querySelector('#meeting-secondary .button').parentElement.textContent.includes('Chat (2)')", timeout=5000)
         open_sub_screen(page, "Chat", "chat")
-        assert [m.inner_text() for m in page.locator("#chat-list .chat-message .chat-text").all()] == ["Can you hear us?", "Yes", "Loud and clear"]
-        assert [m.inner_text() for m in page.locator("#chat-list .chat-message .chat-from").all()] == ["Ann, 8:00\u00a0PM", "Raj, 8:00\u00a0PM", "Sam"]
+        assert [m.inner_text() for m in page.locator("#chat-list .chat-message .chat-text").all()] == ["Can you hear us?", "Yes", "Loud and clear", "Hi"]
+        assert [m.inner_text() for m in page.locator("#chat-list .chat-message .chat-from").all()] == ["Ann, 8:00\u00a0PM", "Raj, 8:00\u00a0PM", "Sam, 10:42 AM", "Lee"]
         assert page.locator("#chat-empty").is_hidden() and fits(page)
         wait_for_calls(page, server, 1)
         assert server.meeting.controls_called == [("chat.seen", None)]
@@ -13562,6 +13562,23 @@ def test_a_zoom_call_is_told_no_screen_at_all(browser):
         page.wait_for_function("document.body.dataset.view === 'meeting'", timeout=5000)
         page.wait_for_timeout(300)
         assert screens_said(server) == []
+        page.close()
+
+
+def test_a_page_loaded_again_in_a_meet_call_says_no_screen_once(browser):
+    """A touch Pi whose page reloads while the TV shows Meet's chat panel for the page before it: the new page says "" at once (the panel
+    must not wait three minutes on the TV)."""
+    with PageServer() as server:
+        page = page_in_a_meet_call(browser, server)
+        open_sub_screen(page, "Chat", "chat")
+        wait_for_calls(page, server, 1)
+        again = browser.new_page(viewport={"width": 1280, "height": 800})
+        again.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        again.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
+        wait_for_calls(again, server, 2)
+        again.wait_for_timeout(300)
+        assert screens_said(server) == ["chat", ""]
+        again.close()
         page.close()
 
 

@@ -30,6 +30,7 @@ class CaptureArm:
         self.screenshots = True
         self.fires_at: Optional[float] = None
         self._timer: Optional[asyncio.Task] = None
+        self._running: Optional[asyncio.Task] = None
         self._listening = False
 
     @property
@@ -38,7 +39,7 @@ class CaptureArm:
 
     def arm(self, after_minutes: int, screenshots: bool) -> None:
         """Arm (again: the last arm is replaced) for ARMED_FOR_S. In a Meet call already, the delay counts from now."""
-        if after_minutes not in self.DELAYS:
+        if type(after_minutes) is not int or after_minutes not in self.DELAYS:   # not True, which equals 1
             raise ValueError(f"after_minutes is one of {', '.join(map(str, self.DELAYS))}")
         self._stop_timer()
         self.until = self._clock() + self.ARMED_FOR_S
@@ -91,8 +92,12 @@ class CaptureArm:
         if not self.armed or not self._in_meet_call():
             return
         self.until = None                          # once
+        self._running = asyncio.current_task()    # held while it runs: the loop keeps only a weak reference to a task
         logger.info("The armed capture of Google Meet runs")
-        await self._run(self.screenshots)
+        try:
+            await self._run(self.screenshots)
+        finally:
+            self._running = None
 
     def state(self) -> Dict[str, Any]:
         return {"armed": self.armed, "until": self.until if self.armed else None, "after_minutes": self.after_minutes,

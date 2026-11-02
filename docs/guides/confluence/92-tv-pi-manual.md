@@ -373,7 +373,7 @@ The check also writes and deletes a test event, "Crystal Meet booking check", da
 | --- | --- |
 | Book | Today and the next 6 days, every quarter hour inside booking hours, 15 minutes to 4 hours, stopped by the next booking and the end of booking hours. |
 | Use now | Starts this minute, ends on the quarter hour nearest to now plus the length. Not limited to booking hours. |
-| End now | Touch Pi only. Shortens a booking in progress; cancels one that has not started. |
+| End now | Touch Pi only. Shortens a booking in progress; cancels one that has not started. A meeting people booked in Google is declined by the room (or shortened, in the room's own calendar), kept in `ended-early.json`. |
 | Cancel | Only a booking made at the room's screens that has not started. |
 
 - **Saved first, then sent.** A booking goes into `bookings.json`, then to Google with a 10-second wait at the screen. If Google doesn't answer it is queued.

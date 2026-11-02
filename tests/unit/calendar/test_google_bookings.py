@@ -88,6 +88,37 @@ async def test_end_now_moves_the_end_and_cancel_deletes():
     assert service.delete.kwargs == {"calendarId": ROOM, "eventId": "google-7"}
 
 
+GUESTS = [{"email": "ben@example.com", "organizer": True, "responseStatus": "accepted"},
+          {"email": ROOM, "resource": True, "self": True, "responseStatus": "accepted"}]
+
+
+async def test_a_meeting_the_room_is_a_guest_of_is_declined_with_nobody_told():
+    """End now for a meeting people booked (spec 2026-10-25, section 2.1): the room's own answer becomes declined, the other guests are
+    sent back as they were, and no email goes."""
+    service = FakeEvents()
+    service.get = FakeCall({"id": "google-9", "organizer": {"email": "ben@example.com"}, "attendees": GUESTS})
+    await provider_with(service).end_meeting_early(ROOM, "google-9", START + timedelta(minutes=30))
+    assert service.get.kwargs == {"calendarId": ROOM, "eventId": "google-9"}
+    kwargs = service.patch.kwargs
+    assert kwargs["eventId"] == "google-9" and kwargs["sendUpdates"] == "none"
+    assert kwargs["body"] == {"attendees": [GUESTS[0], dict(GUESTS[1], responseStatus="declined")]}
+
+
+async def test_a_meeting_in_the_rooms_own_calendar_with_no_guests_ends_now():
+    service = FakeEvents()
+    service.get = FakeCall({"id": "google-9", "organizer": {"email": ROOM, "self": True}})
+    await provider_with(service).end_meeting_early(ROOM, "google-9", START + timedelta(minutes=30))
+    assert service.patch.kwargs["body"] == {"end": {"dateTime": (START + timedelta(minutes=30)).isoformat()}}
+
+
+async def test_a_meeting_gone_from_google_is_ended_already():
+    for status in (404, 410):
+        service = FakeEvents()
+        service.get = FakeCall(error=http_error(status))
+        await provider_with(service).end_meeting_early(ROOM, "google-9", START)
+        assert service.patch.kwargs is None
+
+
 async def test_a_booking_already_gone_from_google_is_cancelled_all_the_same():
     for status in (404, 410):
         await provider_with(FakeEvents(error=http_error(status))).delete_booking(ROOM, "google-7")

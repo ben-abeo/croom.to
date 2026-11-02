@@ -90,8 +90,14 @@ class FakeGoogle:
         self._check(writing=True)
         self.events.pop(google_id, None)
 
+    async def end_meeting_early(self, calendar_id, google_id, ended):
+        """The room declines it as a guest: the calendar service no longer reads a declined meeting, so it goes from the poll."""
+        self.calls.append(("end early", google_id))
+        self._check(writing=True)
+        self.events.pop(google_id, None)
+
     def writes(self):
-        return [c for c in self.calls if c[0] in ("create", "update", "delete")]
+        return [c for c in self.calls if c[0] in ("create", "update", "delete", "end early")]
 
 
 @pytest.fixture
@@ -283,14 +289,56 @@ async def test_withdraw_cancels_a_booking_that_started_a_minute_ago(tmp_path, cl
     assert google.events == {} and rooms.merge([]) == []
 
 
-async def test_end_and_cancel_are_only_for_the_rooms_own_bookings(tmp_path, clock, google):
-    gid = google.add("Booked in Google", at(9), at(10))
+async def test_cancel_is_only_for_the_rooms_own_bookings(tmp_path, clock, google):
+    gid = google.add("Booked in Google", at(10), at(11))
     rooms = make(tmp_path, clock, google)
     await fetched(rooms, google)
     with pytest.raises(UnknownBooking):
-        await rooms.end(gid)
+        await rooms.cancel(gid)
     with pytest.raises(UnknownBooking):
-        await rooms.cancel("nothing-like-it")
+        await rooms.end("nothing-like-it")
+
+
+async def test_end_now_frees_the_room_from_a_meeting_booked_in_google_and_tells_google(tmp_path, clock, google):
+    """An hour booked in Google that took half of it (spec 2026-10-25, section 2.1): the room is free at once, Google is told (the room
+    declines it there), and the room goes on showing it ended at 9:52, a restart too, though Google no longer has it."""
+    gid = google.add("Design review", at(9), at(10))
+    rooms = make(tmp_path, clock, google)
+    await fetched(rooms, google)
+    clock.now = at(9, 52)
+    early = await rooms.end(gid)
+    assert google.writes() == [("end early", gid)] and not early.pending
+    assert rooms.in_progress() is None and now_minutes(clock.now, rooms.busy())[0]   # Use now is offered again
+    shown = await fetched(rooms, google)                                              # declined: gone from Google's list
+    assert [(e.id, e.title, e.end_time) for e in shown] == [(gid, "Design review", at(9, 52))]
+    again = make(tmp_path, clock, google)
+    assert [(e.id, e.end_time) for e in again.merge([])] == [(gid, at(9, 52))]
+
+
+async def test_a_meeting_booked_in_google_ends_at_the_room_while_google_is_down(tmp_path, clock, google):
+    gid = google.add("Design review", at(9), at(10))
+    rooms = make(tmp_path, clock, google)
+    await fetched(rooms, google)
+    google.up = False
+    clock.now = at(9, 40)
+    early = await rooms.end(gid)
+    assert early.pending and rooms.state()["pending"] == 1
+    assert [(e.id, e.end_time) for e in rooms.merge()] == [(gid, at(9, 40))]          # free here at once
+    google.up = True
+    await rooms.sync()
+    assert not early.pending and gid not in google.events
+
+
+async def test_end_now_on_a_meeting_booked_in_google_is_only_for_one_in_progress(tmp_path, clock, google):
+    later = google.add("Later", at(11), at(12))
+    rooms = make(tmp_path, clock, google)
+    await fetched(rooms, google)
+    with pytest.raises(BookingError, match="not started"):
+        await rooms.end(later)
+    clock.now = at(12, 5)
+    with pytest.raises(BookingError, match="already ended"):
+        await rooms.end(later)
+    assert google.writes() == []
 
 
 async def test_a_booking_made_here_and_found_only_in_google_can_still_be_ended(tmp_path, clock, google):

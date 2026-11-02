@@ -17,7 +17,7 @@ working when Google has a problem: what is booked is kept on the device as well 
 - **What the room shows** is Google's bookings with the room's own laid over them. The room's version of its own booking wins while
   a change of it waits to be sent; with nothing waiting, Google's word goes (a booking moved or deleted in Google follows Google).
 - **The tag.** Each booking is written with a private extended property `croom_id`, the room's id for it. It is how the room knows
-  its own (End now and Cancel are only for those, never for meetings booked in Google by people), and how a create whose answer was
+  its own (Cancel is only for those, never for meetings booked in Google by people; End now is for both, section 2.1), and how a create whose answer was
   lost is found instead of being made twice.
 - **The sync.** Changes are sent in the order they were made, on the spot when Google answers, else on every poll (60 s) until they
   go; the first that cannot go stops the round. A calendar that refuses the write (shared with See all event details) keeps the
@@ -37,6 +37,26 @@ working when Google has a problem: what is booked is kept on the device as well 
   refuses a request that does not say it comes from the room page. **Cancel** deletes a booking that has not started, from either
   screen's Today list, with a second tap.
 - **Anyone at a screen can book**, as anyone can Join: there is no sign-in.
+
+### 2.1 End now for meetings booked in Google (2026-11-02)
+
+Ben: "if an hour meeting is scheduled, but it only ends up taking 30 minutes, you can free up the room", for the people at the room
+(B) and for those booking in Google Calendar (A), both.
+
+- **Where.** The room page's End now, with its second tap, for any meeting in progress, the room's own or one people booked in Google.
+  Still never the door sign (the route refuses it). A meeting people booked that has not started has no Cancel.
+- **At the room, at once (B).** The room keeps the meeting's Google id, title and times and the minute it ended in `ended-early.json`
+  (beside `bookings.json`) and shows it ending then: the room page, the door sign and the TV show the room free, Use now and Book
+  room take the rest of the hour, and Laptop mode lets the MeetUp go as it does at a booking's end. It holds while Google is out of
+  reach and across a restart, until a day after the meeting's own end.
+- **In Google (A).** The room reads the event and, when it is a guest of it (the usual case: people invite the room), declines it in
+  the room's calendar: its own answer only, the other guests as they were, `sendUpdates=none` (nobody is emailed; the organizer sees
+  the room declined). One occurrence of a recurring meeting is that occurrence alone. Google then shows the room free for that time.
+  When the room organizes it or it has no guests (made straight in the room's calendar), its end moves to the minute instead. An event
+  gone from Google is ended already. The write goes as the room's own do: on the spot, else at each poll; a calendar shared for
+  reading only shows the same "share it with Make changes to events" note, and the room still shows itself free.
+- **What it does not do.** It does not leave a call: Leave does that. A declined meeting is no longer read from Google, so the room
+  draws it from what it kept, ended at its minute.
 
 ## 3. Pieces
 

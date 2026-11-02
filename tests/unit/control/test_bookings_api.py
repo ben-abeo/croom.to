@@ -96,6 +96,23 @@ async def test_use_now_then_end_now(client_factory, rooms, google):  # noqa: F81
     assert status["calendar"]["booking"]["now"]["minutes"][-1] == 240
 
 
+async def test_end_now_frees_the_room_from_a_meeting_booked_in_google(client_factory, rooms, google):  # noqa: F811
+    """The touch screen's End now for an hour booked in Google that took half of it (spec 2026-10-25, section 2.1); never the door sign."""
+    now = datetime.now().astimezone().replace(second=0, microsecond=0)
+    gid = google.add("Design review", now - timedelta(minutes=30), now + timedelta(minutes=30))
+    meeting = google.events[gid]
+    rooms.remember([meeting])
+    client = await client_for(client_factory, rooms, events=[meeting])
+    refused = await client.post(f"/api/bookings/{gid}/end", json={"source": "door sign"})
+    assert refused.status == 403 and google.writes() == []
+    response = await client.post(f"/api/bookings/{gid}/end", json={"source": "room page"})
+    assert response.status == 200, await response.text()
+    data = await response.json()
+    assert data["booking"]["id"] == gid and data["pending"] is False and google.writes() == [("end early", gid)]
+    status = await (await client.get("/api/status")).json()
+    assert status["calendar"]["booking"]["now"]["minutes"]                 # Use now is offered: the room is free
+
+
 async def test_what_is_refused_and_why(client_factory, rooms, google):  # noqa: F811
     client = await client_for(client_factory, rooms)
     start = tomorrow_at(10)

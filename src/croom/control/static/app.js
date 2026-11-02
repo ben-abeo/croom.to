@@ -1306,12 +1306,15 @@
     const b = bookingOf(cal);
     if (!b) return [];
     const specs = [];
-    if (ongoing && ongoing.booking_id) {
-      const asking = askEnd && askEnd.key === ongoing.booking_id && Date.now() < askEnd.until;
+    // End now ends the meeting in progress, the room's own booking (by its tag) or one people booked in Google (by Google's id: the
+    // room declines it there, spec 2026-10-25, section 2.1)
+    const endKey = ongoing && (ongoing.booking_id || ongoing.id);
+    if (endKey) {
+      const asking = askEnd && askEnd.key === endKey && Date.now() < askEnd.until;
       specs.push({ id: "end-booking", label: asking ? "Tap again to end" : "End now", className: asking ? "danger" : "quiet", icon: "x-circle",
-                   target: ongoing.booking_id, onClick: () => {
-                     if (asking) { askEnd = null; changeBooking(ongoing.booking_id, "end"); return; }
-                     askEnd = { key: ongoing.booking_id, until: Date.now() + CONFIRM_MS };
+                   target: endKey, onClick: () => {
+                     if (asking) { askEnd = null; changeBooking(endKey, "end"); return; }
+                     askEnd = { key: endKey, until: Date.now() + CONFIRM_MS };
                      render();
                      setTimeout(render, CONFIRM_MS + 50);
                    } });

@@ -8,14 +8,17 @@ from Google is kept too (calendar-cache.json), so a device that restarts while G
 What the room shows is Google's bookings with the room's own laid over them: a booking of the room's is the room's
 version (it may hold a change Google has not had yet), and Google's word goes for one with no change waiting.
 
-Each booking carries the room's tag (booking_id) on its Google event, which is how End now and Cancel know a booking
-as the room's own, and how a create whose answer was lost is found instead of being made twice. A booking written while
+Each booking carries the room's tag (booking_id) on its Google event, which is how Cancel knows a booking as the room's own,
+and how a create whose answer was lost is found instead of being made twice. End now also ends a meeting people booked in Google
+(spec 2026-10-25, section 2.1): the room shows it ended at once (ended-early.json, beside bookings.json) and tells Google, which
+it does as for its own bookings, on the spot or at the next poll. A booking written while
 Google was out of reach is written whatever Google has meanwhile: the room's word goes for its own, and a booking it
 overlaps is shown on it as a clash for a person to sort out. Booked while Google answers, a time Google has taken is
 refused instead, with the person still at the screen.
 """
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -163,6 +166,37 @@ class Booking:
                              calendar_id=calendar_id, booking_id=self.id, pending=self.pending)
 
 
+@dataclass
+class EarlyEnd:
+    """A meeting people booked in Google that End now ended at the room (spec 2026-10-25, section 2.1). The room shows it ended at
+    `ended` from that moment, with Google's own times otherwise, until a day after it ended; Google is told once (pending until then):
+    the room declines it, as a guest of it, or its end is moved, when it is in the room's calendar with no guests."""
+    google_id: str
+    title: str
+    start: datetime
+    end: datetime         # as Google had it
+    ended: datetime
+    created: datetime
+    pending: bool = True
+
+    @property
+    def id(self) -> str:
+        return self.google_id
+
+    def to_json(self) -> Dict[str, Any]:
+        return {"google_id": self.google_id, "title": self.title, "start": self.start.isoformat(), "end": self.end.isoformat(),
+                "ended": self.ended.isoformat(), "created": self.created.isoformat(), "pending": self.pending}
+
+    @classmethod
+    def from_json(cls, data: Dict[str, Any]) -> "EarlyEnd":
+        return cls(google_id=str(data["google_id"]), title=str(data["title"]), start=datetime.fromisoformat(data["start"]),
+                   end=datetime.fromisoformat(data["end"]), ended=datetime.fromisoformat(data["ended"]),
+                   created=datetime.fromisoformat(data["created"]), pending=bool(data.get("pending", True)))
+
+    def event(self, calendar_id: str = "") -> CalendarEvent:
+        return CalendarEvent(id=self.google_id, title=self.title, start_time=self.start, end_time=self.ended, calendar_id=calendar_id)
+
+
 def _write_json(path: Path, data: Any) -> None:
     """Whole or not at all: a power cut mid-write leaves the last file, not half of a new one. Readable by the agent's user only."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +260,8 @@ class RoomBookings:
         self._lock = asyncio.Lock()
         self._revision = 0       # counts the changes to what the room shows: a screen reads the day again when it moves
         self._records: List[Booking] = self._load()
+        self.ended_path = self.store_path.with_name("ended-early.json")
+        self._ended: List[EarlyEnd] = self._load_ended()
         self._google, self._saved_at = self.cached()
 
     def set_hours(self, booking_start: str, booking_end: str) -> None:
@@ -248,11 +284,24 @@ class RoomBookings:
                 logger.warning(f"Ignoring a booking in {self.store_path}: {e}")
         return records
 
+    def _load_ended(self) -> List[EarlyEnd]:
+        data = _read_json(self.ended_path) or []
+        ended = []
+        for item in data if isinstance(data, list) else []:
+            try:
+                ended.append(EarlyEnd.from_json(item))
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(f"Ignoring a meeting ended early in {self.ended_path}: {e}")
+        return ended
+
     def _save(self) -> None:
         self._revision += 1
         cutoff = self.clock() - KEEP_ENDED
         self._records = [b for b in self._records if b.pending or b.end > cutoff]
         _write_json(self.store_path, [b.to_json() for b in self._records])
+        self._ended = [x for x in self._ended if x.pending or x.end > cutoff]
+        if self._ended or self.ended_path.exists():
+            _write_json(self.ended_path, [x.to_json() for x in self._ended])
 
     def cached(self) -> Tuple[List[CalendarEvent], Optional[datetime]]:
         """The calendar as Google last gave it, and when: what a device that restarts without Google shows."""
@@ -318,13 +367,23 @@ class RoomBookings:
         google_events = self._google if google_events is None else google_events
         tags = {b.id for b in self._records}
         google_ids = {b.google_id for b in self._records if b.google_id}
-        merged = [e for e in google_events if e.booking_id not in tags and e.id not in google_ids]
+        ended = {x.google_id: x for x in self._ended}
+        merged = [self._as_ended(e, ended.get(e.id)) for e in google_events if e.booking_id not in tags and e.id not in google_ids]
+        seen = {e.id for e in merged}
+        merged += [x.event(self._calendar_id) for x in self._ended if x.google_id not in seen]   # declined in Google: no longer read
         merged += [b.event(self._calendar_id) for b in self._records if not b.cancelled]
         others = [e for e in merged if not e.booking_id and e.status != "cancelled" and e.response_status != "declined"]
         for e in merged:
             if e.booking_id:
                 e.clash = next((o.title for o in others if o.start_time < e.end_time and o.end_time > e.start_time), None)
         return sorted(merged, key=lambda e: e.start_time)
+
+    @staticmethod
+    def _as_ended(event: CalendarEvent, early: Optional[EarlyEnd]) -> CalendarEvent:
+        """A Google event as the room shows it: ended where End now ended it, unless Google already has it ending sooner."""
+        if early is None or event.end_time <= early.ended:
+            return event
+        return dataclasses.replace(event, end_time=max(early.ended, event.start_time))
 
     def busy(self, leave_out: Optional[str] = None) -> List[Span]:
         return busy_spans(self.merge(), leave_out)
@@ -358,7 +417,7 @@ class RoomBookings:
         return {
             "online": self._online,
             "offline_since": self._saved_at.isoformat() if not self._online and self._saved_at else None,
-            "pending": sum(1 for b in self._records if b.pending),
+            "pending": sum(1 for b in self._records if b.pending) + sum(1 for x in self._ended if x.pending),
             "problem": self._problem,
             "revision": self._revision,
             "hours": {"start": self.start_hour.strftime("%H:%M"), "end": self.end_hour.strftime("%H:%M")},
@@ -438,9 +497,13 @@ class RoomBookings:
                 return b
         raise UnknownBooking("That booking was not made at this room's screens")
 
-    async def end(self, key: str) -> Booking:
-        """End now: a booking in progress ends this minute (one that has not started is cancelled)."""
-        booking = self._find(key)
+    async def end(self, key: str):
+        """End now: a booking in progress ends this minute (one of the room's own that has not started is cancelled). A meeting people
+        booked in Google ends the same way at the room (an EarlyEnd), and Google is told."""
+        try:
+            booking = self._find(key)
+        except UnknownBooking:
+            return await self._end_googles(key)
         now = self.clock().replace(second=0, microsecond=0)
         if booking.start >= now:
             return await self.cancel(key)
@@ -448,6 +511,22 @@ class RoomBookings:
             raise BookingError("That booking has already ended")
         booking.end = max(now, booking.start + timedelta(minutes=1))
         return await self._changed(booking)
+
+    async def _end_googles(self, key: str) -> EarlyEnd:
+        event = next((e for e in self._google if e.id == key and not e.booking_id), None)
+        if event is None:
+            raise UnknownBooking("That meeting is not in the room's calendar")
+        if any(x.google_id == key for x in self._ended):
+            raise BookingError("That meeting has already ended")
+        now = self.clock().replace(second=0, microsecond=0)
+        if event.start_time > now:
+            raise BookingError("That meeting has not started yet")
+        if event.end_time <= now:
+            raise BookingError("That meeting has already ended")
+        early = EarlyEnd(google_id=event.id, title=event.title, start=event.start_time, end=event.end_time,
+                         ended=max(now, event.start_time + timedelta(minutes=1)), created=self.clock())
+        self._ended.append(early)
+        return await self._changed(early)
 
     async def cancel(self, key: str) -> Booking:
         booking = self._find(key)
@@ -463,7 +542,7 @@ class RoomBookings:
         booking.cancelled = True
         return await self._changed(booking)
 
-    async def _changed(self, booking: Booking) -> Booking:
+    async def _changed(self, booking):
         booking.pending = True
         self._save()
         if self._provider is not None:
@@ -481,33 +560,37 @@ class RoomBookings:
         if self._provider is None:
             return
         async with self._lock:
-            for booking in sorted((b for b in self._records if b.pending), key=lambda b: b.created):
+            waiting = [b for b in self._records if b.pending] + [x for x in self._ended if x.pending]
+            for booking in sorted(waiting, key=lambda b: b.created):
                 if not await self._send(booking):
                     break
 
-    async def _send(self, booking: Booking, at_the_screen: bool = False) -> bool:
+    async def _send(self, booking, at_the_screen: bool = False) -> bool:
         """One booking's change to Google. True when it went (or there was nothing to send); False when Google is out of reach or
         refuses, and the change waits. At the screen, a time Google has taken since the last poll is refused (SlotTaken)."""
         provider, calendar_id = self._provider, self._calendar_id
         try:
-            if booking.google_id is None:
-                booking.google_id = await provider.find_booking(calendar_id, booking.id)   # a create whose answer was lost
-            if booking.cancelled:
-                if booking.google_id:
-                    await provider.delete_booking(calendar_id, booking.google_id)
-                self._records.remove(booking)
-            elif booking.google_id:
-                await provider.update_booking(calendar_id, booking.google_id, booking.title, booking.start, booking.end)
+            if isinstance(booking, EarlyEnd):
+                await provider.end_meeting_early(calendar_id, booking.google_id, booking.ended)
             else:
-                if at_the_screen:
-                    taken = [e for e in await provider.get_events(calendar_id, booking.start, booking.end)
-                             if e.booking_id != booking.id and e.status != "cancelled" and e.response_status != "declined"
-                             and e.start_time < booking.end and e.end_time > booking.start]
-                    if taken:
-                        raise SlotTaken(f"That time was just booked in Google Calendar: {taken[0].title}")
-                verb = "Started" if booking.start == booking.created.replace(second=0, microsecond=0) else "Booked"
-                booking.google_id = await provider.create_booking(
-                    calendar_id, booking.id, booking.title, booking.start, booking.end, f"{verb} on the {self.room_name} {booking.source}")
+                if booking.google_id is None:
+                    booking.google_id = await provider.find_booking(calendar_id, booking.id)   # a create whose answer was lost
+                if booking.cancelled:
+                    if booking.google_id:
+                        await provider.delete_booking(calendar_id, booking.google_id)
+                    self._records.remove(booking)
+                elif booking.google_id:
+                    await provider.update_booking(calendar_id, booking.google_id, booking.title, booking.start, booking.end)
+                else:
+                    if at_the_screen:
+                        taken = [e for e in await provider.get_events(calendar_id, booking.start, booking.end)
+                                 if e.booking_id != booking.id and e.status != "cancelled" and e.response_status != "declined"
+                                 and e.start_time < booking.end and e.end_time > booking.start]
+                        if taken:
+                            raise SlotTaken(f"That time was just booked in Google Calendar: {taken[0].title}")
+                    verb = "Started" if booking.start == booking.created.replace(second=0, microsecond=0) else "Booked"
+                    booking.google_id = await provider.create_booking(calendar_id, booking.id, booking.title, booking.start,
+                                                                      booking.end, f"{verb} on the {self.room_name} {booking.source}")
             booking.pending = False
         except SlotTaken:
             raise

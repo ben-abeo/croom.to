@@ -55,6 +55,26 @@ def test_use_now_on_the_sign_takes_the_room_and_only_the_room_page_ends_it(brows
         page.close()
 
 
+def test_end_now_on_the_room_page_frees_the_room_from_a_meeting_booked_in_google(browser):  # noqa: F811
+    """An hour booked in Google that took half of it (spec 2026-10-25, section 2.1): the touch screen's End now ends it at the room, and
+    the door sign shows the room free."""
+    from tests.unit.control.test_page import event
+    review = event("g-review", "Design review", -30, duration=60, url="https://meet.google.com/abc-defg-hij")
+    with PageServer(room_name="Room 1", bookings=True, calendar_events=[review]) as server:
+        server.rooms.remember([review])                                            # the calendar service's poll
+        room = browser.new_page(viewport={"width": 1280, "height": 800})
+        room.goto(f"http://127.0.0.1:{server.port}/", wait_until="networkidle")
+        room.wait_for_function("document.getElementById('kicker').textContent === 'Happening now'", timeout=8000)
+        room.click("#actions button:has-text('End now')")
+        room.click("#actions button:has-text('Tap again to end')")
+        room.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        assert server.google.writes() == [("end early", "g-review")]
+        page = sign(browser, server)
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=8000)
+        page.close()
+        room.close()
+
+
 def test_book_on_the_sign_picks_a_day_a_time_a_name_and_a_length(browser):  # noqa: F811
     with PageServer(room_name="Room 1", bookings=True) as server:
         page = sign(browser, server)

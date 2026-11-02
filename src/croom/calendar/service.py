@@ -380,7 +380,7 @@ class CalendarService(Service):
 
         # Find next meeting with a video conference link
         upcoming = [
-            e for e in self._events.values()
+            e for e in self.events   # as the room shows them: a meeting ended early at the room is over
             if e.meeting_url and e.end_time > now
         ]
 
@@ -490,7 +490,7 @@ class CalendarService(Service):
         """
         events = []
 
-        for event in self._events.values():
+        for event in self.events:
             # Check time range
             if event.start_time >= end or event.end_time <= start:
                 continue
@@ -519,7 +519,7 @@ class CalendarService(Service):
         Returns:
             Current meeting or None if no meeting is active
         """
-        for event in self._events.values():
+        for event in self.events:   # as the room shows them: a meeting ended early at the room is over
             if event.is_happening_now() and event.meeting_url:
                 return event
         return None

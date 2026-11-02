@@ -269,6 +269,26 @@ class GoogleCalendarProvider(CalendarProvider):
         body = {'summary': title, 'start': {'dateTime': start.isoformat()}, 'end': {'dateTime': end.isoformat()}}
         await self._write(lambda: self._service.events().patch(calendarId=calendar_id, eventId=google_id, body=body))
 
+    async def end_meeting_early(self, calendar_id: str, google_id: str, ended: datetime) -> None:
+        """End now for a meeting people booked in Google (spec 2026-10-25, section 2.1). A meeting the room is a guest of is declined in
+        the room's calendar (its own answer only: nobody is sent an email), which makes the room free in Google; one in the room's
+        calendar with no guests, or that the room organizes, ends at `ended` instead. One that has gone from Google is ended already."""
+        try:
+            item = await asyncio.to_thread(lambda: self._service.events().get(calendarId=calendar_id, eventId=google_id).execute())
+        except HttpError as e:
+            if _status(e) in (404, 410):
+                return
+            raise
+        if item.get('status') == 'cancelled':
+            return
+        attendees = item.get('attendees') or []
+        if any(a.get('self') for a in attendees) and not item.get('organizer', {}).get('self'):
+            body = {'attendees': [dict(a, responseStatus='declined') if a.get('self') else a for a in attendees]}
+        else:
+            body = {'end': {'dateTime': ended.isoformat()}}
+        await self._write(lambda: self._service.events().patch(calendarId=calendar_id, eventId=google_id, body=body,
+                                                               sendUpdates='none'))
+
     async def check_booking(self, calendar_id: str) -> None:
         """Prove the room can book in its calendar (croom --check-calendar): a quarter hour on January 1, 2000, written and
         deleted at once, out of sight of any week anyone looks at. CalendarWriteRefused when the calendar is shared for reading."""

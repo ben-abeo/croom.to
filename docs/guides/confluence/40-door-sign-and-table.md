@@ -29,7 +29,7 @@ Shown when the room is free.
 
 ## End now (table screen only)
 
-For a booking made on the door sign or table: tap **End now**, then tap again within 5 seconds. This frees the room for others.
+For any meeting in progress, whether it was booked on the door sign, on the table or in Google Calendar: tap **End now**, then tap again within 5 seconds. This frees the room for others, on the door sign and in Google Calendar.
 
 **PLANS CHANGED?**
 

@@ -83,7 +83,7 @@ A status card with a kicker, a headline and a line under it, for example **Room 
 | Join now | A booking with a video link | Joins the call. It opens 10 minutes before the start; until then it says "Join opens at 12:50 PM". |
 | Book room | A calendar is set up | Books a later slot (below). |
 | Use now | The room is free now | Claims the room from this minute (below). |
-| End now | A booking made at the room's screens is in progress | Ends it on the second tap. Only the table can end a booking; the door sign cannot. |
+| End now | A meeting is in progress (booked at the room's screens or in Google Calendar) | Ends it on the second tap: shortened in Google, or declined by the room when people invited it. Only the table can end a meeting; the door sign cannot. |
 | Laptop | Laptop mode is turned on in Settings | Hands the camera, microphones and speaker to a laptop (below). |
 | TV Remote | Top bar, when a TV is set up and paired | Opens the TV remote. |
 | Options | Top bar, always (hidden while a laptop has the camera) | Opens Options. |

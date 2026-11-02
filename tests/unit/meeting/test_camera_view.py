@@ -19,6 +19,11 @@ from tests.unit.devices.test_service import service_for  # noqa: E402
 PAGE = "<title>{0}</title><h1>{0}</h1>"
 TRACK_ENDED = "window.__croomTap.lastTrack && window.__croomTap.lastTrack.readyState === 'ended'"
 TRACK_LIVE = "window.__croomTap.lastTrack && window.__croomTap.lastTrack.readyState === 'live'"
+# What tv.js's preview asks for (PREVIEW_SIZE), and a call's page opening and closing its own camera
+PREVIEW = "navigator.mediaDevices.getUserMedia({video: {width: {ideal: 3840}, height: {ideal: 2160}, frameRate: {ideal: 30}}})" \
+          ".then((s) => { window.own = s; return s.getVideoTracks()[0].getSettings().width; })"
+OWN_CAMERA_ON = "navigator.mediaDevices.getUserMedia({video: true}).then((s) => { window.own = s; })"
+OWN_CAMERA_OFF = "window.own.getTracks().forEach((t) => t.stop())"
 
 
 class Site:
@@ -81,7 +86,11 @@ async def tv(tmp_path):
     view = CameraView(meeting=meeting, devices=devices)
     display = CameraDisplay(f"{site.base}/tv", headless=True, kiosk=False)
     display.camera_view = view
-    await display.start()
+    try:
+        await display.start()
+    except Exception as e:  # noqa: BLE001 - browser missing on this machine
+        await site.stop()
+        pytest.skip(f"Chromium not available: {e}")
     page = await display.page()
     await page.wait_for_function("document.title === 'tv'", timeout=5000)
     try:
@@ -131,8 +140,9 @@ async def test_laptop_mode_and_the_calls_camera_turned_off_stop_the_tap_and_it_c
     assert view.state() == "on"
 
     meeting.call(camera_on=True)
+    await page.evaluate(OWN_CAMERA_ON)                             # the call's own camera (a call's page opens it)
     await fresh_frame(view)
-    meeting.current_meeting.is_camera_on = False                   # turned off at the TV or from the touch Pi: no callback says so
+    meeting.current_meeting.is_camera_on = False                   # turned off from the touch Pi: no callback says so
     await page.wait_for_function(TRACK_ENDED, timeout=2000)
     assert view.state() == "camera_off"
     meeting.current_meeting.is_camera_on = True                    # turned on again: the picture comes back by itself
@@ -174,3 +184,34 @@ async def test_a_slow_viewer_gets_the_newest_frame_never_a_queue():
     view._publish(b"5")
     assert await asyncio.wait_for(waiting, 1) == b"5"
     await frames.aclose()
+
+
+async def test_the_tap_opening_first_on_the_tv_page_leaves_the_preview_its_own_size(tv):
+    """Chromium opens the camera once, at its first caller's size: the tap asks what the TV's preview asks, so the preview keeps it."""
+    site, display, page, view, meeting, devices = tv
+    view.watch()
+    await fresh_frame(view)                                        # the tap opened the camera first
+    assert await page.evaluate(PREVIEW) != 1280                    # the preview, opened second, is not held at the tap's 720p
+
+
+async def test_on_a_calls_page_the_tap_waits_for_the_calls_camera_and_ends_with_it(tv):
+    site, display, page, view, meeting, devices = tv
+    claimed = await display.claim()
+    await claimed.goto(f"{site.base}/call")
+    meeting.call(camera_on=True)
+    view.watch()
+    await asyncio.sleep(1.0)
+    assert await claimed.evaluate("window.__croomTap.opened") == 0  # the call has not opened its camera: the tap does not open it first
+    assert view.state() == "starting"
+    await claimed.evaluate(OWN_CAMERA_ON)
+    await fresh_frame(view)                                        # ... and opens once the call has
+
+    await claimed.evaluate(OWN_CAMERA_OFF)                         # the camera turned off at the TV: the call stops its own track
+    await claimed.wait_for_function(TRACK_ENDED, timeout=1000)     # the tap's ends with it, while is_camera_on still says on
+    assert meeting.current_meeting.is_camera_on and view.state() == "camera_off"
+    await asyncio.sleep(0.6)
+    assert await claimed.evaluate(TRACK_ENDED)                     # and nothing starts it again meanwhile
+
+    await claimed.evaluate(OWN_CAMERA_ON)                          # turned on again at the TV
+    await fresh_frame(view)
+    assert view.state() == "on"

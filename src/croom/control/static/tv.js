@@ -64,7 +64,8 @@
   // open and no meeting runs. One stream at a time, and every way out stops its tracks, so the camera
   // is free again before a meeting provider needs it.
   // The MeetUp films in 4K (Ben, 2026-10-25): asked for nothing more, Chromium opens a camera at 640 by 480. Ideals, so a camera, or a Pi, that
-  // cannot give that much gives its best instead of no picture.
+  // cannot give that much gives its best instead of no picture. The camera's tap for the touch Pi asks the same when it opens the camera
+  // first (croom/meeting/camera_view.py PREVIEW_SIZE): keep the two the same.
   const PREVIEW_SIZE = { width: { ideal: 3840 }, height: { ideal: 2160 }, frameRate: { ideal: 30 } };
   const preview = (function () {
     const video = el("camera-preview");

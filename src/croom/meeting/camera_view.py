@@ -26,20 +26,67 @@ logger = logging.getLogger(__name__)
 
 BINDING = "crystalMeetCameraFrame"
 VIEW = {"width": 640, "height": 360, "interval": 100, "quality": 0.7}
+# What the TV's idle preview asks for (tv.js PREVIEW_SIZE; keep the two the same). Chromium opens the camera once, at the size its first
+# caller asks for, and every later caller shares it: a tap that opens the camera before the preview asks the preview's size, so whoever
+# opens first, the preview gets what it asks for.
+PREVIEW_SIZE = {"width": {"ideal": 3840}, "height": {"ideal": 2160}, "frameRate": {"ideal": 30}}
 STILL_QUALITY = 0.9
 
-# The tap. In the top frame only (Meet's iframes need none), defined once per document. start() answers "on" or "error: <name>"; a track
-# that ends by itself (the camera unplugged, taken away by the USB switch) is reported through the binding as (null, "ended"). `opened`
-# counts the tracks this document opened and `lastTrack` is the last of them, for the tests.
+# The tap. In the top frame only (Meet's iframes need none; Meet and Zoom's client open the camera in the top document), defined once per
+# document. It never chooses the camera's size:
+# - It notes the page's own camera tracks (the TV preview's, Meet's, Zoom's) by wrapping getUserMedia, and MediaStreamTrack's stop and
+#   clone, and reports through the binding when the page's camera goes on and off: (null, "page_camera_on") / (null, "page_camera_off").
+# - When the page has its camera open, the tap opens the same device at the same size (a share that changes nothing). Otherwise, with
+#   opts.follow (a call's page) it waits for the call's own camera and answers "waiting"; on the TV's own page it opens the camera with
+#   opts.size, the preview's own size.
+# - With opts.follow, the call's own camera stopping (the camera turned off at the TV) stops the tap at once.
+# start() answers "on", "waiting" or "error: <name>". A track of the tap's that ends by itself (the camera unplugged, taken away by the USB
+# switch) is reported as (null, "ended"), and a start that fails after waiting as (null, "error"). `opened` counts the tracks this
+# document's tap opened and `lastTrack` is the last of them, for the tests.
 TAP_SCRIPT = """(() => {
   if (window !== window.top || window.__croomTap) return;
   const BINDING = "%s";
   const tap = { opened: 0, lastTrack: null };
-  let stream = null, video = null, timer = null, pending = null, generation = 0, encoding = false, options = null;
+  let stream = null, video = null, timer = null, pending = null, generation = 0, encoding = false, options = null, waiting = false;
 
   const send = (data, event) => {
     try { const binding = window[BINDING]; if (binding) Promise.resolve(binding(data, event || null)).catch(() => {}); } catch (e) {}
   };
+
+  // The page's own camera
+  const devices = window.MediaDevices && MediaDevices.prototype;
+  const getUserMedia = devices && devices.getUserMedia;
+  const pageTracks = new Set();
+  let pageLive = false;
+  const pageTrack = () => { for (const t of pageTracks) { if (t.readyState === "live") return t; } return null; };
+  const pageChanged = () => {
+    const live = Boolean(pageTrack());
+    if (live === pageLive) return;
+    pageLive = live;
+    send(null, live ? "page_camera_on" : "page_camera_off");
+    if (live && waiting) {
+      open(pageTrack()).then((answer) => { if (answer.startsWith("error")) send(null, "error"); });
+    } else if (!live && options && options.follow && (stream || pending)) {
+      tap.stop();   // the call turned its camera off: the tap's own track must not keep the camera on
+    }
+  };
+  const adopt = (track) => {
+    if (track.kind !== "video" || pageTracks.has(track)) return;
+    pageTracks.add(track);
+    track.addEventListener("ended", () => { pageTracks.delete(track); pageChanged(); });
+    pageChanged();
+  };
+  if (getUserMedia) {
+    devices.getUserMedia = function (constraints) {
+      return getUserMedia.call(this, constraints).then((s) => { s.getVideoTracks().forEach(adopt); return s; });
+    };
+  }
+  const trackStop = MediaStreamTrack.prototype.stop;
+  MediaStreamTrack.prototype.stop = function () { trackStop.call(this); if (pageTracks.delete(this)) pageChanged(); };
+  const trackClone = MediaStreamTrack.prototype.clone;
+  MediaStreamTrack.prototype.clone = function () { const c = trackClone.call(this); if (pageTracks.has(this)) adopt(c); return c; };
+
+  // The tap's own track
   const toBase64 = (blob) => new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => { const url = String(reader.result); resolve(url.slice(url.indexOf(",") + 1)); };
@@ -60,7 +107,7 @@ TAP_SCRIPT = """(() => {
   const release = () => {
     if (timer) clearInterval(timer);
     timer = null;
-    if (stream) stream.getTracks().forEach((t) => { t.onended = null; t.stop(); });
+    if (stream) stream.getTracks().forEach((t) => { t.onended = null; trackStop.call(t); });
     stream = null;
     if (video) video.srcObject = null;
     video = null;
@@ -83,21 +130,27 @@ TAP_SCRIPT = """(() => {
     const named = wanted ? cameras.find((d) => d.label.toLowerCase().includes(wanted)) : null;
     return (named || cameras[0] || {}).deviceId || null;
   };
-
-  tap.start = (opts) => {
-    if (stream) return Promise.resolve("on");
-    if (pending) return pending;
+  const open = (shared) => {
+    waiting = false;
     const mine = ++generation;
-    options = opts;
     pending = (async () => {
       try {
-        const deviceId = await choose(opts.label);
-        // 1280x720 asked for, so that a tap that opens the camera first opens it at a size the call and Frame people can use
-        const constraints = { width: { ideal: 1280 }, height: { ideal: 720 } };
-        if (deviceId) constraints.deviceId = { exact: deviceId };
-        const opened = await navigator.mediaDevices.getUserMedia({ video: constraints, audio: false });
+        let constraints;
+        if (shared) {   // the page's camera is open: the same device at the same size
+          const s = shared.getSettings();
+          constraints = { deviceId: { exact: s.deviceId } };
+          if (s.width && s.height) { constraints.width = { ideal: s.width }; constraints.height = { ideal: s.height }; }
+        } else {        // the TV's own page with no preview: the preview's size, so that the preview opened later gets it
+          const deviceId = await choose(options.label);
+          constraints = Object.assign({}, options.size || {});
+          if (deviceId) constraints.deviceId = { exact: deviceId };
+        }
+        const opened = await getUserMedia.call(navigator.mediaDevices, { video: constraints, audio: false });
         const track = opened.getVideoTracks()[0];
-        if (mine !== generation) { opened.getTracks().forEach((t) => t.stop()); return "stopped"; }
+        if (mine !== generation || (options.follow && !pageTrack())) {
+          opened.getTracks().forEach((t) => trackStop.call(t));
+          return "stopped";
+        }
         tap.opened += 1;
         tap.lastTrack = track;
         stream = opened;
@@ -107,7 +160,7 @@ TAP_SCRIPT = """(() => {
         video.playsInline = true;
         video.srcObject = opened;
         video.play().catch(() => {});
-        timer = setInterval(tick, opts.interval);
+        timer = setInterval(tick, options.interval);
         return "on";
       } catch (e) {
         return "error: " + ((e && e.name) || String(e));
@@ -117,7 +170,17 @@ TAP_SCRIPT = """(() => {
     })();
     return pending;
   };
-  tap.stop = () => { generation += 1; pending = null; release(); };
+
+  tap.start = (opts) => {
+    if (stream) return Promise.resolve("on");
+    if (pending) return pending;
+    options = opts;
+    const shared = pageTrack();
+    if (!shared && opts.follow) { waiting = true; return Promise.resolve("waiting"); }
+    if (!getUserMedia) return Promise.resolve("error: no camera on this page");
+    return open(shared);
+  };
+  tap.stop = () => { generation += 1; pending = null; waiting = false; release(); };
   tap.running = () => Boolean(stream);
   tap.still = async (width, height) => (ready() ? jpeg(width, height, %s) : null);
   Object.defineProperty(window, "__croomTap", { value: tap });
@@ -134,6 +197,7 @@ class CameraView:
                             # when the call's camera is turned off)
     CALL_TIMEOUT_S = 5.0    # a start, stop or still on the page answers within this
     PAUSED = (MeetingState.JOINING, MeetingState.LEAVING)   # the call's page is opening (or closing) its own camera: the tap waits
+    IN_CALL = (MeetingState.IN_LOBBY, MeetingState.CONNECTED)  # the TV's page is the call's: the tap follows the call's own camera
 
     def __init__(self, meeting=None, devices=None):
         self._meeting = meeting      # the meeting service: its state and the call's camera
@@ -146,6 +210,8 @@ class CameraView:
         self._tap_page = None
         self._first_frame_due: Optional[float] = None
         self._failed = False
+        self._waiting = False        # the tap waits for the call's own camera to open
+        self._page_off = False       # the call's page stopped its own camera (turned off at the TV) before the meeting says so
         self._frame: Optional[Tuple[int, bytes]] = None
         self._sequence = 0
         self._fresh = asyncio.Event()   # set (and replaced) at each new frame
@@ -281,14 +347,23 @@ class CameraView:
         self._first_frame_due = None
         self._frame = None
         self._failed = False
+        self._waiting = False
+        self._page_off = False
         self._kick()
 
     def _on_binding(self, source, data=None, event=None) -> None:
-        """A frame (base64 JPEG) from the tap, or (None, "ended"): its track ended by itself."""
-        if not self._tap_on or source.get("page") is not self._tap_page:
+        """A frame (base64 JPEG) from the tap; (None, "page_camera_on" / "page_camera_off"): the page's own camera opened or stopped;
+        (None, "ended"): the tap's track ended by itself; (None, "error"): a tap that waited for the call's camera could not open."""
+        page = source.get("page")
+        if event in ("page_camera_on", "page_camera_off"):
+            if page is self._page:
+                self._on_page_camera(event == "page_camera_on")
             return
-        if event == "ended":
-            logger.warning("The camera's picture ended by itself (the camera went away)")
+        if not self._tap_on or page is not self._tap_page:
+            return
+        if event in ("ended", "error"):
+            logger.warning("The camera's picture ended by itself (the camera went away)" if event == "ended"
+                           else "The camera's picture could not start with the call's camera")
             self._tap_on = False
             self._first_frame_due = None
             self._frame = None
@@ -303,10 +378,24 @@ class CameraView:
             return
         self._publish(jpeg)
 
+    def _on_page_camera(self, on: bool) -> None:
+        """The page's own camera (the call's) opened, or stopped: in a call, a stop is the camera turned off at the TV, and the tap (which
+        has stopped itself on the page) stays off until the call's camera is on again (by the page, or by the meeting's own word)."""
+        if on:
+            self._page_off = False
+            if self._tap_on and self._waiting:   # the tap opens on the page now: the wait for its first frame starts
+                self._waiting = False
+                self._first_frame_due = asyncio.get_running_loop().time() + self.FIRST_FRAME_S
+        elif self._in_call():
+            logger.info("The call's camera was turned off on the TV: the camera's picture stops")
+            self._page_off = True
+        self._kick()
+
     def _publish(self, jpeg: bytes) -> None:
         self._sequence += 1
         self._frame = (self._sequence, jpeg)
         self._first_frame_due = None
+        self._waiting = False
         fresh, self._fresh = self._fresh, asyncio.Event()
         fresh.set()
 
@@ -337,9 +426,16 @@ class CameraView:
         if state in self.PAUSED:
             return "starting"
         current = meeting.current_meeting
-        if state != MeetingState.IDLE and current is not None and not current.is_camera_on:
+        if state == MeetingState.IDLE or current is None:
+            self._page_off = False
+            return None
+        if not current.is_camera_on:
+            self._page_off = False   # the meeting agrees now: its word alone says when the camera is on again
             return "camera_off"
-        return None
+        return "camera_off" if self._page_off else None
+
+    def _in_call(self) -> bool:
+        return self._meeting is not None and self._meeting.state in self.IN_CALL
 
     def _label(self) -> str:
         camera = getattr(self._devices, "camera", None)
@@ -392,12 +488,17 @@ class CameraView:
         page, document = self._page, self._document
         self._tap_on, self._tap_page, self._frame = True, page, None   # (frames that come before the start answers are taken)
         self._first_frame_due = asyncio.get_running_loop().time() + self.FIRST_FRAME_S
+        options = dict(VIEW, label=self._label(), size=PREVIEW_SIZE, follow=self._in_call())
         try:
-            answer = await asyncio.wait_for(page.evaluate(START, dict(VIEW, label=self._label())), self.CALL_TIMEOUT_S)
+            answer = await asyncio.wait_for(page.evaluate(START, options), self.CALL_TIMEOUT_S)
         except Exception as e:  # noqa: BLE001 - the page between documents, or a camera that does not answer
             answer = f"error: {type(e).__name__}: {e}"
         if document != self._document or page is not self._page:
             return   # a new document came meanwhile: the tap went with the old one, and starts again on the new
+        if answer == "waiting":   # the call has not opened its camera yet: the tap opens after it, and its 5 s start then
+            if self._frame is None:
+                self._waiting, self._first_frame_due = True, None
+            return
         if answer != "on":
             logger.warning(f"The camera's picture could not start ({answer})")
             self._failed = True
@@ -405,7 +506,7 @@ class CameraView:
 
     async def _stop(self) -> None:
         page = self._tap_page
-        self._tap_on, self._tap_page, self._frame, self._first_frame_due = False, None, None, None
+        self._tap_on, self._tap_page, self._frame, self._first_frame_due, self._waiting = False, None, None, None, False
         if page is None or page.is_closed():
             return
         try:

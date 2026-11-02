@@ -2315,7 +2315,8 @@ class TestRoomDevices:
         data = await (await client.get("/api/status")).json()
         speaker, camera = real_states()
         assert set(data["audio"]) == set(speaker)
-        assert set(data["camera"]) == set(camera) and set(data["camera"]["zoom"]) == set(camera["zoom"])
+        assert set(data["camera"]) == set(camera) | {"view"} and set(data["camera"]["zoom"]) == set(camera["zoom"])   # (view: who may see the picture)
+        assert data["camera"]["view"] == {"allowed": False}
         assert data["audio"]["reason"] == data["camera"]["reason"] == "no devices service"
         assert (await (await client.get("/api/audio/volume")).json()) == data["audio"]
         for path, body in (("/api/audio/volume", {"level": 10}), ("/api/camera/move", {"pan": 1, "tilt": 0}),

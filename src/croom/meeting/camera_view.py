@@ -215,6 +215,8 @@ class CameraView:
         self._frame: Optional[Tuple[int, bytes]] = None
         self._sequence = 0
         self._fresh = asyncio.Event()   # set (and replaced) at each new frame
+        self._changed = asyncio.Event()   # set (and replaced) when state() has changed (see state_changes)
+        self._announced: Optional[str] = None
         self._wake = asyncio.Event()
         self._runner: Optional[asyncio.Task] = None
         if meeting is not None and hasattr(meeting, "add_state_callback"):
@@ -269,6 +271,25 @@ class CameraView:
             return "failed"
         return "on" if self._tap_on and self._frame is not None else "starting"
 
+    async def state_changes(self) -> AsyncIterator[str]:
+        """For one viewer (the touch Pi's socket): state() now, and again each time it changes. The runner looks at the room every CHECK_S
+        while anyone watches (and at once when something wakes it), so a change is told within that; nothing polls beyond it."""
+        last = None
+        while True:
+            state = self.state()
+            if state != last:
+                last = state
+                yield state
+                continue
+            await self._changed.wait()
+
+    def _announce(self) -> None:
+        state = self.state()
+        if state != self._announced:
+            self._announced = state
+            changed, self._changed = self._changed, asyncio.Event()
+            changed.set()
+
     async def still(self, width: int = 1280, height: int = 720, timeout_s: float = 5.0) -> Optional[bytes]:
         """One larger JPEG (Frame people). The tap runs for as long as this takes when nobody watches. None when the camera gives no
         picture within timeout_s (Laptop mode, the call's camera off, no frame)."""
@@ -310,6 +331,7 @@ class CameraView:
             await asyncio.wait({runner})
         if self._tap_on:
             await self._stop()
+        self._announce()
 
     # ------------------------------------------------------------------
     # From the TV's browser (TvDisplay)
@@ -398,6 +420,7 @@ class CameraView:
         self._waiting = False
         fresh, self._fresh = self._fresh, asyncio.Event()
         fresh.set()
+        self._announce()   # (the first frame makes the state "on")
 
     # ------------------------------------------------------------------
     # What the room allows
@@ -460,6 +483,7 @@ class CameraView:
             while True:
                 self._wake.clear()
                 await self._reconcile()
+                self._announce()
                 if not self._wanted() and not self._tap_on:
                     return
                 try:

@@ -99,6 +99,9 @@ class TvDisplay:
         self._lock = asyncio.Lock()   # one start, stop or restart at a time
         self._started_at = 0.0        # loop time of the last launch, for the back-off after a crash
         self._tasks: set = set()      # fire-and-forget tasks, held so they are not collected mid-flight
+        # The camera's live picture (croom.meeting.camera_view.CameraView), or None: its tap goes on every browser this starts, and it
+        # is told which page the TV has
+        self.camera_view = None
 
     @classmethod
     def from_config(cls, config) -> "TvDisplay":
@@ -178,6 +181,7 @@ class TvDisplay:
             self._playwright = await async_playwright().start()
             self._context = await self._launch(folder)
             await self._context.add_init_script(HIDE_POINTER)
+            await self._install_camera_view()
             self._adopt(self._context.pages[0] if self._context.pages else await self._context.new_page())
         except BaseException:   # a failed launch, or a caller cancelled while waiting for it
             await self._stop()   # the driver and a guest's folder go with it
@@ -189,6 +193,15 @@ class TvDisplay:
             logger.info(f"TV browser started as a guest on {folder}")
         await self._show_dark()
         await self.show_idle()
+
+    async def _install_camera_view(self) -> None:
+        """The camera's tap on the new context: a failure costs the touch Pi its picture, never the TV its browser."""
+        if self.camera_view is None:
+            return
+        try:
+            await self.camera_view.install(self._context)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"The camera's picture is not available in the TV's browser: {e!r}")
 
     async def _launch(self, folder: Path) -> "BrowserContext":
         return await self._playwright.chromium.launch_persistent_context(
@@ -202,6 +215,8 @@ class TvDisplay:
             self._pointer_hide.cancel()
             self._pointer_hide = None
         self._pointer_shown = False
+        if self.camera_view is not None:
+            self.camera_view.set_page(None)
         if self._context is not None:
             try:
                 await asyncio.wait_for(self._context.close(), timeout=self.CLOSE_TIMEOUT_S)
@@ -282,6 +297,8 @@ class TvDisplay:
     def _adopt(self, page: "Page") -> None:
         self._page = page
         page.on("crash", self._on_crash)
+        if self.camera_view is not None:
+            self.camera_view.set_page(page)
 
     def _on_crash(self, page: "Page") -> None:
         """Chromium's renderer died ("Aw, Snap!"): forget the page, so the next page() brings a fresh browser;
@@ -289,6 +306,8 @@ class TvDisplay:
         if page is self._page:
             logger.warning("The TV page crashed; a fresh browser will replace it")
             self._page = None
+            if self.camera_view is not None:
+                self.camera_view.set_page(None)
             if self._parked:
                 self._spawn(self._recover())
         self._spawn(self._close_quietly(page))

@@ -168,6 +168,14 @@ class CroomAgent:
         except ImportError as e:
             logger.warning(f"Room devices not available: {e}")
 
+        # The camera's live picture on the touch Pi (spec 2026-11-01 camera view): a tap in the TV's browser, run while the touch Pi
+        # watches (or Frame people needs a frame), kept off in Laptop mode and while the call's camera is off. The meeting service holds
+        # it (meeting.camera_view): it puts the tap on the TV's browser, and the control service finds it there.
+        meeting = self.service_manager.get_service("meeting")
+        if meeting is not None:
+            from croom.meeting.camera_view import CameraView
+            meeting.camera_view = CameraView(meeting=meeting, devices=self.service_manager.get_service("devices"))
+
         # Laptop mode (spec 2026-10-27): the MeetUp lent to a laptop at the table through the USB switch
         laptop_service = None
         if self.config.laptop.enabled:

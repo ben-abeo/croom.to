@@ -383,9 +383,25 @@ body.keyboard-open .schedule { display: none; }
 .sound-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
 .level { min-width: 3ch; text-align: center; font-size: 1.4rem; font-weight: 600; font-variant-numeric: tabular-nums; }
 .camera-grid { display: grid; grid-template-columns: auto 1fr; gap: 40px; align-items: start; margin-top: 14px; }
+.camera-controls { display: contents; }   /* without the picture the pad and the presets are the grid's two cells, as they always were */
 .camera-left { display: flex; gap: 24px; align-items: center; }
 .camera-right { display: flex; flex-direction: column; align-items: flex-start; }
 .camera-right .presets { margin-top: 0; }
+/* The live picture (spec 2026-11-01, section 3): on the touch Pi the picture takes the left, as large as fits at 16:9 (about 760 by 430 at
+   1280 by 800), and the controls stand in a narrower column on the right. */
+.camera-section:has(.camera-grid[data-picture]) { width: 100%; }
+.camera-grid[data-picture] { grid-template-columns: minmax(0, 1fr) 410px; align-items: start; }   /* 410 px: the pad and the zoom buttons side by side, and nothing wider (Set up's note wraps) */
+.camera-grid[data-picture] .camera-controls { display: flex; flex-direction: column; align-items: flex-start; gap: 20px; min-width: 0; }
+.camera-grid[data-picture] .camera-right { min-width: 0; max-width: 100%; }
+.camera-view[hidden] { display: none; }
+.picture { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: 12px; background: #000;
+  touch-action: none; user-select: none; -webkit-user-select: none; }
+.picture-img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; pointer-events: none; will-change: transform; }
+.picture-img[hidden] { display: none; }
+.picture-words { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 16px;
+  padding: 16px; text-align: center; font-size: 1.3rem; color: var(--periwinkle-300); }
+.picture-words[hidden] { display: none; }
+.picture-words p { margin: 0; overflow-wrap: anywhere; }
 .arrow-pad { display: grid; grid-template-columns: repeat(3, 64px); grid-template-rows: repeat(3, 64px); gap: 8px; }
 .arrow-pad .pad { min-height: 64px; padding: 0; font-size: 1.3rem; touch-action: none; user-select: none; -webkit-user-select: none; }
 .zoom-buttons { display: flex; flex-direction: column; gap: 10px; }
@@ -394,6 +410,7 @@ body.keyboard-open .schedule { display: none; }
 .presets[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 .presets .button.saved { border-color: var(--blue-600); }
 #preset-save-mode { margin-top: 10px; }
+#frame-people { margin-bottom: 14px; }
 #preset-save-mode[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
 .link-button { background: none; border: 0; color: var(--periwinkle-300); font: inherit; text-decoration: underline; cursor: pointer; padding: 0; margin-top: 12px; display: block; }
 .link-button[hidden] { display: none; }   /* likewise */

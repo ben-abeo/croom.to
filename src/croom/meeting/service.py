@@ -50,6 +50,9 @@ class MeetingService(Service):
         # Settings' Sign in to Google on the TV (spec 2026-10-29, section 3): made at the first sign-in, on the display's profile
         self._sign_in = sign_in
         self._courtesies: set = set()   # the before-join hooks run for a sign-in (the TV is woken), held until they are done
+        # The camera's live picture for the touch Pi (croom.meeting.camera_view.CameraView, spec 2026-11-01 camera view), set by the agent
+        # before start(): its tap goes on the TV's browser. The control service reaches it here; None in a room (or a test) without it.
+        self.camera_view = None
 
         self._providers: Dict[str, MeetingProvider] = {}
         self._active_provider: Optional[MeetingProvider] = None
@@ -142,6 +145,8 @@ class MeetingService(Service):
         """Start the TV display and the configured providers on it."""
         if self._display is None:
             self._display = TvDisplay.from_config(self.config)
+        if self.camera_view is not None:
+            self._display.camera_view = self.camera_view
         built = {}
         for platform in self.config.meeting.platforms:
             try:
@@ -195,6 +200,8 @@ class MeetingService(Service):
         self._providers.clear()
         self._active_provider = None
 
+        if self.camera_view is not None:
+            await self.camera_view.close()
         if self._display is not None:
             await self._display.stop()
 

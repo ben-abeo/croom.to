@@ -17,6 +17,8 @@
   let lastCameraKey = null;
   let presetSaveMode = false;
   let setupOpen = false;
+  const FRAMING = "Framing\u2026";
+  let framingHere = false;   // this screen's Frame people is under way (the status's camera.framing says it for every screen)
 
   // --- Sound and Camera: the commands behind both panels (spec 2026-10-08, section 4.6) ---
   // A success answers with the device's own block, which replaces the model's at once (no waiting for the next poll).
@@ -54,10 +56,14 @@
       return false;
     }
     if (!background) deviceNotes[kind] = "";
-    if (model.status) model.status[kind] = block;
+    if (model.status) {
+      // The camera's own answer has no "view" (who may see the picture: the status says it for the asking address): the page keeps it.
+      const was = model.status[kind];
+      model.status[kind] = kind === "camera" && was && was.view && block && !block.view ? Object.assign({}, block, { view: was.view }) : block;
+    }
     deviceEpoch[kind] += 1;
     render();
-    return true;
+    return block || true;   // the device's answer, for a caller that has words to take from it (Frame people)
   }
 
   // --- Sound ---
@@ -120,7 +126,7 @@
   function renderCamera(camera) {
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
-    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.position_known,
+    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, framingHere, camera && camera.position_known,
       camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, presetSaveMode, setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
     lastCameraKey = key;
@@ -132,7 +138,9 @@
     }
     panel.hidden = false;
     el("camera-note").textContent = deviceNotes.camera;
-    el("camera-status").textContent = camera.busy ? "Moving\u2026" : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
+    el("camera-status").textContent = camera.framing || framingHere ? FRAMING : camera.busy ? "Moving\u2026"
+      : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
+    el("frame-people").disabled = camera.busy || framingHere;
     for (const b of document.querySelectorAll("#arrow-pad .pad")) b.disabled = camera.busy;
     el("camera-home").disabled = camera.busy || !camera.home_saved;
     const ready = camera.home_saved;
@@ -170,6 +178,26 @@
     });
   });
   el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, { long: true }));
+
+  // Frame people (spec 2026-11-01, section 5): one tap zooms and turns toward the faces the camera finds, for some seconds inside the request.
+  // "Framing..." shows at once here (and on every other screen from the status's camera.framing); the outcome is the camera's note.
+  // A refusal ("Already framing", "Moving...", the picture's words) is the note as any refusal is.
+  function framedWords(block) {
+    const n = block.framed;
+    if (!n) return "No one found: the camera stayed where it was";
+    const words = n === 1 ? "Framed 1 person" : "Framed " + n + " people";
+    return block.turned === false ? words + ". Set up the camera to let it turn too" : words;
+  }
+  el("frame-people").addEventListener("click", async () => {
+    if (framingHere) return;
+    framingHere = true;
+    lastCameraKey = null;
+    const block = await deviceCall("camera", "/api/camera/frame", {}, { long: true });
+    framingHere = false;
+    if (block && typeof block === "object" && "framed" in block) deviceNotes.camera = framedWords(block);
+    lastCameraKey = null;
+    render();
+  });
 
   // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
   // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so
@@ -249,15 +277,272 @@
       if (previewWanted()) setPreview(true);
       previewTimer = setInterval(() => { if (previewWanted()) setPreview(true, { background: true }); }, 30000);
     }
+    syncPicture();
   });
   window.addEventListener("pagehide", () => {
     if (!previewing) return;
     fetch("/api/camera/preview", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ on: false }), keepalive: true }).catch(() => {});
   });
 
+  // --- The live picture on the touch Pi (spec 2026-11-01, section 3) ---
+  // On the touch Pi the room lets see it (camera.view.allowed) the camera screen has the picture on its left: frames come over the
+  // WebSocket GET /api/camera/view while the screen is shown (and the page is), and the socket is closed the moment it is not, which is
+  // what lets the TV Pi stop its tap. One finger dragging in the picture turns the camera as the arrow pad does, against the finger (the
+  // picture follows it); two fingers pinching scale the picture at once and zoom the camera. Every other page has no picture and no socket.
+  const DEAD_ZONE_PX = 30;        // a drag this near its touch point moves nothing
+  const MOVE_REPEAT_MS = 750;     // as the arrow pad: the agent's watchdog stays quiet while a finger holds
+  const ZOOM_EVERY_MS = 100;      // a pinch sends the zoom level at most this often (and once more at its end)
+  const NO_FRAME_MS = 5000;       // no picture this long: "No picture from the camera"
+  const ZOOM_MIN = 100, ZOOM_MAX = 500;
+  const PICTURE_WORDS = {
+    starting: "Starting the picture\u2026", camera_off: "Your camera is off in the call", laptop: "The camera is on the laptop",
+    failed: "No picture from the camera",
+  };
+  const pictureBox = el("picture");
+  const pictureImg = el("picture-img");
+  let pictureOn = false;          // the picture is wanted: a socket is open (or was and ended, to be tried again)
+  let pictureSocket = null;
+  let pictureState = "starting";  // what the room last said (CameraView.state()), "starting" until it speaks
+  let pictureFrame = false;       // a frame is on show
+  let pictureLost = false;        // the socket ended or no frame came for NO_FRAME_MS
+  let pictureUrl = null;          // the frame's object URL: the one before is revoked as the next replaces it
+  let pictureTimer = null;
+
+  function drawPicture() {
+    let words = "";
+    if (pictureState === "camera_off" || pictureState === "laptop") words = PICTURE_WORDS[pictureState];
+    else if (pictureLost || pictureState === "failed") words = PICTURE_WORDS.failed;
+    else if (!pictureFrame) words = PICTURE_WORDS.starting;
+    pictureImg.hidden = words !== "" || !pictureFrame;
+    el("picture-words").hidden = words === "";
+    el("picture-message").textContent = words;
+    el("picture-retry").hidden = words !== PICTURE_WORDS.failed;
+  }
+
+  function dropFrame() {
+    pictureFrame = false;
+    if (pictureUrl !== null) URL.revokeObjectURL(pictureUrl);
+    pictureUrl = null;
+    pictureImg.removeAttribute("src");
+  }
+
+  // The wait for a frame starts again with each frame and each word from the room, and does not run while the room says why there is none.
+  function armNoFrame() {
+    clearTimeout(pictureTimer);
+    pictureTimer = null;
+    pictureLost = false;
+    if (pictureSocket === null || pictureState === "camera_off" || pictureState === "laptop" || pictureState === "failed") return;
+    pictureTimer = setTimeout(() => { pictureLost = true; drawPicture(); }, NO_FRAME_MS);
+  }
+
+  function showFrame(blob) {
+    if (pictureState === "camera_off" || pictureState === "laptop" || pictureState === "failed") return;   // the room says there is none
+    if (pictureState === "off") pictureState = "starting";
+    const url = URL.createObjectURL(blob);
+    const before = pictureUrl;
+    pictureUrl = url;
+    pictureImg.src = url;
+    if (before !== null) URL.revokeObjectURL(before);
+    pictureFrame = true;
+    armNoFrame();
+    drawPicture();
+  }
+
+  function openPicture() {
+    pictureOn = true;
+    pictureState = "starting";
+    pictureLost = false;
+    const mine = new WebSocket((location.protocol === "https:" ? "wss:" : "ws:") + "//" + location.host + "/api/camera/view");
+    pictureSocket = mine;
+    mine.onmessage = (e) => {
+      if (pictureSocket !== mine) return;
+      if (typeof e.data !== "string") { showFrame(e.data); return; }
+      let said;
+      try { said = JSON.parse(e.data).state; } catch (err) { return; }
+      if (!Object.prototype.hasOwnProperty.call(PICTURE_WORDS, said) && said !== "on" && said !== "off") return;
+      pictureState = said;
+      if (said !== "on") dropFrame();      // starting again (the TV changed page), or no picture to show
+      armNoFrame();
+      drawPicture();
+    };
+    mine.onclose = () => {
+      if (pictureSocket !== mine) return;   // closed by the page itself
+      pictureSocket = null;
+      clearTimeout(pictureTimer);
+      pictureLost = true;
+      dropFrame();
+      drawPicture();
+    };
+    armNoFrame();
+    drawPicture();
+  }
+
+  function closePicture() {
+    pictureOn = false;
+    const socket = pictureSocket;
+    pictureSocket = null;       // (before the close, so that its onclose is not taken for the room's)
+    clearTimeout(pictureTimer);
+    pictureTimer = null;
+    if (socket !== null) socket.close();
+    dropFrame();
+  }
+
+  el("picture-retry").addEventListener("click", () => { closePicture(); openPicture(); });
+
+  // Where the picture is: shown whenever the room lets this page see it; the socket only while the camera screen is up and the page is seen.
+  function syncPicture() {
+    const s = model.status;
+    const allowed = Boolean(s && s.camera && s.camera.available && s.camera.view && s.camera.view.allowed);
+    el("camera-view").hidden = !allowed;
+    if (allowed) el("camera-grid").dataset.picture = ""; else delete el("camera-grid").dataset.picture;
+    const wanted = allowed && P.view() === "camera" && !document.hidden;
+    if (wanted && !pictureOn) openPicture();
+    else if (!wanted && pictureOn) { closePicture(); endGestures(); }
+    else if (!wanted) endGestures();
+  }
+
+  // One finger drags, two pinch. A gesture ends when its finger lifts, and as well when the browser cancels it, when it loses its capture,
+  // when the page is hidden or loses focus and when the screen is left: the finger that never seems to lift must not leave the camera turning.
+  const fingers = new Map();      // pointer id -> its last place
+  let gesture = "none";           // "drag", "pinch", or "spent": a pinch ended with a finger still down, which starts nothing new
+  let drag = null;
+  let pinch = null;
+  let zoomWanted = null;
+  let zoomBusy = false;
+
+  const cameraBusy = () => Boolean(model.status && model.status.camera && model.status.camera.busy);
+
+  function turn(pan, tilt) {
+    if (drag.timer !== null) clearInterval(drag.timer);
+    drag.timer = null;
+    if (!pan && !tilt) {
+      if (drag.moving) { drag.moving = false; moveCamera(0, 0); }
+      return;
+    }
+    const send = () => {
+      // The camera went busy under the finger (a Home or a preset from another screen): no more moves, and no stop that would cut it short.
+      if (cameraBusy()) { clearInterval(drag.timer); drag.timer = null; drag.moving = false; return; }
+      drag.moving = true;
+      moveCamera(pan, tilt);
+    };
+    send();
+    if (drag.moving) drag.timer = setInterval(send, MOVE_REPEAT_MS);
+  }
+
+  function dragTo(place) {
+    const dx = place.x - drag.x, dy = place.y - drag.y;
+    // The picture follows the finger: right turns the camera left (pan -1), and down turns it up (tilt +1: the screen's y grows downward).
+    const pan = Math.abs(dx) > DEAD_ZONE_PX ? -Math.sign(dx) : 0;
+    const tilt = Math.abs(dy) > DEAD_ZONE_PX ? Math.sign(dy) : 0;
+    if (pan === drag.pan && tilt === drag.tilt) return;
+    drag.pan = pan;
+    drag.tilt = tilt;
+    turn(pan, tilt);
+  }
+
+  function endDrag() {
+    if (drag === null) return;
+    if (drag.timer !== null) clearInterval(drag.timer);
+    if (drag.moving) moveCamera(0, 0);
+    drag = null;
+  }
+
+  function sendZoom(level) {
+    zoomWanted = level;
+    if (zoomBusy) return;     // one request at a time, the newest level next: they cannot arrive out of order
+    zoomBusy = true;
+    (async () => {
+      while (zoomWanted !== null) {
+        const next = zoomWanted;
+        zoomWanted = null;
+        await deviceCall("camera", "/api/camera/zoom", { level: next });
+      }
+      zoomBusy = false;
+    })();
+  }
+
+  const spread = () => { const [a, b] = [...fingers.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
+
+  function startPinch() {
+    const [a, b] = [...fingers.values()];
+    const box = pictureBox.getBoundingClientRect();
+    const level = model.status && model.status.camera && model.status.camera.zoom ? model.status.camera.zoom.level : ZOOM_MIN;
+    pinch = { spread: spread(), level: level, now: null, sent: null, sentAt: 0, timer: null };
+    pictureImg.style.transformOrigin = ((a.x + b.x) / 2 - box.left) + "px " + ((a.y + b.y) / 2 - box.top) + "px";
+  }
+
+  function pinchSend() {
+    pinch.timer = null;
+    if (pinch.now === null || pinch.now === pinch.sent) return;
+    pinch.sent = pinch.now;
+    pinch.sentAt = performance.now();
+    sendZoom(pinch.now);
+  }
+
+  function pinchTo() {
+    const ratio = spread() / pinch.spread;
+    pictureImg.style.transform = "scale(" + ratio + ")";      // at once: the camera's own frames catch up
+    pinch.now = Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, Math.round(pinch.level * ratio)));
+    const wait = ZOOM_EVERY_MS - (performance.now() - pinch.sentAt);
+    if (wait <= 0) { clearTimeout(pinch.timer); pinchSend(); }
+    else if (pinch.timer === null) pinch.timer = setTimeout(pinchSend, wait);
+  }
+
+  function endPinch() {
+    if (pinch === null) return;
+    clearTimeout(pinch.timer);
+    pinchSend();                                              // the level the fingers ended on, once
+    pinch = null;
+    pictureImg.style.transform = "";
+    pictureImg.style.transformOrigin = "";
+  }
+
+  function endGestures() {
+    if (gesture === "drag") endDrag(); else if (gesture === "pinch") endPinch();
+    for (const id of fingers.keys()) { try { pictureBox.releasePointerCapture(id); } catch (err) { /* already gone */ } }
+    fingers.clear();
+    gesture = "none";
+  }
+
+  function liftFinger(e) {
+    if (!fingers.delete(e.pointerId)) return;
+    if (gesture === "drag") endDrag(); else if (gesture === "pinch") endPinch();
+    gesture = fingers.size ? "spent" : "none";
+  }
+
+  pictureBox.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) return;       // Try again is a button, not a place to drag from
+    e.preventDefault();
+    if (fingers.size >= 2) return;
+    fingers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    pictureBox.setPointerCapture(e.pointerId);
+    if (fingers.size === 2) {
+      if (gesture === "drag") endDrag();
+      gesture = "pinch";
+      startPinch();
+    } else {
+      gesture = "drag";
+      drag = { x: e.clientX, y: e.clientY, pan: 0, tilt: 0, moving: false, timer: null };
+    }
+  });
+  pictureBox.addEventListener("pointermove", (e) => {
+    const place = fingers.get(e.pointerId);
+    if (!place) return;
+    place.x = e.clientX;
+    place.y = e.clientY;
+    if (gesture === "drag") dragTo(place); else if (gesture === "pinch") pinchTo();
+  });
+  for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) pictureBox.addEventListener(type, liftFinger);
+  pictureBox.addEventListener("contextmenu", (e) => e.preventDefault());
+  window.addEventListener("blur", endGestures);
+  document.addEventListener("visibilitychange", syncPicture);
+  window.addEventListener("pagehide", () => { closePicture(); endGestures(); });
+  window.addEventListener("pageshow", syncPicture);
+
   P.onRender((s) => {
     renderSound(s.audio);
     renderMic(s.mic);
     renderCamera(s.camera);
+    syncPicture();
   });
 })();

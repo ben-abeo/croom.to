@@ -29,6 +29,7 @@ from croom.control.capture_arm import CaptureArm
 from croom.control.settings import SettingsStore
 from croom.core.config import CONFIG_PATHS, DEFAULT_COMPANY, Config
 from croom.core.service import Service
+from croom.devices.camera import NO_PICTURE
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.meet_capture import ALREADY_CAPTURING, JOIN_MEET_FIRST, NO_CAPTURE, newest_capture
@@ -273,6 +274,9 @@ class ControlService(Service):
     """
 
     CANCEL_WAIT_S = 5.0   # a task that is cancelled (a join given up, the work that stop() ends) is waited for this long, no longer
+    CAMERA_HEARTBEAT_S = 10.0   # the camera's socket is pinged after this much quiet and closed when the page does not answer within half
+                                # as long: a touch Pi that lost its power or network is let go of (and the tap stopped) in about 15 s
+    CAMERA_WINDOW_S = 30.0      # the touch Pi that may have the picture checked in this recently (it checks in every 5 s)
     POINTER_HEARTBEAT_S = 5.0   # a pointer socket that has been quiet this long is pinged: a page that does not answer is let go of
 
     def __init__(
@@ -325,6 +329,7 @@ class ControlService(Service):
         self._mouse = mouse if mouse is not None else PiMouse()
         self._keyboard = keyboard if keyboard is not None else PiKeyboard()
         self._pointers: Dict[web.WebSocketResponse, _Pointer] = {}       # the pointer sockets that are open
+        self._camera_sockets: Dict[web.WebSocketResponse, web.Request] = {}   # the camera's picture sockets that are open
         self._mouse_waits: Set[asyncio.Task] = set()         # the sockets' handlers that wait for the room Pi's mouse to be made (stop() ends them)
         self._scores = scores
         self._scores_failure: Optional[str] = None
@@ -465,11 +470,13 @@ class ControlService(Service):
         app.router.add_post("/api/audio/volume", self._handle_set_volume)
         app.router.add_get("/api/audio/mic", self._handle_mic)
         app.router.add_post("/api/audio/mic", self._handle_set_mic)
+        app.router.add_get("/api/camera/view", self._handle_camera_view)
         app.router.add_post("/api/camera/move", self._handle_camera_move)
         app.router.add_post("/api/camera/zoom", self._handle_camera_zoom)
         app.router.add_post("/api/camera/home", self._handle_camera_home)
         app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
         app.router.add_post("/api/camera/setup", self._handle_camera_setup)
+        app.router.add_post("/api/camera/frame", self._handle_camera_frame)
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
         app.router.add_post("/api/tv/control", self._handle_tv_control)
         app.router.add_post("/api/tv/pair", self._handle_tv_pair)
@@ -574,8 +581,8 @@ class ControlService(Service):
         hold the listener's wait up for two minutes. The connection of a socket that is still open after the bound is cut."""
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.CANCEL_WAIT_S
-        closing = {asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping")): pointer.request
-                   for ws, pointer in self._pointers.items()}
+        closing = {asyncio.ensure_future(ws.close(code=WSCloseCode.GOING_AWAY, message=b"The room page is stopping")): request
+                   for ws, request in [(ws, pointer.request) for ws, pointer in self._pointers.items()] + list(self._camera_sockets.items())}
         moves = [pointer.relay.sending for pointer in self._pointers.values()]
         await self._cancel(self._task, self._search, *self._tv_requests, *moves, *self._mouse_waits)
         if closing:
@@ -712,7 +719,7 @@ class ControlService(Service):
             "dialog": dict(joined.dialog) if joined is not None and joined.dialog else None,
         }
 
-    def _status(self) -> Dict[str, Any]:
+    def _status(self, request: Optional[web.Request] = None) -> Dict[str, Any]:
         platforms = list(self._meeting.get_available_platforms()) if self._meeting is not None else []
         status = {
             "room": {"name": self._room_name, "location": self._room_location, "company": self._room_company},
@@ -724,7 +731,7 @@ class ControlService(Service):
             "settings": self._settings_payload(),
             "audio": self._audio_state(),
             "mic": self._mic_state(),
-            "camera": self._camera_state(),
+            "camera": dict(self._camera_state(), view={"allowed": self._camera_view_allowed(request)}),
             "tv": self._tv_status(),
             "laptop": self._laptop_status(),
         }
@@ -885,7 +892,7 @@ class ControlService(Service):
         camera = self._camera()
         if camera is not None:
             return camera.state()
-        return dict(self.NO_DEVICES, device=None, moving=False, busy=False, zoom={"level": 0, "min": 0, "max": 0},
+        return dict(self.NO_DEVICES, device=None, moving=False, busy=False, framing=False, zoom={"level": 0, "min": 0, "max": 0},
                     position_known=False, home_saved=False, presets=[], preview=False)
 
     async def _device_call(self, request: web.Request, device, action) -> web.Response:
@@ -1032,6 +1039,26 @@ class ControlService(Service):
             if verb == "save_home":
                 return await camera.save_home()
             raise ValueError("action must be find_stops or save_home")
+
+        return await self._device_call(request, camera, action)
+
+    # Frame people (spec 2026-11-01 camera view, section 5): on a tap only, from any device that shows the camera's controls
+    FRAME_REFUSALS = {"laptop": "The camera is on the laptop", "camera_off": "Your camera is off in the call"}
+
+    async def _handle_camera_frame(self, request: web.Request) -> web.Response:
+        """POST /api/camera/frame: frame the people in the room once (RoomCamera.frame_people, with one picture from the TV's tap). Answers
+        the camera's block with "framed" (how many people) and "turned" (False without Set up: it only zoomed), or 409 with the words:
+        "Already framing", "Moving…", the picture's words when the room gives none (Laptop mode, the call's camera off)."""
+        camera = self._camera()
+
+        async def action(data):
+            view = getattr(self._meeting, "camera_view", None)
+            if view is None:
+                raise DeviceUnavailable(NO_PICTURE)
+            refusal = self.FRAME_REFUSALS.get(view.blocked())
+            if refusal is not None:
+                raise NotReady(refusal)
+            return await camera.frame_people(view.still)
 
         return await self._device_call(request, camera, action)
 
@@ -2396,6 +2423,99 @@ class ControlService(Service):
         finally:
             self._mouse_waits.discard(task)
 
+    @staticmethod
+    def _same_address(one: Any, other: Any) -> bool:
+        """Whether two IP addresses (text) are the same one, an IPv4 address in its IPv6-mapped form (::ffff:a.b.c.d) included."""
+        try:
+            first, second = ipaddress.ip_address(str(one).split("%")[0]), ipaddress.ip_address(str(other).split("%")[0])
+        except ValueError:
+            return False
+        return (getattr(first, "ipv4_mapped", None) or first) == (getattr(second, "ipv4_mapped", None) or second)
+
+    def _camera_view_allowed(self, request: Optional[web.Request]) -> bool:
+        """Whether the camera's picture may go to this request: the room has a CameraView, and the socket's own peer address (never a
+        header) is the address of an allowed touch Pi that checked in within the last CAMERA_WINDOW_S."""
+        if request is None or getattr(self._meeting, "camera_view", None) is None:
+            return False
+        transport = request.transport
+        peer = transport.get_extra_info("peername") if transport is not None else None
+        if not peer or not isinstance(peer, (tuple, list)):
+            return False
+        return any(device["kind"] == "touch" and device["state"] == "allowed" and device["address"]
+                   and device["seen_ago"] is not None and device["seen_ago"] <= self.CAMERA_WINDOW_S
+                   and self._same_address(device["address"], peer[0])
+                   for device in self._registry.devices())
+
+    async def _handle_camera_view(self, request: web.Request) -> web.StreamResponse:
+        """WS /api/camera/view: the camera's picture for the touch Pi's camera screen. Binary messages are one JPEG each (the newest: a
+        client that reads slowly skips the ones between), text messages are `{"state": <CameraView.state()>}` at the start and each time
+        it changes ("off", "starting", "on", "camera_off", "laptop", "failed"). The client sends nothing that is read (Try again opens a
+        new socket). The picture goes to an allowed touch Pi only (_camera_view_allowed): 403 otherwise, before
+        the upgrade, as for a page of another origin, and the socket is closed once it is not (refused or forgotten in Settings, or no
+        longer checking in), looked at every CAMERA_HEARTBEAT_S. The tap runs while the socket is open (watch, and unwatch however the
+        socket ends); a client that does not answer pings is closed in about 1.5 CAMERA_HEARTBEAT_S. No compression: the pictures are
+        JPEGs already, and deflating ten a second costs the TV Pi for nothing."""
+        view = getattr(self._meeting, "camera_view", None)
+        if not self._camera_view_allowed(request) or not self._same_origin(request):
+            return self._error_response("The camera's picture goes to the room's touch screen only", 403)
+        ws = web.WebSocketResponse(heartbeat=self.CAMERA_HEARTBEAT_S, max_msg_size=4096, compress=False)
+        await ws.prepare(request)
+        view.watch()
+        self._camera_sockets[ws] = request
+        tasks = [asyncio.ensure_future(self._camera_reads(ws)), asyncio.ensure_future(self._camera_sends(ws, view)),
+                 asyncio.ensure_future(self._camera_still_allowed(request))]
+        try:
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)     # (the client went, a send failed, or it is not allowed now)
+        finally:
+            view.unwatch()
+            self._camera_sockets.pop(ws, None)
+            for task in tasks:
+                task.cancel()
+            await asyncio.wait(tasks, timeout=self.CANCEL_WAIT_S)
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(ws.close(), self.CANCEL_WAIT_S)
+            for task in tasks:
+                if task.done() and not task.cancelled():
+                    task.exception()    # (looked at, so that a send that failed on a reset is not reported as never retrieved)
+        return ws
+
+    async def _camera_still_allowed(self, request: web.Request) -> None:
+        """Return once the socket's touch Pi may not have the picture any more (looked at every CAMERA_HEARTBEAT_S)."""
+        while True:
+            await asyncio.sleep(self.CAMERA_HEARTBEAT_S)
+            if not self._camera_view_allowed(request):
+                logger.info("The camera's picture stops: its touch screen is not allowed it now")
+                return
+
+    @staticmethod
+    async def _camera_reads(ws: web.WebSocketResponse) -> None:
+        """Read (and ignore) what the client sends: aiohttp answers and notes pings and pongs as it reads, so a socket nobody reads
+        never learns that the client has gone."""
+        with contextlib.suppress(Exception):
+            async for _ in ws:
+                pass
+
+    @staticmethod
+    async def _camera_sends(ws: web.WebSocketResponse, view) -> None:
+        """Send the state and the pictures: the next picture is asked for only once the one before has been sent, and is then the newest."""
+        frames, states = view.frames(), view.state_changes()
+        frame = asyncio.ensure_future(anext(frames))
+        state = asyncio.ensure_future(anext(states))
+        try:
+            while True:
+                await asyncio.wait({frame, state}, return_when=asyncio.FIRST_COMPLETED)
+                if state.done():
+                    await ws.send_json({"state": state.result()})
+                    state = asyncio.ensure_future(anext(states))
+                if frame.done():
+                    await ws.send_bytes(frame.result())
+                    frame = asyncio.ensure_future(anext(frames))
+        finally:
+            for task in (frame, state):
+                task.cancel()
+            await asyncio.wait({frame, state})
+            await asyncio.gather(frames.aclose(), states.aclose(), return_exceptions=True)
+
     def _pointer_in_use(self) -> None:
         """The touchpad drove the room Pi's mouse: the TV shows its pointer for a moment (it is hidden there otherwise; MeetingService and
         TvDisplay.pointer_in_use)."""
@@ -2470,7 +2590,7 @@ class ControlService(Service):
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         await self._refresh_devices()
-        return web.json_response(self._status())
+        return web.json_response(self._status(request))
 
     async def _handle_events(self, request: web.Request) -> web.Response:
         if self._calendar is None:

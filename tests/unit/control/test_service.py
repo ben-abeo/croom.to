@@ -358,7 +358,7 @@ class StubCamera:
     def state(self):
         return {"available": self.available, "device": "/dev/video0" if self.available else None,
                 "reason": None if self.available else "no controllable camera found",
-                "moving": self.moving, "busy": self.busy, "zoom": {"level": self.zoom_level, "min": 100, "max": 500},
+                "moving": self.moving, "busy": self.busy, "framing": False, "zoom": {"level": self.zoom_level, "min": 100, "max": 500},
                 "position_known": self.position_known, "home_saved": self.home_saved,
                 "presets": [{"slot": s, "name": self.names[s - 1], "saved": s in self.saved} for s in (1, 2, 3)],
                 "preview": self.preview_on}
@@ -2315,7 +2315,8 @@ class TestRoomDevices:
         data = await (await client.get("/api/status")).json()
         speaker, camera = real_states()
         assert set(data["audio"]) == set(speaker)
-        assert set(data["camera"]) == set(camera) and set(data["camera"]["zoom"]) == set(camera["zoom"])
+        assert set(data["camera"]) == set(camera) | {"view"} and set(data["camera"]["zoom"]) == set(camera["zoom"])   # (view: who may see the picture)
+        assert data["camera"]["view"] == {"allowed": False}
         assert data["audio"]["reason"] == data["camera"]["reason"] == "no devices service"
         assert (await (await client.get("/api/audio/volume")).json()) == data["audio"]
         for path, body in (("/api/audio/volume", {"level": 10}), ("/api/camera/move", {"pan": 1, "tilt": 0}),

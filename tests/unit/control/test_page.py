@@ -3674,10 +3674,10 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         settled(page)
         page.click("#back-from-tv")
         page.click("#open-camera-setup")
-        assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-save"]
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-users", "#icon-save"]
         settled(page)
         page.click("#setup-link")
-        assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-save", "#icon-locate", "#icon-home"]   # with Set up open
+        assert shown_icons(page) == bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-users", "#icon-save", "#icon-locate", "#icon-home"]   # with Set up open
         settled(page)
         page.click("#back-from-camera")
         page.click("#open-screensaver")
@@ -3689,7 +3689,7 @@ def test_every_icon_on_every_screen_draws_at_the_size_of_its_text_and_costs_no_h
         assert_includes(shown_icons(page), meeting_bar + ["#icon-phone-off", "#icon-mic", "#icon-video", "#icon-volume", "#icon-volume", "#icon-volume", "#icon-mic", "#icon-move", "#icon-calendar"])   # the Touchpad and the TV in the top bar, Leave on the meeting's card, then the tiles and the dock
         settled(page)
         page.click("#open-camera-live")
-        assert shown_icons(page) == meeting_bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in"]    # a meeting's camera screen has no Save or Set up (the top bar keeps the Touchpad and the TV)
+        assert shown_icons(page) == meeting_bar + ["#icon-back", "#icon-zoom-out", "#icon-zoom-in", "#icon-users"]    # a meeting's camera screen has Frame people, and no Save or Set up (the top bar keeps the Touchpad and the TV)
         settled(page)
         page.click("#back-from-camera")
         page.click("#open-upcoming")

@@ -244,6 +244,11 @@ class CameraView:
         self._failed = False
         self._kick()
 
+    def blocked(self) -> Optional[str]:
+        """Why the room gives no picture just now ("laptop", "camera_off", "starting" while a call's page opens), or None. Frame people
+        asks before it moves anything, so that it refuses in the picture's own words."""
+        return self._blocked()
+
     def latest(self) -> Optional[Tuple[int, bytes]]:
         """The newest frame (sequence, jpeg), or None while the tap gives none."""
         return self._frame

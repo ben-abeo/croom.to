@@ -410,6 +410,7 @@ body.keyboard-open .schedule { display: none; }
 .presets[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 .presets .button.saved { border-color: var(--blue-600); }
 #preset-save-mode { margin-top: 10px; }
+#frame-people { margin-bottom: 14px; }
 #preset-save-mode[aria-pressed="true"] { background: var(--blue-600); border-color: var(--blue-600); }
 .link-button { background: none; border: 0; color: var(--periwinkle-300); font: inherit; text-decoration: underline; cursor: pointer; padding: 0; margin-top: 12px; display: block; }
 .link-button[hidden] { display: none; }   /* likewise */

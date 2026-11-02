@@ -13,6 +13,7 @@ import math
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
+from croom.devices import framing
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID_ZOOM_ABSOLUTE, V4l2Controls
 
@@ -23,6 +24,10 @@ NO_CAMERA = "no controllable camera found"
 # ControlConfig.camera_presets)
 DEFAULT_TRAVEL_S = 8.0
 DEFAULT_PRESET_NAMES = ("Wide", "Table", "Whiteboard")
+# Frame people's refusals, in the camera screen's words (spec 2026-11-01 camera view, section 5)
+ALREADY_FRAMING = "Already framing"
+MOVING = "Moving\u2026"                 # what the camera screen says while the camera homes or recalls a preset (devices.js)
+NO_PICTURE = "No picture from the camera"
 
 
 def _sign(value: float) -> int:
@@ -63,6 +68,7 @@ class RoomCamera:
     ZOOM_CACHE_S = 3.0
     PREVIEW_S = 180.0
     SLOTS = 3
+    SETTLE_S = 1.0         # Frame people: the picture settles this long after a zoom or a turn before it is looked at
 
     def __init__(self, device: str = "auto", travel_s: float = 8.0, preset_names: Optional[List[str]] = None,
                  store=None, v4l2=None, clock=time.monotonic, sleep=asyncio.sleep):
@@ -98,6 +104,7 @@ class RoomCamera:
         self._position_known = False
         self._watchdog: Optional[asyncio.Task] = None
         self._busy = False
+        self._framing = False   # Frame people runs (a long move of its own: busy as well)
         self._interrupt = asyncio.Event()
         self._long_done = asyncio.Event()
         self._long_done.set()
@@ -182,6 +189,7 @@ class RoomCamera:
             "reason": None if self.available else self._reason,
             "moving": bool(self._pan or self._tilt),
             "busy": self._busy,
+            "framing": self._framing,
             "zoom": {"level": self._zoom if self._zoom is not None else self._zoom_range[0],
                      "min": self._zoom_range[0], "max": self._zoom_range[1]},
             "position_known": self._position_known,
@@ -466,8 +474,12 @@ class RoomCamera:
         except DeviceUnavailable:
             pass
 
-    async def _long(self, work: Callable[[], Awaitable[None]]) -> None:
+    async def _long(self, work: Callable[[], Awaitable[None]], keeps_position: bool = False) -> None:
         """Run a long move: busy while it runs, stopped and unknown if it is cut short.
+
+        keeps_position: the work also spends time with the motors at rest (Frame people zooms, waits and looks before it
+        turns), and the position stays known when it is cut short there. Cut short while a motor runs, it is unknown as
+        for any other long move.
 
         A watchdog armed before the move is left alone on purpose. _watch stands down while a long move runs,
         and cancelling a watchdog that is already writing would release the control lock before its stop has
@@ -482,9 +494,9 @@ class RoomCamera:
         try:
             await work()
         except (Interrupted, DeviceUnavailable) as e:
-            self._position_known = False
+            after = self._lose_position(keeps_position)
             if isinstance(e, Interrupted):
-                logger.info("Camera move cut short: the position is unknown until the camera is homed again")
+                logger.info(f"Camera move cut short: {after}")
             if self._fd is not None:
                 await self._stop_quietly()
             raise
@@ -492,23 +504,30 @@ class RoomCamera:
             # The task running the move was cancelled (a shutdown, a request that went away): the same, but the
             # stop is shielded, so that a second cancel while it is on its way cannot abandon it half done, with
             # the control lock released and the speeds and the estimate left as the move had them.
-            self._position_known = False
-            logger.info("Camera move cancelled: the position is unknown until the camera is homed again")
+            after = self._lose_position(keeps_position)
+            logger.info(f"Camera move cancelled: {after}")
             if self._fd is not None:
                 await asyncio.shield(self._stop_quietly())
             raise
         except Exception as e:
             # Anything else (a refusal from the work itself, or a bug in it or under it): the motors are still stopped,
             # because a speed control keeps its value until told otherwise and nothing else would stop them
-            self._position_known = False
-            logger.info(f"Camera move failed ({type(e).__name__}: {e}): the position is unknown until the camera is "
-                        "homed again")
+            after = self._lose_position(keeps_position)
+            logger.info(f"Camera move failed ({type(e).__name__}: {e}): {after}")
             if self._fd is not None:
                 await self._stop_quietly()
             raise
         finally:
             self._busy = False
             self._long_done.set()
+
+    def _lose_position(self, keeps_position: bool) -> str:
+        """A long move that failed: the position is unknown, unless the work keeps it and no motor was running (a camera that
+        failed has already lost it in _fail). Says which, for the log."""
+        if keeps_position and not (self._pan or self._tilt):
+            return "nothing was turning, so the position is as it was"
+        self._position_known = False
+        return "the position is unknown until the camera is homed again"
 
     async def _find_stops_work(self) -> None:
         await self._apply_speeds(-1, -1)
@@ -628,6 +647,92 @@ class RoomCamera:
 
         await self._long(work)
         return self.state()
+
+    # ------------------------------------------------------------------
+    # Frame people (spec 2026-11-01 camera view, section 5)
+    # ------------------------------------------------------------------
+
+    async def frame_people(self, still: Callable[[], Awaitable[Optional[bytes]]],
+                           detect: Optional[Callable[[bytes], Any]] = None) -> Dict[str, Any]:
+        """Frame the people in the room once: zoom to the widest and let the picture settle, take one picture (`still`: the tap's
+        CameraView.still, a JPEG or None), find the faces (`detect`: framing.detect_faces by default, run in a worker thread), zoom
+        so the group fills the picture and turn toward it by timed travel, then look once more and correct once at most.
+
+        It is a long move of its own, so the camera is busy throughout, and a drag, an arrow, Home or a preset cuts it short as
+        they cut each other. It refuses, before touching anything, while it already runs ("Already framing") and while the
+        camera moves ("Moving..."). No one found: the zoom goes back to where it was, and nothing has turned. Without Set up
+        (the position not known) it only zooms. Answers the camera's state with "framed" (people found) and "turned" (whether
+        it could turn toward them)."""
+        if self._framing:
+            raise NotReady(ALREADY_FRAMING)
+        if self._busy or self._pan or self._tilt:
+            raise NotReady(MOVING)
+        outcome: Dict[str, Any] = {}
+        self._framing = True      # before anything awaits: a second tap meanwhile is "Already framing"
+        try:
+            await self._long(lambda: self._frame_work(still, detect or framing.detect_faces, outcome), keeps_position=True)
+        finally:
+            self._framing = False
+        return dict(self.state(), **outcome)
+
+    async def _frame_work(self, still, detect, outcome: Dict[str, Any]) -> None:
+        before = await self.read_zoom()
+        await self.zoom(self._zoom_range[0])                         # 1. everyone in reach in view
+        await self._wait(self.SETTLE_S)
+        faces, size = await self._look(still, detect)               # 2. and 3.
+        if faces is None or not faces:
+            await self.zoom(before if before is not None else self._zoom_range[0])
+            if faces is None:
+                raise NotReady(NO_PICTURE)
+            outcome.update(framed=0, turned=False)
+            return
+        position = None
+        if self._position_known and self._speed_controls(1, 1):
+            self._account_now()
+            position = (self._pan_s, self._tilt_s)
+        target = framing.plan(faces, size, self._travel_s, position)  # 4.
+        zoom = await self.zoom(target.zoom)                           # 5.
+        outcome.update(framed=target.people, turned=target.pan_s is not None)
+        if target.pan_s is None:                                      # without Set up: the zoom only
+            return
+        await self._move_to(target.pan_s, target.tilt_s)              # 6.
+        await self._wait(self.SETTLE_S)
+        faces, size = await self._look(still, detect)                # 7. one check, and one correction at most
+        fix = framing.correction(faces or [], size, zoom, self._travel_s)
+        if fix is not None:
+            self._account_now()
+            await self._move_to(self._pan_s + fix[0], self._tilt_s + fix[1])
+
+    async def _look(self, still, detect):
+        """One picture and the faces in it: (faces, (width, height)), or (None, None) when the camera gave no picture or the
+        faces could not be looked for (logged). A command that cuts the framing short ends the wait for either at once."""
+        picture = await self._unless_interrupted(still())
+        if not picture:
+            return None, None
+        try:
+            return await self._unless_interrupted(asyncio.to_thread(detect, picture))
+        except Interrupted:
+            raise
+        except Exception:  # noqa: BLE001 - a detector that fails (a damaged model) answers as no picture, and says why in the log
+            logger.warning("Frame people could not look for faces", exc_info=True)
+            return None, None
+
+    async def _unless_interrupted(self, awaitable: Awaitable[Any]) -> Any:
+        """Await something a long move waits for that is not a sleep (a picture, the detector), but give it up and raise
+        Interrupted the moment another command cuts the move short, as _wait does."""
+        task = asyncio.ensure_future(awaitable)
+        waiter = asyncio.ensure_future(self._interrupt.wait())
+        try:
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            waiter.cancel()
+            if not task.done():
+                task.cancel()
+        if self._interrupt.is_set():
+            if task.done() and not task.cancelled():
+                task.exception()          # retrieved, so a failure nobody wants is not reported as never retrieved
+            raise Interrupted("the camera move was interrupted")
+        return task.result()
 
     def _persist(self, home: Optional[Dict[str, Any]], presets: Dict[str, Dict[str, Any]]) -> None:
         """Write a home and presets through the store, as copies: the store keeps what it is given by

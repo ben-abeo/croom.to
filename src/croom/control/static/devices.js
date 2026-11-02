@@ -17,6 +17,8 @@
   let lastCameraKey = null;
   let presetSaveMode = false;
   let setupOpen = false;
+  const FRAMING = "Framing\u2026";
+  let framingHere = false;   // this screen's Frame people is under way (the status's camera.framing says it for every screen)
 
   // --- Sound and Camera: the commands behind both panels (spec 2026-10-08, section 4.6) ---
   // A success answers with the device's own block, which replaces the model's at once (no waiting for the next poll).
@@ -61,7 +63,7 @@
     }
     deviceEpoch[kind] += 1;
     render();
-    return true;
+    return block || true;   // the device's answer, for a caller that has words to take from it (Frame people)
   }
 
   // --- Sound ---
@@ -124,7 +126,7 @@
   function renderCamera(camera) {
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
-    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.position_known,
+    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, framingHere, camera && camera.position_known,
       camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, presetSaveMode, setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
     lastCameraKey = key;
@@ -136,7 +138,9 @@
     }
     panel.hidden = false;
     el("camera-note").textContent = deviceNotes.camera;
-    el("camera-status").textContent = camera.busy ? "Moving\u2026" : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
+    el("camera-status").textContent = camera.framing || framingHere ? FRAMING : camera.busy ? "Moving\u2026"
+      : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
+    el("frame-people").disabled = camera.busy || framingHere;
     for (const b of document.querySelectorAll("#arrow-pad .pad")) b.disabled = camera.busy;
     el("camera-home").disabled = camera.busy || !camera.home_saved;
     const ready = camera.home_saved;
@@ -174,6 +178,26 @@
     });
   });
   el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, { long: true }));
+
+  // Frame people (spec 2026-11-01, section 5): one tap zooms and turns toward the faces the camera finds, for some seconds inside the request.
+  // "Framing..." shows at once here (and on every other screen from the status's camera.framing); the outcome is the camera's note.
+  // A refusal ("Already framing", "Moving...", the picture's words) is the note as any refusal is.
+  function framedWords(block) {
+    const n = block.framed;
+    if (!n) return "No one found: the camera stayed where it was";
+    const words = n === 1 ? "Framed 1 person" : "Framed " + n + " people";
+    return block.turned === false ? words + ". Set up the camera to let it turn too" : words;
+  }
+  el("frame-people").addEventListener("click", async () => {
+    if (framingHere) return;
+    framingHere = true;
+    lastCameraKey = null;
+    const block = await deviceCall("camera", "/api/camera/frame", {}, { long: true });
+    framingHere = false;
+    if (block && typeof block === "object" && "framed" in block) deviceNotes.camera = framedWords(block);
+    lastCameraKey = null;
+    render();
+  });
 
   // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
   // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so

@@ -358,7 +358,7 @@ class StubCamera:
     def state(self):
         return {"available": self.available, "device": "/dev/video0" if self.available else None,
                 "reason": None if self.available else "no controllable camera found",
-                "moving": self.moving, "busy": self.busy, "zoom": {"level": self.zoom_level, "min": 100, "max": 500},
+                "moving": self.moving, "busy": self.busy, "framing": False, "zoom": {"level": self.zoom_level, "min": 100, "max": 500},
                 "position_known": self.position_known, "home_saved": self.home_saved,
                 "presets": [{"slot": s, "name": self.names[s - 1], "saved": s in self.saved} for s in (1, 2, 3)],
                 "preview": self.preview_on}

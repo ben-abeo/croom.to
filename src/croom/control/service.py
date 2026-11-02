@@ -29,6 +29,7 @@ from croom.control.capture_arm import CaptureArm
 from croom.control.settings import SettingsStore
 from croom.core.config import CONFIG_PATHS, DEFAULT_COMPANY, Config
 from croom.core.service import Service
+from croom.devices.camera import NO_PICTURE
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.laptop.errors import LaptopError
 from croom.meeting.meet_capture import ALREADY_CAPTURING, JOIN_MEET_FIRST, NO_CAPTURE, newest_capture
@@ -475,6 +476,7 @@ class ControlService(Service):
         app.router.add_post("/api/camera/home", self._handle_camera_home)
         app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
         app.router.add_post("/api/camera/setup", self._handle_camera_setup)
+        app.router.add_post("/api/camera/frame", self._handle_camera_frame)
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
         app.router.add_post("/api/tv/control", self._handle_tv_control)
         app.router.add_post("/api/tv/pair", self._handle_tv_pair)
@@ -890,7 +892,7 @@ class ControlService(Service):
         camera = self._camera()
         if camera is not None:
             return camera.state()
-        return dict(self.NO_DEVICES, device=None, moving=False, busy=False, zoom={"level": 0, "min": 0, "max": 0},
+        return dict(self.NO_DEVICES, device=None, moving=False, busy=False, framing=False, zoom={"level": 0, "min": 0, "max": 0},
                     position_known=False, home_saved=False, presets=[], preview=False)
 
     async def _device_call(self, request: web.Request, device, action) -> web.Response:
@@ -1037,6 +1039,26 @@ class ControlService(Service):
             if verb == "save_home":
                 return await camera.save_home()
             raise ValueError("action must be find_stops or save_home")
+
+        return await self._device_call(request, camera, action)
+
+    # Frame people (spec 2026-11-01 camera view, section 5): on a tap only, from any device that shows the camera's controls
+    FRAME_REFUSALS = {"laptop": "The camera is on the laptop", "camera_off": "Your camera is off in the call"}
+
+    async def _handle_camera_frame(self, request: web.Request) -> web.Response:
+        """POST /api/camera/frame: frame the people in the room once (RoomCamera.frame_people, with one picture from the TV's tap). Answers
+        the camera's block with "framed" (how many people) and "turned" (False without Set up: it only zoomed), or 409 with the words:
+        "Already framing", "Moving…", the picture's words when the room gives none (Laptop mode, the call's camera off)."""
+        camera = self._camera()
+
+        async def action(data):
+            view = getattr(self._meeting, "camera_view", None)
+            if view is None:
+                raise DeviceUnavailable(NO_PICTURE)
+            refusal = self.FRAME_REFUSALS.get(view.blocked())
+            if refusal is not None:
+                raise NotReady(refusal)
+            return await camera.frame_people(view.still)
 
         return await self._device_call(request, camera, action)
 

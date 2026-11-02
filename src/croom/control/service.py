@@ -391,6 +391,7 @@ class ControlService(Service):
         pin_store=None,
         admin=None,
         github=None,
+        mouse=None,
     ) -> "ControlService":
         """Build the service from the agent's Config plus the services it controls."""
         data_dir = config.resolve_data_dir()
@@ -420,6 +421,7 @@ class ControlService(Service):
             pin_store=pin_store,
             admin=admin if admin is not None else AdminClient(),
             github=github if github is not None else GitHub(),
+            mouse=mouse,
         )
 
     @property

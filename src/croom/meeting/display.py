@@ -62,6 +62,8 @@ def _alive_pid(pid: int) -> bool:
 
 class TvDisplay:
     POINTER_SHOWN_S = 5.0   # how long the pointer stays after the touchpad last moved the room Pi's mouse
+    PARK_SETTLE_S = 1.0     # a virtual mouse just made is taken up by the desktop a moment later: a move before that is lost
+    PARK_LOAD_TIMEOUT_MS = 10000   # the screensaver's load is waited for this long before the pointer is parked anyway
     BASE_ARGS = [
         *ROOM_PROFILE_ARGS,
         "--use-fake-ui-for-media-stream",
@@ -102,6 +104,10 @@ class TvDisplay:
         # The camera's live picture (croom.meeting.camera_view.CameraView), or None: its tap goes on every browser this starts, and it
         # is told which page the TV has
         self.camera_view = None
+        # The room Pi's virtual mouse (croom.tv.pointer.PiMouse, the touchpad's), or None: the pointer is parked in the screen's corner
+        # with it as the browser starts and each time the screensaver has loaded, and nudged as the touchpad's pointer is hidden again,
+        # because Chromium takes up the page's hidden pointer only when the mouse moves
+        self.mouse = None
 
     @classmethod
     def from_config(cls, config) -> "TvDisplay":
@@ -187,6 +193,7 @@ class TvDisplay:
             await self._stop()   # the driver and a guest's folder go with it
             raise
         self._started_at = asyncio.get_running_loop().time()
+        self._park_pointer()   # the desktop showed between browsers: its pointer is wherever the last one left it
         if self._profile_dir is not None:
             logger.info(f"TV browser started on the signed-in profile at {self._profile_dir}")
         else:
@@ -279,7 +286,7 @@ class TvDisplay:
 
     async def _show_pointer(self, shown: bool) -> None:
         """Mark every frame of the page the TV shows: a frame that has gone, or a page between loads, is skipped (a page that loads anew
-        hides the pointer by itself)."""
+        hides the pointer by itself). A pointer hidden again is nudged, so that it goes now and not at the mouse's next move."""
         self._pointer_shown = shown
         page = self._page
         if page is None or page.is_closed():
@@ -289,6 +296,33 @@ class TvDisplay:
                 await frame.evaluate(SHOW_POINTER, shown)
             except Exception:  # noqa: BLE001 - the frame went, or is between loads
                 logger.debug("A frame of the TV's page did not take the pointer's state", exc_info=True)
+        if not shown and self.mouse is not None and self.mouse.ready:
+            try:
+                self.mouse.nudge()
+            except Exception:  # noqa: BLE001 - the pointer stays until the mouse next moves
+                logger.debug("The room Pi's pointer could not be nudged", exc_info=True)
+
+    def _park_pointer(self, page: Optional["Page"] = None) -> None:
+        """Park the room Pi's pointer in the screen's corner (PiMouse.park), once `page` has loaded when one is given. In the background:
+        the mouse may have to be made first, which takes a moment."""
+        if self.mouse is not None:
+            self._spawn(self._park(page))
+
+    async def _park(self, page: Optional["Page"]) -> None:
+        if page is not None:
+            try:
+                await page.wait_for_load_state("load", timeout=self.PARK_LOAD_TIMEOUT_MS)
+            except Exception:  # noqa: BLE001 - a page slow to load, or gone: the pointer is parked all the same
+                logger.debug("The screensaver did not load before the pointer was parked", exc_info=True)
+        if self._pointer_shown:
+            return   # the touchpad is moving the mouse: its pointer stays where the person put it
+        try:
+            if not self.mouse.ready:
+                await asyncio.to_thread(self.mouse.open)
+                await asyncio.sleep(self.PARK_SETTLE_S)
+            self.mouse.park()
+        except Exception:  # noqa: BLE001 - no virtual mouse here (PiMouse says why once): the pointer stays where it is
+            logger.debug("The room Pi's pointer could not be parked", exc_info=True)
 
     # ------------------------------------------------------------------
     # The page
@@ -422,6 +456,7 @@ class TvDisplay:
             return False
         try:
             await self._page.goto(self._idle_url, wait_until="commit")
+            self._park_pointer(self._page)   # the call's pointer, or the desktop's, goes once the screensaver has its hidden one
             return True
         except Exception as e:  # noqa: BLE001 - the control service may not be listening yet
             logger.debug(f"Screensaver not reachable yet at {self._idle_url}: {e}")

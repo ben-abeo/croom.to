@@ -568,5 +568,55 @@ async def test_the_touchpad_shows_the_pointer_until_it_stops(monkeypatch):
         await site.stop()
 
 
+class FakeMouse:
+    """The room Pi's virtual mouse, as PiMouse has it: what was asked of it."""
+
+    def __init__(self):
+        self.ready = False
+        self.calls = []
+
+    def open(self):
+        self.ready = True
+        self.calls.append("open")
+
+    def park(self):
+        self.calls.append("park")
+
+    def nudge(self):
+        self.calls.append("nudge")
+
+
+async def until(condition, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not condition():
+        assert time.monotonic() < deadline, "timed out"
+        await asyncio.sleep(0.02)
+
+
+async def test_the_pointer_is_parked_as_the_browser_starts_and_once_the_screensaver_loads(monkeypatch):
+    """Chromium hides the page's pointer only once the mouse moves, and the desktop shown between browsers has its own: the TV parks it in
+    the corner as its browser starts and again each time the screensaver has loaded (after a call too), and nudges it as the touchpad's
+    pointer is hidden again."""
+    monkeypatch.setattr(TvDisplay, "PARK_SETTLE_S", 0.0)
+    monkeypatch.setattr(TvDisplay, "POINTER_SHOWN_S", 0.2)
+    site = await IdleSite().start()
+    display = TvDisplay(site.url, headless=True)
+    mouse = display.mouse = FakeMouse()
+    try:
+        await display.start()
+        await until(lambda: mouse.calls.count("park") == 2)          # the browser's start, and the screensaver
+        assert mouse.calls[0] == "open"
+        page = await display.claim()                                  # a call, and back to the screensaver
+        await page.goto(framed_page())
+        await display.show_idle()
+        await until(lambda: mouse.calls.count("park") == 3)
+        display.pointer_in_use()                                      # the touchpad, and its pointer hidden again
+        await until(lambda: "nudge" in mouse.calls)
+        assert mouse.calls.count("park") == 3 and mouse.calls.count("open") == 1
+    finally:
+        await display.stop()
+        await site.stop()
+
+
 def test_the_pointer_hint_is_nothing_without_a_browser():
     TvDisplay("http://127.0.0.1:1/tv", headless=True).pointer_in_use()   # no page yet: nothing to show it on, and no error

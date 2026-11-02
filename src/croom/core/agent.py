@@ -176,6 +176,13 @@ class CroomAgent:
             from croom.meeting.camera_view import CameraView
             meeting.camera_view = CameraView(meeting=meeting, devices=self.service_manager.get_service("devices"))
 
+        # The room Pi's virtual mouse, one for the touchpad (the control service) and the TV, which parks its pointer in the screen's
+        # corner with it: Chromium hides the pointer only once the mouse moves, and the desktop before the browser is up not at all
+        room_mouse = None
+        if meeting is not None:
+            from croom.tv.pointer import PiMouse
+            room_mouse = meeting.mouse = PiMouse()
+
         # Laptop mode (spec 2026-10-27): the MeetUp lent to a laptop at the table through the USB switch
         laptop_service = None
         if self.config.laptop.enabled:
@@ -209,6 +216,7 @@ class CroomAgent:
                     tv=tv_service,   # the room page's TV (None when the room has none enabled): its status and its controls
                     scores=scores_service,
                     laptop=laptop_service,
+                    mouse=room_mouse,
                 )
                 dependencies = (
                     ["meeting", "calendar", "devices"]

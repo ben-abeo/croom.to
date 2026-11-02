@@ -501,6 +501,20 @@ def test_the_keyboard_layout_files_are_made_when_there_are_none(tmp_path):
     assert (labwc / "environment").read_text().splitlines() == ["XKB_DEFAULT_LAYOUT=us"]
 
 
+def test_the_desktop_parks_the_tvs_pointer_as_it_starts(tmp_path):
+    """The desktop before the TV's browser is up shows its pointer: labwc's autostart parks it, once (a second run adds nothing), and the
+    desktop user's other autostart lines are kept."""
+    labwc = tmp_path / "labwc"
+    labwc.mkdir()
+    (labwc / "autostart").write_text("wf-panel-pi &\n")
+    snippet = f"source {SCRIPT}; INSTALL_DIR=/opt/croom; LABWC_DIR={labwc}; CROOM_USER=$(id -un); set_pointer_parking"
+    for _ in range(2):
+        result = run_bash(snippet)
+        assert result.returncode == 0, result.stderr
+    assert (labwc / "autostart").read_text().splitlines() == ["wf-panel-pi &", "/opt/croom/venv/bin/python -m croom.tv.park_pointer &"]
+    assert "set_pointer_parking" in SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+
+
 def test_the_keyboard_layout_goes_where_the_system_reads_it_and_is_part_of_every_install():
     text = SCRIPT.read_text()
     assert 'KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"' in text

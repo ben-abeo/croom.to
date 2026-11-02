@@ -562,7 +562,7 @@ sudo raspi-config nonint do_vnc 1          <span class="c"># optional: VNC off a
   </ul>
 
   <h3 class="sub">The touchpad</h3>
-  <p>The table's touchpad uses the WebSocket <span class="chip">/ws/pointer</span>. On LG it drives the TV's own cursor; otherwise it drives the Pi's virtual mouse "Crystal Meet touchpad" on <span class="chip">/dev/uinput</span>, which needs the udev rule, the <span class="chip">input</span> group and the <span class="chip">uinput</span> module set up by the installer. The pointer is hidden on the TV and shown for 5 seconds after it moves.</p>
+  <p>The table's touchpad uses the WebSocket <span class="chip">/ws/pointer</span>. On LG it drives the TV's own cursor; otherwise it drives the Pi's virtual mouse "Crystal Meet touchpad" on <span class="chip">/dev/uinput</span>, which needs the udev rule, the <span class="chip">input</span> group and the <span class="chip">uinput</span> module set up by the installer. The pointer is hidden on the TV and shown for 5 seconds after it moves. The same mouse parks the pointer in the screen's bottom-right corner as the desktop starts (<span class="chip">python -m croom.tv.park_pointer</span> in <span class="chip">~/.config/labwc/autostart</span>), as the TV's browser starts and each time the screensaver loads, so no pointer shows before the browser is up or after a call.</p>
 
   <h3 class="sub">Checking the TV from a terminal</h3>
 <pre>sudo -u pi /opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml

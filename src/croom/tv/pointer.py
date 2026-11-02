@@ -255,10 +255,23 @@ class PiMouse(_PiDevice):
     NOUN = "mouse"
     DEVICE_NAME = MOUSE_NAME
     _default_factory = staticmethod(_uinput)
+    PARK_DELTA = 20000    # far past the bottom-right corner of any screen: the desktop stops the pointer at the corner
 
     def move(self, dx: int, dy: int) -> None:
         """Move the pointer by dx to the right and dy down."""
         self._emit(*[("EV_REL", axis, delta) for axis, delta in (("REL_X", dx), ("REL_Y", dy)) if delta])
+
+    def park(self) -> None:
+        """Send the pointer to the screen's bottom-right corner, where only the tip of its arrow is left: the TV's pointer while no
+        page hides it (the desktop before the browser is up). It is a real move, so the browser also takes up the page's hidden pointer
+        at once (Chromium does that only when the mouse moves)."""
+        self.move(self.PARK_DELTA, self.PARK_DELTA)
+
+    def nudge(self) -> None:
+        """Move the pointer one step and back: the browser takes up a change of the page's pointer (hidden again after the touchpad)
+        only when the mouse moves."""
+        self.move(1, 0)
+        self.move(-1, 0)
 
     def press(self, button: str = "left") -> None:
         self._emit(("EV_KEY", BUTTONS[button], 1))

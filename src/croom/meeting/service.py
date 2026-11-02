@@ -53,6 +53,9 @@ class MeetingService(Service):
         # The camera's live picture for the touch Pi (croom.meeting.camera_view.CameraView, spec 2026-11-01 camera view), set by the agent
         # before start(): its tap goes on the TV's browser. The control service reaches it here; None in a room (or a test) without it.
         self.camera_view = None
+        # The room Pi's virtual mouse (croom.tv.pointer.PiMouse), the touchpad's, set by the agent before start(): the TV parks its
+        # pointer with it (TvDisplay.mouse). None in a test without it.
+        self.mouse = None
 
         self._providers: Dict[str, MeetingProvider] = {}
         self._active_provider: Optional[MeetingProvider] = None
@@ -147,6 +150,8 @@ class MeetingService(Service):
             self._display = TvDisplay.from_config(self.config)
         if self.camera_view is not None:
             self._display.camera_view = self.camera_view
+        if self.mouse is not None:
+            self._display.mouse = self.mouse
         built = {}
         for platform in self.config.meeting.platforms:
             try:

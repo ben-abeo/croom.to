@@ -539,7 +539,7 @@ The choice is saved in `/var/lib/croom/tv-settings.json`, which overrides the `t
 
 ### The touchpad
 
-The table's touchpad uses the WebSocket `/ws/pointer`. On LG it drives the TV's own cursor; otherwise it drives the Pi's virtual mouse "Crystal Meet touchpad" on `/dev/uinput`, which needs the udev rule, the `input` group and the `uinput` module set up by the installer. The pointer is hidden on the TV and shown for 5 seconds after it moves.
+The table's touchpad uses the WebSocket `/ws/pointer`. On LG it drives the TV's own cursor; otherwise it drives the Pi's virtual mouse "Crystal Meet touchpad" on `/dev/uinput`, which needs the udev rule, the `input` group and the `uinput` module set up by the installer. The pointer is hidden on the TV and shown for 5 seconds after it moves. The same mouse parks the pointer in the screen's bottom-right corner as the desktop starts (`python -m croom.tv.park_pointer` in `~/.config/labwc/autostart`), as the TV's browser starts and each time the screensaver loads, so no pointer shows before the browser is up or after a call.
 
 ### Checking the TV from a terminal
 

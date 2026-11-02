@@ -238,6 +238,22 @@ set_keyboard_layout() {
     chown "$CROOM_USER:" "$labwc_dir" "$labwc_dir/environment" 2>/dev/null || true
 }
 
+# The TV's pointer is hidden by its browser's pages, but the desktop shown before the browser is up has its own, in the middle of the
+# screen. labwc's autostart for the desktop user parks it in the screen's corner as the desktop starts (croom.tv.park_pointer, through
+# the touchpad's virtual mouse); the room agent parks it again whenever its browser starts. Running it again changes nothing.
+set_pointer_parking() {
+    local home labwc_dir autostart line
+    log "Parking the TV's pointer in the screen's corner as the desktop starts..."
+    home=$(getent passwd "$CROOM_USER" | cut -d: -f6)
+    labwc_dir="${LABWC_DIR:-$home/.config/labwc}"
+    autostart="$labwc_dir/autostart"
+    line="$INSTALL_DIR/venv/bin/python -m croom.tv.park_pointer &"
+    mkdir -p "$labwc_dir"
+    touch "$autostart"
+    grep -qxF "$line" "$autostart" || echo "$line" >> "$autostart"
+    chown "$CROOM_USER:" "$labwc_dir" "$autostart" 2>/dev/null || true
+}
+
 # Create directory structure
 create_directories() {
     log "Creating directories..."
@@ -805,6 +821,7 @@ main() {
     create_user
     install_virtual_mouse
     set_keyboard_layout
+    set_pointer_parking
     create_directories
     install_dependencies
     install_croom

@@ -1,0 +1,330 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Book and use the conference room</title>
+<style>
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-400.woff2") format("woff2"); font-weight: 400; }
+@font-face { font-family: "Lexend"; src: url("fonts/lexend-600.woff2") format("woff2"); font-weight: 600; }
+:root {
+  --navy-900: #001636; --navy-800: #16244F; --blue-600: #1B52E5; --blue-700: #003EBC;
+  --periwinkle-300: #BDCEFF; --tint-100: #EDF2FE; --tint-50: #F7F9FF; --slate-500: #647087; --ink-900: #1C2024;
+  --radius: 12px; --radius-sm: 8px;
+}
+@page { size: Letter; }
+* { box-sizing: border-box; }
+body { margin: 0; font-family: "Lexend", "Segoe UI", Arial, sans-serif; color: var(--ink-900); font-size: 10.5pt; line-height: 1.5; }
+h1, h2, h3 { font-weight: 600; line-height: 1.15; margin: 0.2em 0; }
+h2 { font-size: 16pt; color: var(--navy-800); }
+p { margin: 0.4em 0; }
+.kicker { font-size: 9pt; font-weight: 600; letter-spacing: 0.15em; text-transform: uppercase; color: var(--blue-600); margin: 0 0 6px; }
+.banner { background: var(--navy-800); color: #fff; border-radius: var(--radius); padding: 28px 32px; margin-bottom: 20px; }
+.banner .kicker { color: var(--periwinkle-300); }
+.banner .kicker.top { color: #fff; margin-bottom: 2px; }
+.banner h1 { font-size: 26pt; margin: 6px 0 8px; }
+.banner p { color: var(--periwinkle-300); font-size: 11pt; margin: 0; max-width: 60ch; }
+.banner img { height: 26px; display: block; margin-bottom: 18px; }
+.intro { font-size: 11pt; margin: 0 0 18px; max-width: 78ch; }
+.glance { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; margin: 0 0 22px; }
+.glance .card { border-top: 4px solid var(--blue-600); padding: 10px 10px; }
+.glance .card:nth-child(2) { border-top-color: #2F62EA; }
+.glance .card:nth-child(3) { border-top-color: #4A78F1; }
+.glance .card:nth-child(4) { border-top-color: #6C92F5; }
+.glance .card:nth-child(5) { border-top-color: #8EABF8; }
+.glance .card:nth-child(6) { border-top-color: var(--periwinkle-300); }
+.card { border-radius: var(--radius); padding: 14px 16px; background: #fff; border: 1px solid var(--tint-100); }
+.card .kicker { font-size: 8pt; }
+.card h3 { font-size: 10.5pt; margin: 2px 0 4px; }
+.card p { margin: 0; color: var(--slate-500); font-size: 9pt; }
+.block { break-inside: avoid; }
+.block.long { break-inside: auto; }
+.step { display: flex; align-items: center; gap: 12px; margin: 22px 0 8px; }
+.badge { width: 30px; height: 30px; border-radius: 8px; background: var(--blue-600); color: #fff; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; font-size: 12pt; }
+ul { margin: 6px 0 10px; padding-left: 0; list-style: none; }
+li { position: relative; padding-left: 18px; margin: 5px 0; break-inside: avoid; }
+li::before { content: ""; position: absolute; left: 2px; top: 0.6em; width: 7px; height: 7px; border-radius: 50%; background: var(--blue-600); }
+.ui { font-weight: 600; color: var(--blue-600); }
+.chip { font-weight: 600; color: var(--blue-600); background: var(--tint-100); border-radius: 6px; padding: 1px 8px; white-space: nowrap; }
+.chip.wrap { white-space: normal; overflow-wrap: anywhere; }
+.see { color: var(--slate-500); font-size: 9.5pt; margin: 4px 0 0 18px; }
+.callout { border-radius: var(--radius-sm); padding: 12px 18px; margin: 12px 0; border-left: 4px solid var(--blue-600); background: var(--tint-100); break-inside: avoid; }
+.callout.warn { background: #FFF8E1; border-left-color: #E8A013; }
+.callout.tip { background: #EDFBF3; border-left-color: #1FA971; }
+.callout .kicker { margin-bottom: 4px; }
+.callout p { margin: 2px 0; }
+.trouble { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.trouble .card { break-inside: avoid; }
+.trouble .card:last-child:nth-child(odd) { grid-column: 1 / -1; }
+.trouble .card h3 { font-size: 10.5pt; }
+.page-break { break-before: page; }
+.lead { break-after: avoid; }
+ol.checks { margin: 6px 0 10px; padding-left: 0; list-style: none; counter-reset: check; }
+ol.checks > li { counter-increment: check; padding-left: 32px; }
+ol.checks > li::before { content: counter(check); left: 0; top: 0.1em; width: 21px; height: 21px; border-radius: 6px; background: var(--blue-600); color: #fff; font-size: 8.5pt; font-weight: 600; display: flex; align-items: center; justify-content: center; }
+.kicker.lead { margin-top: 26px; }
+h3.sub { font-size: 12.5pt; color: var(--navy-800); margin: 20px 0 4px; break-after: avoid; }
+pre { font: 600 9.5pt/1.5 "Lexend", "Segoe UI", Arial, sans-serif; color: var(--blue-600); background: var(--tint-100); border-radius: var(--radius-sm); padding: 10px 14px; margin: 6px 0 0 18px; white-space: pre-wrap; }
+</style>
+<style>
+.glance { grid-template-columns: repeat(4, 1fr); }
+.step { break-after: avoid; break-inside: avoid; }
+.step + * { break-before: avoid; }
+.room { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 10px 0 14px; }
+.room .card { background: var(--tint-50); border-color: transparent; }
+.room .icon { width: 32px; height: 32px; border-radius: 50%; background: var(--blue-600); color: #fff; display: flex; align-items: center; justify-content: center; margin-bottom: 8px; }
+.room .icon svg { width: 17px; height: 17px; fill: none; stroke: #fff; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.lights { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 8px 0 14px; }
+.lights .card { display: flex; gap: 10px; align-items: flex-start; padding: 10px 12px; }
+.dot { flex: none; width: 14px; height: 14px; border-radius: 50%; margin-top: 3px; }
+.cols { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 8px 0; }
+.cols .card ul { margin: 4px 0 0; }
+.cols .card li { font-size: 9.5pt; }
+.ask { border-radius: var(--radius); background: var(--navy-800); color: #fff; padding: 18px 22px; margin-top: 22px; break-inside: avoid; }
+.ask .kicker { color: var(--periwinkle-300); }
+.ask p { margin: 2px 0; }
+table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 9.5pt; margin: 8px 0 12px; border: 1px solid var(--tint-100); border-radius: var(--radius-sm); overflow: hidden; }
+th { background: var(--navy-800); color: #fff; text-align: left; font-weight: 600; padding: 7px 10px; font-size: 8pt; letter-spacing: 0.08em; text-transform: uppercase; }
+td { padding: 7px 10px; vertical-align: top; border-top: 1px solid var(--tint-100); }
+tr { break-inside: avoid; }
+tbody tr:nth-child(even) td { background: var(--tint-50); }
+td:first-child { font-weight: 600; color: var(--navy-800); width: 34%; }
+</style>
+</head>
+<body>
+
+<section class="banner">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker top">Crystal PM</p>
+  <p class="kicker">How-to guide</p>
+  <h1>Book the conference room and run your meeting from the table</h1>
+  <p>Reserve the room, add a Google Meet or Zoom call, and join with one tap. Includes what to do for Teams and other calls.</p>
+</section>
+
+<p class="intro">Our conference rooms run on <strong>Crystal Meet</strong>. A touch screen on the table runs the call, the TV shows it, and a sign by the door shows who has the room. <strong>You don't need any technical experience, a login or a password.</strong> If you can create a Google Calendar event, you can do everything in this guide. Booking takes about a minute, and joining a call takes one tap.</p>
+
+<h2 class="lead" style="margin-top:4px">Meet the room</h2>
+<div class="room">
+  <div class="card"><div class="icon"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M8 21h8M12 17v4"/></svg></div><h3>The table screen</h3><p>The touch screen on the table. You join calls, mute, change the volume and book the room here.</p></div>
+  <div class="card"><div class="icon"><svg viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="13" rx="2"/><path d="M7 21h10"/></svg></div><h3>The TV</h3><p>Shows the call. It turns on and switches to the right input by itself. You never need to touch it.</p></div>
+  <div class="card"><div class="icon"><svg viewBox="0 0 24 24"><path d="M15 10l5-3v10l-5-3z"/><rect x="2" y="6" width="13" height="12" rx="2"/></svg></div><h3>Camera and speaker</h3><p>The Logitech MeetUp under the TV. It's the room's camera, microphones and speaker in one.</p></div>
+  <div class="card"><div class="icon"><svg viewBox="0 0 24 24"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h5"/></svg></div><h3>The door sign</h3><p>The panel outside the door. It shows whether the room is free and lets you book it on the spot.</p></div>
+</div>
+
+<p style="margin:0 0 4px"><strong>What the colours mean.</strong> The door sign's light bar and screen use the same four colours:</p>
+<div class="lights">
+  <div class="card"><span class="dot" style="background:#1FA971"></span><p><strong style="color:var(--ink-900)">Green: free.</strong> Walk in or book it.</p></div>
+  <div class="card"><span class="dot" style="background:#E8A013"></span><p><strong style="color:var(--ink-900)">Yellow: starting soon.</strong> A booking begins within 10 minutes.</p></div>
+  <div class="card"><span class="dot" style="background:#E5484D"></span><p><strong style="color:var(--ink-900)">Red: in use.</strong> A meeting or booking is on now.</p></div>
+  <div class="card"><span class="dot" style="background:#647087"></span><p><strong style="color:var(--ink-900)">Grey or off.</strong> The sign can't reach the room. Tell the administrator.</p></div>
+</div>
+
+<div class="glance">
+  <div class="card"><p class="kicker">Step 1</p><h3>Reserve</h3><p>Google Calendar, the door sign or the table screen.</p><p class="ui" style="font-size:8.5pt;margin-top:4px">Event › Rooms</p></div>
+  <div class="card"><p class="kicker">Step 2</p><h3>Add the call</h3><p>Google Meet is added for you. For Zoom, paste the link.</p><p class="ui" style="font-size:8.5pt;margin-top:4px">Location or Description</p></div>
+  <div class="card"><p class="kicker">Step 3</p><h3>Join</h3><p>Tap Join now on the table, up to 10 minutes early.</p><p class="ui" style="font-size:8.5pt;margin-top:4px">Table › Join now</p></div>
+  <div class="card"><p class="kicker">Step 4</p><h3>Leave</h3><p>Tap Leave twice when you're done.</p><p class="ui" style="font-size:8.5pt;margin-top:4px">Table › Leave</p></div>
+</div>
+
+<div class="callout warn">
+  <p class="kicker">Good to know before you start</p>
+  <p><strong>The room never joins a call by itself.</strong> Someone in the room always taps <span class="ui">Join now</span>.</p>
+  <p><strong>The room joins Google Meet and Zoom.</strong> For Microsoft Teams, Webex or anything else, see section 6.</p>
+  <p><strong>Meeting titles are public.</strong> The title shows on the door sign and the TV. For a confidential meeting, use a plain title such as "Team meeting".</p>
+</div>
+
+<section class="block long">
+<div class="step"><span class="badge">1</span><h2>Reserve the room in Google Calendar</h2></div>
+<p>This is the best way to book ahead. The booking shows on the door sign and the table screen within about a minute.</p>
+<ul>
+  <li><strong>Create your event</strong> in Google Calendar as usual: title, date, time and guests.</li>
+  <li><strong>Add the room.</strong> Open the <span class="ui">Rooms</span> tab next to Guests (on the full event page, select <span class="ui">More options</span> first). Pick the conference room by name, for example <span class="chip">Room 1</span>.</li>
+  <li><strong>Check that the room is available.</strong> Google shows whether the room is free at that time. If it's taken, pick another time or room.</li>
+  <li><strong>Select Save.</strong> Google invites the room like any other guest.</li>
+</ul>
+<p class="see">Within a minute or two you should see your meeting in the <strong>Today</strong> list on the table screen and on the door sign. Meetings more than 7 days away appear once they're within a week.</p>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p><strong>If the room declines your invite,</strong> someone else already has that time. The room ignores declined bookings, so pick another slot.</p>
+  <p><strong>To change or cancel,</strong> edit the event in Google Calendar. Bookings made in Google Calendar can only be changed there, not on the room's screens.</p>
+  <p><strong>Can't find the room under Rooms?</strong> A newly added room can take up to a day to show up in Google.</p>
+</div>
+</section>
+
+<section class="block">
+<div class="step"><span class="badge">2</span><h2>Book a room with Google Meet</h2></div>
+<ul>
+  <li><strong>Reserve the room</strong> as in section 1.</li>
+  <li><strong>Leave the Google Meet video call on.</strong> Google Calendar adds <span class="ui">Join with Google Meet</span> to new events automatically. If it's missing, select <span class="ui">Add Google Meet video conferencing</span>.</li>
+  <li><strong>Save.</strong> That's all. The room knows it's a Google Meet call.</li>
+</ul>
+<p class="see">The table screen shows "Google Meet" under your meeting's title. To join, see section 5.</p>
+<div class="callout tip">
+  <p class="kicker">Tip</p>
+  <p><strong>Meeting in person, no call?</strong> Remove the Google Meet link from the event. Otherwise the room shows a Join now button for a call nobody needs.</p>
+  <p><strong>Outside guests in a Google Meet call?</strong> If someone outside Crystal PM hosts the call, the room asks to join under its own name (for example "Room 1"). The host needs to let it in within 5 minutes.</p>
+</div>
+</section>
+
+<section class="block long">
+<div class="step"><span class="badge">3</span><h2>Book a room with Zoom</h2></div>
+<ul>
+  <li><strong>Reserve the room</strong> as in section 1.</li>
+  <li><strong>Add the Zoom link</strong> in one of these ways:
+    <ul style="margin-top:4px">
+      <li>Use the <span class="ui">Zoom</span> add-on in Google Calendar to make it a Zoom meeting.</li>
+      <li>Or paste the Zoom invitation link into the event's <span class="ui">Location</span> or <span class="ui">Description</span>. It should look like <span class="chip">https://us02web.zoom.us/j/85512345678</span>.</li>
+    </ul>
+  </li>
+  <li><strong>Don't worry about the Google Meet link.</strong> When an event has both, the room uses the Zoom link you pasted. You can leave the Meet link or remove it.</li>
+  <li><strong>Include the passcode.</strong> If the link doesn't already contain it, paste the whole Zoom invitation (with its <span class="chip">Passcode: 123456</span> line) into the Description. The room reads it from there.</li>
+  <li><strong>Save.</strong></li>
+</ul>
+<p class="see">The table screen shows "Zoom" under your meeting's title. To join, see section 5.</p>
+<div class="callout warn">
+  <p class="kicker">Zoom links the room can't read</p>
+  <p><strong>Personal links with a name</strong>, like <span class="chip">zoom.us/my/jane.smith</span>, don't work. Use the meeting link with numbers (<span class="chip">zoom.us/j/…</span>). Your Personal Meeting ID link in that form is fine.</p>
+  <p><strong>Zoom meetings hosted by other companies</strong> may not join yet, because Zoom is still approving our room app. If the room says the meeting isn't authorized, join from your laptop (section 6) and let the administrator know.</p>
+</div>
+</section>
+
+<section class="block long">
+<div class="step"><span class="badge">4</span><h2>Reserve the room at the door or at the table</h2></div>
+<p>Need the room right now, or want to book it while you're walking past? The door sign and the table screen both have <span class="ui">Use now</span> and <span class="ui">Book</span>. No login or PIN is needed. Bookings made here go into the room's Google calendar, but <strong>not</strong> into your own calendar.</p>
+
+<h3 class="sub">Use the room now</h3>
+<p>Shown when the room is free.</p>
+<ol class="checks">
+  <li>Tap <span class="ui">Use now</span> on the door sign or the table screen.</li>
+  <li>Type <span class="ui">Your name or the meeting's name</span>.</li>
+  <li>Pick how long. Each choice shows when it ends, for example <span class="chip">30 min · until 12:30 PM</span>. You can't pick a time that runs into the next booking.</li>
+  <li>Tap <span class="ui">Start</span>.</li>
+</ol>
+<p class="see">You should see "The room is yours until 12:30 PM." The sign turns red.</p>
+
+<h3 class="sub">Book a later time</h3>
+<ol class="checks">
+  <li>Tap <span class="ui">Book</span> on the door sign, or <span class="ui">Book room</span> on the table screen.</li>
+  <li>Pick the day: <span class="ui">Today</span>, <span class="ui">Tomorrow</span> or one of the next five days.</li>
+  <li>Pick a start time. Only open times are shown, every 15 minutes from 8:00 AM to 6:00 PM.</li>
+  <li>Type your name or the meeting's name, and choose <span class="ui">How long</span> (15 minutes to 4 hours).</li>
+  <li>Tap <span class="ui">Book</span>. To go back a step, tap <span class="ui">Change time</span> or <span class="ui">Back</span>.</li>
+</ol>
+<p class="see">You should see "Booked: your name, 9:00 AM to 9:30 AM." It appears in the Today list (or in <span class="ui">This week</span> on the door sign).</p>
+
+<div class="cols">
+  <div class="card"><p class="kicker">Finished early?</p><h3>End now (table screen only)</h3><p>For a booking made on the door sign or table: tap <span class="ui">End now</span>, then tap again within 5 seconds. This frees the room for others.</p></div>
+  <div class="card"><p class="kicker">Plans changed?</p><h3>Cancel</h3><p>A booking made on the room's screens that hasn't started has <span class="ui">Cancel</span> beside it. Tap it, then tap <span class="ui">Tap again to cancel</span> within 4 seconds.</p></div>
+</div>
+<div class="callout">
+  <p class="kicker">Good to know</p>
+  <p><strong>Want a call with your booking?</strong> Bookings made at the door or table have no Meet or Zoom link. To run a call, paste the link into <span class="ui">Join with a link</span> on the table (section 5), or book in Google Calendar instead.</p>
+  <p><strong>Everyone can cancel.</strong> Anyone at the room can cancel a booking made on its screens. If yours matters, book it in Google Calendar.</p>
+  <p><strong>Left alone,</strong> the booking steps close by themselves after a minute.</p>
+</div>
+</section>
+
+<section class="block long">
+<div class="step"><span class="badge">5</span><h2>Join and run your call from the table</h2></div>
+<h3 class="sub">Join a booked meeting</h3>
+<ol class="checks">
+  <li>Look at the table screen. Until 10 minutes before the start, the button reads <span class="ui">Join opens at 9:50 AM</span>.</li>
+  <li>From 10 minutes before the start, tap <span class="ui">Join now</span>. You can also tap <span class="ui">Join</span> beside the meeting in the Today list.</li>
+  <li>The table shows "Joining…". The TV turns on and shows the call in about 15 seconds.</li>
+</ol>
+<p class="see">The table switches to the meeting screen and shows the call's timer. If it says "Waiting for the host to let the room in.", ask the host to admit the room. They have 5 minutes.</p>
+
+<h3 class="sub">Join a call that isn't booked</h3>
+<ol class="checks">
+  <li>On the table's main screen, tap the box <span class="ui">Paste a meeting link or a Zoom meeting ID</span>.</li>
+  <li>Type or paste a Google Meet or Zoom link, or a Zoom meeting ID like <span class="chip">559 000 0559</span>. Tap <span class="ui">123</span> on the keyboard for numbers.</li>
+  <li>If a <span class="ui">Passcode, if the meeting has one</span> box appears, type the passcode.</li>
+  <li>Tap <span class="ui">Join</span>.</li>
+</ol>
+
+<h3 class="sub">During the call</h3>
+<div class="cols">
+  <div class="card"><p class="kicker">Most used</p><ul>
+    <li><span class="ui">Mute</span> / <span class="ui">Unmute</span>: the room's microphones.</li>
+    <li><span class="ui">Turn camera off</span> / <span class="ui">Turn camera on</span>.</li>
+    <li><span class="ui">Sound</span>: room volume with <span class="ui">Quieter</span>, <span class="ui">Louder</span> and a slider.</li>
+    <li><span class="ui">Camera</span>: move and zoom the camera, or tap a preset such as <span class="ui">Wide</span> or <span class="ui">Table</span>.</li>
+  </ul></div>
+  <div class="card"><p class="kicker">Also there</p><ul>
+    <li><span class="ui">Raise hand</span>, <span class="ui">Reactions</span>, <span class="ui">Captions on</span>.</li>
+    <li><span class="ui">Participants</span> and <span class="ui">Chat</span> (in Google Meet you can also send a message).</li>
+    <li><span class="ui">Mic</span>: turn it up if people in the call can't hear the room.</li>
+    <li><span class="ui">TV</span>: a remote for the TV, if you need it.</li>
+  </ul></div>
+</div>
+<ul>
+  <li><strong>Pop-up questions.</strong> If Zoom or Meet asks something (for example, to agree to a recording), a card appears on the table with its buttons. Tap your answer.</li>
+  <li><strong>The next meeting.</strong> When the next booking is 10 minutes away, the top of the table shows "Next: 10:00 AM …". The room doesn't hang up for you.</li>
+</ul>
+
+<h3 class="sub">Leave the call</h3>
+<ol class="checks">
+  <li>Tap <span class="ui">Leave</span> at the bottom of the meeting card.</li>
+  <li>Tap <span class="ui">Tap again to leave</span> within 5 seconds.</li>
+</ol>
+<p class="see">The table goes back to its main screen and the TV to its idle screen. <strong>Always leave from the table</strong>, even if the host has ended a Google Meet call, so the room is ready for the next person.</p>
+</section>
+
+<section class="block long">
+<div class="step"><span class="badge">6</span><h2>Teams, Webex and other calls: use your laptop</h2></div>
+<p>The room joins only Google Meet and Zoom. A Teams or Webex meeting still shows on the door sign and the table, so everyone knows the room is taken, but it has no Join button. Pasting a Teams link shows "Unsupported meeting link". Reserve the room in Google Calendar as usual (section 1), then use one of these options.</p>
+
+<h3 class="sub">If the table screen shows a Laptop button</h3>
+<p>Some rooms can hand the room's camera, microphones and speaker to your laptop.</p>
+<ol class="checks">
+  <li>Plug the room's laptop USB cable into your laptop. Connect the TV's HDMI cable too if you want to show your screen.</li>
+  <li>On the table's main screen, tap <span class="ui">Laptop</span>. If your booking is on, it switches straight away. If the room is free, choose a length under <span class="ui">Use a laptop for</span> and tap <span class="ui">Switch to laptop</span>.</li>
+  <li>The table says "The camera, microphones and speaker are on the laptop until 10:30 AM".</li>
+  <li>In Teams (or your other app), open the audio and video settings and choose <span class="ui">Logitech MeetUp</span> as the camera, microphone and speaker.</li>
+  <li>When you're done, tap <span class="ui">Back to room</span> on the table. This also happens by itself when your booking ends.</li>
+</ol>
+<p class="see">If the TV doesn't show your laptop, tap <span class="ui">TV</span> on the table and use <span class="ui">Input</span> to pick the laptop's input.</p>
+
+<h3 class="sub">If there's no Laptop button</h3>
+<ul>
+  <li><strong>Join from your laptop</strong> with its own camera, microphone and speakers, or a headset.</li>
+  <li><strong>To show your screen on the TV,</strong> plug in the TV's HDMI cable if the room has one, and switch the TV's input with <span class="ui">TV › Input</span> on the table.</li>
+  <li><strong>Please don't unplug the room's equipment.</strong> If you need the room camera on your laptop, ask the administrator.</li>
+</ul>
+
+<div class="callout tip">
+  <p class="kicker">Tip: sharing your screen in a Meet or Zoom call</p>
+  <p>The table screen can't share a screen. Run the call in the room as usual, then join the same meeting from your laptop and share from there. <strong>Mute your laptop's microphone and turn its speakers off first</strong>, or everyone will hear an echo.</p>
+</div>
+</section>
+
+<section class="block long">
+<div class="step"><span class="badge">7</span><h2>If something doesn't work</h2></div>
+<table>
+  <thead><tr><th>What you see</th><th>What to do</th></tr></thead>
+  <tbody>
+    <tr><td>No Join now button for my meeting</td><td>If it's more than 10 minutes early, wait: the button says when it opens. Otherwise the event has no Meet or Zoom link the room can use, or it's a Teams or Webex meeting. Paste the link into <span class="ui">Join with a link</span>, or see section 6.</td></tr>
+    <tr><td>My booking isn't on the screens</td><td>Wait a minute or two. Check that the room was added under <span class="ui">Rooms</span>, that it didn't decline, and that the meeting is within 7 days.</td></tr>
+    <tr><td>"Couldn't join… Zoom needs the meeting passcode"</td><td>Type the passcode in the box that appears and tap <span class="ui">Join again</span>.</td></tr>
+    <tr><td>"Waiting for the host to let the room in."</td><td>Ask the host to admit the room (it appears as "Room 1" or similar). After 5 minutes the room gives up.</td></tr>
+    <tr><td>Zoom says the meeting isn't authorized</td><td>It's another company's Zoom meeting the room can't join yet. Join from your laptop and tell the administrator.</td></tr>
+    <tr><td>"Unsupported meeting link"</td><td>The room can't join this kind of call. See section 6.</td></tr>
+    <tr><td>"A meeting is already in progress"</td><td>Someone didn't leave the last call. Tap <span class="ui">Leave</span> twice on the table, then join.</td></tr>
+    <tr><td>"That time was just booked in Google Calendar" or "That time is already booked"</td><td>Someone else got there first. Pick another time.</td></tr>
+    <tr><td>"Double-booked with…"</td><td>Two bookings overlap, usually after an internet outage. Talk to the other person and move or cancel one.</td></tr>
+    <tr><td>"Calendar offline since…" or "Not in Google Calendar yet"</td><td>Google can't be reached right now. Your booking is safe in the room and goes to Google when it can.</td></tr>
+    <tr><td>Nobody can hear the room, or the room can't hear the call</td><td>Check <span class="ui">Unmute</span>, then <span class="ui">Sound › Louder</span>, then <span class="ui">Mic</span>. If it says "No speaker found" or "No microphone found", tell the administrator.</td></tr>
+    <tr><td>The TV stays dark</td><td>Tap <span class="ui">TV</span> on the table and use <span class="ui">Power</span>, then <span class="ui">Input</span>.</td></tr>
+    <tr><td>"Can't reach the room" (table) or "Sign not connected" (door)</td><td>The room's system is restarting or offline. It reconnects by itself. If it lasts more than a few minutes, tell the administrator.</td></tr>
+    <tr><td>"The room is updating"</td><td>Wait a few minutes and try again.</td></tr>
+    <tr><td>"The camera is on the laptop: press Back to room first"</td><td>Tap <span class="ui">Back to room</span>, then join.</td></tr>
+    <tr><td>Settings asks for a PIN</td><td>Settings is for the administrator. You never need it to book or run a meeting.</td></tr>
+  </tbody>
+</table>
+<div class="ask">
+  <p class="kicker">Still stuck?</p>
+  <p>Contact your Crystal Meet administrator. Say which room, what the table screen or door sign says (a photo helps), and what you were trying to do.</p>
+</div>
+</section>
+
+</body>
+</html>

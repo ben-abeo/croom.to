@@ -21,6 +21,15 @@ the command, the service units and the folders under `/etc` and `/opt`.
 Neither screen is cabled to the Pi: each only needs a browser, power and the
 network. The device joins nothing by itself; someone presses Join now.
 
+## Use a room, and look after one
+
+For everyone at Crystal PM, [Book the conference room and run your meeting from the table](docs/guides/crystal-meet-employee-guide.pdf)
+covers booking in Google Calendar, Google Meet and Zoom meetings, booking at the door sign and the table, running a call, and
+what to do for Teams, Webex and other calls. For whoever looks after the rooms, there are three technical manuals, each with every
+screen, setting, command and a troubleshooting table: the [touch Pi](docs/guides/crystal-meet-touch-pi-manual.pdf), the
+[TV Pi](docs/guides/crystal-meet-tv-pi-manual.pdf) and the [door sign](docs/guides/crystal-meet-door-sign-manual.pdf). The
+same text, as pages for the CM Confluence space, is in [docs/guides/confluence](docs/guides/confluence/README.md).
+
 ## Set up a room
 
 Follow the five guides in this order:

@@ -1,0 +1,1031 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crystal Meet TV Pi manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+
+<section class="cover">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker">Crystal Meet · Technical manual</p>
+  <h1>The TV Pi, from cable to code</h1>
+  <p class="promise">Everything the person who installs, changes and troubleshoots the room's TV Pi needs: the hardware, the installer, every setting, how calendar, Meet, Zoom, the TV and Laptop mode work, how updates undo themselves, and what to do when the room misbehaves.</p>
+  <div class="meta">
+    <div><p class="kicker">Device</p><p>Raspberry Pi 4 (4 GB) or Pi 5 behind the TV</p></div>
+    <div><p class="kicker">Runs</p><p>The croom service, port 8080</p></div>
+    <div><p class="kicker">Software</p><p>Branch main of ben-abeo/croom.to</p></div>
+    <div><p class="kicker">Edition</p><p>November 2026</p></div>
+  </div>
+</section>
+
+<section class="toc">
+  <p class="kicker">Contents</p>
+  <h2>What this manual covers</h2>
+  <ol>
+    <li><span class="n">01</span><strong>Overview</strong><span class="d">What the TV Pi does and what depends on it</span></li>
+    <li><span class="n">02</span><strong>Hardware and connections</strong><span class="d">The Pi, the TV, the MeetUp, the network and ports</span></li>
+    <li><span class="n">03</span><strong>Installing a TV Pi</strong><span class="d">Blank card to a working room, with the exact commands</span></li>
+    <li><span class="n">04</span><strong>Configuration</strong><span class="d">config.yaml, credentials and every Settings page</span></li>
+    <li><span class="n">05</span><strong>Google Calendar and bookings</strong><span class="d">Reading the room calendar, booking, working offline</span></li>
+    <li><span class="n">06</span><strong>Google Meet</strong><span class="d">The room's Google account, sign-in, joins</span></li>
+    <li><span class="n">07</span><strong>Zoom</strong><span class="d">The Meeting SDK, the tokens and the checks</span></li>
+    <li><span class="n">08</span><strong>TV control, camera and audio</strong><span class="d">Pairing, keeping the TV on, framing, sound</span></li>
+    <li><span class="n">09</span><strong>Laptop mode</strong><span class="d">Lending the MeetUp to a laptop through a USB switch</span></li>
+    <li><span class="n">10</span><strong>Updates, rollback and reboot</strong><span class="d">The root helper, restart with undo, Switch back</span></li>
+    <li><span class="n">11</span><strong>Logs, the croom command and checks</strong><span class="d">Journal, every CLI option, Settings › Check</span></li>
+    <li><span class="n">12</span><strong>Troubleshooting</strong><span class="d">Symptom, cause and fix, grouped by area</span></li>
+    <li><span class="n">13</span><strong>Reference</strong><span class="d">Files, routes, timings and legacy material</span></li>
+  </ol>
+  <div class="callout warn" style="margin-top:22px">
+    <p class="kicker">Not yet proven in a room</p>
+    <p>Some parts are tested only against stand-ins and are flagged where they appear: <strong>Laptop mode</strong> on the real switch (Section 09), <strong>TV control</strong> of the LG C6 and Samsung S90HD (Section 08), <strong>Zoom meetings hosted by other companies</strong> (Section 07), the <strong>Google sign-in check</strong>'s cookie path (Section 06), and Settings' room-management jobs on a room's own Pis (Section 04).</p>
+  </div>
+  <div class="callout" style="margin-top:10px">
+    <p class="kicker">Words used in this manual</p>
+    <p><strong>TV Pi</strong> (also "piTV", "the room device"): the Raspberry Pi behind the room's TV. It runs the <span class="chip">croom</span> service. <strong>Touch Pi</strong>: the touch screen on the table, where Options and Settings live. <strong>Door sign</strong>: the panel by the door. <strong>Room user</strong>: the desktop user the service runs as, normally <span class="chip">pi</span>. People see "Crystal Meet"; every internal name stays upstream's <span class="chip">croom</span>.</p>
+  </div>
+</section>
+
+<!-- 01 -->
+<section class="section new-page">
+  <div class="section-head"><p class="kicker">Section 01 · Overview</p><h2>The TV Pi runs the room; every other device is a window onto it</h2></div>
+  <p class="lede">One TV Pi per room. It owns the single browser page on the TV, reads the room's Google Calendar, joins Google Meet and Zoom when someone presses Join, controls the TV over the network, drives the camera and sound, and serves the pages the touch Pi and door sign show. If <span class="chip">croom</span> stops, both screens say they can't reach the room.</p>
+
+  <div class="diagram">
+    <div class="node"><p class="kicker">On the table</p><h3>Touch Pi</h3><p>Shows the room page <span class="ui">/</span>: Join, bookings, Options, Settings, touchpad.</p></div>
+    <div class="link">HTTP :8080<br>page, API, touchpad</div>
+    <div class="node main"><p class="kicker">Behind the TV</p><h3>TV Pi · croom</h3><p>Meetings, calendar, TV control, camera, sound, Settings, updates.</p></div>
+    <div class="link">HDMI, USB<br>network to the TV</div>
+    <div class="node"><p class="kicker">In the room</p><h3>TV and MeetUp</h3><p>LG or Samsung TV on HDMI; Logitech MeetUp camera and speakerphone on USB.</p></div>
+  </div>
+  <div class="diagram">
+    <div class="node"><p class="kicker">By the door</p><h3>Door sign</h3><p>Shows <span class="ui">/sign</span>; checks in for jobs and updates.</p></div>
+    <div class="link">HTTP :8080<br>page, check-in</div>
+    <div class="node main"><p class="kicker">Behind the TV</p><h3>TV Pi · croom</h3><p>The touch Pi and door sign never talk to each other, only to it.</p></div>
+    <div class="link">HTTPS<br>out only</div>
+    <div class="node"><p class="kicker">Outside</p><h3>Google, Zoom, GitHub</h3><p>Calendar and Meet; Zoom's SDK and tokens; new versions of the software.</p></div>
+  </div>
+
+  <div class="grid c4">
+    <div class="card tint"><div class="stat">8080</div><div class="stat-label">Port for every page and API, plain HTTP on the LAN</div></div>
+    <div class="card tint"><div class="stat">60 s</div><div class="stat-label">Calendar poll interval</div></div>
+    <div class="card tint"><div class="stat">2 min</div><div class="stat-label">Watch after a restart before a saved change is undone</div></div>
+    <div class="card tint"><div class="stat">3 min</div><div class="stat-label">Watch after an update before it is undone</div></div>
+  </div>
+
+  <h3 class="sub">What runs on it</h3>
+<pre>systemd
+├── croom.service        <span class="c">(the desktop user)  python -m croom.core.agent -c /etc/croom/config.yaml</span>
+│     └── Playwright → Chromium <span class="c">(bundled build in /opt/croom/browsers), one kiosk page on the TV,</span>
+│                              <span class="c">profile /var/lib/croom/meet-profile</span>
+├── croom-admin.service  <span class="c">(root)  python -m croom.admin --owner &lt;user&gt; --group &lt;group&gt;, socket /run/croom-admin.sock</span>
+└── croom-ui.service     <span class="c">(written, normally not enabled: upstream Qt touch UI, untested in this fork)</span></pre>
+  <table>
+    <thead><tr><th>Service inside croom</th><th>What it does in a Crystal Meet room</th></tr></thead>
+    <tbody>
+      <tr><td>tv</td><td>Pairs with and controls the TV over the network; wakes it and switches its input before every join. Always registered.</td></tr>
+      <tr><td>meeting</td><td>Owns the TV's Chromium (screensaver page <span class="chip">/tv</span> between calls) and the Google Meet and Zoom providers.</td></tr>
+      <tr><td>calendar</td><td>Polls the room's Google calendar and keeps room bookings.</td></tr>
+      <tr><td>devices</td><td>Camera pan, tilt, zoom and presets; speaker volume; microphone level.</td></tr>
+      <tr><td>laptop</td><td>Laptop mode, only when <span class="chip">laptop.enabled</span> is true.</td></tr>
+      <tr><td>control</td><td>The web server on 8080: room page, door sign, TV page, API, Settings, device check-in.</td></tr>
+      <tr><td>dashboard</td><td>Enrolment and heartbeat to the Crystal Meet dashboard, when enabled.</td></tr>
+      <tr><td>scores</td><td>Door sign football scores from ESPN, idle until a school is switched on.</td></tr>
+      <tr><td>video, audio, display, ai</td><td>Upstream services. Video only lists cameras and leaves the camera free for Meet and Zoom; display probes HDMI-CEC once and then does nothing; audio does nothing useful; ai is off in room configs.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">What the TV Pi can and cannot do</h3>
+  <div class="grid c2">
+    <div class="card"><p class="kicker">Can</p><ul>
+      <li><strong>Join a call when someone presses Join</strong>: Google Meet as the room's signed-in Google user, Zoom through Zoom's Meeting SDK.</li>
+      <li><strong>Turn the TV on and pick its input</strong> before every join, over the network.</li>
+      <li><strong>Book the room</strong> in Google Calendar from the touch Pi and door sign, and keep bookings while Google is unreachable.</li>
+      <li><strong>Move the camera</strong> to saved presets and set speaker and mic levels.</li>
+      <li><strong>Lend the MeetUp to a laptop</strong> where a USB switch is fitted.</li>
+      <li><strong>Update itself</strong> from GitHub and undo an update the room does not start with.</li>
+    </ul></div>
+    <div class="card"><p class="kicker">Cannot</p><ul>
+      <li><strong>Join or leave by itself.</strong> No auto-join, no auto-leave.</li>
+      <li><strong>Frame people automatically.</strong> The MeetUp's RightSight is Logitech software for Windows and macOS.</li>
+      <li><strong>Control the TV over HDMI-CEC.</strong> TV control is over the network.</li>
+      <li><strong>Lock its pages.</strong> Everything on 8080 is open to the LAN; only Settings has a PIN.</li>
+      <li><strong>Refresh its installer pieces on update.</strong> Units, udev rules, sudoers and apt packages need the installer.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- 02 -->
+<section class="section new-page">
+  <div class="section-head"><p class="kicker">Section 02 · Hardware and connections</p><h2>One HDMI cable, one USB cable, and the network does the rest</h2></div>
+  <table>
+    <thead><tr><th>Item</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>Pi</td><td>Raspberry Pi 4 (4 GB) or Raspberry Pi 5, official power supply, 32 GB microSD. The code supports both.</td></tr>
+      <tr><td>Operating system</td><td>Raspberry Pi OS (64-bit) <strong>with desktop</strong>, Bookworm or Trixie. The installer needs <span class="chip">aarch64</span> or <span class="chip">x86_64</span>; it also accepts jammy and noble and warns on other codenames.</td></tr>
+      <tr><td>Desktop</td><td>Auto-login desktop user, normally <span class="chip">pi</span>. labwc on current Raspberry Pi OS, with an X display at <span class="chip">:0</span>; the service waits for <span class="chip">/tmp/.X11-unix/X0</span>.</td></tr>
+      <tr><td>Network</td><td>Wi-Fi or Ethernet, with a fixed address (DHCP reservation). The TV must be on the same network segment as the Pi's default-route interface: Wake-on-LAN is a broadcast and TV discovery is multicast.</td></tr>
+      <tr><td>TV</td><td>One HDMI cable from the Pi to the TV input named in <span class="chip">tv.pi_input</span> (default <span class="chip">HDMI_1</span>). Rooms use LG C6 OLEDs (webOS); the Samsung S90HD is also supported.</td></tr>
+      <tr><td>Camera and speakerphone</td><td>Logitech MeetUp on USB (id <span class="chip">046d:0866</span>): camera, speakerphone and motorised pan, tilt and zoom in one unit.</td></tr>
+      <tr><td>Laptop switch (optional)</td><td>ATEN US234 USB sharing switch and an Adafruit relay (product 4409) on the Pi's header. See Section 09.</td></tr>
+    </tbody>
+  </table>
+  <div class="grid c2">
+    <div class="callout"><p class="kicker">Not recorded</p><p>The repo does not say which Pi model each room has: Pi 4 (4 GB) or Pi 5. Note it on the Pi when you install or service it. Laptop mode looks for GPIO chip <span class="chip">pinctrl-bcm2711</span> (Pi 4) or <span class="chip">pinctrl-rp1</span> (Pi 5).</p></div>
+    <div class="callout"><p class="kicker">The camera is the MeetUp</p><p>The code is built for the Logitech MeetUp. The room setup guide's example (Brio 505 and Jabra Speak2 55) predates it. Camera framing needs a camera with V4L2 zoom or pan and tilt speed controls.</p></div>
+  </div>
+
+  <h3 class="sub">Settings needed on the TV</h3>
+  <table>
+    <thead><tr><th>TV</th><th>On the TV</th><th>How the Pi talks to it</th></tr></thead>
+    <tbody>
+      <tr><td>LG webOS (C6)</td><td><span class="ui">LG Connect Apps</span> on. <span class="ui">Mobile TV On</span> ("Turn on via Wi-Fi") on, unless <span class="ui">Quick Start+</span> is on.</td><td>aiowebostv over ws/wss, ports 3000/3001 (the library's defaults). One pairing prompt, accepted with the TV's remote. Power, inputs, volume and mute read back, apps, channels, every remote key, the TV's own pointer.</td></tr>
+      <tr><td>Samsung Tizen (S90HD)</td><td><span class="ui">Power On with Mobile</span> on. If the prompt keeps coming back, set <span class="ui">Device Connection Manager › Access Notification</span> to <span class="ui">First Time Only</span>.</td><td>Local secure WebSocket on 8002, REST on https 8002, http 8001 for the MAC. No SmartThings account. No input, volume or mute readback; Input opens the source menu; no TV pointer; no automatic HDMI switch before a join.</td></tr>
+      <tr><td>Both</td><td>A fixed address for the TV (reserve it on the router) and its MAC address.</td><td>Wake-on-LAN is always sent first, so the MAC is needed for every Turn on, even with Quick Start+.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout dark"><p class="kicker">Not HDMI-CEC</p><p>HDMI-CEC does not turn the TV on or off or switch its input. Upstream's CEC service still starts and probes <span style="font-weight:600">cec-client</span> and <span style="font-weight:600">/dev/cec0</span> once, but nothing calls it. All TV control is over the network. The old <span style="font-weight:600">tv-lifecycle.service</span> and <span style="font-weight:600">tv-on.sh</span> scripts in the repo are not installed and should not be used.</p></div>
+
+  <h3 class="sub">Network</h3>
+  <ul>
+    <li><strong>In:</strong> TCP 8080 from the touch Pi, door sign and laptops on the LAN; UDP replies from TVs during Find TVs. A firewall that blocks inbound UDP hides every TV.</li>
+    <li><strong>Out:</strong> the TV (LG 3000/3001, Samsung 8002), Google, Zoom, GitHub, the dashboard on 3001, and ESPN for door sign scores. The full list is in Section 13.</li>
+    <li><strong>Never to the other screens.</strong> The touch Pi and door sign poll the TV Pi and check in every 5 seconds; the TV Pi never connects to them.</li>
+  </ul>
+</section>
+
+<!-- 03 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 03 · Installing a TV Pi</p><h2>One installer run takes a blank card to a working room</h2></div>
+  <p class="lede">Prepare the card, get a dashboard token, run <span class="chip">installer/install.sh</span> with the room's config and keys, then finish the room from the touch Pi. The installer itself takes 10 to 20 minutes.</p>
+
+  <div class="callout warn">
+    <p class="kicker">Before you begin</p>
+    <p><strong>The Pi, cabled:</strong> TV on HDMI, MeetUp on USB, power last.</p>
+    <p><strong>Raspberry Pi Imager</strong> on a computer, and a 32 GB microSD card.</p>
+    <p><strong>The room calendar's address</strong>, <span class="chip">c_…@resource.calendar.google.com</span>, and the dashboard's address.</p>
+    <p><strong>The keys:</strong> <span class="chip">google-service-account.json</span> and <span class="chip">zoom-credentials.json</span> (template <span class="chip">deploy/rooms/zoom-credentials.example.json</span>).</p>
+    <p><strong>The room's Google user</strong> (for example <span class="chip">room1@crystalpm.com</span>) and its password, for the sign-in afterwards.</p>
+  </div>
+
+  <h3 class="sub">1 · Prepare the Pi</h3>
+  <ol class="steps">
+    <li>In Raspberry Pi Imager choose <span class="ui">Raspberry Pi OS (64-bit)</span> with desktop. Set the hostname (for example <span class="chip">crystal-meet-room-1</span>), user <span class="chip">pi</span>, Wi-Fi, time zone, and turn SSH on. Write the card.</li>
+    <li>Put the card in the Pi and power it. The desktop appears on the TV.</li>
+    <li>Open <span class="ui">Preferences › Raspberry Pi Configuration › System</span> and turn <span class="ui">Auto Login</span> on. The room then comes back by itself after a power cut.</li>
+    <li>Reserve the Pi's IP address on the router.</li>
+  </ol>
+
+  <h3 class="sub">2 · Get the room's dashboard token</h3>
+  <ol class="steps">
+    <li>On the dashboard open <span class="ui">Provisioning</span>, type the room's name and press <span class="ui">Generate Token</span>.</li>
+    <li>Copy the token. It works once: a reinstall needs a new one.</li>
+  </ol>
+
+  <div class="keep">
+  <h3 class="sub">3 · Run the installer</h3>
+  <p>As the desktop user, over SSH or in a terminal on the Pi:</p>
+<pre>sudo apt update &amp;&amp; sudo apt install -y git
+git clone https://github.com/ben-abeo/croom.to.git &amp;&amp; cd croom.to
+cp deploy/rooms/room-1.yaml ~/room.yaml       <span class="c"># room-2.yaml or room-3.yaml for the other rooms</span>
+nano ~/room.yaml
+<span class="c"># set room.name, room.location (optional), dashboard.url (http://&lt;dashboard&gt;:3001),</span>
+<span class="c"># dashboard.enrollment_token and calendar.google_calendar_id</span>
+sudo bash installer/install.sh --config ~/room.yaml \
+     --credentials ~/google-service-account.json \
+     --zoom-credentials ~/zoom-credentials.json       <span class="c"># 10 to 20 minutes</span>
+sudo systemctl start croom
+sudo reboot                                    <span class="c"># once, so the US keyboard layout takes effect</span>
+rm ~/google-service-account.json ~/zoom-credentials.json
+<span class="c"># the installed copies are in /etc/croom</span></pre>
+  </div>
+  <table class="plain">
+    <thead><tr><th>Installer option</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><strong>--config FILE</strong></td><td>Copied to <span class="chip">/etc/croom/config.yaml</span> (room user, mode 640). Without it an existing config is kept, or a stock one written.</td></tr>
+      <tr><td><strong>--credentials FILE</strong></td><td>Google key to <span class="chip">/etc/croom/google-service-account.json</span>, mode 600.</td></tr>
+      <tr><td><strong>--zoom-credentials FILE</strong></td><td>Zoom keys to <span class="chip">/etc/croom/zoom-credentials.json</span>, mode 600.</td></tr>
+      <tr><td><strong>--enable-ui</strong></td><td>Enables the upstream Qt touch UI. Not used in Crystal Meet rooms.</td></tr>
+      <tr><td><strong>--no-service</strong></td><td>Parsed but <strong>not honoured</strong>.</td></tr>
+      <tr><td><strong>CROOM_REPO=…</strong></td><td>Environment variable overriding the pip source (default <span class="chip">git+https://github.com/ben-abeo/croom.to.git</span>, branch main). Builds a release named <span class="chip">local-&lt;epoch&gt;</span>.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><p class="kicker">Good to know</p><p>The installer must run under <span class="chip">sudo</span> from the desktop user: <span class="chip">$SUDO_USER</span> becomes the service user. It refuses to run as root directly. The finishing text prints the exact <span class="chip">--check-calendar</span>, <span class="chip">--check-zoom</span> and <span class="chip">--sign-in-meet</span> commands for this Pi.</p></div>
+
+  <h3 class="sub">What the installer does, in order</h3>
+  <table class="plain">
+    <thead><tr><th>Step</th><th>What changes on the Pi</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Checks</strong></td><td>Run under sudo, a real desktop user, a supported architecture and release.</td></tr>
+      <tr><td><strong>User groups</strong></td><td>Adds the user to <span class="chip">video, audio, input, dialout, gpio</span>.</td></tr>
+      <tr><td><strong>Virtual mouse</strong></td><td><span class="chip">/etc/udev/rules.d/99-croom-uinput.rules</span> and <span class="chip">/etc/modules-load.d/croom-uinput.conf</span>; loads <span class="chip">uinput</span>.</td></tr>
+      <tr><td><strong>US keyboard</strong></td><td><span class="chip">/etc/default/keyboard</span> and <span class="chip">~/.config/labwc/environment</span>. Sign in to Google types US key codes; the default GB layout turns <span class="chip">@</span> into <span class="chip">"</span>. Applies after a reboot.</td></tr>
+      <tr><td><strong>Folders</strong></td><td><span class="chip">/opt/croom</span>, <span class="chip">/etc/croom</span>, <span class="chip">/var/lib/croom</span>, <span class="chip">/var/lib/croom/meet-profile</span> (700), <span class="chip">/opt/croom/browsers</span>, <span class="chip">/var/lib/croom-admin</span> (root, 700).</td></tr>
+      <tr><td><strong>Packages</strong></td><td>python3, venv, python3-dev, gcc, libc6-dev (to build evdev), chromium, pulseaudio, libpulse0, v4l-utils, libcamera-apps, cec-utils, git, curl, wget, and Qt packages (may warn).</td></tr>
+      <tr><td><strong>The software</strong></td><td>Builds <span class="chip">/opt/croom/releases/&lt;commit&gt;/venv</span> from main, points the <span class="chip">/opt/croom/venv</span> link at it, keeps two releases, then installs Playwright's Chromium into <span class="chip">/opt/croom/browsers</span>.</td></tr>
+      <tr><td><strong>Config and keys</strong></td><td>Copies the config, saves <span class="chip">config.yaml.good</span>, installs the keys (mode 600).</td></tr>
+      <tr><td><strong>Services</strong></td><td>Writes <span class="chip">croom.service</span>, <span class="chip">croom-admin.service</span>, <span class="chip">croom-ui.service</span>; enables croom; enables and starts croom-admin.</td></tr>
+      <tr><td><strong>Desktop icon and sudoers</strong></td><td><span class="ui">Start Crystal Meet</span> on the desktop, and <span class="chip">/etc/sudoers.d/croom</span> letting the user run <span class="chip">systemctl start|restart croom</span> without a password.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">The unit files it writes</h3>
+<pre><span class="c"># /etc/systemd/system/croom.service</span>
+[Unit]
+Description=Crystal Meet room agent (croom)
+After=display-manager.service network-online.target pulseaudio.service
+Wants=network-online.target
+[Service]
+Type=simple
+User=&lt;user&gt;
+Group=&lt;user's primary group&gt;
+WorkingDirectory=/opt/croom
+ExecStartPre=/usr/bin/timeout 120 /bin/sh -c 'until [ -S /tmp/.X11-unix/X0 ]; do sleep 2; done'
+ExecStart=/opt/croom/venv/bin/python -m croom.core.agent -c /etc/croom/config.yaml
+Restart=always
+RestartSec=10
+Environment=DISPLAY=:0
+Environment=XDG_RUNTIME_DIR=/run/user/&lt;uid&gt;
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/croom/browsers
+[Install]
+WantedBy=multi-user.target
+
+<span class="c"># /etc/systemd/system/croom-admin.service</span>
+[Service]
+ExecStart=/opt/croom/venv/bin/python -m croom.admin --owner &lt;user&gt; --group &lt;group&gt;
+Restart=always
+RestartSec=5</pre>
+
+  <h3 class="sub">4 · Finish the room from the touch Pi</h3>
+  <ol class="steps">
+    <li>Open <span class="chip">http://&lt;TV Pi&gt;:8080/</span> on the touch Pi or a laptop. Use the IP address: many tablets do not resolve <span class="chip">.local</span> names. The room page appears.</li>
+    <li>Open <span class="ui">Options › Settings</span> and choose a PIN of 4 to 8 digits. Record it in the office password manager.</li>
+    <li>Set up the TV under <span class="ui">Options › TV › Find TVs</span> (Section 08). The TV shows the screensaver after pairing.</li>
+    <li>Sign the room in to Google with <span class="ui">Settings › Meetings › Sign in to Google</span> (Section 06). The table shows "Signed in as …".</li>
+    <li>Set up the camera under <span class="ui">Options › Camera framing</span>: <span class="ui">Find the stops</span>, nudge, <span class="ui">Save as Home</span>, save presets.</li>
+    <li>On the table Pi run <span class="chip">sudo bash installer/install-kiosk.sh --url http://&lt;TV Pi&gt;:8080/</span>, then tap <span class="ui">Allow</span> under <span class="ui">Settings › Software › Devices waiting to join</span>.</li>
+    <li>Run each test under <span class="ui">Settings › Check</span>: Calendar, TV, Google sign-in, Zoom keys.</li>
+  </ol>
+  <p class="see">You should now see every check pass, the TV Pi's card under <span class="ui">Settings › Software</span> with its version, and the room online on the dashboard's Devices page.</p>
+
+  <h3 class="sub">Upgrading a room from before room settings (once, by hand)</h3>
+<pre>sudo systemctl stop croom
+cd ~/croom.to &amp;&amp; git checkout main &amp;&amp; git pull
+sudo bash installer/install.sh          <span class="c"># no --config: the config and keys are kept</span>
+sudo reboot</pre>
+  <p>If the installer stops with an error, <span class="chip">sudo systemctl start croom</span> brings the room back on the old version. Do not <span class="ui">Switch back</span> to the version from before room settings afterwards: it has no helper, and Settings does not offer it.</p>
+</section>
+
+<!-- 04 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 04 · Configuration</p><h2>One file holds the room's configuration, and Settings edits it safely</h2></div>
+  <p class="lede"><span class="chip">/etc/croom/config.yaml</span> is the single source of truth (room user, mode 640). Settings on the table writes it through the root helper, keeps the five previous versions as <span class="chip">config.yaml.1</span> to <span class="chip">.5</span>, and keeps <span class="chip">config.yaml.good</span>, the config the room last started healthy with. Comments in the file are lost at the first Settings save.</p>
+
+  <h3 class="sub">The keys a Crystal Meet room uses</h3>
+  <p>"Live" keys apply at once; every other change applies after <span class="ui">Restart now</span>. Full defaults are in <span class="chip">src/croom/core/config.py</span>.</p>
+  <table>
+    <thead><tr><th>Key</th><th>Default</th><th>Settings page</th><th>Notes</th></tr></thead>
+    <tbody>
+      <tr><td>room.name</td><td>Conference Room</td><td>Room</td><td>Shown on every screen and the dashboard; the Meet and Zoom name falls back to it.</td></tr>
+      <tr><td>room.location</td><td>""</td><td>Room</td><td>A <span class="chip">REPLACE_…</span> placeholder counts as none.</td></tr>
+      <tr><td>room.timezone</td><td>UTC (room files America/Chicago)</td><td>Room</td><td>Also set the OS time zone (Localisation): it drives event times.</td></tr>
+      <tr><td>room.company</td><td>Crystal Practice Management</td><td>Room</td><td>Door sign; blank shows the logo alone.</td></tr>
+      <tr><td>meeting.platforms</td><td>room files [zoom, google_meet]</td><td>Meetings</td><td>Joins are limited to these platforms' hosts.</td></tr>
+      <tr><td>meeting.camera_default_on, mic_default_on</td><td>true</td><td>Meetings</td><td>Camera and mic state at join.</td></tr>
+      <tr><td>meeting.kiosk</td><td>true</td><td>Meetings</td><td>Full-screen TV browser with no tab strip.</td></tr>
+      <tr><td>meeting.zoom_credentials_path</td><td>room files /etc/croom/zoom-credentials.json</td><td>Meetings</td><td>Without it Zoom falls back to its web client, which Zoom blocks.</td></tr>
+      <tr><td>meeting.google_profile_dir</td><td>room files /var/lib/croom/meet-profile</td><td>Meetings</td><td>Without it the TV browser is a guest and Meet refuses it.</td></tr>
+      <tr><td>meeting.meet_api_domain</td><td>""</td><td>Meetings</td><td>For example <span class="chip">crystalpm.com</span>; blank means off.</td></tr>
+      <tr><td>meeting.dialogs.acknowledge</td><td>9 phrases</td><td>Meetings</td><td>One-button notices the room presses at once.</td></tr>
+      <tr><td>meeting.dialogs.ask_everything</td><td>false</td><td>Meetings</td><td>Every dialog waits for a tap on the table.</td></tr>
+      <tr><td>meeting.controls.reactions</td><td>Thumbs Up, Clap, Heart, Joy, Open Mouth, Tada</td><td>Meetings</td><td><span class="chip">[]</span> hides Reactions.</td></tr>
+      <tr><td>calendar.providers</td><td>room files [google]</td><td>—</td><td>Only the first is used.</td></tr>
+      <tr><td>calendar.google_credentials_path</td><td>""</td><td>Calendar</td><td><span class="chip">/etc/croom/google-service-account.json</span></td></tr>
+      <tr><td>calendar.google_calendar_id</td><td>""</td><td>Calendar</td><td><span class="chip">c_…@resource.calendar.google.com</span></td></tr>
+      <tr><td>calendar.sync_interval_seconds</td><td>60</td><td>—</td><td>Poll interval.</td></tr>
+      <tr><td>calendar.booking_start, booking_end</td><td>08:00, 18:00</td><td>Calendar (live)</td><td>On the quarter hour; end after start.</td></tr>
+      <tr><td>control.enabled, host, port</td><td>true, 0.0.0.0, 8080</td><td>Refused</td><td>Settings refuses to change them.</td></tr>
+      <tr><td>control.screensaver</td><td>info</td><td>—</td><td>First style only; the table's choice is kept in <span class="chip">control-settings.json</span>.</td></tr>
+      <tr><td>control.camera_presets</td><td>Wide, Table, Whiteboard</td><td>Devices (live)</td><td>Names of preset slots 1 to 3.</td></tr>
+      <tr><td>audio.output_device, input_device</td><td>auto</td><td>Devices</td><td>Part of a PipeWire device's name.</td></tr>
+      <tr><td>video.device</td><td>auto</td><td>Devices</td><td>Or <span class="chip">/dev/videoN</span>.</td></tr>
+      <tr><td>video.ptz_travel_seconds</td><td>8</td><td>Devices</td><td>1 to 60 in Settings.</td></tr>
+      <tr><td>tv.enabled, brand, host, mac</td><td>false, lg, "", ""</td><td>Options › TV</td><td>Find TVs saves a selection in <span class="chip">tv-settings.json</span> that overrides these. Put a MAC in quotes.</td></tr>
+      <tr><td>tv.pi_input, laptop_input</td><td>HDMI_1, ""</td><td>TV connection settings</td><td>The laptop input must differ from the Pi's.</td></tr>
+      <tr><td>tv.keep_on</td><td>true</td><td>—</td><td>Wake at start, before every join, and after an unexpected off.</td></tr>
+      <tr><td>laptop.*</td><td>see Section 09</td><td>Laptop switch</td><td>enabled, gpio_pin, active_low, press_ms, usb_id, switch_wait_s.</td></tr>
+      <tr><td>ai.*</td><td>false in room files</td><td>AI &amp; dashboard</td><td>Upstream; not used.</td></tr>
+      <tr><td>dashboard.enabled, url, enrollment_token, heartbeat_interval_seconds</td><td>true, "", "", 30</td><td>AI &amp; dashboard</td><td>URL <span class="chip">http://&lt;dashboard&gt;:3001</span>; the token works once; heartbeat 5 to 55 s.</td></tr>
+      <tr><td>data_dir</td><td>""</td><td>—</td><td>Overrides <span class="chip">/var/lib/croom</span>.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout dark"><p class="kicker">An unknown key throws the whole file away</p><p>An unknown key <strong>inside a section</strong> (other than under meeting.dialogs or meeting.controls) makes the agent discard the whole config and run on built-in defaults. The one warning line is printed to stdout and reaches the journal only when the service stops. An unknown top-level key is ignored. After a hand edit, compare with <span style="font-weight:600">config.yaml.good</span>.</p></div>
+
+  <h3 class="sub">Credentials</h3>
+  <table>
+    <thead><tr><th>What</th><th>Holds</th><th>Put there by</th><th>Checked by</th></tr></thead>
+    <tbody>
+      <tr><td>/etc/croom/google-service-account.json</td><td>The Google Cloud service-account key (calendar; also the Meet API).</td><td>Installer <span class="chip">--credentials</span>, or <span class="ui">Settings › Calendar</span>: Upload or From USB stick.</td><td><span class="chip">croom --check-calendar</span>; <span class="ui">Check › Calendar</span></td></tr>
+      <tr><td>/etc/croom/zoom-credentials.json</td><td>Zoom SDK pair, plus the server-to-server values and room user.</td><td>Installer <span class="chip">--zoom-credentials</span>, or <span class="ui">Settings › Meetings</span>: upload, USB or Type the keys.</td><td><span class="chip">croom --check-zoom</span>; <span class="ui">Check › Zoom keys</span></td></tr>
+      <tr><td>Google session</td><td>Cookies in <span class="chip">/var/lib/croom/meet-profile</span>.</td><td><span class="ui">Sign in to Google</span>, or <span class="chip">croom --sign-in-meet</span>.</td><td><span class="ui">Check › Google sign-in</span></td></tr>
+      <tr><td>TV keys</td><td><span class="chip">tv-client-key</span> or <span class="chip">tv-&lt;hash&gt;-key</span> in the data folder.</td><td>Pairing from the table.</td><td><span class="chip">croom --check-tv</span></td></tr>
+      <tr><td>Settings PIN</td><td><span class="chip">settings-pin.json</span> (scrypt hash).</td><td>First Settings open.</td><td>—</td></tr>
+      <tr><td>Dashboard</td><td>Token in config, then <span class="chip">dashboard-state.json</span>.</td><td>Config, or <span class="ui">Settings › AI &amp; dashboard</span>.</td><td>Dashboard › Devices</td></tr>
+    </tbody>
+  </table>
+  <p>Keys saved from Settings are written to <span class="chip">/etc/croom</span> (mode 600), up to 64 KB, and apply after a restart. A key on a USB stick must be a <span class="chip">.json</span> file at the top of the stick. To revoke: delete the service-account key in the Cloud console, suspend the room's Workspace user, or deactivate the Zoom apps.</p>
+
+  <h3 class="sub">Settings on the touch Pi</h3>
+  <ul>
+    <li><strong>Where:</strong> <span class="ui">Options › Settings</span> on the touch Pi, or the same page in a laptop browser at <span class="chip">http://&lt;TV Pi&gt;:8080/</span>.</li>
+    <li><strong>PIN:</strong> 4 to 8 digits. Unlocked for 5 minutes after the last use; <span class="ui">Lock</span> ends it; a service restart locks every screen.</li>
+    <li><strong>Lockout:</strong> 5 wrong PINs in a row lock every screen for 10 minutes. A restart clears it.</li>
+    <li><strong>Forgotten PIN:</strong> <span class="chip">sudo rm /var/lib/croom/settings-pin.json</span> on the TV Pi. No restart needed; choose a new PIN on the next open.</li>
+    <li><strong>Saving:</strong> shows <span class="ui">Saved</span>, or <span class="ui">Saved: applies after a restart</span> with <span class="ui">Restart now</span>. Live fields: booking hours and camera preset names.</li>
+  </ul>
+  <table>
+    <thead><tr><th>Page</th><th>What it changes on the TV Pi</th></tr></thead>
+    <tbody>
+      <tr><td>Room</td><td>Name, location, company, time zone.</td></tr>
+      <tr><td>Calendar</td><td>Room calendar address, Google key (Upload, From USB stick), booking hours (live).</td></tr>
+      <tr><td>Meetings</td><td>Platforms, camera and mic at join, kiosk, dialogs the room answers, reactions, Zoom SDK keys, Meet participants domain, Google sign-in folder and <span class="ui">Sign in to Google</span>.</td></tr>
+      <tr><td>Devices</td><td>Speaker, microphone and camera (from what the Pi finds now, or Automatic), camera travel time, preset names (live).</td></tr>
+      <tr><td>TV</td><td>Opens <span class="ui">Options › TV</span>: remote, Find TVs, Pair, Forget TV, connection settings (MAC, the Pi's HDMI input, Laptop input).</td></tr>
+      <tr><td>Laptop switch</td><td>On or off, GPIO pin, active low, press length, USB id, wait; <span class="ui">Test the switch</span>.</td></tr>
+      <tr><td>AI &amp; dashboard</td><td>Upstream AI switches; dashboard on or off, address, enrolment token.</td></tr>
+      <tr><td>Network</td><td>Each device's Wi-Fi or Ethernet, network, signal, address; <span class="ui">Change Wi-Fi</span> with a 90-second safety net; <span class="ui">Forget</span>.</td></tr>
+      <tr><td>Check</td><td>Calendar, TV, Laptop switch, Google sign-in, Zoom keys (each up to 60 s); <span class="ui">Capture the next Google Meet call</span>.</td></tr>
+      <tr><td>Logs</td><td>The croom journal, newest first, 200 lines a page, All or Warnings and errors.</td></tr>
+      <tr><td>Software</td><td>Each device's version and the newest; <span class="ui">Update</span>, <span class="ui">Reboot</span>, <span class="ui">Restart room software</span>, <span class="ui">Switch back to</span>, <span class="ui">Update all</span>; Devices waiting to join.</td></tr>
+      <tr><td>Security</td><td>Change the PIN.</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>Refused in a meeting:</strong> restart, reboot, update, Wi-Fi changes and Google sign-in answer "Leave the meeting first".</li>
+    <li><strong>Refused in Laptop mode:</strong> restart, reboot, update and sign-in answer "The camera is on the laptop: press Back to room first".</li>
+    <li><strong>No helper:</strong> pages that need the root helper say "Not available on this device" (Section 10).</li>
+  </ul>
+  <div class="callout"><p class="kicker">Not yet verified</p><p>Settings' room-management jobs (NetworkManager, systemd, journald, pip, git, GitHub) are verified against stand-ins, not yet on a room's own Pis. The README's hands-on checklist is still to be run.</p></div>
+
+  <h3 class="sub">The table's own choices: control-settings.json</h3>
+  <p>Kept in <span class="chip">/var/lib/croom/control-settings.json</span> (mode 600), not in config.yaml: <span class="chip">screensaver</span> (info, quiet, brand, bounce), <span class="chip">key_click</span>, <span class="chip">sign_background</span>, <span class="chip">sign_scores</span>, <span class="chip">camera</span> (home and presets) and <span class="chip">mic_level</span>. If the file can't be written the choice is held in memory until the next restart, with the log line "Could not save the room settings to …".</p>
+</section>
+
+<!-- 05 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 05 · Google Calendar and bookings</p><h2>The room reads one Google calendar every minute and keeps booking when Google is away</h2></div>
+  <p class="lede">A Google service account reads the room's resource calendar and writes bookings made at the touch Pi and door sign. The room keeps its last read and its own bookings on disk, so the screens work through an outage and sync when Google returns.</p>
+
+  <h3 class="sub">Setting it up</h3>
+  <ol class="steps">
+    <li>In the Google Cloud project "Crystal Meet", enable the Calendar API and create a service account (for example <span class="chip">crystal-meet-rooms@….iam.gserviceaccount.com</span>) with no roles. Download a JSON key.</li>
+    <li>In Google Calendar, share the room's resource calendar with the service account's address with <span class="ui">Make changes to events</span>. The Workspace setting for secondary calendars must be "Share all information, and outsiders can change calendars".</li>
+    <li>On the touch Pi, <span class="ui">Settings › Calendar</span>: enter the <span class="ui">Room calendar address</span> and upload the key. Tap <span class="ui">Restart now</span>.</li>
+    <li>Run <span class="ui">Settings › Check › Calendar</span>, or the command below. The last line reads "Bookings: the door sign and the room page can book this calendar."</li>
+  </ol>
+<pre>sudo -u pi /opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
+<span class="c"># Google Calendar: connected as crystal-meet-rooms@….iam.gserviceaccount.com</span>
+<span class="c"># Calendar: Room 1 (c_…@resource.calendar.google.com)</span>
+<span class="c"># Bookings in the next 7 days:   (the first 10)</span>
+<span class="c"># Bookings: the door sign and the room page can book this calendar.</span>
+<span class="c"># exit 0 when everything works, 1 otherwise; run it as the service user, who can read the key</span></pre>
+  <p>The check also writes and deletes a test event, "Crystal Meet booking check", dated 2000-01-01, to prove it can write. It reports bookings still waiting to be sent and any that are double-booked.</p>
+
+  <h3 class="sub">How the room reads the calendar</h3>
+  <ul>
+    <li><strong>Every 60 seconds</strong> it reads from one hour ago to seven days ahead, up to 100 events, from the one calendar in <span class="chip">google_calendar_id</span>.</li>
+    <li><strong>Dropped:</strong> cancelled events and events the room resource declined (double bookings).</li>
+    <li><strong>Which link wins:</strong> the event's conference link, except that a typed Zoom, Teams or Webex link beats an automatically added Meet link.</li>
+    <li><strong>Zoom passcode:</strong> from <span class="chip">pwd=</span> in the link, else from "Passcode:" or "Password:" in the location or description.</li>
+    <li><strong>Join now</strong> appears on the room page from 10 minutes before a booking until it ends. Nothing joins automatically.</li>
+    <li><strong>Not configured</strong> (no key, unreadable key, empty or <span class="chip">REPLACE_</span> address): one warning in the log; the room still joins pasted links.</li>
+  </ul>
+
+  <h3 class="sub">Bookings made at the room's screens</h3>
+  <table>
+    <thead><tr><th>Action</th><th>Rule</th></tr></thead>
+    <tbody>
+      <tr><td>Book</td><td>Today and the next 6 days, every quarter hour inside booking hours, 15 minutes to 4 hours, stopped by the next booking and the end of booking hours.</td></tr>
+      <tr><td>Use now</td><td>Starts this minute, ends on the quarter hour nearest to now plus the length. Not limited to booking hours.</td></tr>
+      <tr><td>End now</td><td>Touch Pi only. Shortens a booking in progress; cancels one that has not started.</td></tr>
+      <tr><td>Cancel</td><td>Only a booking made at the room's screens that has not started.</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>Saved first, then sent.</strong> A booking goes into <span class="chip">bookings.json</span>, then to Google with a 10-second wait at the screen. If Google doesn't answer it is queued.</li>
+    <li><strong>Tagged.</strong> Each event carries the private property <span class="chip">croom_id</span> and the description "Booked on the &lt;room&gt; door sign" or "Started on the &lt;room&gt; room page".</li>
+    <li><strong>Queue order.</strong> Queued changes go oldest first at the start of each poll, and the round stops at the first failure.</li>
+    <li><strong>Clashes.</strong> While Google answers, a taken time is refused: "That time was just booked in Google Calendar: &lt;title&gt;". A booking queued offline is written anyway and shows "Double-booked with &lt;title&gt;".</li>
+    <li><strong>Google wins</strong> for settled bookings: moving or deleting an event in Google changes the room's booking.</li>
+    <li><strong>Offline.</strong> The last read is in <span class="chip">calendar-cache.json</span> (it includes links and passcodes, mode 600). Screens say "Calendar offline since 10:42 AM. Bookings made here will sync."</li>
+  </ul>
+  <div class="callout"><p class="kicker">Good to know</p><p>With the placeholder calendar address or a missing key, the screens still accept bookings, but they stay "Not in Google Calendar yet" forever. A calendar shared read-only does the same, with "The room's calendar does not take bookings from Crystal Meet: share it with the service account with Make changes to events."</p></div>
+</section>
+
+<!-- 06 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 06 · Google Meet</p><h2>Meet joins as the room's own Google user, signed in once on the TV</h2></div>
+  <p class="lede">Meet refuses a browser driven by automation when it joins as a guest ("You can't join this video call"), but accepts it once signed in. So each room has its own Google Workspace user, signed in once into the TV browser's profile at <span class="chip">/var/lib/croom/meet-profile</span>.</p>
+
+  <h3 class="sub">The room's Google account</h3>
+  <ul>
+    <li><strong>One Workspace user per room:</strong> <span class="chip">room1@crystalpm.com</span>, <span class="chip">room2@</span>, <span class="chip">room3@</span>. Its name is the name people see in calls.</li>
+    <li><strong>An organisational unit "Meeting rooms"</strong> with Google session control set to <strong>never expire</strong>. Without it, rooms are signed out on Workspace's schedule.</li>
+    <li><strong>2-Step Verification</strong> allowed but not enforced for that unit.</li>
+  </ul>
+
+  <h3 class="sub">Sign in from the table (preferred)</h3>
+  <ol class="steps">
+    <li>Open <span class="ui">Settings › Meetings</span>. If <span class="ui">Google sign-in</span> has no folder, tap <span class="ui">Use /var/lib/croom/meet-profile</span>, then <span class="ui">Restart now</span>.</li>
+    <li>Tap <span class="ui">Sign in to Google</span>. The TV's browser closes and Google's sign-in page fills the TV. The table shows a full-screen touchpad with <span class="ui">Type on the TV</span>, <span class="ui">Done</span> and <span class="ui">Cancel</span>.</li>
+    <li>Use the touchpad to click Google's email field, then <span class="ui">Type on the TV</span> to enter the room's address.</li>
+    <li>Enter the password and accept Google's prompts the same way.</li>
+    <li>When Google shows the account, tap <span class="ui">Done</span>. The table says "Signed in as &lt;address&gt;" or "Signed in as the room's Google account" (both mean success), and the TV gets its screensaver back.</li>
+  </ol>
+  <ul>
+    <li><strong>Nothing changes on a failed attempt.</strong> <span class="ui">Cancel</span>, 15 minutes without a touch, the browser closing by itself, or the service stopping put the old cookies back: "Sign-in cancelled: nothing changed".</li>
+    <li><strong>Refused</strong> in a meeting, in Laptop mode, and with no sign-in folder ("Set up Google Meet first: …"). A join waits until the sign-in ends.</li>
+    <li><strong>A leftover backup.</strong> The sign-in copies the cookies to <span class="chip">&lt;profile&gt;/.croom-sign-in-before/</span>; a folder left behind means a sign-in did not finish cleanly.</li>
+  </ul>
+
+  <h3 class="sub">Sign in from a terminal</h3>
+  <p>Use this over VNC when the table can't be used. The service must be stopped, and the command must run as the service user, never as root.</p>
+<pre>sudo raspi-config nonint do_vnc 0          <span class="c"># once, to see the TV's screen from a laptop</span>
+sudo systemctl stop croom
+sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --sign-in-meet -c /etc/croom/config.yaml
+<span class="c"># sign in as room1@crystalpm.com in the VNC window, close the browser → "Profile saved. Test it with: …"</span>
+sudo -u pi DISPLAY=:0 /opt/croom/venv/bin/croom --check-meet https://meet.google.com/abc-defg-hij -c /etc/croom/config.yaml
+sudo systemctl start croom
+sudo raspi-config nonint do_vnc 1          <span class="c"># optional: VNC off again</span></pre>
+  <p>The terminal sign-in takes no backup of the cookies. "No session was saved: the browser closed before the sign-in finished" means run it again.</p>
+  <div class="callout"><p class="kicker">Verify on a Pi</p><p>Both sign-in checks read only <span class="chip">&lt;profile&gt;/Default/Cookies</span>, looking for Google's <span class="chip">SID</span>, <span class="chip">__Secure-1PSID</span> or <span class="chip">__Secure-3PSID</span>. If the Pi's Chromium keeps cookies in <span class="chip">Default/Network/Cookies</span>, a sign-in that worked can still show as not saved. Check with <span class="chip">ls /var/lib/croom/meet-profile/Default/</span>.</p></div>
+  <p>Every Chromium on the room's profile runs with <span class="chip">--profile-directory=Default --allow-browser-signin=false</span>. Before this fix (commit 0b7b177), Chromium moved the Workspace account into a new "Profile 1" where neither the TV nor the check looked. A stray <span class="chip">Profile 1</span> folder is ignored.</p>
+
+  <h3 class="sub">How a Meet join runs</h3>
+  <table class="plain">
+    <thead><tr><th>Stage</th><th>What happens</th></tr></thead>
+    <tbody>
+      <tr><td><strong>TV</strong></td><td>The TV is woken and switched to the Pi's input (up to 15 seconds; never blocks the join).</td></tr>
+      <tr><td><strong>Page</strong></td><td>The TV browser opens <span class="chip">https://meet.google.com/&lt;code&gt;</span>, fills the name if asked, and sets camera and mic to the defaults.</td></tr>
+      <tr><td><strong>Join</strong></td><td>Presses <span class="ui">Join now</span> or <span class="ui">Ask to join</span>, then waits up to 30 seconds for the Leave button, or up to 5 minutes in the lobby.</td></tr>
+      <tr><td><strong>In the call</strong></td><td>Mute (Ctrl+D), camera (Ctrl+E), raise hand (Ctrl+Alt+H), captions (C), plus chat, people, pin, host switches, layout, reactions, admit and deny, mute everyone and end.</td></tr>
+      <tr><td><strong>Failure</strong></td><td>The table quotes what Meet showed; a screenshot goes to <span class="chip">/tmp/croom-meet-failure.png</span>; the TV goes back to the screensaver.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><p class="kicker">Not yet verified</p><p>Meet's English button labels the room looks for are "not yet confirmed on a room Pi". On the first real calls, save <span class="chip">GET /api/meeting/diagnostics</span> (Section 11). A control whose button isn't found is hidden rather than pressed wrongly.</p></div>
+
+  <h3 class="sub">Participants from the Meet API (optional)</h3>
+  <ol class="steps">
+    <li>In the Admin console, grant domain-wide delegation of <span class="chip">https://www.googleapis.com/auth/meetings.space.readonly</span> to the calendar service account's client ID.</li>
+    <li>Enable the Google Meet API in the service account's Cloud project.</li>
+    <li>Set <span class="ui">Meet participants domain</span> (<span class="chip">meeting.meet_api_domain</span>) to <span class="chip">crystalpm.com</span> and restart.</li>
+  </ol>
+  <p>The list is read every 15 seconds for meetings organised in that domain. If Google refuses, the room waits 5 minutes before asking again and reads the list from Meet's page meanwhile.</p>
+
+  <h3 class="sub">Capture the next Google Meet call</h3>
+  <p><span class="ui">Settings › Check › Capture the next Google Meet call</span> records Meet's panels 1, 3 or 5 minutes into the next Meet call (armed for two hours, forgotten on restart). Names, emails and chat are redacted. It never presses admit, remove, mute all, end or leave. The newest three zips are kept as <span class="chip">/var/lib/croom/meet-capture-*.zip</span>; download the newest from the same page.</p>
+</section>
+
+<!-- 07 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 07 · Zoom</p><h2>Zoom runs in Zoom's own web SDK, signed for each join as the room's Zoom user</h2></div>
+  <p class="lede">The TV Pi serves a page on the Pi's own loopback address that loads Zoom's Meeting SDK for Web 6.5.0, signs each join with the SDK app's keys, and adds the room user's ZAK so meetings hosted by other accounts can be joined. Without the credentials file Zoom falls back to its public web client, which Zoom blocks for automated browsers.</p>
+
+  <h3 class="sub">What Zoom needs</h3>
+  <table>
+    <thead><tr><th>Piece</th><th>Setup</th><th>Used for</th></tr></thead>
+    <tbody>
+      <tr><td>Meeting SDK app</td><td>Zoom Marketplace "General App", admin-managed, Meeting SDK on. The development pair joins Crystal PM's own meetings; other companies' meetings need Zoom's review (submitted "External Zoom users", then set Unlisted) and the production pair.</td><td><span class="chip">sdk_client_id</span>, <span class="chip">sdk_client_secret</span>: an HS256 signature per join, valid 2 hours.</td></tr>
+      <tr><td>Server-to-Server OAuth app</td><td>Scopes <span class="chip">user:read:zak:admin</span> and <span class="chip">user:read:token:admin</span>; activated.</td><td><span class="chip">account_id</span>, <span class="chip">s2s_client_id</span>, <span class="chip">s2s_client_secret</span>: an account token, then the room's ZAK at every join.</td></tr>
+      <tr><td>Room's Zoom user</td><td>One per room, Basic (free), display name = the room's name.</td><td><span class="chip">room_user</span>: whose ZAK the room joins with.</td></tr>
+    </tbody>
+  </table>
+<pre><span class="c"># /etc/croom/zoom-credentials.json  (room user, mode 600)</span>
+{
+  "sdk_client_id": "…",          <span class="c"># required</span>
+  "sdk_client_secret": "…",      <span class="c"># required</span>
+  "account_id": "…",             <span class="c"># these four go together, or not at all</span>
+  "s2s_client_id": "…",
+  "s2s_client_secret": "…",
+  "room_user": "room1@crystalpm.com"
+}</pre>
+  <ol class="steps">
+    <li>Put the file in place: <span class="ui">Settings › Meetings › Zoom SDK keys</span> (upload, USB stick, or <span class="ui">Type the keys</span>, which keeps the server-to-server values), or <span class="chip">sudo install -o pi -g pi -m 600 ~/zoom-credentials.json /etc/croom/zoom-credentials.json</span>.</li>
+    <li>Restart the room software. The log shows "Zoom Meeting SDK provider ready (page on http://127.0.0.1:&lt;port&gt;/meeting)".</li>
+    <li>Run <span class="ui">Settings › Check › Zoom keys</span>, or the command below. It ends with "Ready: …".</li>
+  </ol>
+<pre>sudo -u pi /opt/croom/venv/bin/croom --check-zoom -c /etc/croom/config.yaml
+<span class="c"># Zoom Meeting SDK: app …, signature minted (Zoom checks it only when a meeting is joined)</span>
+<span class="c"># Zoom account: server-to-server token obtained for account …</span>
+<span class="c"># Zoom room user: room1@crystalpm.com, ZAK obtained (valid 2 hours)</span>
+<span class="c"># Ready: this room can join meetings on your own Zoom account now; …</span>
+<span class="c"># with no room_user it says so and still exits 0: own-account meetings only</span></pre>
+
+  <h3 class="sub">How a Zoom join runs</h3>
+  <ul>
+    <li><strong>Tokens first.</strong> An account token (cached until 60 s before it expires), then a fresh ZAK, each with a 15-second timeout. A failure here opens nothing on the TV.</li>
+    <li><strong>The page.</strong> The TV browser opens <span class="chip">http://127.0.0.1:&lt;port&gt;/meeting#&lt;one-time token&gt;</span>, which loads the SDK from <span class="chip">source.zoom.us/6.5.0/</span>.</li>
+    <li><strong>Waiting.</strong> Up to 90 seconds to connect, 300 seconds in a waiting room.</li>
+    <li><strong>Camera and mic.</strong> The camera is set both ways at join; the mic only towards muted, so a host's mute-on-entry stays.</li>
+    <li><strong>Passcode.</strong> From <span class="chip">?pwd=</span>, the invitation text, or the room page's Passcode field (letters, digits, <span class="chip">@ - _ *</span>, up to 32). "Zoom needs the meeting passcode (…)" makes the page ask.</li>
+    <li><strong>Dialogs.</strong> One-button notices matching <span class="chip">meeting.dialogs.acknowledge</span> (recording, transcription, AI Companion, mute notices) are pressed at once; every other dialog waits for a tap on the table. Each is logged.</li>
+  </ul>
+  <div class="grid c2">
+    <div class="callout"><p class="kicker">Not yet verified</p><p>Joining meetings hosted by other companies has not been tested against a live meeting. It needs Zoom's approval of the SDK app, the production pair and the ZAK. If Zoom still refuses, the fallback is the SDK app's own OAuth, which is not built.</p></div>
+    <div class="callout"><p class="kicker">Good to know</p><p>The SDK version is set once, <span class="chip">SDK_VERSION = "6.5.0"</span> in <span class="chip">src/croom/meeting/providers/zoom_sdk_site.py</span>. When Zoom retires it from its CDN, bump it there and release. Zoom's button labels were read from the 6.5.0 files, not a live meeting.</p></div>
+  </div>
+</section>
+
+<!-- 08 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 08 · TV control, camera and audio</p><h2>The TV, the camera and the sound are all set up from the table</h2></div>
+
+  <h3 class="sub">Pairing the TV</h3>
+  <ol class="steps">
+    <li>Turn the TV on and have its remote ready. Check the settings in Section 02.</li>
+    <li>On the touch Pi open <span class="ui">Options › TV</span> and tap <span class="ui">Find TVs</span>. LG and Samsung TVs on the network are listed after a few seconds.</li>
+    <li>Select the room's TV (within 5 minutes of the search). Pairing starts and the TV shows a "Crystal Meet" prompt.</li>
+    <li>Accept the prompt with the TV's remote within 60 seconds. The table shows the TV as paired; no restart is needed.</li>
+    <li>Open the TV's connection settings and check the <span class="ui">MAC address</span>, the Pi's HDMI input and, if fitted, the <span class="ui">Laptop input</span>.</li>
+  </ol>
+  <p>The choice is saved in <span class="chip">/var/lib/croom/tv-settings.json</span>, which overrides the <span class="chip">tv:</span> section of config.yaml. The pairing key is <span class="chip">tv-&lt;hash&gt;-key</span> in the same folder. Never delete key files by hand: use <span class="ui">Forget TV</span>, then <span class="ui">Pair</span>.</p>
+
+  <h3 class="sub">Keeping the TV on</h3>
+  <ul>
+    <li><strong>At start and before every join</strong> (with <span class="chip">tv.keep_on: true</span>): Wake-on-LAN, resent every 3 seconds for up to 15 seconds, then a switch to <span class="chip">tv.pi_input</span> if the TV shows another input or an app. The join goes ahead after 15 seconds either way.</li>
+    <li><strong>After an unexpected off</strong>, such as the TV's own remote, it is woken again 5 seconds later.</li>
+    <li><strong>Off from the table</strong> (second tap) holds the TV off until a manual On or the next join. A restart forgets the hold.</li>
+    <li><strong>Turn on from the table</strong> can take up to about 23 seconds.</li>
+    <li><strong>Reconnects</strong> back off from 2 to 30 seconds. A TV that refused pairing is not retried until <span class="ui">Forget TV</span> and <span class="ui">Pair</span>.</li>
+  </ul>
+
+  <h3 class="sub">The touchpad</h3>
+  <p>The table's touchpad uses the WebSocket <span class="chip">/ws/pointer</span>. On LG it drives the TV's own cursor; otherwise it drives the Pi's virtual mouse "Crystal Meet touchpad" on <span class="chip">/dev/uinput</span>, which needs the udev rule, the <span class="chip">input</span> group and the <span class="chip">uinput</span> module set up by the installer. The pointer is hidden on the TV and shown for 5 seconds after it moves.</p>
+
+  <h3 class="sub">Checking the TV from a terminal</h3>
+<pre>sudo -u pi /opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml
+<span class="c"># as the service user, never root: the key is mode 600, and a check as root</span>
+<span class="c"># could leave a renewed key the service can't read</span>
+<span class="c"># never wakes, pairs or switches; exit 0 when the TV answered</span>
+<span class="c"># with no TV configured it lists the TVs it finds</span>
+<span class="c"># ends "Ready: the TV answers." or "The TV answers, with the warnings above."</span></pre>
+  <div class="callout"><p class="kicker">Not yet verified</p><p>TV control of the LG C6 and the Samsung S90HD (remote, pairing, touchpad) has only been tested against a fake TV and a fake virtual mouse, not yet on a real TV behind a room Pi. The Samsung needs a physical acceptance test.</p></div>
+
+  <h3 class="sub">Camera framing</h3>
+  <p>The MeetUp reports no pan or tilt position, so the room estimates it in seconds of travel from the end stops. Set it up once under <span class="ui">Options › Camera framing</span>:</p>
+  <ol class="steps">
+    <li>Tap <span class="ui">Find the stops</span>. The camera drives to its corner for <span class="chip">video.ptz_travel_seconds</span> (8 by default) and the position becomes known.</li>
+    <li>Nudge the camera to the room's normal view and tap <span class="ui">Save as Home</span>.</li>
+    <li>Nudge to each other view and save presets 1 to 3 (named by <span class="chip">control.camera_presets</span>: Wide, Table, Whiteboard).</li>
+  </ol>
+  <ul>
+    <li><strong>Homes at every start</strong> once a home is saved. Presets are in <span class="chip">control-settings.json</span>, key <span class="chip">camera</span>.</li>
+    <li><strong>Drift.</strong> If presets land wrong, find the stops again, save home, re-save presets, or adjust the travel time.</li>
+    <li><strong>Preview.</strong> While someone uses Camera framing between meetings, the TV shows the camera for up to 180 seconds. Not during a call.</li>
+    <li><strong>The camera stays free for calls.</strong> The room opens the camera only for control calls; Chromium owns the picture.</li>
+  </ul>
+  <div class="callout"><p class="kicker">Good to know</p><p>Automatic framing is not available: the MeetUp's RightSight runs only in Logitech's Windows and macOS software, and upstream's AI features are off in every room. Coming in a later release: the live camera picture on the touch Pi, with drag to turn and pinch to zoom.</p></div>
+
+  <h3 class="sub">Sound</h3>
+  <ul>
+    <li><strong>PipeWire</strong> of the desktop session, through <span class="chip">pw-dump</span> and <span class="chip">wpctl</span>. Chromium reaches it through the Pulse layer, which needs <span class="chip">libpulse0</span>.</li>
+    <li><strong>Speaker:</strong> <span class="chip">audio.output_device</span>, <span class="chip">auto</span> or part of a device name (<span class="chip">MeetUp</span>, <span class="chip">HDMI</span> for the TV's speakers). A named device is also made the default, and WirePlumber remembers it: to change back, name the other device rather than <span class="chip">auto</span>.</li>
+    <li><strong>Microphone:</strong> <span class="chip">audio.input_device</span>, same rules. <span class="ui">Mic level</span> runs 0 to 150 (100 normal) and is re-applied at join and every 5 seconds in a call, because the browser's gain control moves it.</li>
+  </ul>
+</section>
+
+<!-- 09 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 09 · Laptop mode</p><h2>Laptop mode lends the MeetUp to a laptop through a USB switch</h2></div>
+  <p class="lede">For a call on someone's laptop: a relay on the TV Pi presses the ATEN US234's button, the MeetUp moves to the laptop's port, and the TV switches to the laptop's HDMI input. At the end of the booking it all moves back.</p>
+  <div class="callout"><p class="kicker">Not yet verified</p><p>Laptop mode has never run on the real ATEN US234 and relay: every test uses a fake switch. The MeetUp's USB id <span class="chip">046d:0866</span> is still to be confirmed with <span class="chip">lsusb</span> on the TV Pi. Run <span class="ui">Test the switch</span> before relying on it.</p></div>
+
+  <h3 class="sub">Wiring</h3>
+  <table>
+    <thead><tr><th>Connection</th><th>Where</th></tr></thead>
+    <tbody>
+      <tr><td>MeetUp</td><td>A device port of the US234</td></tr>
+      <tr><td>TV Pi</td><td>US234 computer port 1</td></tr>
+      <tr><td>Laptop cable on the table</td><td>US234 computer port 2; the laptop has its own HDMI cable to the TV (<span class="chip">tv.laptop_input</span>)</td></tr>
+      <tr><td>Relay red</td><td>Pi header pin 1 (3.3 V); pin 2 (5 V) if the relay doesn't click</td></tr>
+      <tr><td>Relay black</td><td>Pin 9 (GND)</td></tr>
+      <tr><td>Relay white</td><td>Pin 11 (GPIO17)</td></tr>
+      <tr><td>Relay COM and NO</td><td>Soldered across the two contacts of the US234's remote button, either order. The hand button keeps working.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Settings › Laptop switch</h3>
+  <table class="plain">
+    <thead><tr><th>Key</th><th>Default</th><th>Range</th></tr></thead>
+    <tbody>
+      <tr><td><strong>laptop.enabled</strong></td><td>false</td><td>Applies after a restart</td></tr>
+      <tr><td><strong>laptop.gpio_pin</strong></td><td>17 (BCM, header pin 11)</td><td>0 to 27</td></tr>
+      <tr><td><strong>laptop.active_low</strong></td><td>false</td><td>True for relays that trigger on low</td></tr>
+      <tr><td><strong>laptop.press_ms</strong></td><td>200</td><td>50 to 2000</td></tr>
+      <tr><td><strong>laptop.usb_id</strong></td><td>046d:0866</td><td>vendor:product, four hex digits each</td></tr>
+      <tr><td><strong>laptop.switch_wait_s</strong></td><td>10</td><td>1 to 60</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">How it switches</h3>
+  <ul>
+    <li><strong>To the laptop.</strong> Uses the end of the booking in progress; otherwise books "Laptop" with Use now for the minutes chosen; with no calendar there is no end. Releases the camera, presses the relay, and waits up to 10 seconds for the MeetUp to leave (read from <span class="chip">/sys/bus/usb/devices</span>), pressing once more if needed. Then switches the TV to the laptop's input.</li>
+    <li><strong>Back to room.</strong> By hand, or automatically at the booking's end (followed every 2 seconds, so moving the booking in Google moves the end). Presses back, finds the camera again within 15 seconds, homes it, switches the TV to the Pi. Ends only a booking Laptop mode made.</li>
+    <li><strong>If the switch doesn't move:</strong> two presses fail, the booking it made is withdrawn, and the table says "The switch did not answer: press the button on the switch box".</li>
+    <li><strong>The hand button is followed.</strong> Two consecutive looks that agree are enough. State survives restarts in <span class="chip">laptop.json</span>.</li>
+    <li><strong>While the laptop has the MeetUp:</strong> joins, restart, reboot, update and Google sign-in are refused with "The camera is on the laptop: press Back to room first".</li>
+  </ul>
+
+  <h3 class="sub">Testing the switch</h3>
+  <ol class="steps">
+    <li>With the service running, open <span class="ui">Settings › Laptop switch</span> and tap <span class="ui">Test the switch</span>. It presses, then brings the MeetUp back, and reports "Pressed again: the MeetUp is back on the Pi (X.X s)."</li>
+    <li>Or, from a terminal, stop the service first (it holds the pin):</li>
+  </ol>
+<pre>sudo systemctl stop croom                     <span class="c"># croom holds the pin</span>
+/opt/croom/venv/bin/croom --check-laptop -c /etc/croom/config.yaml
+<span class="c"># looks only; add --switch to press once and report where the MeetUp went</span>
+lsusb -d 046d:                                <span class="c"># confirm the MeetUp's USB id</span>
+sudo systemctl start croom</pre>
+</section>
+
+<!-- 10 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 10 · Updates, rollback and reboot</p><h2>Updates build beside the running version and undo themselves if the room doesn't start</h2></div>
+  <p class="lede">The root helper, <span class="chip">croom-admin</span>, does everything that needs root: config writes, restarts, reboots, updates, rollback, Wi-Fi and the journal. It never runs a shell; it answers a fixed list of jobs on <span class="chip">/run/croom-admin.sock</span> and keeps its record in <span class="chip">/var/lib/croom-admin/admin-state.json</span>.</p>
+
+  <h3 class="sub">Restart with undo</h3>
+  <ol class="steps">
+    <li>Tap <span class="ui">Restart now</span> or <span class="ui">Restart room software</span>. The helper restarts croom and asks <span class="chip">/api/status</span> every 5 seconds for 2 minutes.</li>
+    <li>If the room answers, Settings shows it running again and <span class="chip">config.yaml.good</span> is refreshed.</li>
+    <li>If it doesn't answer and a saved change was waiting, the helper puts back <span class="chip">config.yaml.good</span>, keeps the failed config as <span class="chip">config.yaml.1</span>, restarts again, and the page says "Your last change was undone: the room did not start with it".</li>
+  </ol>
+  <p>With no change waiting it leaves the room as it is ("down"). After a reboot or power cut it waits up to 5 minutes for systemd to start croom and watches the same way.</p>
+
+  <h3 class="sub">Updating the TV Pi</h3>
+  <ol class="steps">
+    <li>Open <span class="ui">Settings › Software</span>. The TV Pi's card shows its version, the newest commit of main on GitHub, and the changes between them.</li>
+    <li>Tap <span class="ui">Update</span>. The card shows each step as it runs.</li>
+    <li>Wait. If a meeting is on, the switch waits for it to end, up to 30 minutes, then goes ahead.</li>
+  </ol>
+  <p class="see">You should now see the new version on the card. If the room did not answer within 3 minutes, the card says "The update to … was undone: the room did not start with it" and the room is on the old version.</p>
+  <table class="plain">
+    <thead><tr><th>Step</th><th>What the helper does</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Build</strong></td><td>New venv in <span class="chip">/opt/croom/releases/&lt;commit&gt;</span>, <span class="chip">pip install git+https://github.com/ben-abeo/croom.to.git@&lt;commit&gt;</span> (40-minute limit), Playwright's Chromium, an import check, <span class="chip">python -m croom.admin --check</span>.</td></tr>
+      <tr><td><strong>Switch</strong></td><td>Moves the <span class="chip">/opt/croom/venv</span> link in one step, restarts croom, restarts the helper on the new release.</td></tr>
+      <tr><td><strong>Watch</strong></td><td>3 minutes. No answer: link back, restart on the old release.</td></tr>
+      <tr><td><strong>Keep</strong></td><td>Two releases: the running one and the previous one.</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>Refused</strong> for a commit not on main, during a meeting, a restart or a Wi-Fi change, and while a saved config waits ("Restart now first, then update"). Joins are refused while it runs: "The room is updating: it restarts in a few minutes".</li>
+    <li><strong>A cut-off build never touches the running release.</strong> Unfinished folders are swept at the helper's next start.</li>
+    <li><strong>Switch back to</strong> offers the previous release, only if its helper starts.</li>
+    <li><strong>Update all</strong> queues the touch Pi and door sign first and the TV Pi last.</li>
+    <li><strong>GitHub</strong> is asked without an account (60 requests an hour per address), cached 10 minutes; "Can't check for updates right now" when it doesn't answer.</li>
+  </ul>
+  <div class="callout dark"><p class="kicker">Updates don't re-run the installer</p><p>An update from Settings › Software replaces only the Python release. Unit files, udev rules, sudoers, apt packages and the keyboard layout are refreshed only by an installer run. When a release changes any of those, or the card says "This TV Pi can't update itself until its installer has been run once more", run the installer by hand:</p>
+<pre style="margin-top:6px">cd ~/croom.to &amp;&amp; git pull &amp;&amp; sudo bash installer/install.sh &amp;&amp; sudo reboot   <span class="c"># keeps config and keys</span></pre></div>
+
+  <h3 class="sub">Reboot</h3>
+  <p><span class="ui">Settings › Software › Reboot</span> on the TV Pi's card (second tap), or <span class="chip">sudo reboot</span>. Refused in a meeting or Laptop mode. The service comes back by itself: it waits up to 120 seconds for the desktop each try and restarts every 10 seconds.</p>
+</section>
+
+<!-- 11 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 11 · Logs, the croom command and checks</p><h2>The journal and five checks tell you what the room is doing</h2></div>
+
+  <h3 class="sub">Logs and quick checks</h3>
+<pre>sudo systemctl status croom croom-admin
+sudo journalctl -u croom -n 50                      <span class="c"># last 50 lines: look for the first ERROR</span>
+sudo journalctl -u croom -f                         <span class="c"># follow</span>
+sudo journalctl -u croom -p warning --since today   <span class="c"># warnings and errors only</span>
+sudo journalctl -u croom --since "1 hour ago" | grep -E "Zoom dialog|Acknowledged|waits on the table"
+sudo journalctl -u croom-admin -n 50                <span class="c"># updates, restarts, Wi-Fi</span>
+curl -s http://localhost:8080/api/status | python3 -m json.tool   <span class="c"># everything the screens see</span>
+curl http://&lt;dashboard&gt;:3001/health                <span class="c"># dashboard reachable?</span>
+ls -l /opt/croom/venv; cat /opt/croom/VERSION       <span class="c"># running release</span>
+wpctl status                                        <span class="c"># sound devices (as the desktop user)</span>
+v4l2-ctl --list-devices; arecord -l; lsusb -d 046d: <span class="c"># camera, mic, MeetUp on USB</span>
+ls -l /dev/uinput; groups pi; lsmod | grep uinput   <span class="c"># virtual mouse prerequisites</span>
+df -h /var/lib/croom; ls -ld /var/lib/croom         <span class="c"># data folder writable?</span></pre>
+  <ul>
+    <li><strong>Level:</strong> WARNING by default. Every Zoom and Meet dialog (title, words, buttons, what was done) is logged at INFO regardless.</li>
+    <li><strong>Priorities:</strong> each line carries its syslog priority, so <span class="chip">-p warning</span> and Settings › Logs can filter.</li>
+    <li><strong>Only the journal.</strong> <span class="chip">/var/log/croom</span> is created but unused.</li>
+  </ul>
+  <h4>Verbose logging for a while (between meetings)</h4>
+<pre>sudo nano /etc/systemd/system/croom.service
+<span class="c"># add -v: ExecStart=/opt/croom/venv/bin/python -m croom.core.agent -v -c /etc/croom/config.yaml</span>
+sudo systemctl daemon-reload &amp;&amp; sudo systemctl restart croom
+<span class="c"># undo the same way afterwards; an installer run also rewrites the unit</span></pre>
+
+  <h3 class="sub">Settings › Check</h3>
+  <table>
+    <thead><tr><th>Check</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td>Calendar</td><td>The same as <span class="chip">croom --check-calendar</span>, on config.yaml as it is now.</td></tr>
+      <tr><td>TV</td><td>Looks through the room's own TV connection; opens no second one.</td></tr>
+      <tr><td>Laptop switch</td><td>Looks at the switch, never presses it, and says who has the MeetUp.</td></tr>
+      <tr><td>Google sign-in</td><td>Reads the profile's cookies: "Signed in as …" or "Not signed in: the profile holds no Google session".</td></tr>
+      <tr><td>Zoom keys</td><td>The same as <span class="chip">croom --check-zoom</span>.</td></tr>
+    </tbody>
+  </table>
+  <p>Each check stops after 60 seconds. Checks run side by side but not twice at once ("Already running"). None is refused during a meeting.</p>
+
+  <h3 class="sub">Every croom command option</h3>
+  <p>Run <span class="chip">/opt/croom/venv/bin/croom</span> as the service user (<span class="chip">sudo -u pi …</span>), never as root. Without <span class="chip">-c</span> the config is searched at <span class="chip">/etc/croom/config.yaml</span>, <span class="chip">~/.config/croom/config.yaml</span>, <span class="chip">./config.yaml</span>.</p>
+  <table>
+    <thead><tr><th>Command</th><th>What it does</th><th>Needs</th><th>Exit</th></tr></thead>
+    <tbody>
+      <tr><td>croom -c CONFIG</td><td>Runs the agent, as the unit does.</td><td>The desktop session</td><td>1 on failure</td></tr>
+      <tr><td>-v, --debug</td><td>INFO or DEBUG logging.</td><td>—</td><td>—</td></tr>
+      <tr><td>--check-calendar</td><td>Signs in, opens the calendar, lists up to 10 bookings in 7 days, tests writing, reports queued and double-booked room bookings.</td><td>Network; readable key</td><td>0 ok, 1 not</td></tr>
+      <tr><td>--check-zoom</td><td>Validates the credentials, mints a signature, gets a token and the room's ZAK.</td><td>Network</td><td>0 ok (also with no room user), 1 not</td></tr>
+      <tr><td>--check-tv</td><td>Looks at the configured TV through a new connection (never wakes, pairs or switches), or lists TVs found.</td><td>Service user (key is 600)</td><td>0 answered, 1 not</td></tr>
+      <tr><td>--check-laptop</td><td>Shows the pin, the GPIO chip and where the MeetUp is.</td><td>Service stopped</td><td>0 pin usable, 1 not</td></tr>
+      <tr><td>--check-laptop --switch</td><td>As above, presses once and says where the MeetUp went.</td><td>Service stopped</td><td>0 moved, 1 not</td></tr>
+      <tr><td>--check-meet URL [--profile DIR]</td><td>Opens a Meet link the way the room does, lists the devices the browser sees, the name field and join control, quotes Meet, saves <span class="chip">/tmp/croom-meet-check.png</span>. Does not join.</td><td><span class="chip">DISPLAY=:0</span>; service stopped if it uses the room profile</td><td>0 join control found, 1 not</td></tr>
+      <tr><td>--sign-in-meet</td><td>Opens a plain Chromium on the room profile at accounts.google.com; "Profile saved" if a Google session is found after the window closes.</td><td><span class="chip">DISPLAY=:0</span>; service stopped; <span class="chip">google_profile_dir</span> set</td><td>0 saved, 1 not</td></tr>
+      <tr><td>--help</td><td>Lists the options above.</td><td>—</td><td>0</td></tr>
+      <tr><td>python -m croom.admin --check</td><td>Builds the helper's job table without listening; prints "The helper starts".</td><td>—</td><td>0</td></tr>
+      <tr><td>python -m croom.admin --owner U --group G [--socket PATH]</td><td>The root helper itself, as <span class="chip">croom-admin.service</span> runs it.</td><td>root</td><td>—</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Meeting diagnostics</h3>
+<pre>curl -s http://&lt;TV Pi&gt;:8080/api/meeting/diagnostics &gt; diagnostics-1.json
+<span class="c"># only during a call; opens and closes Zoom's menus on the TV, so take one snapshot: never poll it</span></pre>
+  <p>For Meet it returns every labelled element on the page, what the room read and where the keyboard focus is. For Zoom it returns Zoom's own field names, buttons and the SDK version. Use it on first calls to confirm the labels the room relies on.</p>
+</section>
+
+<!-- 12 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 12 · Troubleshooting</p><h2>Most problems show up in three places: the screens, the journal and Settings › Check</h2></div>
+  <p class="lede">Start with three checks. From a laptop on the room's network open <span class="chip">http://&lt;TV Pi&gt;:8080/api/status</span>. On the TV Pi run <span class="chip">sudo systemctl status croom croom-admin</span> and <span class="chip">sudo journalctl -u croom -n 50</span>, and look for the first ERROR. Then run the matching test under Settings › Check.</p>
+
+  <h3 class="sub">Service and screens</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Room page doesn't load at :8080</td><td>croom not running, or port 8080 taken (log "Room control page cannot listen on 0.0.0.0:8080: …"; the agent runs on without a web server).</td><td>Check status and the journal; free the port. Over VNC, the desktop icon <span class="ui">Start Crystal Meet</span> restarts it.</td></tr>
+      <tr><td>A tablet or the door sign can't open the page</td><td><span class="chip">.local</span> name not resolved, or another network.</td><td>Use the IP address. Open <span class="chip">/api/status</span> from a laptop on the same network.</td></tr>
+      <tr><td>No browser on the TV after boot</td><td>The service waits for the desktop (up to 120 s each try); Auto Login off; Playwright's Chromium missing.</td><td>Wait a minute. Look for "Failed to initialize" in the journal. Turn Auto Login on. If <span class="chip">/opt/croom/browsers</span> is missing, re-run the installer.</td></tr>
+      <tr><td>The TV shows a tab strip and address bar</td><td><span class="chip">meeting.kiosk: false</span>, or an old version.</td><td>Set kiosk on in Settings › Meetings; update.</td></tr>
+      <tr><td>TV stays navy or shows a Chromium error</td><td>The screensaver page can't be reached (log "The TV could not load the screensaver at … for 30 s; still trying").</td><td>Check the control service started; <span class="chip">curl http://127.0.0.1:8080/tv</span>.</td></tr>
+      <tr><td>"The TV page crashed; a fresh browser will replace it", repeating</td><td>Renderer crash loop.</td><td>Check memory with <span class="chip">free -h</span>; reboot; read the journal around the crash.</td></tr>
+      <tr><td>"Room control page assets are missing." (or Door sign, TV page)</td><td><span class="chip">index.html</span>, <span class="chip">sign.html</span> or <span class="chip">tv.html</span> not installed.</td><td>Update, or re-run the installer.</td></tr>
+      <tr><td>Config changes ignored; the room runs on defaults</td><td>An unknown key inside a section discarded the whole file.</td><td>Remove unknown keys; compare with <span class="chip">config.yaml.good</span>; restart.</td></tr>
+      <tr><td>A table choice (screensaver, background, scores) lost after restart</td><td>Data folder not writable (SD full or read-only, wrong owner); log "Could not save the room settings".</td><td><span class="chip">df -h /var/lib/croom</span>; <span class="chip">ls -ld /var/lib/croom</span> must show the desktop user.</td></tr>
+      <tr><td>Room offline on the dashboard</td><td>Dashboard unreachable; token used or invalid; log "Enrollment rejected by dashboard (…)" or "Dashboard does not know this device; clearing enrollment state".</td><td><span class="chip">curl http://&lt;dashboard&gt;:3001/health</span>; check <span class="chip">dashboard.url</span>; new token from Provisioning in Settings › AI &amp; dashboard; restart.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Settings, PIN and the helper</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"Not available on this device"</td><td>croom-admin not running, or its socket is missing.</td><td><span class="chip">sudo systemctl status croom-admin</span>; <span class="chip">sudo journalctl -u croom-admin -n 50</span>; re-run the installer.</td></tr>
+      <tr><td>"The helper did not answer" / "could not be reached"</td><td>Helper hung, crashed, or wrong socket permissions.</td><td><span class="chip">sudo systemctl restart croom-admin</span>; check the journal.</td></tr>
+      <tr><td>"Your last change was undone: the room did not start with it"</td><td>A saved change stopped the room starting; the helper restored <span class="chip">config.yaml.good</span>.</td><td>Read <span class="chip">/etc/croom/config.yaml.1</span> (the rejected one) and the journal.</td></tr>
+      <tr><td>Restart state "down": "The room did not answer within 2 minutes of a restart"</td><td>The room is unhealthy and there was nothing to undo.</td><td>Read the journal for the first ERROR.</td></tr>
+      <tr><td>"The room's settings file is not valid YAML: fix it at the TV Pi"</td><td>A hand edit broke the file.</td><td>Fix it by hand; earlier versions are <span class="chip">config.yaml.1</span> to <span class="chip">.5</span> and <span class="chip">.good</span>.</td></tr>
+      <tr><td>Forgotten PIN, or "The saved PIN can't be read…"</td><td>— / corrupt <span class="chip">settings-pin.json</span>.</td><td><span class="chip">sudo rm /var/lib/croom/settings-pin.json</span>; no restart needed.</td></tr>
+      <tr><td>"Too many wrong PINs: try again in N minutes"</td><td>5 wrong PINs.</td><td>Wait 10 minutes, or <span class="chip">sudo systemctl restart croom</span>.</td></tr>
+      <tr><td>"Enter the PIN" again and again</td><td>Unlock lasts 5 minutes after the last use; a restart locks every screen.</td><td>Enter the PIN again.</td></tr>
+      <tr><td>"Leave the meeting first"</td><td>Restart, reboot, update, Wi-Fi or sign-in tried during a call.</td><td>Leave the call first.</td></tr>
+      <tr><td>"An update is under way: wait for it to finish" / "The room is restarting: try again in a moment"</td><td>The helper is busy.</td><td>Wait; Settings › Software shows progress.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Updates</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"The update to … was undone: the room did not start with it"</td><td>The new release didn't answer within 3 minutes.</td><td>The room is on the old release. Read <span class="chip">journalctl -u croom</span> for the failed start.</td></tr>
+      <tr><td>Update failed during a build step</td><td>pip, GitHub or the network.</td><td>Read the card's lines and <span class="chip">journalctl -u croom-admin</span>; try again.</td></tr>
+      <tr><td>"The update was cut off before it was finished"</td><td>Power cut or helper restart mid-build.</td><td>Nothing changed; update again.</td></tr>
+      <tr><td>"This TV Pi can't update itself until its installer has been run once more"</td><td>The release needs installer changes.</td><td>Run the installer by hand (Section 10).</td></tr>
+      <tr><td>"Can't check for updates right now"</td><td>api.github.com unreachable, or 60 requests an hour used.</td><td>Check the network to GitHub; try later.</td></tr>
+      <tr><td>"Restart now first, then update"</td><td>A saved change waits for a restart.</td><td>Tap Restart now, then Update.</td></tr>
+      <tr><td>Join refused: "The room is updating: it restarts in a few minutes"</td><td>An update is running.</td><td>Wait.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Google Meet</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"The room's Google sign-in has expired or was never done; …"</td><td>Meet showed Google's sign-in page.</td><td>Settings › Meetings › Sign in to Google. If it recurs every few weeks, the unit's session control isn't "never expire".</td></tr>
+      <tr><td>Table quotes Meet: "You can't join this video call"</td><td>The browser is a guest: no <span class="chip">google_profile_dir</span>, not in use yet, or the sign-in was abandoned.</td><td>Set <span class="chip">/var/lib/croom/meet-profile</span>, restart, sign in again.</td></tr>
+      <tr><td>"No session was saved" / "Not signed in: Google did not keep a sign-in…" although the sign-in looked fine</td><td>Done pressed too early; an old version put the session in "Profile 1"; or cookies are in <span class="chip">Default/Network/Cookies</span>.</td><td>Update; sign in again and press Done only once the account shows; <span class="chip">ls /var/lib/croom/meet-profile/Default/</span>.</td></tr>
+      <tr><td>"The room service is using /var/lib/croom/meet-profile (process N); stop it first"</td><td>A CLI command run while croom holds the profile.</td><td><span class="chip">sudo systemctl stop croom</span>, run it, start again.</td></tr>
+      <tr><td>"The TV's browser did not let go of the room's Google profile: try again in a moment"</td><td>The profile lock was still held after 5 s.</td><td>Try again; if stuck, restart croom.</td></tr>
+      <tr><td>Google asks for a phone or second factor</td><td>2-Step Verification enforced for room users.</td><td>Allow but don't enforce it for the Meeting rooms unit.</td></tr>
+      <tr><td>Typed <span class="chip">@</span> comes out as <span class="chip">"</span></td><td>Keyboard still GB.</td><td>The installer sets US; reboot.</td></tr>
+      <tr><td>"Could not find Meet's join button; Meet shows: …" / "join button stayed disabled" / "Failed to join meeting"</td><td>Meet's page changed or showed something unexpected; name missing.</td><td>Read the quote and <span class="chip">/tmp/croom-meet-failure.png</span>; run <span class="chip">--check-meet</span> with the service stopped.</td></tr>
+      <tr><td>"The host did not admit the room in time"</td><td>More than 5 minutes in the lobby.</td><td>The host must admit the room.</td></tr>
+      <tr><td>"Meet's chat box has the keyboard; close it on the TV first"</td><td>Shortcuts go to the chat box.</td><td>Close the chat on the TV with the touchpad.</td></tr>
+      <tr><td>Wrong name in the call</td><td>The Workspace user's name.</td><td>Rename the user in the Admin console.</td></tr>
+      <tr><td>Log "Google's Meet API refused the participants list (…)"</td><td>No delegation, Meet API off, organiser outside the domain, or a typed link.</td><td>Grant <span class="chip">meetings.space.readonly</span>; enable the API; set <span class="chip">meet_api_domain</span>; restart. The list falls back to Meet's page.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Zoom</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Zoom says "Automated bots aren't allowed…"; log "Zoom Meeting SDK not configured: …"</td><td>No credentials path, or the file is incomplete or still REPLACE.</td><td>Install <span class="chip">zoom-credentials.json</span>; <span class="chip">--check-zoom</span>; restart.</td></tr>
+      <tr><td>"Zoom refused the server-to-server credentials…"</td><td>Wrong account id, client id or secret, or the app isn't activated.</td><td>Re-copy from the app's credentials page; activate.</td></tr>
+      <tr><td>"Zoom has no user … on this account" / "the server-to-server app lacks a scope…"</td><td><span class="chip">room_user</span> not an active user, or a scope missing.</td><td>Fix the user; add the scope and activate the app again.</td></tr>
+      <tr><td>Zoom's "not authorized" on another company's meeting</td><td>SDK app not approved, development pair still on the Pi, or no room user.</td><td>Approval, production pair and server-to-server values; restart; <span class="chip">--check-zoom</span>.</td></tr>
+      <tr><td>"Zoom needs the meeting passcode (…)"</td><td>No <span class="chip">pwd=</span> and no "Passcode:" in the invitation.</td><td>Type the passcode and tap <span class="ui">Join again</span>.</td></tr>
+      <tr><td>"Zoom's SDK did not load from source.zoom.us (…)"; TV dark</td><td>The CDN is blocked, or SDK 6.5.0 retired.</td><td>Check internet access to source.zoom.us; bump <span class="chip">SDK_VERSION</span> and release.</td></tr>
+      <tr><td>"Zoom cannot use the camera right now"</td><td>Another process holds the camera; Laptop mode has the MeetUp; the MeetUp is missing.</td><td>Update; check <span class="chip">lsusb</span> and Laptop mode; <span class="chip">sudo fuser -v /dev/video*</span>; reboot.</td></tr>
+      <tr><td>"Zoom did not connect; the page says: …"</td><td>No connection in 90 s (300 s in a waiting room).</td><td>Read Zoom's words; check the network.</td></tr>
+      <tr><td>"Could not read the join parameters: join parameters expired"</td><td>The join page was reloaded (the token works once).</td><td>Join again.</td></tr>
+      <tr><td>"Zoom ignored … (it takes one a few seconds after the last)"</td><td>Zoom's rate limits.</td><td>Wait and try again.</td></tr>
+      <tr><td>Room joins muted</td><td>Host's mute on entry.</td><td>Tap Unmute.</td></tr>
+      <tr><td>A Zoom dialog sits on the TV</td><td>Its words aren't on the acknowledge list.</td><td>Answer it from the table; add the phrase under Settings › Meetings.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">TV</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Find TVs lists nothing / "The TV is not answering at …"</td><td>Inbound UDP blocked on the Pi; TV on another network or off; LG Connect Apps off; wrong address.</td><td>Allow inbound UDP; same subnet as the Pi's default route; turn on LG Connect Apps; reserve the TV's IP; <span class="chip">--check-tv</span>.</td></tr>
+      <tr><td>"The TV at … did not turn on: check that Wake-on-LAN is enabled…"; joins go ahead with the TV dark</td><td>Missing, malformed or wrong MAC (Wi-Fi vs Ethernet); Mobile TV On and Quick Start+ both off.</td><td>Set the active interface's MAC in the TV's connection settings (in quotes in YAML); turn on Mobile TV On or Quick Start+.</td></tr>
+      <tr><td>"The TV's MAC address is not set…" / "'…' is not a MAC address…"</td><td>As above.</td><td>As above.</td></tr>
+      <tr><td>"The TV no longer accepts this table: Forget TV, then Pair" / TV keeps prompting</td><td>TV reset or its paired devices cleared.</td><td>Forget TV, then Pair; accept within 60 s.</td></tr>
+      <tr><td>"Nobody accepted the prompt on the TV within 60 seconds"</td><td>Prompt not accepted.</td><td>Pair again with the remote ready.</td></tr>
+      <tr><td><span class="chip">--check-tv</span>: "The TV is not paired with this device … found no TV key it can read…"</td><td>Run as the wrong user, or not paired.</td><td><span class="chip">sudo -u pi /opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml</span></td></tr>
+      <tr><td>TV stays on the wrong input at join</td><td><span class="chip">keep_on: false</span>; <span class="chip">pi_input</span> wrong; Samsung (no direct input); TV state unknown.</td><td>Set the right HDMI input; <span class="chip">--check-tv</span> warns.</td></tr>
+      <tr><td>TV turns itself back on after its own remote turned it off</td><td><span class="chip">keep_on</span> wakes it after 5 s.</td><td>Turn it off from the table, or set <span class="chip">keep_on: false</span>.</td></tr>
+      <tr><td>Touchpad does nothing: "…is not allowed to use /dev/uinput…" / "…needs /dev/uinput, and it is not there…"</td><td>udev rule, input group or uinput module missing; evdev not built.</td><td><span class="chip">sudo bash -c 'source installer/install.sh &amp;&amp; install_virtual_mouse'</span>, then restart croom (a group change may need a reboot).</td></tr>
+      <tr><td>"Enter the Settings PIN again to type on the TV"</td><td>The PIN unlock ran out during a sign-in.</td><td>Unlock Settings again.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Sound, camera and devices</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>No sound or picture in the call; <span class="chip">wpctl status</span> lists the MeetUp but the browser doesn't</td><td>The browser can't reach PipeWire.</td><td>Check <span class="chip">libpulse0</span>; the unit's <span class="chip">XDG_RUNTIME_DIR</span>; plug devices before boot; reboot.</td></tr>
+      <tr><td>"No speaker found" / "No microphone found"</td><td>No device, or the configured name matches nothing.</td><td><span class="chip">wpctl status</span> as the desktop user; set <span class="chip">auto</span> or a matching name.</td></tr>
+      <tr><td>Sound on the wrong device</td><td>WirePlumber remembers the default.</td><td>Name the wanted device (not auto); <span class="chip">HDMI</span> for the TV.</td></tr>
+      <tr><td>"They can't hear us"</td><td>Mic level.</td><td>Options › Mic level (100 normal, up to 150).</td></tr>
+      <tr><td>"No controllable camera found"</td><td>No camera with zoom or pan/tilt controls; MeetUp lent to the laptop.</td><td><span class="chip">v4l2-ctl --list-devices</span>; check Laptop mode; replug.</td></tr>
+      <tr><td>Presets land in the wrong place</td><td>Drift; wrong travel time.</td><td>Find the stops, Save as Home, re-save presets; adjust the travel time.</td></tr>
+      <tr><td>"the TV is in a meeting" on the camera preview</td><td>The preview is for between meetings.</td><td>Expected.</td></tr>
+      <tr><td>"could not save the camera settings: …"</td><td><span class="chip">control-settings.json</span> not writable.</td><td>Check disk space and ownership.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Calendar</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"Google Calendar not configured: …"</td><td>No key path, unreadable key, empty or placeholder address.</td><td>Fix config and key; restart. Run checks as the service user.</td></tr>
+      <tr><td>"Could not sign in with …: the key file is not a service account key, or the project's Calendar API is not enabled."</td><td>Wrong JSON (an OAuth client file), API off, key deleted, <strong>or no network</strong>.</td><td>New key; enable the API; check the network.</td></tr>
+      <tr><td>"Calendar … not found or not shared…"</td><td>Wrong address, or not shared with the service account.</td><td>Share with <span class="ui">Make changes to events</span>; check the address.</td></tr>
+      <tr><td>"…for reading only…" / bookings stuck "Not in Google Calendar yet"</td><td>Shared as See all event details.</td><td>Change to Make changes to events; the queue sends on the next poll.</td></tr>
+      <tr><td>"Calendar offline since …"</td><td>Google unreachable.</td><td>Check the network; bookings are kept and sent later.</td></tr>
+      <tr><td>"Double-booked with …"</td><td>Booked here while offline; a clash in Google.</td><td>Move or cancel one in Google Calendar.</td></tr>
+      <tr><td>A booking is missing</td><td>Room not added, room declined, more than 7 days ahead, or cancelled.</td><td>Fix the event in Google.</td></tr>
+      <tr><td>Bookings at the wrong time</td><td>The OS time zone.</td><td>Set Localisation; restart croom.</td></tr>
+      <tr><td>Join now missing</td><td>No joinable video link.</td><td>Add a Meet or Zoom link to the event.</td></tr>
+      <tr><td>Google: "Key creation is not allowed"</td><td>Organisation policy.</td><td>Turn off "Disable service account key creation" for the project.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Laptop mode</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"This room has no laptop switch"</td><td><span class="chip">laptop.enabled</span> off, or not restarted.</td><td>Turn it on in Settings › Laptop switch; Restart now.</td></tr>
+      <tr><td><span class="chip">--check-laptop</span>: "The switch cannot be pressed: …"</td><td>croom holds the pin; gpiod missing; no Pi 4 or Pi 5 GPIO chip.</td><td>Stop croom first; check the Pi model.</td></tr>
+      <tr><td>"The switch did not answer: …"</td><td>Relay not clicking (3.3 V vs 5 V), wrong contacts, <span class="chip">active_low</span> wrong.</td><td>Check the wiring; try pin 2; toggle active low; press the US234's button by hand.</td></tr>
+      <tr><td>"The camera is on the laptop: press Back to room first"</td><td>Laptop mode is on.</td><td>Back to room on the table.</td></tr>
+      <tr><td>TV not on the laptop: "Choose the laptop's input under Options › TV…" / "Choose HDMI 2 on the TV with its Input button"</td><td>No laptop input set; TV off or unreachable; Samsung.</td><td>Set the Laptop input; or switch with the TV's remote.</td></tr>
+      <tr><td>The MeetUp's USB id differs</td><td>The default is unconfirmed.</td><td><span class="chip">lsusb</span>, then set <span class="chip">laptop.usb_id</span>.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 13 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 13 · Reference</p><h2>Every file, route and timing in one place</h2></div>
+
+  <h3 class="sub">Files and folders on the TV Pi</h3>
+  <table>
+    <thead><tr><th>Path</th><th>Owner, mode</th><th>What</th></tr></thead>
+    <tbody>
+      <tr><td>/etc/croom/config.yaml</td><td>room user, 640</td><td>Room config; <span class="chip">.1</span> to <span class="chip">.5</span> previous versions; <span class="chip">.good</span> last healthy start</td></tr>
+      <tr><td>/etc/croom/google-service-account.json</td><td>room user, 600</td><td>Google service-account key</td></tr>
+      <tr><td>/etc/croom/zoom-credentials.json</td><td>room user, 600</td><td>Zoom keys</td></tr>
+      <tr><td>/opt/croom/venv</td><td>link</td><td>Points at <span class="chip">releases/&lt;commit&gt;/venv</span>, the running release; two kept</td></tr>
+      <tr><td>/opt/croom/VERSION</td><td>root, 644</td><td>Running release's commit</td></tr>
+      <tr><td>/opt/croom/browsers/</td><td>room user</td><td>Playwright's Chromium</td></tr>
+      <tr><td>/var/lib/croom/</td><td>room user</td><td>Data folder (falls back to <span class="chip">~/.local/share/croom</span> if not writable)</td></tr>
+      <tr><td>…/meet-profile/</td><td>700</td><td>TV browser profile and Google session</td></tr>
+      <tr><td>…/control-settings.json</td><td>600</td><td>Screensaver, door sign look, key click, camera home and presets, mic level</td></tr>
+      <tr><td>…/settings-pin.json</td><td>600</td><td>Settings PIN hash; delete to reset</td></tr>
+      <tr><td>…/devices.json</td><td>600</td><td>Joined and refused touch Pis and door signs</td></tr>
+      <tr><td>…/tv-settings.json, tv-&lt;hash&gt;-key, tv-client-key</td><td>600</td><td>Chosen TV; pairing keys</td></tr>
+      <tr><td>…/calendar-cache.json, bookings.json</td><td>600</td><td>Last calendar read; room bookings and their sync state</td></tr>
+      <tr><td>…/laptop.json</td><td>600</td><td>Laptop mode state</td></tr>
+      <tr><td>…/dashboard-state.json</td><td>600</td><td>Dashboard enrolment; delete, with a new token, to re-enrol</td></tr>
+      <tr><td>…/door-sign/, meet-capture-*.zip</td><td></td><td>Door sign APKs (two newest); Meet captures (three newest)</td></tr>
+      <tr><td>/var/lib/croom-admin/admin-state.json</td><td>root, 600</td><td>Helper's record: restarts, updates, previous release, Wi-Fi changes</td></tr>
+      <tr><td>/run/croom-admin.sock</td><td>root:group, 660</td><td>Helper socket</td></tr>
+      <tr><td>/etc/systemd/system/croom*.service</td><td>root</td><td>Units</td></tr>
+      <tr><td>/etc/sudoers.d/croom</td><td>root, 440</td><td><span class="chip">systemctl start|restart croom</span> for the desktop user</td></tr>
+      <tr><td>/etc/udev/rules.d/99-croom-uinput.rules, /etc/modules-load.d/croom-uinput.conf</td><td>root</td><td>Virtual mouse and keyboard</td></tr>
+      <tr><td>/etc/NetworkManager/system-connections/croom-*.nmconnection</td><td>root, 600</td><td>Wi-Fi networks added from Settings</td></tr>
+      <tr><td>/tmp/croom-meet-failure.png, croom-meet-check.png</td><td></td><td>Screenshots of a failed Meet join and of <span class="chip">--check-meet</span></td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Network and ports</h3>
+  <table>
+    <thead><tr><th>Direction</th><th>Port or address</th><th>Purpose</th></tr></thead>
+    <tbody>
+      <tr><td>In, LAN</td><td>TCP 8080</td><td>Room page <span class="chip">/</span>, door sign <span class="chip">/sign</span>, TV page <span class="chip">/tv</span>, <span class="chip">/api/…</span>, WebSocket <span class="chip">/ws/pointer</span></td></tr>
+      <tr><td>In, loopback</td><td>127.0.0.1, any free port</td><td>The page Zoom's SDK runs in; refuses anyone but the Pi itself</td></tr>
+      <tr><td>In, local socket</td><td>/run/croom-admin.sock</td><td>The root helper (mode 660, the room user's group)</td></tr>
+      <tr><td>In, LAN UDP</td><td>any port</td><td>Replies from TVs during Find TVs: a firewall that blocks inbound UDP hides every TV</td></tr>
+      <tr><td>Out, multicast</td><td>UDP 239.255.255.250:1900</td><td>TV discovery (SSDP)</td></tr>
+      <tr><td>Out, broadcast</td><td>UDP</td><td>Wake-on-LAN to the TV's MAC</td></tr>
+      <tr><td>Out, TV</td><td>LG 3000/3001; Samsung 8002 (and 8001)</td><td>TV control</td></tr>
+      <tr><td>Out, HTTPS</td><td>www.googleapis.com, oauth2.googleapis.com</td><td>Calendar API</td></tr>
+      <tr><td>Out, HTTPS</td><td>meet.google.com, accounts.google.com, meet.googleapis.com</td><td>Google Meet; Meet participants API (only with <span class="chip">meeting.meet_api_domain</span>)</td></tr>
+      <tr><td>Out, HTTPS</td><td>zoom.us, api.zoom.us, source.zoom.us</td><td>Zoom tokens, the room's ZAK, the SDK 6.5.0 scripts</td></tr>
+      <tr><td>Out, HTTPS</td><td>api.github.com, github.com</td><td>Update check and builds; door sign releases</td></tr>
+      <tr><td>Out, HTTP</td><td>&lt;dashboard&gt;:3001</td><td>Dashboard enrolment and WebSocket heartbeat</td></tr>
+      <tr><td>Out, HTTPS</td><td>site.api.espn.com</td><td>Door sign scores, only while a school is on</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Important routes on port 8080</h3>
+  <table>
+    <thead><tr><th>Route</th><th>Access</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>GET / · /sign · /tv</td><td>Open</td><td>Room page, door sign, TV screensaver</td></tr>
+      <tr><td>GET /api/status</td><td>Open</td><td>Everything the screens show; never errors</td></tr>
+      <tr><td>GET /api/calendar/events · /week</td><td>Open</td><td>Today; seven days</td></tr>
+      <tr><td>/api/bookings, /now, /{key}/end, /{key}/cancel, /slots</td><td>Open</td><td>Booking; End now only from the room page</td></tr>
+      <tr><td>POST /api/meeting/join · leave · mute · camera · control · dialog</td><td>Open</td><td>Calls from the table</td></tr>
+      <tr><td>GET /api/meeting/diagnostics</td><td>Open</td><td>What the meeting page shows, during a call</td></tr>
+      <tr><td>/api/tv/discover · select · pair · forget · control · settings</td><td>Open</td><td>TV setup and remote</td></tr>
+      <tr><td>/api/camera/*, /api/audio/volume, /api/audio/mic</td><td>Open</td><td>Camera, speaker, microphone</td></tr>
+      <tr><td>POST /api/laptop</td><td>Open</td><td><span class="chip">{"to":"laptop"}</span> or <span class="chip">{"to":"room"}</span></td></tr>
+      <tr><td>WS /ws/pointer</td><td>Same origin</td><td>Touchpad and typing on the TV</td></tr>
+      <tr><td>POST /api/settings/unlock · /api/settings/…</td><td>PIN, then token</td><td>Unlock returns the <span class="chip">X-Croom-Unlock</span> token every Settings route needs</td></tr>
+      <tr><td>POST /api/devices/checkin · GET /api/devices/apk/{code}</td><td>Device token</td><td>Touch Pi and door sign check-in; door sign APKs</td></tr>
+      <tr><td>GET /api/devices/busy · seen-since</td><td>Loopback only</td><td>Used by the root helper</td></tr>
+    </tbody>
+  </table>
+  <p>Every POST must be <span class="chip">Content-Type: application/json</span> (else 415), except key uploads (multipart). Errors are <span class="chip">{"error": "…"}</span>.</p>
+
+  <h3 class="sub">Timings</h3>
+  <table class="plain">
+    <thead><tr><th>What</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Screens</strong></td><td>Status every 2 s (room page, TV page); device check-in every 5 s; online if seen within 20 s</td></tr>
+      <tr><td><strong>Calendar</strong></td><td>Poll every 60 s; 10 s wait at the screen for a booking; Join now from 10 min before</td></tr>
+      <tr><td><strong>Settings</strong></td><td>Unlock 5 min after last use; 5 wrong PINs lock 10 min; each check up to 60 s</td></tr>
+      <tr><td><strong>Restart and update</strong></td><td>Restart watched 2 min (every 5 s); update watched 3 min; update waits up to 30 min for a meeting; build limit 40 min; GitHub cached 10 min</td></tr>
+      <tr><td><strong>TV</strong></td><td>Wake up to 15 s, packet resent every 3 s; Turn on up to about 23 s; re-wake 5 s after an unexpected off; pairing 60 s (+5 s); reconnect 2 to 30 s; Find TVs results valid 5 min</td></tr>
+      <tr><td><strong>TV browser</strong></td><td>Screensaver retry 2 to 10 s, warning after 30 s; crash relaunch back-off 10 s; pointer shown 5 s</td></tr>
+      <tr><td><strong>Google Meet</strong></td><td>Join control 30 s; lobby 5 min; Meet API every 15 s; Google sign-in closes after 15 min untouched</td></tr>
+      <tr><td><strong>Zoom</strong></td><td>Connect 90 s; waiting room 300 s; signature and ZAK valid 2 h; 15 s per token request</td></tr>
+      <tr><td><strong>Devices</strong></td><td>Camera stops 1.5 s after the last move; preview 180 s; missing devices looked for every 30 s; mic re-applied every 5 s in a call</td></tr>
+      <tr><td><strong>Laptop mode</strong></td><td>Relay press 200 ms; wait 10 s per press, two presses; watch every 2 s; camera found again within 15 s</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Repo material not to follow for the TV Pi</h3>
+  <ul>
+    <li><strong>scripts/ and services/</strong> (<span class="chip">startup.sh</span>, <span class="chip">tv-on.sh</span>, <span class="chip">tv-standby.sh</span>, <span class="chip">tv-lifecycle.service</span>, <span class="chip">firstboot.service</span>…): from the earlier "minimeet" setup; not installed.</li>
+    <li><strong>Upstream guides:</strong> <span class="chip">docs/guides/administrator-guide.md</span>, <span class="chip">deployment-guide.md</span>, <span class="chip">user-guide.md</span> are generic croom.to, not Crystal Meet. <span class="chip">packaging/debian</span> is unused.</li>
+    <li><strong>Unused code:</strong> <span class="chip">croom.ai</span>, <span class="chip">croom.display</span> controls, <span class="chip">meeting/controls.py</span>, <span class="chip">quality.py</span>, the Teams and Webex providers, the Microsoft 365 calendar, <span class="chip">croom-ui</span>.</li>
+    <li><strong>Older text:</strong> the setup guide's Brio and Jabra example; "Meet offers four controls"; <span class="chip">--check-tv</span> help saying "LG".</li>
+  </ul>
+
+  <h3 class="sub">Source map</h3>
+  <table class="plain">
+    <thead><tr><th>Path in ben-abeo/croom.to</th><th>Holds</th></tr></thead>
+    <tbody>
+      <tr><td>installer/install.sh, deploy/rooms/</td><td>The installer and unit files; room configs and the Zoom template</td></tr>
+      <tr><td>src/croom/core/agent.py, config.py</td><td>Start-up, CLI options, every config key</td></tr>
+      <tr><td>src/croom/control/, settings/, admin/</td><td>Web server and pages; Settings; the root helper</td></tr>
+      <tr><td>src/croom/meeting/, calendar/, tv/, laptop/, devices/</td><td>Meetings, calendar, TV, Laptop mode, camera and sound</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</body>
+</html>

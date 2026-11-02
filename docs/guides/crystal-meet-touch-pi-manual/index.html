@@ -1,0 +1,744 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Crystal Meet touch Pi manual</title>
+<link rel="stylesheet" href="manual.css">
+</head>
+<body>
+
+<section class="cover">
+  <img src="crystalpm-logo-white.svg" alt="Crystal PM">
+  <p class="kicker">Crystal Meet · Technical manual</p>
+  <h1>The table screen, from glass to code</h1>
+  <p class="promise">Everything the person who installs, changes and troubleshoots the room's table touch screen needs: every screen and button, the kiosk and its agent, room Settings, updates, Wi-Fi, logs, and what to do when it misbehaves.</p>
+  <div class="meta">
+    <div><p class="kicker">Device</p><p>Raspberry Pi with a 10.1" touch panel</p></div>
+    <div><p class="kicker">Runs</p><p>Chromium kiosk and croom-kiosk-agent</p></div>
+    <div><p class="kicker">Talks to</p><p>The room's TV Pi on port 8080</p></div>
+    <div><p class="kicker">Edition</p><p>November 2026</p></div>
+  </div>
+</section>
+
+<section class="toc">
+  <p class="kicker">Contents</p>
+  <h2>What this manual covers</h2>
+  <ol>
+    <li><span class="n">01</span><strong>Overview</strong><span class="d">What the touch Pi is and where it fits in the room</span></li>
+    <li><span class="n">02</span><strong>Hardware and network</strong><span class="d">The Pi, the panel, and what it talks to</span></li>
+    <li><span class="n">03</span><strong>Using the table screen</strong><span class="d">Every screen, label and button people see</span></li>
+    <li><span class="n">04</span><strong>Installing a touch Pi</strong><span class="d">Blank card to a joined, managed table screen</span></li>
+    <li><span class="n">05</span><strong>Configuration and Settings</strong><span class="d">What lives where, the PIN, every Settings page</span></li>
+    <li><span class="n">06</span><strong>Managing it from the room</strong><span class="d">Check-in, Allow, updates, rollback, reboot and Wi-Fi</span></li>
+    <li><span class="n">07</span><strong>How it works</strong><span class="d">The kiosk, the agent, the APIs and the files</span></li>
+    <li><span class="n">08</span><strong>Logs and diagnostics</strong><span class="d">Where to look on the touch Pi and the TV Pi</span></li>
+    <li><span class="n">09</span><strong>Troubleshooting</strong><span class="d">Symptom, cause and fix for every known problem</span></li>
+    <li><span class="n">10</span><strong>Reference</strong><span class="d">Names, timers, ports, files and tests</span></li>
+  </ol>
+  <div class="callout warn" style="margin-top:22px">
+    <p class="kicker">Where this manual is ahead of other guides</p>
+    <p>The room setup guide says the meeting chat on the table is read-only. <strong>That is out of date:</strong> in a Google Meet call the table can send chat messages; only Zoom's chat is read-only. The older upstream guides <span class="chip">administrator-guide.md</span>, <span class="chip">deployment-guide.md</span> and <span class="chip">user-guide.md</span> describe the original Croom project, not this setup.</p>
+  </div>
+  <div class="callout" style="margin-top:10px">
+    <p class="kicker">Words used in this manual</p>
+    <p><strong>Touch Pi</strong>: the Raspberry Pi with the touch display on the conference table, also called the table screen or PiTouch. <strong>TV Pi</strong>: the Raspberry Pi behind the room's TV. It runs the <span class="chip">croom</span> service, which serves the page the touch Pi shows and does all the room's work. <strong>Room page</strong>: <span class="chip">http://&lt;TV Pi&gt;:8080/</span>. <strong>Door sign</strong>: the panel by the door, another client of the TV Pi.</p>
+  </div>
+</section>
+
+<!-- 01 -->
+<section class="section new-page">
+  <div class="section-head"><p class="kicker">Section 01 · Overview</p><h2>The touch Pi is a browser and a small agent; the TV Pi does the rest</h2></div>
+  <p class="lede">The table screen is where people join calls, book the room, run the meeting and change room Settings. The touch Pi itself holds almost nothing: Chromium shows the room page that the TV Pi serves, and a small root agent checks in with the TV Pi so the room can reboot it, update it and change its Wi-Fi.</p>
+
+  <div class="diagram">
+    <div class="node"><p class="kicker">On the table</p><h3>Touch Pi</h3><p>Chromium kiosk shows <span class="ui">/?keyboard=1</span>; <span class="ui">croom-kiosk-agent</span> checks in and runs jobs.</p></div>
+    <div class="link">HTTP :8080<br>page, APIs, touchpad, check-in</div>
+    <div class="node main"><p class="kicker">Behind the TV</p><h3>TV Pi · croom</h3><p>Serves the page, runs the call, calendar, camera, sound and TV, queues jobs.</p></div>
+    <div class="link">HTTPS<br>calendar, versions</div>
+    <div class="node"><p class="kicker">Outside</p><h3>Google and GitHub</h3><p>The room calendar; versions of <span class="ui">main</span>. The touch Pi fetches GitHub itself only during an update.</p></div>
+  </div>
+
+  <div class="grid c4">
+    <div class="card tint"><div class="stat">2 s</div><div class="stat-label">The page asks the TV Pi for the room's status</div></div>
+    <div class="card tint"><div class="stat">5 s</div><div class="stat-label">The agent checks in with the TV Pi</div></div>
+    <div class="card tint"><div class="stat">1280×800</div><div class="stat-label">Layout size: the 1920×1200 panel at 1.5× scale</div></div>
+    <div class="card tint"><div class="stat">10 min</div><div class="stat-label">Options screens return to the idle screen</div></div>
+  </div>
+
+  <h3 class="sub">What the table screen can and cannot do</h3>
+  <div class="grid c2">
+    <div class="card"><p class="kicker">Can</p><ul>
+      <li><strong>Join and run calls</strong>: Zoom and Google Meet, by booking or by link, with mute, camera, hand, reactions, captions, layout, participants, chat and host controls.</li>
+      <li><strong>Book the room</strong>, use it now, end a booking made at the room, or cancel one that has not started.</li>
+      <li><strong>Drive the camera, sound and TV</strong>: presets, mic level, volume, a TV remote and a touchpad.</li>
+      <li><strong>Change room Settings</strong> behind a PIN, including the door sign and the touch Pi itself.</li>
+    </ul></div>
+    <div class="card"><p class="kicker">Cannot</p><ul>
+      <li><strong>Work without the TV Pi.</strong> The page, the call and every control live there. The top bar says "Can't reach the room".</li>
+      <li><strong>Show its own logs.</strong> Settings › Logs shows only the TV Pi's journal; the touch Pi's are read over SSH.</li>
+      <li><strong>Appear on the fleet dashboard.</strong> Only the TV Pi reports there.</li>
+      <li><strong>Show the camera's picture yet.</strong> A live picture on the camera screen is coming in a later release.</li>
+    </ul></div>
+  </div>
+</section>
+
+<!-- 02 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 02 · Hardware and network</p><h2>Any desktop Pi with the touch panel, on a network that reaches the TV Pi</h2></div>
+  <table>
+    <thead><tr><th>Item</th><th>Detail</th></tr></thead>
+    <tbody>
+      <tr><td>Computer</td><td>A Raspberry Pi. <strong>The model is not specified</strong> in Crystal Meet's code or guides. As a baseline, use what the room setup guide lists for the TV Pi: a Pi 4 (4 GB) or Pi 5, the official power supply and a 32 GB microSD card.</td></tr>
+      <tr><td>Operating system</td><td>Raspberry Pi OS (64-bit) with desktop, on the <strong>labwc</strong> (Wayland) desktop of current releases (Bookworm, Trixie). <strong>Auto-login to the desktop must be on.</strong></td></tr>
+      <tr><td>Touch display</td><td>A 10.1-inch, 1920×1200 Forzola touch panel, with no vibration motor. <strong>Its part number and connection (HDMI with USB touch, or DSI) are not specified.</strong></td></tr>
+      <tr><td>Scale</td><td>Chromium runs at 1.5×, so the page lays out at 1280×800; buttons are about 11 mm tall. Every screen fits without page scrolling.</td></tr>
+      <tr><td>Power</td><td><strong>Not specified.</strong> Whatever powers it, after a power cut the Pi must boot to the desktop by itself so the kiosk restarts.</td></tr>
+      <tr><td>Audio</td><td>Only the on-screen keyboard's key click plays on the touch Pi's own audio output. Call sound comes from the TV Pi's speaker.</td></tr>
+      <tr><td>Network</td><td>Ethernet or Wi-Fi, managed by NetworkManager (<span class="chip">nmcli</span> is needed for Wi-Fi changes from Settings). It must reach the TV Pi on TCP <strong>8080</strong>, and github.com on HTTPS for updates.</td></tr>
+      <tr><td>Cabling</td><td>Not cabled to the TV Pi. It needs only power and the network.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">What the touch Pi talks to</h3>
+  <table>
+    <thead><tr><th>Peer</th><th>How</th><th>When</th></tr></thead>
+    <tbody>
+      <tr><td>TV Pi</td><td>HTTP and WebSocket to <span class="chip">http://&lt;TV Pi&gt;:8080</span></td><td>Always: the page, every API, the touchpad link <span class="chip">/ws/pointer</span>, and the agent's check-in every 5 s.</td></tr>
+      <tr><td>GitHub</td><td>HTTPS 443, <span class="chip">git fetch</span> of <span class="chip">ben-abeo/croom.to</span></td><td>Only during an update.</td></tr>
+      <tr><td>Apt mirrors</td><td>HTTP/HTTPS</td><td>Only during install, when Chromium, curl or git are missing.</td></tr>
+      <tr><td>Google, TV, door sign, dashboard</td><td>None directly</td><td>The TV Pi talks to all of them; the touch Pi asks the TV Pi.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout"><p class="kicker">Good to know</p><p><strong>Nothing listens on the touch Pi.</strong> Crystal Meet opens no port on it; it only calls the TV Pi. SSH on port 22 is there only if you turned it on in Raspberry Pi Imager.</p></div>
+</section>
+
+<!-- 03 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 03 · Using the table screen</p><h2>One screen at a time, every one with Back, and idle screens go home by themselves</h2></div>
+  <p class="lede">A top bar runs across every screen: the room's name and location, the time and date, the meeting's state and time in call, "Next: 2:00 PM Weekly sync" from 10 minutes before a booking, and "Can't reach the room" when the TV Pi does not answer. Below it, one view at a time. Every button has an icon before its label.</p>
+  <ul>
+    <li><strong>Back everywhere.</strong> Every screen below the idle screen has <span class="ui">Back</span>.</li>
+    <li><strong>Going home.</strong> Options screens return to the idle screen after 10 minutes untouched. Meeting screens (Participants, Chat, Host, TV, Mic) return to the meeting after 2 minutes.</li>
+    <li><strong>Second taps.</strong> Anything hard to undo asks "Tap again to …" and waits 5 seconds for the second tap.</li>
+    <li><strong>Mis-tap guard.</strong> Taps are ignored for half a second after the layout shifts or a dialog appears.</li>
+  </ul>
+
+  <h3 class="sub">The idle screen</h3>
+  <p>A status card with a kicker, a headline and a line under it, for example <strong>Room free</strong> · "Free until 1:00 PM", <strong>Starting soon</strong> · "Weekly sync starts in 8 minutes", <strong>Happening now</strong>, or <strong>In use</strong> · "Weekly sync until 2:00 PM". Other lines: "Double-booked with …", "Booked here; not in Google Calendar yet.", "Free for the rest of the day", and "No calendar is connected. Join with a link below."</p>
+  <table>
+    <thead><tr><th>Button</th><th>When it shows</th><th>What it does</th></tr></thead>
+    <tbody>
+      <tr><td>Join now</td><td>A booking with a video link</td><td>Joins the call. It opens 10 minutes before the start; until then it says "Join opens at 12:50 PM".</td></tr>
+      <tr><td>Book room</td><td>A calendar is set up</td><td>Books a later slot (below).</td></tr>
+      <tr><td>Use now</td><td>The room is free now</td><td>Claims the room from this minute (below).</td></tr>
+      <tr><td>End now</td><td>A booking made at the room's screens is in progress</td><td>Ends it on the second tap. Only the table can end a booking; the door sign cannot.</td></tr>
+      <tr><td>Laptop</td><td>Laptop mode is turned on in Settings</td><td>Hands the camera, microphones and speaker to a laptop (below).</td></tr>
+      <tr><td>TV Remote</td><td>Top bar, when a TV is set up and paired</td><td>Opens the TV remote.</td></tr>
+      <tr><td>Options</td><td>Top bar, always (hidden while a laptop has the camera)</td><td>Opens Options.</td></tr>
+    </tbody>
+  </table>
+
+  <h4>Join with a link</h4>
+  <ol class="steps">
+    <li>Tap the field <span class="ui">Meeting link or Zoom meeting ID</span>. The page's own keyboard opens.</li>
+    <li>Type or paste the link. For a bare Zoom ID, or a Zoom link without <span class="chip">pwd=</span>, a <span class="ui">Passcode</span> field appears: fill it in.</li>
+    <li>Tap <span class="ui">Join</span> (on the screen or on the keyboard). The top bar shows Joining, then In a meeting, and the meeting screen opens.</li>
+  </ol>
+  <p>If Zoom refuses over the passcode, a "Couldn't join" card says "Zoom needs the meeting passcode" with <span class="ui">Join again</span>.</p>
+
+  <h4>The Today list</h4>
+  <p>Today's bookings, scrolling inside their own box. The room's own bookings that have not started carry <span class="ui">Cancel</span> (second tap). Notes such as "Not in Google Calendar yet" and "Calendar offline since 10:42 AM. Bookings made here will sync." appear when Google can't be reached.</p>
+
+  <h3 class="sub">Book room and Use now</h3>
+  <ol class="steps">
+    <li>Tap <span class="ui">Book room</span>. Choose the day: today and the next six.</li>
+    <li>Choose an open start time. Times run every 15 minutes inside booking hours (08:00 to 18:00 unless changed).</li>
+    <li>Type a name in <span class="ui">Your name or the meeting's name</span>; the page's keyboard opens by itself.</li>
+    <li>Choose a length, 15 minutes to 4 hours, as far as the next booking allows, and tap <span class="ui">Book</span> (or <span class="ui">Done</span> on the keyboard). "Booked" shows for 4 seconds.</li>
+  </ol>
+  <p><span class="ui">Use now</span> asks for a name and a length shown with its end, for example <span class="chip">30 min · until 12:30 PM</span>, then <span class="ui">Start</span>. It ends on the nearest quarter hour. Booking steps left alone for a minute close by themselves; <span class="ui">Back</span> goes back one step. Bookings are written to the room's Google calendar, or kept on the TV Pi and synced when Google is back.</p>
+
+  <h3 class="sub">Options</h3>
+  <p>Six items, no PIN needed except for Settings: <span class="ui">Camera framing</span>, <span class="ui">Mic level</span>, <span class="ui">Screensaver</span>, <span class="ui">Door sign</span>, <span class="ui">TV</span>, <span class="ui">Settings</span>. Below them, <span class="ui">Keyboard</span>: <span class="ui">Key click on</span> / <span class="ui">Key click off</span>.</p>
+  <table>
+    <thead><tr><th>Item</th><th>What it offers</th></tr></thead>
+    <tbody>
+      <tr><td>Camera framing</td><td>Arrow pad (hold to move; the middle key is Home), <span class="ui">Zoom out</span> / <span class="ui">Zoom in</span>, three preset buttons (Wide, Table, Whiteboard by default), <span class="ui">Save</span> ("Tap a preset to save it here"), and <span class="ui">Set up</span>: <span class="ui">Find the stops</span>, then nudge to the view you want and <span class="ui">Save as Home</span>. The TV shows the camera's picture while this screen is open. "No controllable camera found" if the TV Pi has no camera it can turn. Coming in a later release: the camera's live picture here, with drag to turn and pinch to zoom.</td></tr>
+      <tr><td>Mic level</td><td>A slider from 0 to 150 (100 is normal) with <span class="ui">Quieter</span> / <span class="ui">Louder</span> in steps of 5. Kept, and applied at every join. "No microphone found" if there is none.</td></tr>
+      <tr><td>Screensaver</td><td>What the TV shows when idle: Information, Quiet, Brand or Bounce. The TV changes at once.</td></tr>
+      <tr><td>Door sign</td><td><span class="ui">Door sign background</span>: Austin skyline (default), Capitol, UT Tower, Pennybacker Bridge, Hamilton Pool, Texas star, Hill Country, DKR stadium, Plain. <span class="ui">Football scores</span>: Texas, Michigan, Texas A&amp;M, Missouri, all off by default.</td></tr>
+      <tr><td>TV</td><td>The TV remote and touchpad (below).</td></tr>
+      <tr><td>Settings</td><td>Room Settings, behind the PIN (Section 05).</td></tr>
+      <tr><td>Keyboard</td><td>Turns the on-screen keyboard's click on or off for every screen of the room.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">The meeting screen</h3>
+  <p>Opens by itself during a call. It is laid out as a control deck.</p>
+  <table>
+    <thead><tr><th>Area</th><th>What is there</th></tr></thead>
+    <tbody>
+      <tr><td>Meeting card (left)</td><td>State (Joining, In the lobby, In a meeting, Leaving), time in call, "N people in the call", "N unread chat messages", "The room is host/co-host", and what the meeting disclosed (recorded, transcribed, AI Companion). <span class="ui">Leave</span> asks "Tap again to leave" within 5 seconds; a double tap on the glass does not count.</td></tr>
+      <tr><td>Main tiles</td><td><span class="ui">Mute</span> / <span class="ui">Unmute</span>, <span class="ui">Turn camera off</span> / <span class="ui">Turn camera on</span>, <span class="ui">Raise hand</span> / <span class="ui">Lower hand</span> (when the call offers it), <span class="ui">Reactions</span> (a row of choices for 10 seconds, with Cancel).</td></tr>
+      <tr><td>Second row</td><td><span class="ui">Captions on</span> / <span class="ui">off</span>; on Zoom <span class="ui">Gallery view</span> / <span class="ui">Speaker view</span>, on Meet <span class="ui">Layout</span> (Auto, Tiled, Spotlight, Sidebar); <span class="ui">Hide self view</span> / <span class="ui">Show self view</span>; <span class="ui">Participants (N)</span>; <span class="ui">Chat (N)</span>; <span class="ui">Host</span> when the room is host or co-host.</td></tr>
+      <tr><td>Dock</td><td><span class="ui">Sound</span>: volume slider, <span class="ui">Quieter</span> / <span class="ui">Louder</span>, <span class="ui">Mute speaker</span>, and <span class="ui">Mic</span> for the mic level. <span class="ui">Camera</span>: presets and nudges. <span class="ui">Upcoming meetings</span>.</td></tr>
+      <tr><td>Top bar</td><td><span class="ui">Touchpad</span>: a full-screen touchpad on the TV Pi's mouse. <span class="ui">TV</span>: the remote.</td></tr>
+      <tr><td>Dialog card</td><td>A Zoom or Meet question that waits for a tap ("Zoom asks" / "Meet asks" when untitled), with the platform's own buttons. Questions the room is set to answer are answered by themselves.</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>Participants.</strong> Each person with Host, Hand raised, Muted or Video off, and "(this room)". <span class="ui">Pin</span> / <span class="ui">Unpin</span> for anyone. As host: <span class="ui">Mute</span> one person and <span class="ui">Remove</span> (second tap). On Meet, a <span class="ui">Waiting room</span> with <span class="ui">Admit</span> and <span class="ui">Deny</span>. On Meet the list is read from Meet's people panel while this screen is open ("Reading the list from Meet").</li>
+    <li><strong>Chat.</strong> The last 20 messages. In a <strong>Meet</strong> call a message box and <span class="ui">Send</span> appear when Meet's chat is available; <strong>Zoom chat is read-only</strong>.</li>
+    <li><strong>Host controls on Zoom.</strong> <span class="ui">Mute all</span>, <span class="ui">Ask all to unmute</span>, <span class="ui">Start recording</span> / <span class="ui">Stop recording</span>, <span class="ui">Lock meeting</span> / <span class="ui">Unlock meeting</span>, <span class="ui">End meeting for everyone</span> (second tap).</li>
+    <li><strong>Host controls on Meet.</strong> <span class="ui">Mute everyone</span> (second tap), <span class="ui">End call for everyone</span>, and <span class="ui">Meeting settings</span> switches read from Meet's host panel (screen share, chat, reactions, microphones, video, Quick access).</li>
+    <li><strong>When a control can't be done</strong>, the screen says why in words, for example "Meet's chat button isn't on the screen".</li>
+  </ul>
+
+  <h3 class="sub">Laptop mode</h3>
+  <p>Only when Laptop mode is turned on in Settings. During a booking, <span class="ui">Laptop</span> switches in one tap; in a free room it asks "Use a laptop for" a length, then <span class="ui">Switch to laptop</span> (this books the room when there is a calendar). The button says "Switching…". The laptop screen says "The camera, microphones and speaker are on the laptop until 2:00 PM", with <span class="ui">Back to room</span>. Meanwhile joins are refused and Options is hidden.</p>
+
+  <h3 class="sub">TV remote and touchpad</h3>
+  <ul>
+    <li><strong>Status line.</strong> For example "&lt;TV name&gt; · On · HDMI 1 (Crystal Meet)", with <span class="ui">Turn on</span> when the TV is off, <span class="ui">Change TV</span> and <span class="ui">Forget TV</span> (second tap).</li>
+    <li><strong>Keys.</strong> <span class="ui">Power</span> (second tap to turn off), <span class="ui">Input</span> (the TV Pi's input is marked Crystal Meet), Home, Menu, Volume, Mute, Channel, a round pad with <span class="ui">OK</span>, Back, Exit, Info, Guide, digits with <span class="ui">Go</span>, playback and colour keys.</li>
+    <li><strong>Modes.</strong> <span class="ui">Pointer</span> (the TV's own cursor, LG only), <span class="ui">Room Pi mouse</span> (a mouse on the TV Pi), and <span class="ui">Full-screen touchpad</span> with <span class="ui">TV</span> / <span class="ui">Room Pi</span> and <span class="ui">Done</span>.</li>
+    <li><strong>Gestures.</strong> One finger moves; a quick tap clicks; two fingers scroll; a two-finger tap is a right-click on the Pi; press and hold, then move, drags (a blue border shows the hold is armed). A dropped link shows "Reconnecting…" and retries by itself.</li>
+    <li><strong>No TV yet.</strong> "No TV is set up for this room": <span class="ui">Find TVs</span>, <span class="ui">Connect</span>, then accept on the TV within a minute. <span class="ui">Change TV</span> sets <span class="ui">TV MAC address</span>, <span class="ui">Room Pi input</span> and <span class="ui">Laptop input</span>, then <span class="ui">Save connection</span>.</li>
+    <li><strong>Samsung TVs.</strong> Input opens the TV's source menu and there is no pointer mode; the Room Pi mouse and touchpad still work.</li>
+  </ul>
+
+  <h3 class="sub">The on-screen keyboard</h3>
+  <p>The kiosk opens the page with <span class="chip">?keyboard=1</span>, so the page draws its own keyboard: the Pi's system keyboard would be hidden under the kiosk window.</p>
+  <ul>
+    <li><strong>Layers.</strong> Letters, <span class="ui">123</span>, <span class="ui">#+=</span>, and <span class="ui">ABC</span> back. Shift once for one capital; double-tap Shift for caps lock (a dot under the arrow).</li>
+    <li><strong>Feel.</strong> Keys act on touch-down and take several fingers at once; holding delete repeats; a preview pops above the key; the click is a short tick on the touch Pi's speaker.</li>
+    <li><strong>Closing it.</strong> The hide key, or a tap elsewhere. <span class="ui">Join</span> on the keyboard joins the call. The MAC address field and the chat have their own layouts.</li>
+  </ul>
+
+  <h3 class="sub">Sign in to Google</h3>
+  <p>From <span class="ui">Settings › Meetings</span>. The TV shows Google's sign-in, and the table shows the full-screen touchpad on the TV Pi's mouse with <span class="ui">Type on the TV</span>, <span class="ui">Done</span> ("Signed in as …") and <span class="ui">Cancel</span>. Fifteen minutes without a touch cancels it. Refused during a call or in Laptop mode.</p>
+</section>
+
+<!-- 04 -->
+<section class="section">
+  <div class="keep">
+  <div class="section-head"><p class="kicker">Section 04 · Installing a touch Pi</p><h2>One installer sets up the kiosk and the agent; then Allow it in Settings</h2></div>
+  <p class="lede">The installer <span class="chip">installer/install-kiosk.sh</span> turns a Raspberry Pi OS desktop into the table screen: it installs Chromium if needed, opens the room page full screen at every login, turns off screen blanking, and installs the agent that lets the room manage it.</p>
+
+  <div class="callout warn">
+    <p class="kicker">Before you begin</p>
+    <p><strong>The TV Pi installed and running</strong>, with a <strong>fixed address</strong> (a DHCP reservation). The kiosk and the agent both hold this address. Use the IP address rather than a <span class="chip">.local</span> name if name lookup is unreliable on the network.</p>
+    <p><strong>A TV Pi with room settings.</strong> If it was set up before room settings existed, upgrade the TV Pi first.</p>
+    <p><strong>Raspberry Pi OS (64-bit) with desktop</strong> on the touch Pi, written with Raspberry Pi Imager, with a desktop user (for example <span class="chip">pi</span>), Wi-Fi or Ethernet, and SSH if you want it.</p>
+    <p><strong>Outside meeting hours</strong> when working on a room in use.</p>
+  </div>
+  </div>
+  <div class="callout dark"><p class="kicker">Never run install.sh on the touch Pi</p><p><span style="font-weight:600">installer/install.sh</span> installs the full room software for the TV Pi. On a Pi with a touch screen it would also turn on an untested upstream touch interface. The touch Pi only ever gets <span style="font-weight:600">install-kiosk.sh</span>.</p></div>
+
+  <h3 class="sub">1 · Turn on auto-login</h3>
+  <ol class="steps">
+    <li>On the touch Pi open <span class="ui">Raspberry Pi Configuration › System</span> and turn <span class="ui">Auto Login</span> on for the desktop user.</li>
+    <li>Reboot. The Pi should come up on the desktop without asking for a password.</li>
+  </ol>
+
+  <h3 class="sub">2 · Run the installer</h3>
+  <p>Log in as the desktop user (at the Pi or over SSH) and run:</p>
+<pre>sudo apt update &amp;&amp; sudo apt install -y git
+git clone https://github.com/ben-abeo/croom.to.git
+cd croom.to
+sudo bash installer/install-kiosk.sh --url http://&lt;TV Pi address&gt;:8080/
+<span class="c"># ends with "Crystal Meet table screen set up." and how to Allow this Pi</span>
+sudo reboot</pre>
+  <ul>
+    <li><strong>Run it with sudo from the desktop user.</strong> Run as root directly, it stops with "Run with sudo from the desktop user's login, so the kiosk starts in that desktop".</li>
+    <li><strong>Run it from a git clone.</strong> Otherwise: "Run this from a clone of the repository".</li>
+    <li><strong><span class="chip">--url</span> is required.</strong> Without it: "Say which room page to show". <span class="chip">--help</span> prints the usage.</li>
+  </ul>
+  <p class="see">After the reboot you should see the room page full screen. It can take a few minutes if the TV Pi is still starting: the kiosk waits for it.</p>
+  <div class="callout"><p class="kicker">Good to know</p><p>The installer prints a command to open the kiosk without rebooting. It works from a terminal on the Pi's own desktop. <strong>Over SSH it has not been tested</strong> and probably fails for lack of the desktop's display settings: reboot instead, or tap the <span class="ui">Room controls</span> icon on the desktop.</p></div>
+
+  <h3 class="sub">What the installer does</h3>
+  <table class="plain">
+    <thead><tr><th>Step</th><th>Result</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Packages</strong></td><td>Installs <span class="chip">chromium</span>, <span class="chip">curl</span> and <span class="chip">git</span> if missing.</td></tr>
+      <tr><td><strong>Kiosk launcher</strong></td><td>Writes <span class="chip">/usr/local/bin/crystal-meet-kiosk</span> holding the URL with <span class="chip">?keyboard=1</span>.</td></tr>
+      <tr><td><strong>Autostart</strong></td><td>Adds <span class="chip">/usr/local/bin/crystal-meet-kiosk &amp;</span> once to <span class="chip">~/.config/labwc/autostart</span>.</td></tr>
+      <tr><td><strong>Desktop icon</strong></td><td><span class="ui">Room controls</span> on the desktop, to reopen the kiosk.</td></tr>
+      <tr><td><strong>Blanking off</strong></td><td><span class="chip">raspi-config nonint do_blanking 1</span>.</td></tr>
+      <tr><td><strong>Agent</strong></td><td>A bare clone in <span class="chip">/opt/croom-kiosk/repo.git</span>, a sealed release of the clone's current commit in <span class="chip">/opt/croom-kiosk/releases/</span>, the links <span class="chip">current</span> and <span class="chip">good</span>, the state folder <span class="chip">/var/lib/croom-kiosk</span> with <span class="chip">config.json</span>, and the service <span class="chip">croom-kiosk-agent</span>, enabled and started.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">3 · Allow it in Settings</h3>
+  <ol class="steps">
+    <li>On the table screen tap <span class="ui">Options › Settings</span>. The first time, choose a PIN of 4 to 8 digits and enter it again. There is no default PIN.</li>
+    <li>Open <span class="ui">Software</span>. Under <span class="ui">Devices waiting to join</span> you should see this Pi, named by its hostname.</li>
+    <li>Tap <span class="ui">Allow</span> beside it. Allow only a device you know.</li>
+  </ol>
+  <p class="see">You should now see a <strong>Touch Pi</strong> card with "Checked in just now", its version, the newest version, <span class="ui">Update</span> and <span class="ui">Reboot</span>; its connection appears under <span class="ui">Settings › Network</span>.</p>
+
+  <h3 class="sub">4 · First-run check</h3>
+  <ol class="steps">
+    <li>Tap the link field and type a test meeting link on the on-screen keyboard. The key click should sound if it is on.</li>
+    <li>Tap <span class="ui">Join</span>. The TV should join the call and the table should show the meeting screen.</li>
+    <li>Tap <span class="ui">Leave</span>, then <span class="ui">Tap again to leave</span>. The table should return to the idle screen.</li>
+  </ol>
+
+  <h3 class="sub">Re-running the installer</h3>
+  <p>Run it again to change the TV Pi's address, to repair the kiosk, or to bring an older table Pi (set up before room settings, with no agent) up to date. It is safe to repeat and keeps the Pi's identity, so the Pi stays joined.</p>
+<pre>cd ~/croom.to &amp;&amp; git checkout main &amp;&amp; git pull
+sudo bash installer/install-kiosk.sh --url http://&lt;TV Pi address&gt;:8080/
+sudo reboot</pre>
+  <div class="callout dark"><p class="kicker">Pull first, every time</p><p>The installer installs the agent from the clone's <strong>current commit</strong>. Run <span style="font-weight:600">git pull</span> before it, or you may move the touch Pi back to an older version than the one the room updated it to.</p></div>
+  <p>A Pi that had no agent then appears under <span class="ui">Devices waiting to join</span>: <span class="ui">Allow</span> it. For a whole room, do the TV Pi first, then the touch Pi, then the door sign.</p>
+
+  <h3 class="sub">A tablet instead of a touch Pi</h3>
+  <p>An Android tablet in Fully Kiosk Browser, or an iPad in Guided Access with Safari, can show <span class="chip">http://&lt;TV Pi&gt;:8080/</span> full screen and kept awake. It uses its own keyboard and has no agent, so it can't be updated, rebooted or moved to new Wi-Fi from Settings.</p>
+</section>
+
+<!-- 05 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 05 · Configuration and Settings</p><h2>The touch Pi holds only an address; everything else is kept on the TV Pi</h2></div>
+  <p class="lede">There is no <span class="chip">config.yaml</span> on the touch Pi. What it shows and how the room behaves are set on the TV Pi, mostly from <span class="ui">Options › Settings</span> on the table. The same Settings pages also work in a laptop's browser at <span class="chip">http://&lt;TV Pi&gt;:8080/</span>.</p>
+
+  <h3 class="sub">On the touch Pi</h3>
+  <table>
+    <thead><tr><th>What</th><th>Where</th><th>Content</th></tr></thead>
+    <tbody>
+      <tr><td>Kiosk URL</td><td><span class="chip">/usr/local/bin/crystal-meet-kiosk</span></td><td>The room page with <span class="chip">?keyboard=1</span></td></tr>
+      <tr><td>Agent config</td><td><span class="chip">/var/lib/croom-kiosk/config.json</span> (root, 600)</td><td><span class="chip">{"url": "http://&lt;TV Pi&gt;:8080/", "user": "pi"}</span></td></tr>
+      <tr><td>Agent identity</td><td><span class="chip">/var/lib/croom-kiosk/identity.json</span> (root, 600)</td><td>Its id and secret token</td></tr>
+      <tr><td>Autostart</td><td><span class="chip">~/.config/labwc/autostart</span></td><td>The launcher line</td></tr>
+      <tr><td>Wi-Fi profiles</td><td><span class="chip">/etc/NetworkManager/system-connections/</span></td><td>Those made from Settings are <span class="chip">croom-&lt;uuid&gt;.nmconnection</span> (root, 600)</td></tr>
+    </tbody>
+  </table>
+  <p>To point the touch Pi at a new TV Pi address, re-run the installer with the new <span class="chip">--url</span> (Section 04). It rewrites both the launcher and the agent's config. Then reboot.</p>
+
+  <h3 class="sub">On the TV Pi</h3>
+  <ul>
+    <li><strong><span class="chip">/etc/croom/config.yaml</span></strong>, written by Settings through the TV Pi's root helper. The last five versions are kept as <span class="chip">config.yaml.1</span> to <span class="chip">.5</span>, and the last one that started well as <span class="chip">config.yaml.good</span>.</li>
+    <li><strong><span class="chip">/var/lib/croom/control-settings.json</span></strong>, the choices made on the table without a PIN: screensaver, door sign background and scores, key click, mic level, camera Home and presets.</li>
+    <li><strong><span class="chip">/var/lib/croom/settings-pin.json</span></strong>, the Settings PIN as a salted hash (mode 600).</li>
+    <li><strong><span class="chip">/var/lib/croom/devices.json</span></strong>, the joined devices, with each token stored only as a hash (mode 600).</li>
+  </ul>
+
+  <h3 class="sub">The Settings PIN</h3>
+  <ul>
+    <li><strong>First use.</strong> Choose 4 to 8 digits on the PIN pad, tap <span class="ui">OK</span>, then enter the same PIN again. Mismatched: "The two PINs were not the same: choose a PIN again".</li>
+    <li><strong>Unlocked for 5 minutes</strong> after the last Settings action. The header shows "Locks in N min"; <span class="ui">Lock</span> ends it at once.</li>
+    <li><strong>Leaving Settings locks it</strong>: going idle, a call starting, opening any Options screen other than TV, or reloading the page.</li>
+    <li><strong>Wrong PINs.</strong> "Wrong PIN: N tries left". After 5 wrong PINs every screen is locked out for 10 minutes ("Too many wrong PINs: try again in 10 minutes"). Restarting <span class="chip">croom</span> on the TV Pi clears the count.</li>
+    <li><strong>Change it</strong> under <span class="ui">Security</span>: current PIN, new PIN, new PIN again. Every other screen's unlock ends.</li>
+    <li><strong>Forgotten PIN.</strong> On the TV Pi, <span class="chip">sudo rm /var/lib/croom/settings-pin.json</span>. No restart is needed; the next person chooses a new PIN.</li>
+  </ul>
+
+  <h3 class="sub">Settings pages</h3>
+  <table>
+    <thead><tr><th>Page</th><th>What it holds</th></tr></thead>
+    <tbody>
+      <tr><td>Room</td><td>Name (required, up to 80 characters), location, company (shown on the door sign; blank shows the logo alone), time zone.</td></tr>
+      <tr><td>Calendar</td><td>Google calendar id; the service-account key, by <span class="ui">Upload</span> or <span class="ui">From USB stick</span> (a <span class="chip">.json</span> at the top of a stick in the <strong>TV Pi</strong>), then shown only as "Key for …, saved …"; booking hours.</td></tr>
+      <tr><td>Meetings</td><td>Platforms, camera and mic on at join, kiosk mode, the dialogs the room answers, ask about every dialog, reactions, Zoom SDK keys (upload, USB or <span class="ui">Type the keys</span>), Meet participants domain, <span class="ui">Sign in to Google</span>.</td></tr>
+      <tr><td>Devices</td><td>Speaker, microphone and camera on the TV Pi (or Automatic), camera travel time (1 to 60 s), the three camera preset names.</td></tr>
+      <tr><td>TV</td><td>Opens <span class="ui">Options › TV</span>; its Back returns to Settings.</td></tr>
+      <tr><td>Laptop switch</td><td>On or off, GPIO pin (BCM 0 to 27), press length (50 to 2000 ms), the camera's USB id, wait for a move (1 to 60 s), <span class="ui">Test the switch</span>.</td></tr>
+      <tr><td>AI &amp; dashboard</td><td>AI switches and backend; the fleet dashboard's on/off, URL and enrolment token.</td></tr>
+      <tr><td>Network</td><td>A card per device (TV Pi, <strong>Touch Pi</strong>, door sign): Wi-Fi or Ethernet, network, signal, address, <span class="ui">Change Wi-Fi</span>, <span class="ui">Forget</span> (Section 06).</td></tr>
+      <tr><td>Check</td><td><span class="ui">Calendar</span>, <span class="ui">TV</span>, <span class="ui">Laptop switch</span>, <span class="ui">Google sign-in</span>, <span class="ui">Zoom keys</span>; and <span class="ui">Capture the next Google Meet call</span> for support. None checks the touch Pi.</td></tr>
+      <tr><td>Logs</td><td>The TV Pi's <span class="chip">croom</span> journal, newest first, 200 lines and <span class="ui">Load more</span>, with <span class="ui">All</span> / <span class="ui">Warnings and errors</span>. <strong>Not the touch Pi's logs.</strong></td></tr>
+      <tr><td>Software</td><td>A card for the TV Pi, one per joined device, <span class="ui">Update all</span>, and <span class="ui">Devices waiting to join</span> (Section 06).</td></tr>
+      <tr><td>Security</td><td>Change the PIN.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Saving rules</h3>
+  <ul>
+    <li><strong>Checked before saving.</strong> A refused value says why next to the field, and nothing is saved: "Not saved: see the settings marked".</li>
+    <li><strong>Live or after a restart.</strong> Live settings (booking hours, camera preset names) say <span class="ui">Saved</span>. Others say <span class="ui">Saved: applies after a restart</span> with <span class="ui">Restart now</span>.</li>
+    <li><strong>Automatic undo.</strong> After Restart now, the TV Pi watches the room for 2 minutes. If it does not start, the last good config comes back and the page says "Your last change was undone: the room did not start with it". The refused one is kept as <span class="chip">config.yaml.1</span>.</li>
+    <li><strong>Not in a call.</strong> Restart, reboot, update, Wi-Fi changes, Google sign-in and touch Pi jobs are refused during a call: "Leave the meeting first".</li>
+    <li><strong>"Not available on this device".</strong> Saving, keys, restart, Logs and the TV Pi's Software and Wi-Fi need the TV Pi's root helper <span class="chip">croom-admin</span>. If it is not running, those pages say this; the rest still work.</li>
+  </ul>
+</section>
+
+<!-- 06 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 06 · Managing it from the room</p><h2>Once allowed, the room can reboot, update and move the touch Pi without SSH</h2></div>
+  <p class="lede">The agent checks in with the TV Pi every 5 seconds, and each answer can carry one job. Everything here is done under <span class="ui">Options › Settings</span> with the room PIN.</p>
+  <div class="callout warn"><p class="kicker">Tested against stand-ins</p><p>The agent, updates and the Wi-Fi safety net are covered by automated tests that use stand-ins for Git, systemd and NetworkManager. <strong>They have not yet been proven on real Pis.</strong> Try the first update and the first Wi-Fi change with someone at the table, outside meeting hours.</p></div>
+
+  <h3 class="sub">The Touch Pi card</h3>
+  <ul>
+    <li><strong>Seen.</strong> "Checked in just now" or "N seconds ago" while online (checked in within 20 seconds); otherwise "Not seen since 10:42 AM", and its jobs wait.</li>
+    <li><strong>Version.</strong> The commit it runs, or "Version unknown". <strong>Newest:</strong> "Newest: 1a2b3c4, date" with the list of changes, or "Up to date".</li>
+    <li><strong>Job.</strong> What it is doing now, in the agent's own words, and the last result.</li>
+    <li><strong>Buttons.</strong> <span class="ui">Update</span>, <span class="ui">Reboot</span> (second tap) and <span class="ui">Forget</span> (second tap).</li>
+  </ul>
+
+  <h3 class="sub">Allow, Refuse, Forget</h3>
+  <table class="plain">
+    <thead><tr><th>Action</th><th>Effect</th></tr></thead>
+    <tbody>
+      <tr><td><strong>Allow</strong></td><td>The waiting device joins and gets its jobs. At most 10 can wait; a waiting entry unseen for 10 minutes is dropped.</td></tr>
+      <tr><td><strong>Refuse</strong> (tap twice)</td><td>Remembers the device's id and turns it away from then on: "This device was refused".</td></tr>
+      <tr><td><strong>Forget</strong> (tap twice)</td><td>Removes a joined device and remembers nothing. For a replaced Pi; if the old one is still running it asks to join again.</td></tr>
+    </tbody>
+  </table>
+  <p><strong>Undo a Refuse</strong> by giving the touch Pi a new identity. It then appears under Devices waiting to join.</p>
+<pre>sudo rm /var/lib/croom-kiosk/identity.json
+sudo systemctl restart croom-kiosk-agent</pre>
+
+  <h3 class="sub">Jobs</h3>
+  <table>
+    <thead><tr><th>Job</th><th>What the touch Pi does</th><th>What the card reports</th></tr></thead>
+    <tbody>
+      <tr><td>Reboot</td><td><span class="chip">sync</span>, then <span class="chip">systemctl reboot</span></td><td>Rebooting, then Rebooted at the first check-in after</td></tr>
+      <tr><td>Update</td><td>Fetches the chosen commit of main, sets it up, reboots onto it on trial</td><td>Fetching main from GitHub, Getting…, Setting up…, Restarting on…, Updated to …</td></tr>
+      <tr><td>Wi-Fi scan</td><td>Lists up to 30 networks</td><td>Looking for networks</td></tr>
+      <tr><td>Wi-Fi connect</td><td>Joins with a 90-second safety net</td><td>Joining a network, then Joined …</td></tr>
+      <tr><td>Wi-Fi forget</td><td>Removes a saved network</td><td>Forgot …</td></tr>
+    </tbody>
+  </table>
+  <ul>
+    <li><strong>Never during a call.</strong> Reboot, update and Wi-Fi changes are refused: "Leave the meeting first".</li>
+    <li><strong>One at a time.</strong> "The Touch Pi is busy: wait for it to finish".</li>
+    <li><strong>Jobs live in the TV Pi's memory.</strong> Restarting <span class="chip">croom</span> forgets a job not yet handed out.</li>
+  </ul>
+
+  <h3 class="sub">How an update runs</h3>
+  <p>Versions are commits of <span class="chip">main</span> on GitHub <span class="chip">ben-abeo/croom.to</span>. The TV Pi checks the newest every 10 minutes; if it can't, the card says "Can't check for updates right now". Updating the touch Pi changes only its launcher, agent and Wi-Fi code. <strong>The screens it shows come from the TV Pi</strong>, so updating the TV Pi is what changes them.</p>
+  <ol class="steps">
+    <li>Tap <span class="ui">Update</span> on the Touch Pi card, or <span class="ui">Update all</span> (touch Pis and door signs first, the TV Pi last). The card shows "Fetching main from GitHub".</li>
+    <li>The agent fetches main itself and checks the commit is on it. It does not trust the TV Pi for this.</li>
+    <li>It builds the new release beside the old one ("Getting …"), runs the new release's installer ("Setting up …"), then reboots ("Restarting on …").</li>
+    <li>After the reboot the old agent starts the new one on trial and waits up to <strong>5 minutes</strong> for it to check in.</li>
+    <li>It checks in: the card says "Updated to …" and the new release becomes the good one.</li>
+  </ol>
+  <div class="callout tip"><p class="kicker">It rolls itself back</p><p>If the new version's setup fails, the Pi stays where it was: "The update to X did not happen: its kiosk setup did not finish". If the new version does not check in within 5 minutes (or crashes 3 times), the Pi goes back and reboots: "The update to X was undone: the touch Pi did not check in with it within 5 minutes. It is back on Y". A power cut at any step is recovered at the next start.</p></div>
+
+  <h3 class="sub">Changing Wi-Fi safely</h3>
+  <ol class="steps">
+    <li>In <span class="ui">Settings › Network</span>, on the Touch Pi card, tap <span class="ui">Change Wi-Fi</span>. A list of networks appears; <span class="ui">Look again</span> rescans and <span class="ui">Hidden network</span> lets you type a name.</li>
+    <li>Choose a network, type the password and tap <span class="ui">Join</span>. The card shows "Joined X: checking that the touch Pi can do its job on it".</li>
+    <li>For up to 90 seconds the touch Pi checks every 5 seconds that it can reach the room page on the new network.</li>
+    <li>Proven: the card says "Joined X" and older profiles for that network are removed. Not proven: it goes back to the old network and says why.</li>
+  </ol>
+  <ul>
+    <li><strong>Refused on purpose:</strong> networks that ask for a user name (enterprise), WEP, a password on an open network, and forgetting the network it is on ("join another network first, or it would be cut off").</li>
+    <li><strong>Hidden networks</strong> with a password are joined as WPA2; a WPA3-only hidden network fails and goes back.</li>
+    <li><strong>Power cut during the 90 seconds:</strong> the touch Pi comes back on the old network.</li>
+    <li><strong>The TV Pi waits for the touch Pi.</strong> A Wi-Fi change on the TV Pi is proven by the touch Pi checking in, so it is undone if the touch Pi is offline.</li>
+  </ul>
+
+  <h3 class="sub">Updating by hand</h3>
+  <p>When Settings can't reach the touch Pi, update it over SSH. Pull first (Section 04).</p>
+<pre>cd ~/croom.to &amp;&amp; git checkout main &amp;&amp; git pull
+sudo bash installer/install-kiosk.sh --url http://&lt;TV Pi address&gt;:8080/
+sudo reboot</pre>
+</section>
+
+<!-- 07 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 07 · How it works</p><h2>A launcher in the desktop session and a root service, both pointed at port 8080</h2></div>
+
+  <h3 class="sub">What runs on the touch Pi</h3>
+  <table>
+    <thead><tr><th>Process</th><th>Started by</th><th>Runs as</th></tr></thead>
+    <tbody>
+      <tr><td>Chromium kiosk</td><td>The labwc autostart line, or the <span class="ui">Room controls</span> icon. Not a systemd unit.</td><td>The desktop user</td></tr>
+      <tr><td>croom-kiosk-agent</td><td>systemd, at boot, after the network; restarts 5 s after a crash</td><td>root, system Python 3, standard library only</td></tr>
+      <tr><td>Trial agent</td><td>The good agent, for up to 5 minutes after an update reboot</td><td>root</td></tr>
+    </tbody>
+  </table>
+  <p>The touch Pi runs no <span class="chip">croom</span>, no <span class="chip">croom-admin</span> and no Python virtual environment.</p>
+
+  <h3 class="sub">The kiosk launcher</h3>
+  <ol class="steps">
+    <li>If a Chromium kiosk is already running, it stops, so the icon never opens a second window.</li>
+    <li>It waits for the room page to answer: up to 60 tries, each a 2-second request and a 2-second pause. After that it opens Chromium anyway.</li>
+    <li>It starts Chromium full screen on the room page.</li>
+  </ol>
+<pre>chromium --kiosk --force-device-scale-factor=1.5 --noerrdialogs --disable-infobars
+  --disable-session-crashed-bubble --hide-crash-restore-bubble
+  --check-for-update-interval=31536000 --password-store=basic
+  --overscroll-history-navigation=0 --disable-pinch "http://&lt;TV Pi&gt;:8080/?keyboard=1"</pre>
+
+  <h3 class="sub">The page and the TV Pi</h3>
+  <ul>
+    <li><strong>Polling.</strong> <span class="chip">GET /api/status</span> every 2 seconds; <span class="chip">GET /api/calendar/events</span> every 30 seconds. A failed status shows "Can't reach the room".</li>
+    <li><strong>No caching.</strong> The page and its files are served with <span class="chip">Cache-Control: no-cache</span>.</li>
+    <li><strong>No reload by itself.</strong> As far as the code shows, the page does not reload after the TV Pi is updated. To be sure the table runs the new screens, reboot the touch Pi from Settings.</li>
+    <li><strong>JSON only.</strong> Every POST must be <span class="chip">Content-Type: application/json</span>, else 415.</li>
+  </ul>
+
+  <h3 class="sub">APIs the table uses</h3>
+  <table>
+    <thead><tr><th>Group</th><th>Routes on the TV Pi, port 8080</th></tr></thead>
+    <tbody>
+      <tr><td>Room</td><td>GET /, /api/status, /api/calendar/events, /api/calendar/week</td></tr>
+      <tr><td>Bookings</td><td>GET /api/bookings/slots; POST /api/bookings, /api/bookings/now, /api/bookings/{key}/end (only from the room page), /api/bookings/{key}/cancel</td></tr>
+      <tr><td>Meeting</td><td>POST /api/meeting/join, /leave, /mute, /camera, /control, /dialog, /chat/seen</td></tr>
+      <tr><td>Look and sound</td><td>/api/screensaver, /api/settings (key click, door sign background and scores), /api/audio/volume, /api/audio/mic</td></tr>
+      <tr><td>Camera</td><td>POST /api/camera/move, /zoom, /home, /presets/{slot}, /setup, /preview</td></tr>
+      <tr><td>TV and laptop</td><td>POST /api/tv/control, /pair, /select, /settings, /forget; GET /api/tv/discover; POST /api/laptop</td></tr>
+      <tr><td>Touchpad</td><td>WebSocket /ws/pointer, refused to pages of another origin</td></tr>
+      <tr><td>Settings (PIN)</td><td>/api/settings/… with header X-Croom-Unlock; the PIN routes /api/settings/pin, /pin/set, /unlock, /lock</td></tr>
+      <tr><td>Agent</td><td>POST /api/devices/checkin with header X-Croom-Device-Token</td></tr>
+    </tbody>
+  </table>
+  <p>The everyday routes have no login: the room page is meant for the office LAN only. Only Settings is behind the PIN.</p>
+
+  <h3 class="sub">Check-in protocol</h3>
+<pre>POST http://&lt;TV Pi&gt;:8080/api/devices/checkin        every 5 s
+X-Croom-Device-Token: &lt;token&gt;
+{"id": "&lt;32 hex&gt;", "kind": "touch", "version": "&lt;commit&gt;", "name": "&lt;hostname&gt;",
+ "network": {…}, "job": &lt;last job report or null&gt;}
+
+→ {"state": "pending"}
+→ {"state": "allowed", "job": {"id", "type", "args"} | null}</pre>
+  <p>The touch Pi makes its own id and 256-bit token on first start; no token ever comes from the TV Pi, which keeps only a SHA-256 hash of it. A job not acknowledged is handed out again after 15 seconds.</p>
+
+  <h3 class="sub">Files on the touch Pi</h3>
+  <table>
+    <thead><tr><th>Path</th><th>What</th></tr></thead>
+    <tbody>
+      <tr><td>~/croom.to/</td><td>The git clone the installer ran from</td></tr>
+      <tr><td>/usr/local/bin/crystal-meet-kiosk</td><td>The kiosk launcher (root, 755)</td></tr>
+      <tr><td>~/.config/labwc/autostart</td><td>Starts the launcher at login</td></tr>
+      <tr><td>~/Desktop/room-controls.desktop</td><td>The Room controls icon</td></tr>
+      <tr><td>/etc/systemd/system/croom-kiosk-agent.service</td><td>The agent's unit</td></tr>
+      <tr><td>/opt/croom-kiosk/repo.git</td><td>Bare clone, origin github.com/ben-abeo/croom.to</td></tr>
+      <tr><td>/opt/croom-kiosk/releases/&lt;commit&gt;/</td><td>Sealed releases, each with a VERSION file</td></tr>
+      <tr><td>/opt/croom-kiosk/good, current</td><td>Links: the release systemd runs the agent from; the release whose kiosk setup is installed</td></tr>
+      <tr><td>/var/lib/croom-kiosk/ (root, 700)</td><td>config.json, identity.json, update.json, job.json, wifi.json, trial-ok (each 600)</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Security in brief</h3>
+  <ul>
+    <li><strong>An open room page.</strong> On the LAN, anyone can open the room page, drive the call, the camera and the TV, and read <span class="chip">/api/status</span>, which includes the meeting link and recent chat. This is by design; keep the room on the office network.</li>
+    <li><strong>Plain HTTP.</strong> The PIN, keys and Wi-Fi passwords cross the LAN unencrypted, including the Wi-Fi password sent to the touch Pi in a check-in answer.</li>
+    <li><strong>A narrow root agent.</strong> It accepts only five jobs, checks every argument, never runs a shell, checks an update's commit on GitHub itself, and runs only root-owned releases no one else can write.</li>
+  </ul>
+</section>
+
+<!-- 08 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 08 · Logs and diagnostics</p><h2>The touch Pi's own story is in its agent journal, read over SSH</h2></div>
+  <p class="lede">There is no separate health check for the touch Pi. It is healthy when the kiosk shows the room page and its card in <span class="ui">Settings › Software</span> says "Checked in". Settings › Logs shows only the TV Pi.</p>
+
+  <h3 class="sub">On the touch Pi</h3>
+<pre>systemctl status croom-kiosk-agent
+sudo journalctl -u croom-kiosk-agent -n 100          <span class="c"># check-ins, joining, jobs, updates, Wi-Fi</span>
+sudo journalctl -u croom-kiosk-agent -f              <span class="c"># follow it live</span>
+sudo cat /var/lib/croom-kiosk/config.json            <span class="c"># the room address and desktop user</span>
+sudo cat /var/lib/croom-kiosk/update.json            <span class="c"># last update: state, commit, from, why</span>
+sudo cat /var/lib/croom-kiosk/job.json               <span class="c"># last job and its result</span>
+sudo cat /var/lib/croom-kiosk/wifi.json              <span class="c"># last Wi-Fi change</span>
+ls -l /opt/croom-kiosk/                              <span class="c"># current and good point at the running release</span>
+cat /opt/croom-kiosk/good/VERSION
+pgrep -af "chromium.*--kiosk"                        <span class="c"># is the kiosk running?</span>
+curl -s http://&lt;TV Pi&gt;:8080/api/status | head -c 300 <span class="c"># does the TV Pi answer?</span>
+nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status
+cat ~/.config/labwc/autostart /usr/local/bin/crystal-meet-kiosk</pre>
+  <p>Chromium's own output is not saved anywhere by the installer.</p>
+
+  <h3 class="sub">Agent journal lines</h3>
+  <table class="plain">
+    <thead><tr><th>Line</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td>Checking in with &lt;url&gt; as &lt;id&gt;, version &lt;short&gt;</td><td>The agent has started.</td></tr>
+      <tr><td>This touch Pi is &lt;id&gt;: it waits to join until Allow is tapped in Settings › Software</td><td>First start: a new identity.</td></tr>
+      <tr><td>Waiting to join: tap Allow in Settings › Software on the room page</td><td>Allow it (Section 04).</td></tr>
+      <tr><td>Can't reach the room at &lt;url&gt;: …</td><td>Network, address, or the TV Pi is down.</td></tr>
+      <tr><td>The room refused the check-in (&lt;status&gt;): &lt;words&gt;</td><td>Refused, or a token mismatch (Section 09).</td></tr>
+      <tr><td>Checking in with the room</td><td>Recovered after a problem.</td></tr>
+      <tr><td>Updated to &lt;short&gt; / The update to … was undone (…)</td><td>The end of an update.</td></tr>
+      <tr><td>No room address in /var/lib/croom-kiosk/config.json</td><td>Re-run the installer with <span class="chip">--url</span>.</td></tr>
+      <tr><td>Wi-Fi: &lt;words&gt;</td><td>A Wi-Fi job's progress.</td></tr>
+    </tbody>
+  </table>
+  <p>Trouble lines are written once when something changes, not every 5 seconds.</p>
+
+  <h3 class="sub">On the TV Pi</h3>
+<pre>sudo systemctl status croom croom-admin
+sudo journalctl -u croom -n 50                 <span class="c"># look for the first ERROR; joins and Allows are logged here</span>
+sudo journalctl -u croom-admin -n 50
+sudo cat /var/lib/croom/devices.json           <span class="c"># joined and refused devices (tokens hashed)</span>
+/opt/croom/venv/bin/croom --check-calendar -c /etc/croom/config.yaml
+/opt/croom/venv/bin/croom --check-tv -c /etc/croom/config.yaml     <span class="c"># as the desktop user, never root</span>
+curl http://&lt;TV Pi&gt;:8080/api/meeting/diagnostics   <span class="c"># in a call only; opens menus on the TV briefly, never poll it</span></pre>
+  <p>The TV Pi's journal records "A touch Pi asks to join: &lt;name&gt; at &lt;address&gt;", "The touch Pi &lt;name&gt; may join" and each job asked for from Settings.</p>
+</section>
+
+<!-- 09 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 09 · Troubleshooting</p><h2>Start with two checks, then find the symptom</h2></div>
+  <p class="lede">From the touch Pi (or a laptop on its network), run <span class="chip">curl http://&lt;TV Pi&gt;:8080/api/status</span>. If it answers, the problem is on the touch Pi; if not, it is the TV Pi or the network. On the touch Pi, read <span class="chip">sudo journalctl -u croom-kiosk-agent -n 100</span>.</p>
+
+  <h3 class="sub">The screen and the kiosk</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Desktop shown, no room page</td><td>Kiosk not started: auto-login off, autostart line missing, or the browser was closed.</td><td>Tap <span class="ui">Room controls</span> on the desktop. Check auto-login and that <span class="chip">~/.config/labwc/autostart</span> has the launcher line. Re-run the installer (pull first).</td></tr>
+      <tr><td>The page takes minutes to appear after a boot</td><td>The launcher waits for the TV Pi to answer.</td><td>Normal while the TV Pi starts. If it happens every time, check the TV Pi and the network.</td></tr>
+      <tr><td>Browser error page ("can't be reached")</td><td>The TV Pi was down for the whole wait, or its address changed.</td><td>Check <span class="chip">sudo systemctl status croom</span> on the TV Pi and its fixed address. Reboot the touch Pi. If the address changed, re-run the installer with the new <span class="chip">--url</span>.</td></tr>
+      <tr><td>Top bar says "Can't reach the room"</td><td>Status requests fail: the TV Pi is down or restarting, or the network dropped.</td><td>Wait a moment after a restart. Run the curl check from the touch Pi; read <span class="chip">journalctl -u croom</span> on the TV Pi.</td></tr>
+      <tr><td>A <span class="chip">.local</span> address fails</td><td>Name lookup (mDNS) not working on the network.</td><td>Re-run the installer with the TV Pi's IP address.</td></tr>
+      <tr><td>No on-screen keyboard</td><td>The URL lacks <span class="chip">?keyboard=1</span> (a tablet, or a browser opened by hand).</td><td>Re-run the installer, which adds it.</td></tr>
+      <tr><td>Everything tiny or huge</td><td>An old launcher without the 1.5× scale.</td><td>Re-run the installer and reboot.</td></tr>
+      <tr><td>Screen goes blank when idle</td><td>Blanking was not turned off.</td><td><span class="chip">sudo raspi-config nonint do_blanking 1</span>, then reboot.</td></tr>
+      <tr><td>No key click</td><td>Key click is off, or the touch Pi has no audio output.</td><td><span class="ui">Options › Key click on</span>; check the touch Pi's audio output.</td></tr>
+      <tr><td>Screens did not change after the TV Pi was updated</td><td>The kiosk still has the old page loaded.</td><td>Reboot the touch Pi from <span class="ui">Settings › Software</span>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Joining and check-in</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Not listed under Devices waiting to join</td><td>Agent stopped, wrong address in config.json, TV Pi unreachable, refused before, or 10 already waiting.</td><td><span class="chip">systemctl status croom-kiosk-agent</span> and its journal. Check <span class="chip">config.json</span>. "Too many devices are waiting to join": wait 10 minutes or deal with the others.</td></tr>
+      <tr><td>"No room address in /var/lib/croom-kiosk/config.json"</td><td>Installed without the agent, or the file was deleted.</td><td>Re-run the installer with <span class="chip">--url</span>.</td></tr>
+      <tr><td>"The room refused the check-in (403): This device was refused"</td><td>Someone tapped Refuse.</td><td>Delete <span class="chip">identity.json</span> and restart the agent (Section 06), then Allow.</td></tr>
+      <tr><td>"The room refused the check-in (403): This device's token is not the one it joined with"</td><td>The identity was replaced while the old id is still allowed.</td><td>In Settings › Software, <span class="ui">Forget</span> the old card; the Pi then waits to join: <span class="ui">Allow</span>.</td></tr>
+      <tr><td>"Can't reach the room at &lt;url&gt;: …"</td><td>Network, TV Pi down, or wrong address.</td><td>Check the network, the TV Pi, and <span class="chip">config.json</span>.</td></tr>
+      <tr><td>Card says "Not seen since …"</td><td>Touch Pi off, agent stopped, or network down.</td><td>Check power and network; <span class="chip">sudo systemctl restart croom-kiosk-agent</span>. Jobs wait until it returns.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Updates and jobs</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"Version unknown", or "This touch Pi was not set up for updates: run install-kiosk.sh on it once more"</td><td>The agent runs from a clone, or its release links are wrong.</td><td>Pull, re-run the installer, reboot.</td></tr>
+      <tr><td>"Can't reach GitHub (…)"</td><td>No HTTPS from the touch Pi to github.com.</td><td>Fix outbound HTTPS or DNS, then retry. The running version is untouched.</td></tr>
+      <tr><td>"That version is not on main on GitHub"</td><td>The commit is not on main.</td><td>Use <span class="ui">Check again</span> and choose a version on main.</td></tr>
+      <tr><td>"The update to X did not happen: its kiosk setup did not finish (…)"</td><td>The new release's installer failed (apt, disk space).</td><td>The Pi stays on the old version. Read the agent journal, fix, retry.</td></tr>
+      <tr><td>"The update to X was undone: the touch Pi did not check in with it within 5 minutes"</td><td>No network after the reboot, or a fault in the new release.</td><td>Check the network and TV Pi; retry. Report the commit if it repeats.</td></tr>
+      <tr><td>"The update to X was undone: … after 3 starts"</td><td>Power cuts or crashes during the trial.</td><td>Steady the power; retry.</td></tr>
+      <tr><td>"The touch Pi restarted before it finished" / "stopped before it finished"</td><td>The Pi restarted or stopped mid-job.</td><td>Retry the job; read the agent journal.</td></tr>
+      <tr><td>"The Touch Pi is busy: wait for it to finish"</td><td>One job at a time.</td><td>Wait for the current job.</td></tr>
+      <tr><td>"This touch Pi has not joined yet: allow it first"</td><td>A job for a waiting device.</td><td><span class="ui">Allow</span> it first.</td></tr>
+      <tr><td>"Leave the meeting first"</td><td>Reboot, update or Wi-Fi change during a call.</td><td>Leave the call and retry.</td></tr>
+      <tr><td>Update all refused with words about the laptop</td><td>Laptop mode has the camera.</td><td>Tap <span class="ui">Back to room</span> first.</td></tr>
+      <tr><td>"Can't check for updates right now"</td><td>The TV Pi can't reach GitHub.</td><td>Check the TV Pi's internet. Everything else works.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Wi-Fi</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"Joined X, but the touch Pi could not reach the room at &lt;url&gt; within 90 seconds. The touch Pi is back on Y"</td><td>The new network does not route to the TV Pi (another VLAN, guest network, client isolation).</td><td>Choose a network that reaches the TV Pi, or move it by hand at the Pi.</td></tr>
+      <tr><td>"Could not join X: …"</td><td>Wrong password or out of range.</td><td>Retype the password. It is back on the old network already.</td></tr>
+      <tr><td>"X asks for a user name…" / "X uses WEP…"</td><td>Enterprise or WEP network.</td><td>Not supported: use Ethernet or a WPA2/WPA3-Personal network.</td></tr>
+      <tr><td>"This touch Pi has no Wi-Fi"</td><td>No Wi-Fi radio managed by NetworkManager.</td><td>Use Ethernet; check <span class="chip">nmcli device status</span>.</td></tr>
+      <tr><td>"A Wi-Fi change is under way: wait for it to finish"</td><td>A change is still in its 90 seconds.</td><td>Wait for it.</td></tr>
+      <tr><td>The TV Pi's Wi-Fi change is undone after 90 s</td><td>The touch Pi was offline, so it could not prove the change.</td><td>Bring the touch Pi online first.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Settings and the PIN</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"Settings locked: enter the PIN again"</td><td>5 minutes passed, Settings was left, <span class="chip">croom</span> restarted, or the PIN changed elsewhere.</td><td>Enter the PIN again.</td></tr>
+      <tr><td>"Too many wrong PINs: try again in N minutes"</td><td>5 wrong PINs.</td><td>Wait 10 minutes, or <span class="chip">sudo systemctl restart croom</span> on the TV Pi.</td></tr>
+      <tr><td>PIN forgotten</td><td>—</td><td>On the TV Pi, <span class="chip">sudo rm /var/lib/croom/settings-pin.json</span>, then choose a new one.</td></tr>
+      <tr><td>"Not available on this device"</td><td><span class="chip">croom-admin</span> is not running on the TV Pi.</td><td><span class="chip">sudo systemctl status croom-admin</span> and its journal; re-run the TV Pi's installer.</td></tr>
+      <tr><td>"Your last change was undone: the room did not start with it"</td><td>A saved setting stopped the room from starting.</td><td>Fix the value; the refused config is <span class="chip">/etc/croom/config.yaml.1</span>.</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Calls, TV and devices</h3>
+  <table class="trouble">
+    <thead><tr><th>Symptom</th><th>Likely cause</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>"Unsupported meeting link" / "A meeting is already in progress"</td><td>The platform is not turned on in Settings, or a call is running.</td><td>Use a supported link; leave the current call first.</td></tr>
+      <tr><td>"Couldn't join": "Zoom needs the meeting passcode"</td><td>No passcode in the link.</td><td>Type the passcode and tap <span class="ui">Join again</span>.</td></tr>
+      <tr><td>Join refused with words about the laptop</td><td>Laptop mode has the camera.</td><td><span class="ui">Back to room</span>.</td></tr>
+      <tr><td>"End now is on the room's touch screen"</td><td>End was asked for from somewhere other than the table.</td><td>Use <span class="ui">End now</span> on the table.</td></tr>
+      <tr><td>Touchpad says "Reconnecting…"</td><td>The touchpad link dropped.</td><td>It retries by itself; check the TV Pi.</td></tr>
+      <tr><td>Room Pi mouse does nothing ("needs /dev/uinput")</td><td>The TV Pi's virtual mouse is not set up.</td><td>On the TV Pi check <span class="chip">ls -l /dev/uinput</span> and the rule <span class="chip">99-croom-uinput.rules</span>; re-run its installer; restart croom.</td></tr>
+      <tr><td>"The TV is not answering at …" / Find TVs lists nothing</td><td>TV off, on another network, or a firewall on the TV Pi.</td><td>Run <span class="chip">croom --check-tv</span> on the TV Pi; see the room setup guide.</td></tr>
+      <tr><td>"The TV no longer accepts this table"</td><td>The TV forgot the pairing.</td><td><span class="ui">Forget TV</span>, <span class="ui">Pair</span>, and accept on the TV within a minute.</td></tr>
+      <tr><td>"Wake unavailable · Add a MAC address in Change TV"</td><td>No TV MAC address saved.</td><td><span class="ui">Change TV › TV MAC address › Save connection</span>.</td></tr>
+      <tr><td>"No speaker found" / "No microphone found" / "No controllable camera found"</td><td>The TV Pi does not see the device.</td><td>Check the USB cables on the TV Pi, reboot it, then <span class="ui">Settings › Devices</span>.</td></tr>
+      <tr><td>"Reading the list from Meet"</td><td>Meet's people panel is still opening on the TV.</td><td>Wait a moment with the screen open.</td></tr>
+      <tr><td>"Calendar offline since …"</td><td>The TV Pi can't reach Google.</td><td>Bookings sync later. Check the TV Pi's internet and <span class="chip">croom --check-calendar</span>.</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- 10 -->
+<section class="section">
+  <div class="section-head"><p class="kicker">Section 10 · Reference</p><h2>Names, numbers and files on a few pages</h2></div>
+  <table>
+    <thead><tr><th>What</th><th>Value</th></tr></thead>
+    <tbody>
+      <tr><td>Room page</td><td>http://&lt;TV Pi&gt;:8080/?keyboard=1</td></tr>
+      <tr><td>Installer</td><td>installer/install-kiosk.sh --url http://&lt;TV Pi&gt;:8080/</td></tr>
+      <tr><td>Agent</td><td>tools/kiosk_agent/croom_kiosk_agent.py, service croom-kiosk-agent</td></tr>
+      <tr><td>Check-in</td><td>POST /api/devices/checkin every 5 s, kind "touch", header X-Croom-Device-Token</td></tr>
+      <tr><td>Versions</td><td>Commits of main on github.com/ben-abeo/croom.to</td></tr>
+      <tr><td>Settings PIN</td><td>4 to 8 digits; 5 minutes unlocked; 5 tries, then 10 minutes locked</td></tr>
+      <tr><td>Desktop icon</td><td>Room controls</td></tr>
+      <tr><td>Hardware</td><td>Raspberry Pi (model not specified), 10.1" 1920×1200 Forzola touch panel (part number and power not specified)</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Timers and limits</h3>
+  <table class="plain">
+    <thead><tr><th>Value</th><th>Where it applies</th></tr></thead>
+    <tbody>
+      <tr><td>Check-in every 5 s; online if seen within 20 s; job resent after 15 s</td><td>Agent and the TV Pi's registry</td></tr>
+      <tr><td>Agent restarted 5 s after a crash</td><td>systemd unit</td></tr>
+      <tr><td>Update trial 5 min, at most 3 starts; fetch and setup time out after 15 min</td><td>Agent</td></tr>
+      <tr><td>Wi-Fi proof within 90 s, checked every 5 s; join wait 45 s; status re-read every 30 s</td><td>Agent's Wi-Fi code</td></tr>
+      <tr><td>Status every 2 s, events every 30 s; second tap within 5 s</td><td>The room page</td></tr>
+      <tr><td>Options return after 10 min; meeting screens after 2 min; reactions row 10 s; tap guard 0.5 s</td><td>The room page</td></tr>
+      <tr><td>Launcher waits at most 60 tries for the TV Pi</td><td>crystal-meet-kiosk</td></tr>
+      <tr><td>Restart watch 2 min; TV Pi update watch 3 min; GitHub answer cached 10 min</td><td>TV Pi</td></tr>
+      <tr><td>Sign in to Google cancelled after 15 min without a touch</td><td>TV Pi</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Ports</h3>
+  <table class="plain">
+    <thead><tr><th>Port</th><th>Use</th></tr></thead>
+    <tbody>
+      <tr><td>TCP 8080, touch Pi to TV Pi</td><td>Room page, APIs, touchpad, check-in</td></tr>
+      <tr><td>TCP 443, touch Pi to github.com</td><td>Fetching an update</td></tr>
+      <tr><td>TCP 80 and 443, touch Pi to apt mirrors</td><td>Install only</td></tr>
+      <tr><td>TCP 22, to the touch Pi</td><td>SSH, if turned on</td></tr>
+      <tr><td>None</td><td>Crystal Meet opens no listening port on the touch Pi</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Installer environment overrides</h3>
+  <p>For tests and unusual setups: <span class="chip">KIOSK_URL</span>, <span class="chip">KIOSK_USER</span>, <span class="chip">KIOSK_HOME</span>, <span class="chip">BIN_DIR</span>, <span class="chip">SKIP_PACKAGES</span>, <span class="chip">SKIP_RASPI_CONFIG</span>, <span class="chip">SKIP_AGENT</span>, <span class="chip">KIOSK_SOURCE</span>, <span class="chip">KIOSK_REPO_URL</span>, <span class="chip">AGENT_DIR</span>, <span class="chip">AGENT_STATE</span>, <span class="chip">AGENT_PYTHON</span>, <span class="chip">UNIT_DIR</span>, <span class="chip">RELEASE_OWNER</span>. The agent sets <span class="chip">KIOSK_FROM_AGENT</span> itself during an update.</p>
+
+  <h3 class="sub">Source map</h3>
+  <table class="plain">
+    <thead><tr><th>Path</th><th>Holds</th></tr></thead>
+    <tbody>
+      <tr><td>installer/install-kiosk.sh</td><td>The touch Pi installer</td></tr>
+      <tr><td>tools/kiosk_agent/croom_kiosk_agent.py</td><td>The agent: check-in, jobs, updates, trials</td></tr>
+      <tr><td>src/croom/admin/nmcli.py</td><td>Wi-Fi with the safety net, shared with the TV Pi</td></tr>
+      <tr><td>src/croom/settings/checkin.py</td><td>The device registry on the TV Pi</td></tr>
+      <tr><td>src/croom/control/service.py</td><td>Every route</td></tr>
+      <tr><td>src/croom/control/static/</td><td>The room page: index.html, app.js, booking.js, devices.js, keyboard.js, remote.js, touchpad.js, settings*.js, style.css, icons.svg</td></tr>
+      <tr><td>docs/superpowers/specs/2026-10-29-room-settings-design.md</td><td>The design of room settings (sections 6 and 7 for the touch Pi)</td></tr>
+    </tbody>
+  </table>
+
+  <h3 class="sub">Tests</h3>
+  <p>Run with pytest from the repository: <span class="chip">tests/unit/kiosk_agent/</span> (the agent), <span class="chip">tests/unit/installer/test_install_kiosk_script.py</span> (the installer) and <span class="chip">tests/unit/control/</span> (the room page and its routes).</p>
+<pre>cd ~/croom.to
+.venv/bin/python -m pytest tests/unit/kiosk_agent tests/unit/installer/test_install_kiosk_script.py
+.venv/bin/python -m pytest tests/unit/control</pre>
+</section>
+
+</body>
+</html>

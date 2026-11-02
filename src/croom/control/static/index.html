@@ -106,33 +106,45 @@
       <p id="camera-note" class="note"></p>
       <div id="camera-panel" class="camera" hidden>
         <p id="camera-status" class="note"></p>
-        <div class="camera-grid">
-          <div class="camera-left">
-            <div id="arrow-pad" class="arrow-pad" role="group" aria-label="Pan and tilt">
-              <span></span>
-              <button type="button" class="button quiet pad" data-pan="0" data-tilt="1" aria-label="Tilt up">&#9650;</button>
-              <span></span>
-              <button type="button" class="button quiet pad" data-pan="-1" data-tilt="0" aria-label="Pan left">&#9664;</button>
-              <button type="button" id="camera-home" class="button quiet pad" aria-label="Home">&#8962;</button>
-              <button type="button" class="button quiet pad" data-pan="1" data-tilt="0" aria-label="Pan right">&#9654;</button>
-              <span></span>
-              <button type="button" class="button quiet pad" data-pan="0" data-tilt="-1" aria-label="Tilt down">&#9660;</button>
-              <span></span>
-            </div>
-            <div class="zoom-buttons">
-              <button type="button" id="zoom-out" class="button quiet" data-zoom="-25" data-icon="zoom-out">Zoom out</button>
-              <button type="button" id="zoom-in" class="button quiet" data-zoom="25" data-icon="zoom-in">Zoom in</button>
+        <div id="camera-grid" class="camera-grid">
+          <!-- The live picture (spec 2026-11-01): only on the touch Pi the room lets see it (devices.js shows it); every other page keeps the controls alone. -->
+          <div id="camera-view" class="camera-view" hidden>
+            <div id="picture" class="picture" role="img" aria-label="Live picture from the camera">
+              <img id="picture-img" class="picture-img" alt="" draggable="false" hidden>
+              <div id="picture-words" class="picture-words">
+                <p id="picture-message"></p>
+                <button type="button" id="picture-retry" class="button quiet" hidden>Try again</button>
+              </div>
             </div>
           </div>
-          <div class="camera-right">
-            <div id="preset-row" class="presets" hidden></div>
-            <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" data-icon="save" hidden>Save</button>
-            <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
-            <div id="camera-setup" class="setup" hidden>
-              <p class="note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
-              <div class="setup-buttons">
-                <button type="button" id="find-stops" class="button quiet" data-icon="locate">Find the stops</button>
-                <button type="button" id="save-home" class="button primary" data-icon="home" disabled>Save as Home</button>
+          <div class="camera-controls">
+            <div class="camera-left">
+              <div id="arrow-pad" class="arrow-pad" role="group" aria-label="Pan and tilt">
+                <span></span>
+                <button type="button" class="button quiet pad" data-pan="0" data-tilt="1" aria-label="Tilt up">&#9650;</button>
+                <span></span>
+                <button type="button" class="button quiet pad" data-pan="-1" data-tilt="0" aria-label="Pan left">&#9664;</button>
+                <button type="button" id="camera-home" class="button quiet pad" aria-label="Home">&#8962;</button>
+                <button type="button" class="button quiet pad" data-pan="1" data-tilt="0" aria-label="Pan right">&#9654;</button>
+                <span></span>
+                <button type="button" class="button quiet pad" data-pan="0" data-tilt="-1" aria-label="Tilt down">&#9660;</button>
+                <span></span>
+              </div>
+              <div class="zoom-buttons">
+                <button type="button" id="zoom-out" class="button quiet" data-zoom="-25" data-icon="zoom-out">Zoom out</button>
+                <button type="button" id="zoom-in" class="button quiet" data-zoom="25" data-icon="zoom-in">Zoom in</button>
+              </div>
+            </div>
+            <div class="camera-right">
+              <div id="preset-row" class="presets" hidden></div>
+              <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" data-icon="save" hidden>Save</button>
+              <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
+              <div id="camera-setup" class="setup" hidden>
+                <p class="note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
+                <div class="setup-buttons">
+                  <button type="button" id="find-stops" class="button quiet" data-icon="locate">Find the stops</button>
+                  <button type="button" id="save-home" class="button primary" data-icon="home" disabled>Save as Home</button>
+                </div>
               </div>
             </div>
           </div>

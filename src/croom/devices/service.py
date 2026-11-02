@@ -8,7 +8,7 @@ room chose when a meeting joins and every few seconds while one is connected.
 
 import asyncio
 import logging
-from typing import Any, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, List, Optional
 
 from croom.core.service import Service
 from croom.devices.camera import RoomCamera
@@ -42,6 +42,9 @@ class DevicesService(Service):
         self._rediscover_task: Optional[asyncio.Task] = None
         self._last_failure: Optional[str] = None
         self._away = False   # the MeetUp is lent to a laptop (spec 2026-10-27): the background check does not look for it
+        # Laptop mode as the camera's live picture sees it: from the start of release() until reclaim() has looked for the MeetUp again
+        self._lent = False
+        self._lent_callbacks: List[Callable[[bool], None]] = []
 
     @classmethod
     def from_config(cls, config, store, meeting=None) -> "DevicesService":
@@ -136,10 +139,31 @@ class DevicesService(Service):
                 await self._check(self.mic.reapply)
             await asyncio.sleep(self.MIC_REAPPLY_S)
 
+    @property
+    def lent(self) -> bool:
+        """Whether the MeetUp is lent to a laptop: from the start of release() until reclaim() has looked for it again."""
+        return self._lent
+
+    def add_lent_callback(self, callback: Callable[[bool], None]) -> None:
+        """`callback(lent)` when Laptop mode starts (before the camera is closed and the switch moves) and when it ends."""
+        self._lent_callbacks.append(callback)
+
+    def _set_lent(self, lent: bool) -> None:
+        if lent == self._lent:
+            return
+        self._lent = lent
+        for callback in list(self._lent_callbacks):
+            try:
+                callback(lent)
+            except Exception:  # noqa: BLE001 - a listener's fault must not stop the switch
+                logger.exception("A Laptop mode listener failed")
+
     async def release(self) -> None:
-        """The MeetUp is going to a laptop (spec 2026-10-27 Laptop mode): the preview ends, the camera is closed (a homing under way
-        is cut short), and the background check leaves the camera, the speaker and the microphone alone until reclaim()."""
+        """The MeetUp is going to a laptop (spec 2026-10-27 Laptop mode): the preview and the camera's live picture end, the camera is
+        closed (a homing under way is cut short), and the background check leaves the camera, the speaker and the microphone alone until
+        reclaim()."""
         self._away = True
+        self._set_lent(True)
         self.camera.set_preview(False)
         await self.camera.close()
         self.camera.forget_position()
@@ -150,14 +174,17 @@ class DevicesService(Service):
         self._away = False
         loop = asyncio.get_running_loop()
         deadline = loop.time() + self.RECLAIM_S
-        while True:
-            await self._check(self.camera.discover)
-            await self._check(self.volume.refresh, force=True)
-            if self.mic is not None:
-                await self._check(self.mic.refresh, force=True)
-            if self.camera.available or loop.time() >= deadline:
-                break
-            await asyncio.sleep(self.RECLAIM_POLL_S)
+        try:
+            while True:
+                await self._check(self.camera.discover)
+                await self._check(self.volume.refresh, force=True)
+                if self.mic is not None:
+                    await self._check(self.mic.refresh, force=True)
+                if self.camera.available or loop.time() >= deadline:
+                    break
+                await asyncio.sleep(self.RECLAIM_POLL_S)
+        finally:
+            self._set_lent(False)   # the camera's picture may start again: the MeetUp is back (or as back as it will be)
         if home and self.camera.available and self.camera.home_saved and (self.homing is None or self.homing.done()):
             self.homing = asyncio.create_task(self._home_at_start())
 

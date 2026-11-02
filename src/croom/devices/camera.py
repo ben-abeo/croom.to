@@ -82,6 +82,7 @@ class RoomCamera:
         self._sleep = sleep
         self._fd: Optional[int] = None
         self._path: Optional[str] = None
+        self._label: Optional[str] = None   # the camera's name (V4L2 card), as Chromium's device label starts with it
         self._reason: Optional[str] = "not checked yet"
         self._warned: Optional[str] = None
         self._zoom_range = (100, 500)
@@ -154,6 +155,11 @@ class RoomCamera:
         return self._fd is not None
 
     @property
+    def label(self) -> Optional[str]:
+        """The name the open camera gives (its V4L2 card name), which Chromium's label for it contains; None when unknown."""
+        return self._label
+
+    @property
     def busy(self) -> bool:
         return self._busy
 
@@ -213,6 +219,8 @@ class RoomCamera:
                 self._v4l2.close(fd)
                 continue
             self._fd, self._path = fd, path
+            namer = getattr(self._v4l2, "camera_name", None)   # QUERYCAP on a node of its own: no frames are read
+            self._label = namer(path) if namer is not None else None
             self._has_pan, self._has_tilt = pan is not None, tilt is not None
             if zoom is not None:
                 self._zoom_range = (zoom[0], zoom[1])

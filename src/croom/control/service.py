@@ -2451,18 +2451,21 @@ class ControlService(Service):
         client that reads slowly skips the ones between), text messages are `{"state": <CameraView.state()>}` at the start and each time
         it changes ("off", "starting", "on", "camera_off", "laptop", "failed"). The client sends nothing that is read (Try again opens a
         new socket). The picture goes to an allowed touch Pi only (_camera_view_allowed): 403 otherwise, before
-        the upgrade, as for a page of another origin. The tap runs while the socket is open (watch, and unwatch however the socket ends);
-        a client that does not answer pings is closed in about 1.5 CAMERA_HEARTBEAT_S."""
+        the upgrade, as for a page of another origin, and the socket is closed once it is not (refused or forgotten in Settings, or no
+        longer checking in), looked at every CAMERA_HEARTBEAT_S. The tap runs while the socket is open (watch, and unwatch however the
+        socket ends); a client that does not answer pings is closed in about 1.5 CAMERA_HEARTBEAT_S. No compression: the pictures are
+        JPEGs already, and deflating ten a second costs the TV Pi for nothing."""
         view = getattr(self._meeting, "camera_view", None)
         if not self._camera_view_allowed(request) or not self._same_origin(request):
             return self._error_response("The camera's picture goes to the room's touch screen only", 403)
-        ws = web.WebSocketResponse(heartbeat=self.CAMERA_HEARTBEAT_S, max_msg_size=4096)
+        ws = web.WebSocketResponse(heartbeat=self.CAMERA_HEARTBEAT_S, max_msg_size=4096, compress=False)
         await ws.prepare(request)
         view.watch()
         self._camera_sockets[ws] = request
-        tasks = [asyncio.ensure_future(self._camera_reads(ws)), asyncio.ensure_future(self._camera_sends(ws, view))]
+        tasks = [asyncio.ensure_future(self._camera_reads(ws)), asyncio.ensure_future(self._camera_sends(ws, view)),
+                 asyncio.ensure_future(self._camera_still_allowed(request))]
         try:
-            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)     # (the client went, or a send failed)
+            await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)     # (the client went, a send failed, or it is not allowed now)
         finally:
             view.unwatch()
             self._camera_sockets.pop(ws, None)
@@ -2475,6 +2478,14 @@ class ControlService(Service):
                 if task.done() and not task.cancelled():
                     task.exception()    # (looked at, so that a send that failed on a reset is not reported as never retrieved)
         return ws
+
+    async def _camera_still_allowed(self, request: web.Request) -> None:
+        """Return once the socket's touch Pi may not have the picture any more (looked at every CAMERA_HEARTBEAT_S)."""
+        while True:
+            await asyncio.sleep(self.CAMERA_HEARTBEAT_S)
+            if not self._camera_view_allowed(request):
+                logger.info("The camera's picture stops: its touch screen is not allowed it now")
+                return
 
     @staticmethod
     async def _camera_reads(ws: web.WebSocketResponse) -> None:

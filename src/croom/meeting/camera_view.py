@@ -6,7 +6,7 @@ The tap is a script on every page the TV's browser shows (the idle /tv page, Mee
 the room camera, which Chromium shares with whatever has the camera open already (the TV's preview, Meet's or Zoom's capture): nothing
 outside Chromium ever opens the device to read frames. About ten times a second it draws the picture into a 640x360 canvas, never mirrored,
 makes a JPEG of it and hands it to Python through a binding on the browser context: no network, so Chrome's Local Network Access rules never
-apply. Told to stop, it stops its own track only. On request it makes one larger JPEG (Frame people).
+apply. Told to stop, it stops its own track only. On request it makes one larger JPEG (Frame people), in the track's own shape.
 
 CameraView runs the tap only while somebody watches (or Frame people needs a frame) and the room is not in Laptop mode and, in a call, the
 room's camera is on; it stops it as soon as any of these ends. When the TV's page loads a new document (the page lent to a call, or handed
@@ -41,8 +41,8 @@ STILL_QUALITY = 0.9
 #   opts.size, the preview's own size.
 # - With opts.follow, the call's own camera stopping (the camera turned off at the TV) stops the tap at once.
 # start() answers "on", "waiting" or "error: <name>". A track of the tap's that ends by itself (the camera unplugged, taken away by the USB
-# switch) is reported as (null, "ended"), and a start that fails after waiting as (null, "error"). `opened` counts the tracks this
-# document's tap opened and `lastTrack` is the last of them, for the tests.
+# switch) is reported as (null, "ended"), a start that fails after waiting as (null, "error"), and the tap's own stop with the call's
+# camera as (null, "stopped"). `opened` counts the tracks this document's tap opened and `lastTrack` is the last of them, for the tests.
 TAP_SCRIPT = """(() => {
   if (window !== window.top || window.__croomTap) return;
   const BINDING = "%s";
@@ -68,6 +68,7 @@ TAP_SCRIPT = """(() => {
       open(pageTrack()).then((answer) => { if (answer.startsWith("error")) send(null, "error"); });
     } else if (!live && options && options.follow && (stream || pending)) {
       tap.stop();   // the call turned its camera off: the tap's own track must not keep the camera on
+      send(null, "stopped");
     }
   };
   const adopt = (track) => {
@@ -182,7 +183,11 @@ TAP_SCRIPT = """(() => {
   };
   tap.stop = () => { generation += 1; pending = null; waiting = false; release(); };
   tap.running = () => Boolean(stream);
-  tap.still = async (width, height) => (ready() ? jpeg(width, height, %s) : null);
+  tap.still = async (width, height) => {   // the track's own shape within width x height, no bars: Frame people's places are the picture's
+    if (!ready()) return null;
+    const scale = Math.min(width / video.videoWidth, height / video.videoHeight);
+    return jpeg(Math.max(1, Math.round(video.videoWidth * scale)), Math.max(1, Math.round(video.videoHeight * scale)), %s);
+  };
   Object.defineProperty(window, "__croomTap", { value: tap });
 })()""" % (BINDING, STILL_QUALITY)
 
@@ -208,6 +213,7 @@ class CameraView:
         self._stills = 0
         self._tap_on = False         # the tap runs (or is starting) on the page's current document
         self._tap_page = None
+        self._stale_page = None      # a page that loaded a new document while the tap ran or started on it: told to stop (_new_document)
         self._first_frame_due: Optional[float] = None
         self._failed = False
         self._waiting = False        # the tap waits for the call's own camera to open
@@ -334,6 +340,9 @@ class CameraView:
         if runner is not None and not runner.done():
             runner.cancel()
             await asyncio.wait({runner})
+        stale, self._stale_page = self._stale_page, None
+        if stale is not None and stale is not self._tap_page:
+            await self._stop_on(stale)
         if self._tap_on:
             await self._stop()
         self._announce()
@@ -366,11 +375,18 @@ class CameraView:
             self._new_document()
 
     def _new_document(self) -> None:
-        """The tap went with the document it ran on: the picture pauses, and starts again on the new one when still wanted."""
+        """The tap went with the document it ran on: the picture pauses, and starts again on the new one when still wanted.
+
+        A tap that ran (or was starting) may be in the new document itself: a page loaded with wait_until="commit" (TvDisplay's
+        show_idle) runs the tap's start there before DOMContentLoaded says "new document". So the page is told to stop its tap before
+        anything else (the runner's next round): a stop where no tap runs does nothing, and a start answers again if still wanted."""
         self._document += 1
         if self._tap_on:
             logger.info("The TV's page changed: the camera's picture starts again on the new one")
+            if self._tap_page is not None:
+                self._stale_page = self._tap_page
         self._tap_on = False
+        self._tap_page = None
         self._first_frame_due = None
         self._frame = None
         self._failed = False
@@ -380,13 +396,18 @@ class CameraView:
 
     def _on_binding(self, source, data=None, event=None) -> None:
         """A frame (base64 JPEG) from the tap; (None, "page_camera_on" / "page_camera_off"): the page's own camera opened or stopped;
-        (None, "ended"): the tap's track ended by itself; (None, "error"): a tap that waited for the call's camera could not open."""
+        (None, "ended"): the tap's track ended by itself; (None, "error"): a tap that waited for the call's camera could not open;
+        (None, "stopped"): the tap stopped itself with the call's own camera (turned off at the TV)."""
         page = source.get("page")
         if event in ("page_camera_on", "page_camera_off"):
             if page is self._page:
                 self._on_page_camera(event == "page_camera_on")
             return
         if not self._tap_on or page is not self._tap_page:
+            return
+        if event == "stopped":   # no failure: the runner starts it again (waiting for the call's camera) when the room allows
+            self._tap_on, self._tap_page, self._frame, self._first_frame_due, self._waiting = False, None, None, None, False
+            self._kick()
             return
         if event in ("ended", "error"):
             logger.warning("The camera's picture ended by itself (the camera went away)" if event == "ended"
@@ -475,7 +496,7 @@ class CameraView:
 
     def _kick(self) -> None:
         self._wake.set()
-        if (self._wanted() or self._tap_on) and (self._runner is None or self._runner.done()):
+        if (self._wanted() or self._tap_on or self._stale_page is not None) and (self._runner is None or self._runner.done()):
             try:
                 self._runner = asyncio.get_running_loop().create_task(self._run())
             except RuntimeError:   # no loop: nothing runs the tap outside the agent's loop
@@ -489,7 +510,7 @@ class CameraView:
                 self._wake.clear()
                 await self._reconcile()
                 self._announce()
-                if not self._wanted() and not self._tap_on:
+                if not self._wanted() and not self._tap_on and self._stale_page is None:
                     return
                 try:
                     await asyncio.wait_for(self._wake.wait(), self.CHECK_S)
@@ -503,6 +524,9 @@ class CameraView:
                 await self._stop()
 
     async def _reconcile(self) -> None:
+        stale, self._stale_page = self._stale_page, None
+        if stale is not None:   # (before any start: the start on its new document answers again)
+            await self._stop_on(stale)
         allowed = self._wanted() and self._blocked() is None and not self._failed and self._page is not None
         if allowed and not self._tap_on:
             await self._start()
@@ -523,7 +547,10 @@ class CameraView:
         except Exception as e:  # noqa: BLE001 - the page between documents, or a camera that does not answer
             answer = f"error: {type(e).__name__}: {e}"
         if document != self._document or page is not self._page:
-            return   # a new document came meanwhile: the tap went with the old one, and starts again on the new
+            return   # a new document came meanwhile: the page is told to stop (_stale_page, next round), and the tap starts again
+        if answer == "stopped":   # the call's camera went off while the tap opened: no failure, the next round waits for it again
+            self._tap_on, self._tap_page, self._first_frame_due = False, None, None
+            return
         if answer == "waiting":   # the call has not opened its camera yet: the tap opens after it, and its 5 s start then
             if self._frame is None:
                 self._waiting, self._first_frame_due = True, None
@@ -536,6 +563,10 @@ class CameraView:
     async def _stop(self) -> None:
         page = self._tap_page
         self._tap_on, self._tap_page, self._frame, self._first_frame_due, self._waiting = False, None, None, None, False
+        await self._stop_on(page)
+
+    async def _stop_on(self, page) -> None:
+        """Tell the tap on the page's current document to stop (its track, or a start still going); a page with none: nothing."""
         if page is None or page.is_closed():
             return
         try:

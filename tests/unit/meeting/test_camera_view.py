@@ -24,6 +24,9 @@ PREVIEW = "navigator.mediaDevices.getUserMedia({video: {width: {ideal: 3840}, he
           ".then((s) => { window.own = s; return s.getVideoTracks()[0].getSettings().width; })"
 OWN_CAMERA_ON = "navigator.mediaDevices.getUserMedia({video: true}).then((s) => { window.own = s; })"
 OWN_CAMERA_OFF = "window.own.getTracks().forEach((t) => t.stop())"
+# A camera that is slow to start (the MeetUp's 4K getUserMedia takes about a second): the tap's start goes on a while
+SLOW_DEVICES = """(() => { const p = MediaDevices.prototype, list = p.enumerateDevices;
+  p.enumerateDevices = function () { return new Promise((r) => setTimeout(r, 1500)).then(() => list.call(this)); }; })()"""
 
 
 class Site:
@@ -34,8 +37,18 @@ class Site:
         async def page(request):
             return web.Response(text=PAGE.format(request.path.strip("/")), content_type="text/html")
 
+        async def slow(request):   # a page whose DOMContentLoaded comes a while after its document is committed
+            response = web.StreamResponse(headers={"Content-Type": "text/html"})
+            await response.prepare(request)
+            await response.write(b"<title>slow</title><h1>slow")
+            await asyncio.sleep(float(request.query.get("s", "1.5")))
+            await response.write(b"</h1>" + b" " * 2048)
+            await response.write_eof()
+            return response
+
         app.router.add_get("/tv", page)
         app.router.add_get("/call", page)
+        app.router.add_get("/slow", slow)
         self.runner = web.AppRunner(app)
         await self.runner.setup()
         await web.TCPSite(self.runner, "127.0.0.1", 0).start()
@@ -168,6 +181,25 @@ async def test_a_page_change_runs_exactly_one_tap_on_the_new_page(tv):
     assert await claimed.evaluate("window.__croomTap.opened") == 1
     view.unwatch()
     await claimed.wait_for_function(TRACK_ENDED, timeout=3000)
+
+
+@pytest.mark.parametrize("start", ["in flight", "answered"])
+async def test_a_viewer_who_goes_as_the_new_page_loads_leaves_no_tap_running(tv, start):
+    """Leaving a call: the TV's page commits /tv and the tap starts there before its DOMContentLoaded, which then says "new document";
+    the touch Pi closes its socket then (its poll saw IDLE), with the tap's start still going or already answered. The tap started in
+    that document must not keep the camera open with nobody watching."""
+    site, display, page, view, meeting, devices = tv
+    if start == "in flight":
+        await display.context.add_init_script(SLOW_DEVICES)
+    page.once("domcontentloaded", lambda _: view.unwatch())        # the viewer goes as the document is loaded
+    await page.goto(f"{site.base}/slow?s={0.5 if start == 'in flight' else 1.5}", wait_until="commit")
+    view.watch()                                                   # the tap starts in /slow while it is still parsing
+    if start == "answered":
+        await fresh_frame(view)                                    # (and runs there before its DOMContentLoaded)
+    await page.wait_for_load_state("domcontentloaded")
+    await asyncio.sleep(2.5)
+    assert view.state() == "off"
+    assert not await page.evaluate(TRACK_LIVE), "the tap kept the camera open with nobody watching"
 
 
 async def test_a_slow_viewer_gets_the_newest_frame_never_a_queue():

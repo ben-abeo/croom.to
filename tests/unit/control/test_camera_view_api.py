@@ -1,7 +1,7 @@
 """GET /api/camera/view (camera view spec 2026-11-01, section 4): the camera's picture to the touch Pi over a WebSocket. Only the risky
-paths: who may open it (the socket's peer, never a header), a socket whose client has gone (it must not keep the tap running), and a
-client that reads slowly (it gets the newest picture, never a queue). The CameraView is the real one with a watch counter, its frames
-published by hand (no browser); the registry is the real one in memory on a fake clock."""
+paths: who may open it (the socket's peer, never a header) and keep it open (refused in Settings), a socket whose client has gone (it
+must not keep the tap running), and a client that reads slowly (it gets the newest picture, never a queue). The CameraView is the real
+one with a watch counter, its frames published by hand (no browser); the registry is the real one in memory on a fake clock."""
 
 import asyncio
 
@@ -51,6 +51,12 @@ def registry(clock):
 @pytest.fixture
 def view():
     return WatchedView()
+
+
+async def drain(ws):
+    """Read everything until the socket closes."""
+    async for _ in ws:
+        pass
 
 
 async def room(client_factory, registry, view, allow=True, kind="touch"):  # noqa: F811
@@ -103,6 +109,19 @@ async def test_a_socket_whose_client_stops_answering_pings_is_closed_and_the_tap
     await wait_until(lambda: view.watches == 1)
     assert view.unwatches == 0
     await wait_until(lambda: view.unwatches == 1, timeout=3)
+    assert view.watches == 1 and not service._camera_sockets
+
+
+async def test_a_socket_whose_touch_pi_is_refused_while_it_watches_is_closed_and_the_tap_let_go_of(client_factory, registry, view, monkeypatch):  # noqa: F811
+    monkeypatch.setattr(ControlService, "CAMERA_HEARTBEAT_S", 0.2)
+    service, client = await room(client_factory, registry, view)
+    ws = await client.ws_connect("/api/camera/view")
+    reads = asyncio.ensure_future(drain(ws))                         # (the client reads, so it answers the pings)
+    await asyncio.sleep(1.0)                                        # five looks while it is allowed: the socket stays
+    assert not reads.done() and view.unwatches == 0
+    registry.refuse(TOUCH)                                          # refused in Settings while the picture is open
+    await asyncio.wait_for(reads, 3)                                # the server closes the socket
+    await wait_until(lambda: view.unwatches == 1)
     assert view.watches == 1 and not service._camera_sockets
 
 

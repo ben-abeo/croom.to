@@ -1043,6 +1043,20 @@ class TestJoin:
         await wait_until(lambda: meeting.joins)
         assert meeting.joins[0][0] == "https://zoom.us/j/5590000559"
 
+    @pytest.mark.parametrize("typed, link", [
+        ("abc-defg-hij", "https://meet.google.com/abc-defg-hij"),
+        ("ABC-DEFG-HIJ", "https://meet.google.com/abc-defg-hij"),
+        ("abcdefghij", "https://meet.google.com/abc-defg-hij"),
+        (" abc defg hij ", "https://meet.google.com/abc-defg-hij"),
+        ("559 000 0559", "https://zoom.us/j/5590000559"),
+        ("meet.google.com/abc-defg-hij", "https://meet.google.com/abc-defg-hij"),
+        ("abc-defg-hi", "https://abc-defg-hi"),                  # not a code: read as a link, as before
+    ])
+    def test_a_meet_code_or_a_zoom_id_typed_at_the_table_becomes_its_link(self, typed, link):
+        """Nothing can be pasted at the table's touch screen: a Meet code or a Zoom ID is typed on its keys instead."""
+        from croom.control.service import normalize_link
+        assert normalize_link(typed) == link
+
     async def test_join_by_event_uses_its_link_and_title(self, client_factory):
         meeting = StubMeeting()
         calendar = StubCalendar(events=[event("e1", "Design review", starts_in_minutes=5)])

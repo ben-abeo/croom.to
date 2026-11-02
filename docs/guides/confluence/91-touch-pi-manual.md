@@ -90,8 +90,8 @@ A status card with a kicker, a headline and a line under it, for example **Room 
 
 ### Join with a link
 
-1. Tap the field **Meeting link or Zoom meeting ID**. The page's own keyboard opens.
-2. Type or paste the link. For a bare Zoom ID, or a Zoom link without `pwd=`, a **Passcode** field appears: fill it in.
+1. Tap the field **Zoom meeting ID, Meet code or link**. The page's own keyboard opens.
+2. Type a Zoom meeting ID, a Meet code (`abc-defg-hij`, with or without its dashes) or a link. For a bare Zoom ID, or a Zoom link without `pwd=`, a **Passcode** field appears: fill it in.
 3. Tap **Join** (on the screen or on the keyboard). The top bar shows Joining, then In a meeting, and the meeting screen opens.
 
 If Zoom refuses over the passcode, a "Couldn't join" card says "Zoom needs the meeting passcode" with **Join again**.

@@ -12,8 +12,8 @@
 
 ## Join a call that isn't booked
 
-1. On the table's main screen, tap the box **Paste a meeting link or a Zoom meeting ID**.
-2. Type or paste a Google Meet or Zoom link, or a Zoom meeting ID like `559 000 0559`. Tap **123** on the keyboard for numbers.
+1. On the table's main screen, tap the box **Zoom meeting ID, Meet code or link**.
+2. Type a Zoom meeting ID like `559 000 0559` or a Google Meet code like `abc-defg-hij` (the dashes are optional), or a whole link. Tap **123** on the keyboard for numbers.
 3. If a **Passcode, if the meeting has one** box appears, type the passcode.
 4. Tap **Join**.
 

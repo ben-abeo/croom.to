@@ -68,6 +68,7 @@ MAX_BODY_BYTES = 4096                  # a JSON request, and a pointer message: 
 MAX_SETTINGS_BODY = 128 * 1024         # a Settings page's save, at the schema's list limits (40 dialogs of 120 characters, escaped)
 MAX_UPLOAD_BYTES = MAX_SETTINGS_BODY   # the app's limit: a key file's upload (64 KB and the form around it) and a Settings save
 ZOOM_MEETING_ID = re.compile(r"^\d{9,11}$")
+MEET_CODE = re.compile(r"^([a-z]{3})-?([a-z]{4})-?([a-z]{3})$", re.IGNORECASE)   # a Meet code, abc-defg-hij, with its dashes or not
 ID_GROUP_GAPS = re.compile("[ \u00a0]+")   # between the groups of an ID as invitations print it: spaces, no-break spaces
 # Zoom's own alphabet for a passcode: letters, digits and @ - _ * (Zoom allows 10 of them; this allows 32).
 PASSCODE = re.compile(r"[A-Za-z0-9@_*-]{1,32}")
@@ -172,13 +173,17 @@ def _register_font_types() -> None:
 
 def normalize_link(value: str) -> str:
     """
-    Trim, turn a bare Zoom meeting id into a link, and add https:// when no scheme is given. The id may be written in
-    groups, as invitations print it ("559 000 0559"): the blanks between them go.
+    Trim, turn a bare Zoom meeting id or Google Meet code into a link, and add https:// when no scheme is given. The id may be
+    written in groups, as invitations print it ("559 000 0559"), and the code typed with spaces, without its dashes or in
+    capitals ("ABC DEFG HIJ", "abcdefghij"), as the table's keys type it: the blanks between them go.
     """
     url = value.strip()
     digits = ID_GROUP_GAPS.sub("", url)
     if ZOOM_MEETING_ID.match(digits):
         return f"https://zoom.us/j/{digits}"
+    code = MEET_CODE.match(digits)
+    if code:
+        return "https://meet.google.com/" + "-".join(code.groups()).lower()
     if url and "://" not in url:
         return "https://" + url
     return url

@@ -14,8 +14,9 @@ import pytest
 from croom.control.settings import SettingsStore
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.devices.camera import RoomCamera
-from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID_ZOOM_ABSOLUTE
-from tests.unit.devices.fake_v4l2 import MEETUP, FakeClock, FakeV4l2
+from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
+                                V4L2_CID_ZOOM_ABSOLUTE)
+from tests.unit.devices.fake_v4l2 import MEETUP, RALLY, FakeClock, FakeV4l2
 
 
 def camera_for(tmp_path=None, nodes=None, device="auto", travel_s=8.0, names=None, latency_s=0.0):
@@ -1144,3 +1145,51 @@ async def test_a_stop_that_fails_after_a_second_cancel_leaves_no_unretrieved_err
     finally:
         loop.set_exception_handler(handler)
     assert [context.get("message") for context in reports] == []
+
+
+# --- a camera that says where it is (the Rally): its home and presets are its own position, not an estimate ---
+
+async def test_a_camera_that_says_where_it_is_saves_and_returns_to_its_own_position(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY}, names=["Wide", "Table", "Whiteboard"])
+    await camera.discover()
+    assert camera.position_known                       # no Set up: the camera says where it is
+    turned = lambda pan, tilt: v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): pan, (10, V4L2_CID_TILT_ABSOLUTE): tilt})
+    turned(36000, -7200)
+    await camera.zoom(200)
+    await camera.save_home()
+    turned(-108000, 18000)
+    await camera.zoom(600)
+    await camera.save(2)
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera") == {
+        "home": {"pan": 36000, "tilt": -7200}, "presets": {"2": {"pan": -108000, "tilt": 18000, "zoom": 600}}}
+    assert camera.home_saved and camera.state()["presets"][1] == {"slot": 2, "name": "Table", "saved": True}
+    camera.forget_position()                           # a laptop had it: the camera still says where it is
+    assert camera.position_known
+    turned(0, 0)
+    v4l2.set_many_calls.clear()
+    v4l2.calls.clear()
+    await camera.home()
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 36000, V4L2_CID_TILT_ABSOLUTE: -7200}   # pan and tilt in one call
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE) == [100]
+    assert -1 not in v4l2.sets(V4L2_CID_PAN_SPEED) + v4l2.sets(V4L2_CID_TILT_SPEED)   # not driven into the stops
+    await camera.recall(2)
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: -108000, V4L2_CID_TILT_ABSOLUTE: 18000}
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE)[-1] == 600
+    with pytest.raises(NotReady) as failure:
+        await camera.recall(3)
+    assert str(failure.value) == "nothing saved in this slot"
+
+
+async def test_travel_times_saved_for_a_meetup_are_not_a_home_or_presets_for_a_camera_that_says_where_it_is(tmp_path):
+    SettingsStore(tmp_path / "control-settings.json").save(
+        "camera", {"home": {"pan_s": 3.0, "tilt_s": 4.0}, "presets": {"1": {"pan_s": 1.0, "tilt_s": 1.0, "zoom": 200}}})
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    assert camera.home_saved is False and camera.state()["presets"][0]["saved"] is False
+    with pytest.raises(NotReady) as failure:
+        await camera.home()
+    assert str(failure.value) == "save a home first"
+    with pytest.raises(NotReady) as failure:
+        await camera.recall(1)
+    assert str(failure.value) == "nothing saved in this slot"
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_PAN_ABSOLUTE) == []   # nothing was moved by the old times

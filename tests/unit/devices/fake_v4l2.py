@@ -4,9 +4,13 @@ import asyncio
 import threading
 import time
 
-from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID_ZOOM_ABSOLUTE
+from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
+                                V4L2_CID_ZOOM_ABSOLUTE)
 
 MEETUP = {V4L2_CID_ZOOM_ABSOLUTE: (100, 500, 1, 100), V4L2_CID_PAN_SPEED: (-1, 1, 1, 1), V4L2_CID_TILT_SPEED: (-1, 1, 1, 1)}
+# The Rally (Plus) camera, as v4l2-ctl --list-ctrls showed it in the Boardroom (2026-11-04): the MeetUp's controls and its position
+RALLY = {V4L2_CID_ZOOM_ABSOLUTE: (100, 1500, 1, 100), V4L2_CID_PAN_SPEED: (-1, 1, 1, 1), V4L2_CID_TILT_SPEED: (-1, 1, 1, 1),
+         V4L2_CID_PAN_ABSOLUTE: (-324000, 324000, 3600, 0), V4L2_CID_TILT_ABSOLUTE: (-324000, 180000, 3600, 0)}
 DECODER = {}   # /dev/video19, the Pi's HEVC decoder: no camera controls
 
 

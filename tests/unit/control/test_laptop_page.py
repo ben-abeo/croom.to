@@ -37,8 +37,16 @@ def test_laptop_in_a_room_with_no_calendar_switches_in_one_tap_and_back(browser)
         assert page.locator("#headline").inner_text() == "The camera, microphones and speaker are on the laptop"
         assert "Logitech MeetUp" in page.locator("#detail").inner_text()
         assert page.locator("#laptop-problem").is_hidden()
-        assert page.locator(".link").is_hidden() and page.locator("#open-options").is_hidden()
+        assert page.locator(".link").is_hidden()
         assert fits(page)
+        # Settings stays reachable (a room wrong about who has the camera is put right there); the device views do not
+        page.click("#open-options")
+        page.wait_for_function("document.body.dataset.view === 'options'", timeout=5000)
+        assert page.locator("#open-settings").is_visible()
+        assert page.locator("#open-camera-setup").is_hidden() and page.locator("#open-mic-options").is_hidden()
+        page.wait_for_timeout(4500)    # two status polls (every 2 s): Options is not closed under the person
+        assert page.evaluate("document.body.dataset.view") == "options"
+        page.click("#back-from-options")
         page.click("#actions button:has-text('Back to room')")
         page.wait_for_function("document.body.dataset.laptop !== 'on'", timeout=5000)
         assert laptop.calls[-1] == ("room", True)

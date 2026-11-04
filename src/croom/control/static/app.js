@@ -1205,8 +1205,11 @@
     el("meeting-detail").textContent = meetingLine(m, label);
 
     document.body.dataset.laptop = laptopHasIt(s) ? "on" : "off";
-    if (laptopHasIt(s) && mode() === "idle" && !["idle", "tv"].includes(view())) applyView("idle", true);   // lent at the switch itself
-    el("open-options").hidden = mode() !== "idle" || laptopHasIt(s);
+    // Lent at the switch itself: the views that use the devices close. Options and Settings stay, so a room that is wrong about who has
+    // the camera (laptop.usb_id naming another camera) can still be put right from here.
+    if (laptopHasIt(s) && mode() === "idle" && !["idle", "tv", "options", "settings-pin", "settings"].includes(view())) applyView("idle", true);
+    el("open-options").hidden = mode() !== "idle";
+    el("open-camera-setup").hidden = el("open-mic-options").hidden = laptopHasIt(s);
     let specs = [];
     if (m.state === "joining" || m.state === "in_lobby" || m.state === "leaving") {
       body.dataset.state = "joining";

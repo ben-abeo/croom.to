@@ -3,7 +3,9 @@ The room camera's framing through V4L2 (spec 2026-10-08 sound and camera, sectio
 4.3). The Logitech MeetUp reports no pan or tilt position: it has speed controls
 (move until told to stop) and an absolute zoom. So the camera keeps an estimate of
 where it is in seconds of travel from the end stops, found by homing, and presets
-are stored against that estimate. Control calls go through a second file
+are stored against that estimate. A camera that says where it is (the Rally:
+pan_absolute and tilt_absolute) keeps its own position in its home and presets
+instead, and is sent back there. Control calls go through a second file
 descriptor next to Chromium's stream; nothing here streams video.
 """
 
@@ -15,7 +17,8 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from croom.devices import framing
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
-from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID_ZOOM_ABSOLUTE, V4l2Controls
+from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
+                                V4L2_CID_ZOOM_ABSOLUTE, V4l2Controls)
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +97,7 @@ class RoomCamera:
         self._zoom_range = (100, 500)
         self._has_pan = False
         self._has_tilt = False
+        self._absolute = False   # the camera says where it is (pan_absolute and tilt_absolute): no estimate needed
         self._zoom: Optional[int] = None
         self._zoom_read_at: Optional[float] = None
         self._pan = 0
@@ -126,13 +130,13 @@ class RoomCamera:
         # Entries without finite numbers are dropped, so that home and recall can convert them without failing.
         home = saved.get("home")
         self._home: Optional[Dict[str, Any]] = None
-        if _saved_position(home, "pan_s", "tilt_s"):
+        if _saved_position(home, "pan_s", "tilt_s") or _saved_position(home, "pan", "tilt"):
             self._home = dict(home)
         elif home is not None:
             logger.debug(f"Ignoring the saved camera home: {home!r}")
         self._presets: Dict[str, Dict[str, Any]] = {}
         for slot, preset in presets.items():
-            if _saved_position(preset, "pan_s", "tilt_s", "zoom"):
+            if _saved_position(preset, "pan_s", "tilt_s", "zoom") or _saved_position(preset, "pan", "tilt", "zoom"):
                 self._presets[str(slot)] = dict(preset)
             else:
                 logger.debug(f"Ignoring the saved camera preset {slot}: {preset!r}")
@@ -172,11 +176,16 @@ class RoomCamera:
 
     @property
     def position_known(self) -> bool:
-        return self._position_known
+        return self._absolute or self._position_known
 
     @property
     def home_saved(self) -> bool:
-        return self._home is not None
+        return self._usable(self._home)
+
+    def _usable(self, saved: Any) -> bool:
+        """A saved home or preset this camera can go to: its own pan and tilt on a camera that says where it is, seconds of travel
+        on one that does not (the MeetUp). The one kind is no home or preset for the other camera."""
+        return _saved_position(saved, *(("pan", "tilt") if self._absolute else ("pan_s", "tilt_s")))
 
     @property
     def preview(self) -> bool:
@@ -192,9 +201,9 @@ class RoomCamera:
             "framing": self._framing,
             "zoom": {"level": self._zoom if self._zoom is not None else self._zoom_range[0],
                      "min": self._zoom_range[0], "max": self._zoom_range[1]},
-            "position_known": self._position_known,
+            "position_known": self.position_known,
             "home_saved": self.home_saved,
-            "presets": [{"slot": slot, "name": self._names[slot - 1], "saved": str(slot) in self._presets}
+            "presets": [{"slot": slot, "name": self._names[slot - 1], "saved": self._usable(self._presets.get(str(slot)))}
                         for slot in range(1, self.SLOTS + 1)],
             "preview": self.preview,
         }
@@ -230,12 +239,15 @@ class RoomCamera:
             namer = getattr(self._v4l2, "camera_name", None)   # QUERYCAP on a node of its own: no frames are read
             self._label = namer(path) if namer is not None else None
             self._has_pan, self._has_tilt = pan is not None, tilt is not None
+            self._absolute = (self._v4l2.query(fd, V4L2_CID_PAN_ABSOLUTE) is not None
+                              and self._v4l2.query(fd, V4L2_CID_TILT_ABSOLUTE) is not None)
             if zoom is not None:
                 self._zoom_range = (zoom[0], zoom[1])
                 self._zoom = zoom[3]
             self._reason = None
             self._warned = None
-            logger.info(f"Camera: {path} (zoom {_span(zoom)}, pan {_span(pan)}, tilt {_span(tilt)})")
+            logger.info(f"Camera: {path} (zoom {_span(zoom)}, pan {_span(pan)}, tilt {_span(tilt)}"
+                        f"{', says where it is' if self._absolute else ''})")
             return True
         self._fail(NO_CAMERA)
         return False
@@ -255,6 +267,7 @@ class RoomCamera:
         self._pan = self._tilt = 0
         self._segment_started = None
         self._position_known = False
+        self._absolute = False
 
     def _speed_controls(self, pan: int, tilt: int) -> Dict[int, int]:
         """The speed controls this node has, with the values to write; pan and tilt go out in one call."""
@@ -331,6 +344,7 @@ class RoomCamera:
             except OSError:
                 pass
         self._fd, self._path = None, None
+        self._absolute = False
         self._reason = "closed"
 
     # ------------------------------------------------------------------
@@ -572,16 +586,34 @@ class RoomCamera:
         await self._move_to(float(self._home["pan_s"]), float(self._home["tilt_s"]))
         await self.zoom(self._zoom_range[0])
 
+    async def _go_to(self, saved: Dict[str, Any], zoom: int) -> None:
+        """A camera that says where it is: stop any turn, then send it to the saved pan and tilt in one call (on a UVC camera they are
+        the two halves of one control) and to the zoom. The camera drives itself there."""
+        await self._apply_speeds(0, 0)
+        async with self._io_lock:
+            await self._set_many({V4L2_CID_PAN_ABSOLUTE: int(saved["pan"]), V4L2_CID_TILT_ABSOLUTE: int(saved["tilt"])})
+        await self.zoom(zoom)
+
+    async def _where(self) -> Dict[str, Any]:
+        """Where the camera is, as a home or preset keeps it: the camera's own pan and tilt when it says, else the estimate."""
+        if not self._absolute:
+            return self._estimate_now()
+        async with self._io_lock:
+            return {"pan": await self._get(V4L2_CID_PAN_ABSOLUTE), "tilt": await self._get(V4L2_CID_TILT_ABSOLUTE)}
+
     async def find_stops(self) -> Dict[str, Any]:
         """Drive both axes into their end stops and call that (0, 0): the one place the position is known for sure."""
         await self._long(self._find_stops_work)
         return self.state()
 
     async def home(self) -> Dict[str, Any]:
-        """Find the stops, then move to the saved home and the widest zoom."""
-        if self._home is None:
+        """Find the stops, then move to the saved home and the widest zoom (a camera that says where it is goes straight there)."""
+        if not self.home_saved:
             raise NotReady("save a home first")
-        await self._long(self._home_work)
+        if self._absolute:
+            await self._long(lambda: self._go_to(self._home, self._zoom_range[0]))
+        else:
+            await self._long(self._home_work)
         return self.state()
 
     def _account_now(self) -> None:
@@ -600,9 +632,9 @@ class RoomCamera:
 
     async def save_home(self) -> Dict[str, Any]:
         """Remember where the camera is now as its home, the place homing goes back to."""
-        if not self._position_known:
+        if not self.position_known:
             raise NotReady("home the camera first")
-        home = self._estimate_now()
+        home = await self._where()
         self._persist(home, self._presets)      # written first: a write that fails leaves the camera as it was
         self._home = home
         logger.info(f"Camera home saved at {self._home}")
@@ -617,12 +649,12 @@ class RoomCamera:
     async def save(self, slot: int) -> Dict[str, Any]:
         """Store the camera's position and zoom in a preset slot."""
         key = self._slot(slot)
-        if not self._position_known:
+        if not self.position_known:
             raise NotReady("home the camera first")
         zoom = await self.read_zoom()          # first: it may wait for the camera, and the position is taken right after
-        if not self._position_known:           # a long move was cut short, or a call failed, while the zoom was read
+        if not self.position_known:            # a long move was cut short, or a call failed, while the zoom was read
             raise NotReady("home the camera first")
-        presets = {**self._presets, key: {**self._estimate_now(), "zoom": zoom if zoom is not None else self._zoom_range[0]}}
+        presets = {**self._presets, key: {**(await self._where()), "zoom": zoom if zoom is not None else self._zoom_range[0]}}
         self._persist(self._home, presets)      # written first: a write that fails leaves the camera as it was
         self._presets = presets
         logger.info(f"Camera preset {key} ({self._names[slot - 1]}) saved: {self._presets[key]}")
@@ -632,14 +664,16 @@ class RoomCamera:
         """Move to a saved preset by the difference from where the camera is, homing first when it does not know."""
         key = self._slot(slot)
         preset = self._presets.get(key)
-        if preset is None:
+        if not self._usable(preset):
             raise NotReady("nothing saved in this slot")
-        if not self._position_known and self._home is None:
+        if not self.position_known and not self.home_saved:
             raise NotReady("home the camera first")
 
         async def work():
+            if self._absolute:
+                return await self._go_to(preset, int(preset["zoom"]))
             if not self._position_known:       # also true when this recall has just cut another long move short
-                if self._home is None:
+                if not self.home_saved:
                     raise NotReady("home the camera first")
                 await self._home_work()
             await self._move_to(float(preset["pan_s"]), float(preset["tilt_s"]))

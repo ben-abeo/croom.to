@@ -13,6 +13,8 @@ from typing import Dict, List, Optional, Tuple
 from croom.video.v4l2_ioctl import (
     V4L2_CAP_VIDEO_CAPTURE,
     V4L2_CID_CAMERA_CLASS_BASE,
+    V4L2_CID_PAN_ABSOLUTE,
+    V4L2_CID_TILT_ABSOLUTE,
     V4L2_CID_ZOOM_ABSOLUTE,
     VIDIOC_G_CTRL,
     VIDIOC_QUERYCAP,
@@ -52,7 +54,8 @@ class v4l2_ext_controls(ctypes.Structure):  # 32 bytes on a 64-bit kernel
 
 VIDIOC_S_EXT_CTRLS = _IOWR(ord("V"), 72, ctypes.sizeof(v4l2_ext_controls))
 
-__all__ = ["V4L2_CID_PAN_SPEED", "V4L2_CID_TILT_SPEED", "V4L2_CID_ZOOM_ABSOLUTE", "Range", "V4l2Controls"]
+__all__ = ["V4L2_CID_PAN_ABSOLUTE", "V4L2_CID_PAN_SPEED", "V4L2_CID_TILT_ABSOLUTE", "V4L2_CID_TILT_SPEED", "V4L2_CID_ZOOM_ABSOLUTE",
+           "Range", "V4l2Controls"]
 
 
 def _node_number(path: str) -> int:

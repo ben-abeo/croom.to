@@ -126,7 +126,8 @@
   function renderCamera(camera) {
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
-    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, framingHere, camera && camera.position_known,
+    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, camera && camera.auto_framing,
+      framingHere, camera && camera.position_known,
       camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, camera && camera.limits, camera && camera.picture, presetSaveMode,
       setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
@@ -142,6 +143,10 @@
     el("camera-status").textContent = camera.framing || framingHere ? FRAMING : camera.busy ? "Moving\u2026"
       : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
     el("frame-people").disabled = camera.busy || framingHere;
+    // Auto framing (the room's setting, during a call): on, or paused while a person has the camera
+    el("auto-framing-note").hidden = !camera.auto_framing;
+    el("auto-framing-note").textContent = camera.auto_framing === "paused" ? "Auto framing is paused while the camera is moved by hand: "
+      + "Frame people gives it back" : camera.auto_framing === "on" ? "Auto framing is on" : "";
     for (const b of document.querySelectorAll("#arrow-pad .pad")) b.disabled = camera.busy;
     el("camera-home").disabled = camera.busy || !camera.home_saved;
     const ready = camera.home_saved;

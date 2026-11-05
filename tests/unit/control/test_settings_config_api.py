@@ -9,6 +9,7 @@ import yaml
 from croom.calendar.bookings import RoomBookings
 from croom.control.service import ControlService
 from croom.core.config import Config
+from croom.devices.autoframe import AutoFramer
 from croom.devices.camera import RoomCamera
 from croom.meeting.providers.base import MeetingState
 from croom.settings.pin import PinStore
@@ -43,7 +44,8 @@ def room(tmp_path):
     """The room's bookings and camera, which the live settings reach."""
     bookings = RoomBookings(tmp_path / "bookings.json", tmp_path / "calendar-cache.json", "Lab")
     camera = RoomCamera(v4l2=FakeV4l2())
-    return SimpleNamespace(calendar=SimpleNamespace(bookings=bookings, events=[]), devices=SimpleNamespace(camera=camera, volume=None),
+    devices = SimpleNamespace(camera=camera, volume=None, autoframer=AutoFramer(camera, None))
+    return SimpleNamespace(calendar=SimpleNamespace(bookings=bookings, events=[]), devices=devices,
                            bookings=bookings, camera=camera, meeting=StubMeeting())
 
 
@@ -125,6 +127,12 @@ async def test_camera_preset_names_apply_at_once(client, unlocked, room):
                                  headers=unlocked)
     assert (await response.json())["restart"] is False
     assert [p["name"] for p in room.camera.state()["presets"]] == ["Door", "Table", "Board"]
+
+
+async def test_auto_framing_turns_on_and_off_at_once(client, unlocked, room):
+    for on in (True, False):
+        response = await client.post("/api/settings/config/devices", json={"values": {"control.camera_auto_framing": on}}, headers=unlocked)
+        assert (await response.json())["restart"] is False and room.devices.autoframer.enabled is on
 
 
 async def test_the_helpers_refusal_is_said(client, unlocked, admin):

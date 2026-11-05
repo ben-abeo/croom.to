@@ -372,6 +372,7 @@ class ControlService(Service):
         # The settings the room applies at once (spec 2026-10-29, section 4): the rest wait for a restart
         self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
         self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
+        self._editor.on_change(("control.camera_auto_framing",), self._apply_auto_framing)
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -1449,6 +1450,12 @@ class ControlService(Service):
         camera = self._camera()
         if camera is not None:
             camera.set_preset_names(values["control.camera_presets"])
+
+    def _apply_auto_framing(self, values: Dict[str, Any]) -> None:
+        """Auto framing on or off, at once: from its next look."""
+        framer = getattr(self._devices, "autoframer", None)
+        if framer is not None:
+            framer.set_enabled(bool(values["control.camera_auto_framing"]))
 
     async def _handle_config(self, request: web.Request) -> web.Response:
         """A Settings page's values as config.yaml has them, the fields its form draws, and whether a saved change waits for a restart."""

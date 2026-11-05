@@ -125,6 +125,16 @@ def group_box(faces: Sequence[Face], size: Tuple[int, int]) -> Box:
     return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
 
 
+def at_edge(faces: Sequence[Face], size: Tuple[int, int], margin: float) -> bool:
+    """Whether anyone's head and shoulders reach within `margin` (a fraction of the picture) of its edge: someone coming in, or about
+    to leave it (Auto framing)."""
+    for face in faces:
+        left, top, right, bottom = head_and_shoulders(face, size)
+        if left < margin or top < margin or right > 1 - margin or bottom > 1 - margin:
+            return True
+    return False
+
+
 def zoom_for(box: Box, middle: Tuple[float, float] = (0.5, 0.5), top: int = ZOOM_MAX) -> int:
     """The zoom level at which the box fills the picture once the place `middle` (of the picture at zoom 100) is in its middle:
     the box's furthest side from there sets it. 100 to `top` (the MeetUp's 500, or the camera's own)."""

@@ -6326,6 +6326,21 @@ def test_the_picture_settings_the_camera_has_are_in_set_up_and_kept(browser):
         page.close()
 
 
+def test_the_camera_screen_says_when_auto_framing_is_on_or_paused(browser):
+    camera = StubCamera(auto_framing="on")
+    with PageServer(devices=StubDevices(camera=camera)) as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.wait_for_function("document.getElementById('auto-framing-note').textContent === 'Auto framing is on'", timeout=5000)
+        camera.auto_framing = "paused"                     # someone moved the camera by hand
+        page.wait_for_function("document.getElementById('auto-framing-note').textContent.startsWith('Auto framing is paused')",
+                               timeout=5000)
+        assert "Frame people gives it back" in page.locator("#auto-framing-note").inner_text()
+        camera.auto_framing = None                         # the call is over, or the setting is off
+        page.wait_for_function("document.getElementById('auto-framing-note').hidden", timeout=5000)
+        page.close()
+
+
 def test_panels_hide_with_a_note_when_the_devices_are_missing(browser):
     with PageServer(devices=StubDevices(volume=StubVolume(available=False), camera=StubCamera(available=False))) as server:
         page = open_page(browser, server)

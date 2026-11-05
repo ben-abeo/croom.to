@@ -273,6 +273,7 @@ class ControlConfig:
     port: int = 8080
     screensaver: str = "info"  # what the TV shows when idle until someone picks another style on the room page
     camera_presets: List[str] = field(default_factory=lambda: ["Wide", "Table", "Whiteboard"])  # the three slot names
+    camera_auto_framing: bool = False   # Auto framing: Frame people by itself during calls (devices/autoframe.py)
 
 
 @dataclass
@@ -433,6 +434,7 @@ class Config:
                 "port": self.control.port,
                 "screensaver": self.control.screensaver,
                 "camera_presets": list(self.control.camera_presets),
+                "camera_auto_framing": self.control.camera_auto_framing,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

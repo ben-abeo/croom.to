@@ -166,7 +166,7 @@ async def test_a_camera_that_fails_while_homing_at_start_is_warned_about(tmp_pat
 async def test_nothing_escapes_the_homing_task(tmp_path, caplog, error, level):
     service, _, _ = service_for(tmp_path, home=HOME)
 
-    async def home():
+    async def home(by_person=True):
         raise error
 
     service.camera.home = home

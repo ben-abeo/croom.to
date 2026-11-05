@@ -131,6 +131,11 @@ class RoomCamera:
         self._watchdog: Optional[asyncio.Task] = None
         self._busy = False
         self._framing = False   # Frame people runs (a long move of its own: busy as well)
+        # Auto framing (autoframe.py) steps back while a person has the camera: when a person last moved it by hand (an arrow or a
+        # drag, the zoom, Home, a preset, Find the stops), until a person taps Frame people. And what Auto framing says it is doing
+        # ("on", "paused", or None: off, or not in a call), for the camera screen.
+        self._taken_over_at: Optional[float] = None
+        self.auto_framing: Optional[str] = None
         self._interrupt = asyncio.Event()
         self._long_done = asyncio.Event()
         self._long_done.set()
@@ -234,6 +239,7 @@ class RoomCamera:
             "moving": bool(self._pan or self._tilt),
             "busy": self._busy,
             "framing": self._framing,
+            "auto_framing": self.auto_framing,
             "zoom": {"level": self._zoom if self._zoom is not None else self._zoom_range[0],
                      "min": self._zoom_range[0], "max": self._zoom_range[1]},
             "position_known": self.position_known,
@@ -409,6 +415,8 @@ class RoomCamera:
                 or pan not in (-1, 0, 1) or tilt not in (-1, 0, 1)):
             raise ValueError("pan and tilt must each be -1, 0 or 1")
         await self._require()
+        if pan or tilt:
+            self._by_hand()
         await self._cancel_long_move()
         await self._apply_speeds(int(pan), int(tilt))
         if self._absolute and (self._pan or self._tilt) and (self._stepper is None or self._stepper.done()):
@@ -513,10 +521,13 @@ class RoomCamera:
             async with self._io_lock:
                 for name, cid in PICTURE:
                     if name in self._picture and name in self._picture_ranges and not self._temperature_is_automatic(name):
-                        await self._write_picture(name, self._picture[name])
+                        try:
+                            await self._write_picture(name, self._picture[name])
+                        except ValueError as e:      # this one refused: the others still go back
+                            logger.info(f"A picture setting was not put back: {e}")
                 await self._read_picture()
-        except (DeviceUnavailable, ValueError) as e:
-            logger.info(f"The camera's picture settings were not all put back: {e}")
+        except DeviceUnavailable as e:
+            logger.info(f"The camera's picture settings were not put back: {e}")
 
     def _temperature_is_automatic(self, name: str) -> bool:
         automatic = self._picture.get("white_balance_automatic", self._picture_now.get("white_balance_automatic", 1))
@@ -590,7 +601,22 @@ class RoomCamera:
                 self._zoom_read_at = now
             return self._zoom
 
+    @property
+    def taken_over_at(self) -> Optional[float]:
+        """When a person last moved the camera by hand (the camera's clock), or None since a person tapped Frame people."""
+        return self._taken_over_at
+
+    def _by_hand(self) -> None:
+        self._taken_over_at = self._clock()
+
     async def zoom(self, level: int) -> int:
+        """The zoom a person asks for (the page's zoom buttons and slider)."""
+        level = _whole_number(level, "the zoom level")
+        self._by_hand()
+        return await self._zoom_to(level)
+
+    async def _zoom_to(self, level: int) -> int:
+        """The zoom, as the camera's own moves set it (Home, a preset, Frame people): not a person's."""
         level = _whole_number(level, "the zoom level")
         await self._require()
         level = max(self._zoom_range[0], min(self._zoom_range[1], level))
@@ -731,7 +757,7 @@ class RoomCamera:
     async def _home_work(self) -> None:
         await self._find_stops_work()
         await self._move_to(float(self._home["pan_s"]), float(self._home["tilt_s"]))
-        await self.zoom(self._zoom_range[0])
+        await self._zoom_to(self._zoom_range[0])
 
     async def _go_to(self, saved: Dict[str, Any], zoom: int) -> None:
         """A camera that says where it is: stop any turn, then send it to the saved pan and tilt in one call (on a UVC camera they are
@@ -741,7 +767,7 @@ class RoomCamera:
         await self._apply_speeds(0, 0)
         async with self._io_lock:
             await self._set_many(self._inside(float(saved["pan"]), float(saved["tilt"]), zoom))
-        await self.zoom(zoom)
+        await self._zoom_to(zoom)
 
     def _limit_degrees(self) -> Dict[str, float]:
         return {edge: value / ARCSEC for edge, value in self._limits.items()}
@@ -780,13 +806,17 @@ class RoomCamera:
 
     async def find_stops(self) -> Dict[str, Any]:
         """Drive both axes into their end stops and call that (0, 0): the one place the position is known for sure."""
+        self._by_hand()
         await self._long(self._find_stops_work)
         return self.state()
 
-    async def home(self) -> Dict[str, Any]:
-        """Find the stops, then move to the saved home and the widest zoom (a camera that says where it is goes straight there)."""
+    async def home(self, by_person: bool = True) -> Dict[str, Any]:
+        """Find the stops, then move to the saved home and the widest zoom (a camera that says where it is goes straight there).
+        by_person: a person's Home (the page's), not the room's own at start or after Laptop mode."""
         if not self.home_saved:
             raise NotReady("save a home first")
+        if by_person:
+            self._by_hand()
         if self._absolute:
             await self._long(lambda: self._go_to(self._home, self._zoom_range[0]))
         else:
@@ -866,6 +896,7 @@ class RoomCamera:
         preset = self._presets.get(key)
         if not self._usable(preset):
             raise NotReady("nothing saved in this slot")
+        self._by_hand()
         if not self.position_known and not self.home_saved:
             raise NotReady("home the camera first")
 
@@ -877,7 +908,7 @@ class RoomCamera:
                     raise NotReady("home the camera first")
                 await self._home_work()
             await self._move_to(float(preset["pan_s"]), float(preset["tilt_s"]))
-            await self.zoom(int(preset.get("zoom", self._zoom_range[0])))
+            await self._zoom_to(int(preset.get("zoom", self._zoom_range[0])))
 
         await self._long(work)
         return self.state()
@@ -887,7 +918,7 @@ class RoomCamera:
     # ------------------------------------------------------------------
 
     async def frame_people(self, still: Callable[[], Awaitable[Optional[bytes]]],
-                           detect: Optional[Callable[[bytes], Any]] = None) -> Dict[str, Any]:
+                           detect: Optional[Callable[[bytes], Any]] = None, by_person: bool = True) -> Dict[str, Any]:
         """Frame the people in the room once: zoom to the widest and let the picture settle, take one picture (`still`: the tap's
         CameraView.still, a JPEG or None), find the faces (`detect`: framing.detect_faces by default, run in a worker thread), zoom
         so the group fills the picture and turn toward it by timed travel, then look once more and correct once at most.
@@ -897,11 +928,14 @@ class RoomCamera:
         camera moves ("Moving..."). No one found: the zoom goes back to where it was, and nothing has turned. Without Set up
         (the position not known) it only zooms. A camera that says where it points is turned straight to the group, inside its
         limits (_aim_work). Answers the camera's state with "framed" (people found) and "turned" (whether
-        it could turn toward them)."""
+        it could turn toward them). by_person: a person's tap, which also gives the camera back to Auto framing; Auto framing's own
+        framing is not."""
         if self._framing:
             raise NotReady(ALREADY_FRAMING)
         if self._busy or self._pan or self._tilt:
             raise NotReady(MOVING)
+        if by_person:
+            self._taken_over_at = None
         outcome: Dict[str, Any] = {}
         self._framing = True      # before anything awaits: a second tap meanwhile is "Already framing"
         try:
@@ -912,11 +946,11 @@ class RoomCamera:
 
     async def _frame_work(self, still, detect, outcome: Dict[str, Any]) -> None:
         before = await self.read_zoom()
-        await self.zoom(self._zoom_range[0])                         # 1. everyone in reach in view
+        await self._zoom_to(self._zoom_range[0])                         # 1. everyone in reach in view
         await self._wait(self.SETTLE_S)
         faces, size = await self._look(still, detect)               # 2. and 3.
         if faces is None or not faces:
-            await self.zoom(before if before is not None else self._zoom_range[0])
+            await self._zoom_to(before if before is not None else self._zoom_range[0])
             if faces is None:
                 raise NotReady(NO_PICTURE)
             outcome.update(framed=0, turned=False)
@@ -928,7 +962,7 @@ class RoomCamera:
             self._account_now()
             position = (self._pan_s, self._tilt_s)
         target = framing.plan(faces, size, self._travel_s, position)  # 4.
-        zoom = await self.zoom(target.zoom)                           # 5.
+        zoom = await self._zoom_to(target.zoom)                           # 5.
         outcome.update(framed=target.people, turned=target.pan_s is not None)
         if target.pan_s is None:                                      # without Set up: the zoom only
             return

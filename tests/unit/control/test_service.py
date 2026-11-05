@@ -341,11 +341,12 @@ class StubVolume:
 
 
 class StubCamera:
-    def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2), limits=None, picture=()):
+    def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2), limits=None, picture=(), auto_framing=None):
         self.available, self.home_saved = available, home_saved
         self.limits = limits            # None: the MeetUp; a dict of edges set: a camera that says where it points (the Rally)
         self.picture = [dict(setting) for setting in picture]   # the picture settings the camera has, as RoomCamera.state() lists them
         self.pictures = []              # what set_picture and reset_picture were asked, in order
+        self.auto_framing = auto_framing    # what Auto framing says: "on", "paused", or None
         self.position_known = position_known and available      # a missing camera never knows its position
         self.saved = set(saved)
         self.zoom_level, self.moving, self.busy = 100, False, False
@@ -365,7 +366,7 @@ class StubCamera:
                 "position_known": self.position_known, "home_saved": self.home_saved,
                 "presets": [{"slot": s, "name": self.names[s - 1], "saved": s in self.saved} for s in (1, 2, 3)],
                 "limits": dict(self.limits) if self.limits is not None else None,
-                "picture": [dict(setting) for setting in self.picture], "preview": self.preview_on}
+                "picture": [dict(setting) for setting in self.picture], "auto_framing": self.auto_framing, "preview": self.preview_on}
 
     async def set_picture(self, name, value):
         from croom.devices.errors import NotReady

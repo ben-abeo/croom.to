@@ -327,7 +327,7 @@ class TestControlConfig:
         assert config.control.host == "127.0.0.1"
         assert config.control.port == 9090
         assert config.to_dict()["control"] == {"enabled": False, "host": "127.0.0.1", "port": 9090, "screensaver": "info",
-                                               "camera_presets": ["Wide", "Table", "Whiteboard"]}
+                                               "camera_presets": ["Wide", "Table", "Whiteboard"], "camera_auto_framing": False}
         assert Config.from_dict(config.to_dict()).control.port == 9090
 
 

@@ -1364,3 +1364,15 @@ async def test_a_picture_setting_the_camera_refuses_is_said_and_the_camera_stays
     assert meetup.state()["picture"] == []
     with pytest.raises(NotReady):
         await meetup.set_picture("brightness", 100)
+
+
+async def test_a_picture_setting_refused_when_the_camera_is_opened_again_leaves_the_others_put_back(tmp_path):
+    from croom.devices.v4l2 import V4L2_CID_BRIGHTNESS, V4L2_CID_SHARPNESS
+    camera, _, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY_PICTURE})
+    await camera.discover()
+    await camera.set_picture("brightness", 90)
+    await camera.set_picture("sharpness", 200)
+    again, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY_PICTURE})
+    v4l2.refuse.add(V4L2_CID_BRIGHTNESS)
+    assert await again.discover()
+    assert v4l2.sets(V4L2_CID_SHARPNESS) == [200] and picture(again)["sharpness"] == 200 and again.available

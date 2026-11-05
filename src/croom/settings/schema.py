@@ -142,6 +142,9 @@ SCHEMA: List[Setting] = [
     Setting("video.ptz_travel_seconds", "Camera travel time", "devices", "number", range=(1, 60), step=0.5,
             help="Seconds the camera takes from one end stop to the other"),
     Setting("control.camera_presets", "Camera preset names", "devices", "list", live=True, required=True, max_items=3, max_length=24),
+    Setting("control.camera_auto_framing", "Auto framing", "devices", "switch", live=True,
+            help="Frames the people in the room by itself during calls, as Logitech RightSight does: when a call starts, and when people "
+                 "come in, leave or reach the edge. Moving the camera by hand pauses it until Frame people is tapped"),
     # Laptop switch
     Setting("laptop.enabled", "Laptop switch", "laptop", "switch"),
     Setting("laptop.gpio_pin", "GPIO pin", "laptop", "number", range=(0, 27), integer=True, help="BCM numbering: 17 is header pin 11"),

@@ -5,7 +5,9 @@ The room camera's framing through V4L2 (spec 2026-10-08 sound and camera, sectio
 where it is in seconds of travel from the end stops, found by homing, and presets
 are stored against that estimate. A camera that says where it is (the Rally:
 pan_absolute and tilt_absolute) keeps its own position in its home and presets
-instead, and is sent back there. Control calls go through a second file
+instead, and is sent back there. It is never turned by speed: the Rally goes on
+saying the last place it was sent whatever a turn by speed does, so an arrow
+steps its position instead. Control calls go through a second file
 descriptor next to Chromium's stream; nothing here streams video.
 """
 
@@ -72,6 +74,10 @@ class RoomCamera:
     PREVIEW_S = 180.0
     SLOTS = 3
     SETTLE_S = 1.0         # Frame people: the picture settles this long after a zoom or a turn before it is looked at
+    # A camera that says where it is, turned by an arrow or a drag: its position moved STEP_DEG every STEP_S (10 deg/s, near the
+    # MeetUp's speed). The knobs for how it feels; the Rally counts its position in 1/3600 deg and takes whole degrees.
+    STEP_S = 0.1
+    STEP_DEG = 1
 
     def __init__(self, device: str = "auto", travel_s: float = 8.0, preset_names: Optional[List[str]] = None,
                  store=None, v4l2=None, clock=time.monotonic, sleep=asyncio.sleep):
@@ -98,6 +104,8 @@ class RoomCamera:
         self._has_pan = False
         self._has_tilt = False
         self._absolute = False   # the camera says where it is (pan_absolute and tilt_absolute): no estimate needed
+        self._pan_range = self._tilt_range = (0, 0)   # its pan and tilt, lowest to highest, in its own units (1/3600 deg)
+        self._stepper: Optional[asyncio.Task] = None
         self._zoom: Optional[int] = None
         self._zoom_read_at: Optional[float] = None
         self._pan = 0
@@ -239,8 +247,10 @@ class RoomCamera:
             namer = getattr(self._v4l2, "camera_name", None)   # QUERYCAP on a node of its own: no frames are read
             self._label = namer(path) if namer is not None else None
             self._has_pan, self._has_tilt = pan is not None, tilt is not None
-            self._absolute = (self._v4l2.query(fd, V4L2_CID_PAN_ABSOLUTE) is not None
-                              and self._v4l2.query(fd, V4L2_CID_TILT_ABSOLUTE) is not None)
+            pan_at, tilt_at = self._v4l2.query(fd, V4L2_CID_PAN_ABSOLUTE), self._v4l2.query(fd, V4L2_CID_TILT_ABSOLUTE)
+            self._absolute = pan_at is not None and tilt_at is not None
+            if self._absolute:
+                self._pan_range, self._tilt_range = (pan_at[0], pan_at[1]), (tilt_at[0], tilt_at[1])
             if zoom is not None:
                 self._zoom_range = (zoom[0], zoom[1])
                 self._zoom = zoom[3]
@@ -270,8 +280,11 @@ class RoomCamera:
         self._absolute = False
 
     def _speed_controls(self, pan: int, tilt: int) -> Dict[int, int]:
-        """The speed controls this node has, with the values to write; pan and tilt go out in one call."""
+        """The speed controls this node has, with the values to write; pan and tilt go out in one call. None on a camera that says
+        where it is: a turn by speed is not counted in the place it says (the Rally), so it is turned by its position (_step)."""
         speeds: Dict[int, int] = {}
+        if self._absolute:
+            return speeds
         if self._has_pan:
             speeds[V4L2_CID_PAN_SPEED] = pan
         if self._has_tilt:
@@ -359,6 +372,8 @@ class RoomCamera:
         await self._require()
         await self._cancel_long_move()
         await self._apply_speeds(int(pan), int(tilt))
+        if self._absolute and (self._pan or self._tilt) and (self._stepper is None or self._stepper.done()):
+            self._stepper = asyncio.create_task(self._step())
         self._cancel_watchdog()
         if pan or tilt:
             self._watchdog = asyncio.create_task(self._watch())
@@ -387,6 +402,24 @@ class RoomCamera:
                 await self._apply_speeds(0, 0)
             except DeviceUnavailable:
                 pass
+
+    async def _step(self) -> None:
+        """A camera that says where it is, turned by an arrow or a drag: its pan and tilt moved a step every STEP_S, within its range,
+        for as long as the direction move() set stays (a let-go, the watchdog, a Home or a preset set it to nothing). Each step starts
+        from the place the camera says, so the place it says stays where it is."""
+        step = self.STEP_DEG * 3600
+        try:
+            while self._fd is not None and (self._pan or self._tilt):
+                async with self._io_lock:
+                    if not (self._pan or self._tilt):     # stopped while this step waited for the camera
+                        break
+                    pan = await self._get(V4L2_CID_PAN_ABSOLUTE) + self._pan * step
+                    tilt = await self._get(V4L2_CID_TILT_ABSOLUTE) + self._tilt * step
+                    await self._set_many({V4L2_CID_PAN_ABSOLUTE: max(self._pan_range[0], min(self._pan_range[1], pan)),
+                                          V4L2_CID_TILT_ABSOLUTE: max(self._tilt_range[0], min(self._tilt_range[1], tilt))})
+                await self._sleep(self.STEP_S)
+        except DeviceUnavailable:
+            pass        # the camera has gone, and _fail has said so
 
     def _cancel_watchdog(self) -> None:
         if self._watchdog is not None and not self._watchdog.done() and self._watchdog is not asyncio.current_task():

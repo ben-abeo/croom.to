@@ -1193,3 +1193,43 @@ async def test_travel_times_saved_for_a_meetup_are_not_a_home_or_presets_for_a_c
         await camera.recall(1)
     assert str(failure.value) == "nothing saved in this slot"
     assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_PAN_ABSOLUTE) == []   # nothing was moved by the old times
+
+
+async def test_an_arrow_held_on_a_camera_that_says_where_it_is_steps_its_position_and_a_save_keeps_where_it_got_to(tmp_path):
+    # The Rally keeps saying the last place it was sent whatever a turn by speed does (the Boardroom, 2026-11-04): so an arrow
+    # turns it by its own position, a step at a time, and never by speed
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 0, (10, V4L2_CID_TILT_ABSOLUTE): -7200})
+    await camera.move(0, -1)                           # the down arrow, held
+    assert camera.state()["moving"]
+    await asyncio.sleep(0.05)
+    await camera.move(0, 0)                            # let go
+    await asyncio.sleep(0.02)
+    tilts = v4l2.sets(V4L2_CID_TILT_ABSOLUTE)
+    assert len(tilts) >= 2 and tilts[0] == -7200 - 3600            # a degree a step, downward ...
+    assert all(b - a in (-3600, 0) for a, b in zip(tilts, tilts[1:])) and min(tilts) >= -324000   # ... and not past the stop
+    assert set(v4l2.sets(V4L2_CID_PAN_ABSOLUTE)) == {0}
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []           # never by speed
+    written = len(v4l2.calls)
+    await asyncio.sleep(0.02)
+    assert len(v4l2.calls) == written and not camera.state()["moving"]                           # let go: no more steps
+    await camera.save_home()
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["home"] == {"pan": 0, "tilt": tilts[-1]}
+
+
+async def test_an_arrow_against_the_stop_of_a_camera_that_says_where_it_is_stays_at_the_stop(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 324000, (10, V4L2_CID_TILT_ABSOLUTE): -320400})
+    await camera.move(1, -1)
+    await asyncio.sleep(0.03)
+    await camera.stop()
+    assert set(v4l2.sets(V4L2_CID_PAN_ABSOLUTE)) == {324000} and v4l2.sets(V4L2_CID_TILT_ABSOLUTE)[-1] == -324000
+
+
+async def test_find_the_stops_does_not_turn_a_camera_that_says_where_it_is(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    await camera.find_stops()
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == [] and camera.position_known

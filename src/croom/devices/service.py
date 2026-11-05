@@ -45,6 +45,7 @@ class DevicesService(Service):
         # manager starts the services one after another, so homing runs in the background and the room page is
         # not held back by it at every boot and restart. stop() and the tests wait for it through this task.
         self.homing: Optional[asyncio.Task] = None
+        self._called = False    # a call has connected since the camera was last sent home (_on_meeting_state)
         self._rediscover_task: Optional[asyncio.Task] = None
         self._last_failure: Optional[str] = None
         self._away = False   # the MeetUp is lent to a laptop (spec 2026-10-27): the background check does not look for it
@@ -104,18 +105,32 @@ class DevicesService(Service):
                 self._last_failure = message
                 logger.warning(message, exc_info=True)
 
-    async def _home_at_start(self) -> None:
+    async def _home_at_start(self, when: str = "at start") -> None:
         """Take the camera to its saved home. Nothing escapes: stop() waits for this task, and a camera that
         will not home is still usable by hand."""
         try:
             await self.camera.home(by_person=False)      # the room's own, not a person taking the camera over
-            logger.info("Camera homed at start")
+            logger.info(f"Camera homed {when}")
         except Interrupted:
-            logger.info("Camera homing at start was interrupted by a request on the page, or by shutdown")
+            logger.info(f"Camera homing {when} was interrupted by a request on the page, or by shutdown")
         except (NotReady, DeviceUnavailable) as e:
-            logger.warning(f"Could not home the camera at start: {e}")
+            logger.warning(f"Could not home the camera {when}: {e}")
         except Exception:  # noqa: BLE001 - outside the camera's contract, but nothing may escape this task
-            logger.exception("Could not home the camera at start")
+            logger.exception(f"Could not home the camera {when}")
+
+    def _home_again(self, when: str) -> None:
+        """Send a camera that says where it points (the Rally) back to its home when a call is over, or when it has come back after it
+        went (unplugged, or restarted by the Rally system, which wakes it at Logitech's own default): the room wants it at Home when
+        nobody uses it (Ben, 2026-11-05). Not without a home, while the camera is lent to a laptop, while a homing runs, or outside
+        start() and stop(). The MeetUp is left as it was: it homes by driving into its stops."""
+        if not (self._running and not self._away and self.camera.available and self.camera.says_where and self.camera.home_saved):
+            return
+        if self.homing is not None and not self.homing.done():
+            return
+        try:
+            self.homing = asyncio.get_running_loop().create_task(self._home_at_start(when))
+        except RuntimeError:     # no loop running: a callback from outside the agent's loop has nothing to start
+            logger.debug(f"The camera was not homed {when}: no event loop")
 
     async def _rediscover(self) -> None:
         while True:
@@ -124,6 +139,7 @@ class DevicesService(Service):
                 continue
             if not self.camera.available:
                 await self._check(self.camera.discover)
+                self._home_again("now that it is back")
             if not self.volume.available:
                 await self._check(self.volume.refresh, force=True)
             if self.mic is not None and not self.mic.available:
@@ -180,7 +196,13 @@ class DevicesService(Service):
 
     def _on_meeting_state(self, state: MeetingState) -> None:
         """The meeting service's state callback: a meeting that is connected keeps the chosen microphone level, from its first moment
-        and every MIC_REAPPLY_S; anything else (leaving, over, failed, back in a lobby) ends that."""
+        and every MIC_REAPPLY_S; anything else (leaving, over, failed, back in a lobby) ends that. A call that was connected and is
+        over sends a camera that says where it points back to its home (_home_again)."""
+        if state == MeetingState.CONNECTED:
+            self._called = True
+        elif state == MeetingState.IDLE and self._called:
+            self._called = False
+            self._home_again("after the call")
         if self.mic is None:
             return
         if state == MeetingState.CONNECTED and self._running:

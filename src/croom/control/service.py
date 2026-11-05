@@ -484,6 +484,7 @@ class ControlService(Service):
         app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
         app.router.add_post("/api/camera/setup", self._handle_camera_setup)
         app.router.add_post("/api/camera/frame", self._handle_camera_frame)
+        app.router.add_post("/api/camera/picture", self._handle_camera_picture)
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
         app.router.add_post("/api/tv/control", self._handle_tv_control)
         app.router.add_post("/api/tv/pair", self._handle_tv_pair)
@@ -1048,6 +1049,20 @@ class ControlService(Service):
             if verb in ("set_limit", "clear_limit"):        # a camera that says where it points: an edge its picture keeps to
                 return await camera.set_limit(data.get("edge"), verb == "set_limit")
             raise ValueError("action must be find_stops, save_home, set_limit or clear_limit")
+
+        return await self._device_call(request, camera, action)
+
+    async def _handle_camera_picture(self, request: web.Request) -> web.Response:
+        """POST /api/camera/picture: {"name": "brightness", "value": 140} changes one picture setting and keeps it for the room;
+        {"reset": true} puts every one back to the camera's own default."""
+        camera = self._camera()
+
+        async def action(data):
+            if data.get("reset") is True:
+                return await camera.reset_picture()
+            if "name" not in data or "value" not in data:
+                raise ValueError("Send name and value, or reset")
+            return await camera.set_picture(data["name"], self._int_field(data, "value"))
 
         return await self._device_call(request, camera, action)
 

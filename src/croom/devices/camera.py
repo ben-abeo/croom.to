@@ -14,6 +14,7 @@ descriptor next to Chromium's stream; nothing here streams video.
 """
 
 import asyncio
+import errno
 import logging
 import math
 import time
@@ -21,7 +22,9 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from croom.devices import framing
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
-from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
+from croom.devices.v4l2 import (V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION, V4L2_CID_BRIGHTNESS,
+                                V4L2_CID_CONTRAST, V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_SATURATION, V4L2_CID_SHARPNESS,
+                                V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED, V4L2_CID_WHITE_BALANCE_TEMPERATURE,
                                 V4L2_CID_ZOOM_ABSOLUTE, V4l2Controls)
 
 logger = logging.getLogger(__name__)
@@ -37,6 +40,13 @@ MOVING = "Moving\u2026"                 # what the camera screen says while the 
 NO_PICTURE = "No picture from the camera"
 NO_LIMITS = "This camera does not say where it points, so it cannot keep to limits"
 ARCSEC = 3600                           # a camera's pan and tilt are counted in 1/3600 deg (UVC)
+# The picture settings a room may change, by the names the page and the store use, in the order they are put back (the automatic white
+# balance before the temperature, which the camera takes only while the automatic one is off). A camera has those it reports.
+PICTURE = (("brightness", V4L2_CID_BRIGHTNESS), ("contrast", V4L2_CID_CONTRAST), ("saturation", V4L2_CID_SATURATION),
+           ("sharpness", V4L2_CID_SHARPNESS), ("backlight_compensation", V4L2_CID_BACKLIGHT_COMPENSATION),
+           ("white_balance_automatic", V4L2_CID_AUTO_WHITE_BALANCE), ("white_balance_temperature", V4L2_CID_WHITE_BALANCE_TEMPERATURE))
+PICTURE_CIDS = dict(PICTURE)
+WHITE_BALANCE_IS_AUTOMATIC = "Turn off automatic white balance first"
 
 
 def _sign(value: float) -> int:
@@ -157,6 +167,14 @@ class RoomCamera:
         self._limits: Dict[str, int] = {}
         if isinstance(limits, dict):
             self._limits = {edge: int(limits[edge]) for edge in framing.EDGES if _finite(limits.get(edge))}
+        # The picture: the room's own settings (by PICTURE's names), put back whenever the camera is opened; the open camera's ranges
+        # (min, max, step, default) for the ones it has, and what it says they are now
+        picture = saved.get("picture")
+        self._picture: Dict[str, int] = {}
+        if isinstance(picture, dict):
+            self._picture = {name: int(picture[name]) for name, _ in PICTURE if _finite(picture.get(name))}
+        self._picture_ranges: Dict[str, tuple] = {}
+        self._picture_now: Dict[str, int] = {}
 
     def set_preset_names(self, preset_names: Optional[List[str]]) -> None:
         """The three slots' names (control.camera_presets): at start, and when Settings changes them, which applies at once. Slots past
@@ -224,6 +242,10 @@ class RoomCamera:
                         for slot in range(1, self.SLOTS + 1)],
             # which limits are set, on a camera that can keep to them (one that says where it points); None on any other
             "limits": {edge: edge in self._limits for edge in framing.EDGES} if self._absolute else None,
+            # the picture settings this camera has, in PICTURE's order: their ranges, and the value each has now
+            "picture": [{"name": name, "min": r[0], "max": r[1], "step": r[2], "default": r[3],
+                         "value": self._picture_now.get(name, r[3])}
+                        for name, r in ((name, self._picture_ranges.get(name)) for name, _ in PICTURE) if r is not None],
             "preview": self.preview,
         }
 
@@ -265,11 +287,15 @@ class RoomCamera:
             if zoom is not None:
                 self._zoom_range = (zoom[0], zoom[1])
                 self._zoom = zoom[3]
+            self._picture_ranges = {name: r for name, r in ((name, self._v4l2.query(fd, cid)) for name, cid in PICTURE)
+                                    if r is not None}
+            self._picture_now = {}
             self._reason = None
             self._warned = None
             logger.info(f"Camera: {path} (zoom {_span(zoom)}, pan {_span(pan)}, tilt {_span(tilt)}"
                         f"{', says where it is' if self._absolute else ''})")
-            return True
+            await self._put_picture_back()
+            return self._fd is not None
         self._fail(NO_CAMERA)
         return False
 
@@ -289,6 +315,7 @@ class RoomCamera:
         self._segment_started = None
         self._position_known = False
         self._absolute = False
+        self._picture_ranges, self._picture_now = {}, {}
 
     def _speed_controls(self, pan: int, tilt: int) -> Dict[int, int]:
         """The speed controls this node has, with the values to write; pan and tilt go out in one call. None on a camera that says
@@ -369,6 +396,7 @@ class RoomCamera:
                 pass
         self._fd, self._path = None, None
         self._absolute = False
+        self._picture_ranges, self._picture_now = {}, {}
         self._reason = "closed"
 
     # ------------------------------------------------------------------
@@ -473,6 +501,80 @@ class RoomCamera:
         while self._busy:
             self._interrupt.set()
             await self._long_done.wait()
+
+    # ------------------------------------------------------------------
+    # The picture: brightness, contrast, colour, sharpness, a bright window behind people, white balance
+    # ------------------------------------------------------------------
+
+    async def _put_picture_back(self) -> None:
+        """The room's picture settings, written to the camera that has just been opened (a camera unplugged or restarted forgets them),
+        then what it says they are. A setting it refuses is left as the camera has it, and said in the log."""
+        try:
+            async with self._io_lock:
+                for name, cid in PICTURE:
+                    if name in self._picture and name in self._picture_ranges and not self._temperature_is_automatic(name):
+                        await self._write_picture(name, self._picture[name])
+                await self._read_picture()
+        except (DeviceUnavailable, ValueError) as e:
+            logger.info(f"The camera's picture settings were not all put back: {e}")
+
+    def _temperature_is_automatic(self, name: str) -> bool:
+        automatic = self._picture.get("white_balance_automatic", self._picture_now.get("white_balance_automatic", 1))
+        return name == "white_balance_temperature" and automatic != 0
+
+    async def _write_picture(self, name: str, value: int) -> None:
+        """One picture setting, under the control lock. A camera that is gone fails as any control call does; one that refuses the value
+        (a setting the camera has made inactive) is a ValueError, and the camera stays available."""
+        self._check_open()
+        try:
+            await asyncio.to_thread(self._v4l2.set, self._fd, PICTURE_CIDS[name], value)
+        except OSError as e:
+            if e.errno in (errno.ENODEV, errno.ENOENT, errno.EIO):
+                self._fail(f"camera call failed: {e}")
+                raise DeviceUnavailable(self._reason) from e
+            raise ValueError(f"The camera refused {name.replace('_', ' ')} {value}: {e.strerror or e}") from e
+
+    async def _read_picture(self) -> None:
+        self._picture_now = {name: await self._get(PICTURE_CIDS[name]) for name in self._picture_ranges}
+
+    async def set_picture(self, name: Any, value: Any) -> Dict[str, Any]:
+        """Change one picture setting, keep it for the room (put back whenever the camera is opened), and answer the state with what the
+        camera says every setting is now (automatic white balance changes the temperature it reports)."""
+        if name not in PICTURE_CIDS:
+            raise ValueError(f"name must be one of {', '.join(n for n, _ in PICTURE)}")
+        value = _whole_number(value, name.replace("_", " "))
+        await self._require()
+        span = self._picture_ranges.get(name)
+        if span is None:
+            raise NotReady(f"This camera has no {name.replace('_', ' ')} setting")
+        low, high, step = span[0], span[1], max(1, span[2])
+        value = max(low, min(high, low + round((value - low) / step) * step))
+        if name == "white_balance_temperature" and self._picture_now.get("white_balance_automatic", 0) != 0:
+            raise NotReady(WHITE_BALANCE_IS_AUTOMATIC)
+        async with self._io_lock:
+            await self._write_picture(name, value)
+            await self._read_picture()
+        picture = {**self._picture, name: value}
+        if name == "white_balance_automatic" and value == 0 and "white_balance_temperature" in self._picture_now:
+            picture["white_balance_temperature"] = self._picture_now["white_balance_temperature"]   # where the automatic one left it
+        self._persist(self._home, self._presets, picture=picture)
+        self._picture = picture
+        logger.info(f"Camera picture: {name} {value}")
+        return self.state()
+
+    async def reset_picture(self) -> Dict[str, Any]:
+        """Every picture setting back to the camera's own default, and none kept for the room."""
+        await self._require()
+        async with self._io_lock:
+            for name, _ in PICTURE:
+                span = self._picture_ranges.get(name)
+                if span is not None and name != "white_balance_temperature":   # the automatic white balance (its default) sets it
+                    await self._write_picture(name, span[3])
+            await self._read_picture()
+        self._persist(self._home, self._presets, picture={})
+        self._picture = {}
+        logger.info("Camera picture back to the camera's defaults")
+        return self.state()
 
     # ------------------------------------------------------------------
     # Zoom
@@ -885,7 +987,7 @@ class RoomCamera:
         return task.result()
 
     def _persist(self, home: Optional[Dict[str, Any]], presets: Dict[str, Dict[str, Any]],
-                 limits: Optional[Dict[str, int]] = None) -> None:
+                 limits: Optional[Dict[str, int]] = None, picture: Optional[Dict[str, int]] = None) -> None:
         """Write a home, presets and limits (the ones kept now when not given) through the store, as copies: the store keeps what it is
         given by reference, so a later save of another key would otherwise write a preset that is half edited. The callers write the
         new values first and keep them only once this has returned: a save that raises (a full disk) must not leave the camera
@@ -893,7 +995,8 @@ class RoomCamera:
         if self._store is not None:
             self._store.save("camera", {"home": dict(home) if home is not None else None,
                                         "presets": {k: dict(v) for k, v in presets.items()},
-                                        "limits": dict(self._limits if limits is None else limits)})
+                                        "limits": dict(self._limits if limits is None else limits),
+                                        "picture": dict(self._picture if picture is None else picture)})
 
     # ------------------------------------------------------------------
     # Preview

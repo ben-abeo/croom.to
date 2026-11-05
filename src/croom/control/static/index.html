@@ -154,6 +154,13 @@
                   <button type="button" class="button quiet" data-edge="left" aria-pressed="false">Set leftmost</button>
                   <button type="button" class="button quiet" data-edge="right" aria-pressed="false">Set rightmost</button>
                 </div>
+                <!-- The picture settings the camera has (brightness, contrast, colour, sharpness, a bright window behind people, white
+                     balance), kept for the room: devices.js draws them from the status's camera.picture -->
+                <details id="camera-picture" class="picture-settings" hidden>
+                  <summary>Picture</summary>
+                  <div id="picture-controls" class="picture-settings-rows"></div>
+                  <button type="button" id="picture-reset" class="button quiet">Reset picture</button>
+                </details>
               </div>
             </div>
           </div>

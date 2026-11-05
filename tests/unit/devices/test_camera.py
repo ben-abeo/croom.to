@@ -16,7 +16,7 @@ from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.devices.camera import RoomCamera
 from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
                                 V4L2_CID_ZOOM_ABSOLUTE)
-from tests.unit.devices.fake_v4l2 import MEETUP, RALLY, FakeClock, FakeV4l2
+from tests.unit.devices.fake_v4l2 import MEETUP, RALLY, RALLY_PICTURE, FakeClock, FakeV4l2
 
 
 def camera_for(tmp_path=None, nodes=None, device="auto", travel_s=8.0, names=None, latency_s=0.0):
@@ -991,7 +991,7 @@ async def test_the_camera_gives_the_store_copies_of_its_home_and_presets(tmp_pat
     camera._store.save("screensaver", "clock")                   # ... while another key is saved, which rewrites the whole file
     saved = SettingsStore(tmp_path / "control-settings.json").get("camera")
     assert saved == {"home": {"pan_s": 0.0, "tilt_s": 0.0}, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}},
-                     "limits": {}}
+                     "limits": {}, "picture": {}}
 
 
 # --- the final fix pass: an explained open failure, settings with defaults, no wait without motors, every failure stops ---
@@ -1087,7 +1087,7 @@ async def test_a_home_or_preset_that_could_not_be_written_is_not_reported_saved(
     await camera.save(3)                                         # the next write that works holds only what was saved
     assert SettingsStore(path).get("camera") == {"home": None, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100},
                                                                           "3": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}},
-                                                 "limits": {}}
+                                                 "limits": {}, "picture": {}}
 
 
 async def test_a_long_move_that_fails_in_any_other_way_still_stops_the_motors():
@@ -1163,7 +1163,7 @@ async def test_a_camera_that_says_where_it_is_saves_and_returns_to_its_own_posit
     await camera.zoom(600)
     await camera.save(2)
     assert SettingsStore(tmp_path / "control-settings.json").get("camera") == {
-        "home": {"pan": 36000, "tilt": -7200}, "presets": {"2": {"pan": -108000, "tilt": 18000, "zoom": 600}}, "limits": {}}
+        "home": {"pan": 36000, "tilt": -7200}, "presets": {"2": {"pan": -108000, "tilt": 18000, "zoom": 600}}, "limits": {}, "picture": {}}
     assert camera.home_saved and camera.state()["presets"][1] == {"slot": 2, "name": "Table", "saved": True}
     camera.forget_position()                           # a laptop had it: the camera still says where it is
     assert camera.position_known
@@ -1308,3 +1308,59 @@ async def test_limits_need_a_camera_that_says_where_it_points(tmp_path):
     await rally.discover()
     with pytest.raises(ValueError):
         await rally.set_limit("sideways", True)
+
+
+# --- the picture: brightness, contrast, colour, sharpness, a bright window behind people, white balance ---
+
+def picture(camera):
+    return {p["name"]: p["value"] for p in camera.state()["picture"]}
+
+
+async def test_picture_settings_are_kept_for_the_room_and_put_back_when_the_camera_is_opened_again(tmp_path):
+    from croom.devices.v4l2 import V4L2_CID_BACKLIGHT_COMPENSATION, V4L2_CID_BRIGHTNESS
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY_PICTURE})
+    await camera.discover()
+    assert picture(camera) == {"brightness": 128, "contrast": 128, "saturation": 128, "sharpness": 128, "backlight_compensation": 0,
+                               "white_balance_automatic": 1, "white_balance_temperature": 4000}
+    await camera.set_picture("brightness", 300)                      # past the top: the camera's top
+    await camera.set_picture("backlight_compensation", 1)
+    assert picture(camera)["brightness"] == 255 and picture(camera)["backlight_compensation"] == 1
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["picture"] == {"brightness": 255, "backlight_compensation": 1}
+    again, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY_PICTURE})   # unplugged and back, or a restart
+    await again.discover()
+    assert v4l2.sets(V4L2_CID_BRIGHTNESS) == [255] and v4l2.sets(V4L2_CID_BACKLIGHT_COMPENSATION) == [1]
+    assert picture(again)["brightness"] == 255
+    await again.reset_picture()
+    assert picture(again)["brightness"] == 128 and picture(again)["backlight_compensation"] == 0
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["picture"] == {}
+
+
+async def test_the_white_balance_temperature_is_set_only_with_the_automatic_one_off(tmp_path):
+    from croom.devices.v4l2 import V4L2_CID_WHITE_BALANCE_TEMPERATURE
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY_PICTURE})
+    await camera.discover()
+    with pytest.raises(NotReady, match="^Turn off automatic white balance first$"):
+        await camera.set_picture("white_balance_temperature", 5000)
+    v4l2.values[(10, V4L2_CID_WHITE_BALANCE_TEMPERATURE)] = 2990         # where the automatic one has it
+    await camera.set_picture("white_balance_automatic", 0)
+    saved = SettingsStore(tmp_path / "control-settings.json").get("camera")["picture"]
+    assert saved == {"white_balance_automatic": 0, "white_balance_temperature": 2990}   # kept where the automatic one left it
+    await camera.set_picture("white_balance_temperature", 5004)
+    assert v4l2.sets(V4L2_CID_WHITE_BALANCE_TEMPERATURE) == [5000]       # to the camera's step of 10
+
+
+async def test_a_picture_setting_the_camera_refuses_is_said_and_the_camera_stays(tmp_path):
+    from croom.devices.v4l2 import V4L2_CID_SHARPNESS
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY_PICTURE})
+    await camera.discover()
+    v4l2.refuse.add(V4L2_CID_SHARPNESS)
+    with pytest.raises(ValueError, match="refused sharpness"):
+        await camera.set_picture("sharpness", 200)
+    assert camera.available and "sharpness" not in (SettingsStore(tmp_path / "control-settings.json").get("camera") or {}).get("picture", {})
+    with pytest.raises(ValueError):
+        await camera.set_picture("hue", 10)
+    meetup, _, _ = camera_for(tmp_path)                              # the stand-in MeetUp reports no picture controls
+    await meetup.discover()
+    assert meetup.state()["picture"] == []
+    with pytest.raises(NotReady):
+        await meetup.set_picture("brightness", 100)

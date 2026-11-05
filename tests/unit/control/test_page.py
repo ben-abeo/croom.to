@@ -6290,6 +6290,42 @@ def test_a_camera_that_says_where_it_points_offers_limits_in_set_up_instead_of_t
         page.close()
 
 
+RALLY_PICTURE = [
+    {"name": "brightness", "min": 0, "max": 255, "step": 1, "default": 128, "value": 128},
+    {"name": "backlight_compensation", "min": 0, "max": 1, "step": 1, "default": 0, "value": 0},
+    {"name": "white_balance_automatic", "min": 0, "max": 1, "step": 1, "default": 1, "value": 1},
+    {"name": "white_balance_temperature", "min": 2000, "max": 7500, "step": 10, "default": 4000, "value": 4000},
+]
+
+
+def test_the_picture_settings_the_camera_has_are_in_set_up_and_kept(browser):
+    camera = StubCamera(home_saved=False, limits={"down": False, "up": False, "left": False, "right": False}, picture=RALLY_PICTURE)
+    with PageServer(devices=StubDevices(camera=camera)) as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        page.click("#camera-picture summary")
+        rows = page.locator("#picture-controls .picture-setting")
+        assert rows.count() == 4
+        assert page.get_by_label("Brightness").get_attribute("type") == "range"
+        assert page.get_by_label("White balance, warm to cool").is_hidden()   # the automatic one is on
+        page.get_by_label("Bright window behind people").check()
+        page.wait_for_function("document.querySelector(\"[data-picture='backlight_compensation']\").checked", timeout=5000)
+        page.get_by_label("Automatic white balance").uncheck()
+        page.wait_for_function("!document.querySelector(\"[data-picture='white_balance_temperature']\").closest('.picture-setting').hidden",
+                               timeout=5000)
+        page.click("#picture-reset")
+        page.wait_for_function("document.querySelector(\"[data-picture='white_balance_temperature']\").closest('.picture-setting').hidden",
+                               timeout=5000)
+        assert camera.pictures == [("backlight_compensation", 1), ("white_balance_automatic", 0), "reset"]
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+        page.close()
+    with PageServer() as server:                          # a camera that reports no picture settings: no Picture section
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        assert page.locator("#camera-picture").is_hidden()
+        page.close()
+
+
 def test_panels_hide_with_a_note_when_the_devices_are_missing(browser):
     with PageServer(devices=StubDevices(volume=StubVolume(available=False), camera=StubCamera(available=False))) as server:
         page = open_page(browser, server)

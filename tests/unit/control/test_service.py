@@ -341,9 +341,11 @@ class StubVolume:
 
 
 class StubCamera:
-    def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2), limits=None):
+    def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2), limits=None, picture=()):
         self.available, self.home_saved = available, home_saved
         self.limits = limits            # None: the MeetUp; a dict of edges set: a camera that says where it points (the Rally)
+        self.picture = [dict(setting) for setting in picture]   # the picture settings the camera has, as RoomCamera.state() lists them
+        self.pictures = []              # what set_picture and reset_picture were asked, in order
         self.position_known = position_known and available      # a missing camera never knows its position
         self.saved = set(saved)
         self.zoom_level, self.moving, self.busy = 100, False, False
@@ -362,7 +364,25 @@ class StubCamera:
                 "moving": self.moving, "busy": self.busy, "framing": False, "zoom": {"level": self.zoom_level, "min": 100, "max": 500},
                 "position_known": self.position_known, "home_saved": self.home_saved,
                 "presets": [{"slot": s, "name": self.names[s - 1], "saved": s in self.saved} for s in (1, 2, 3)],
-                "limits": dict(self.limits) if self.limits is not None else None, "preview": self.preview_on}
+                "limits": dict(self.limits) if self.limits is not None else None,
+                "picture": [dict(setting) for setting in self.picture], "preview": self.preview_on}
+
+    async def set_picture(self, name, value):
+        from croom.devices.errors import NotReady
+        self._check()
+        setting = next((s for s in self.picture if s["name"] == name), None)
+        if setting is None:
+            raise NotReady(f"This camera has no {name} setting")
+        setting["value"] = max(setting["min"], min(setting["max"], int(value)))
+        self.pictures.append((name, setting["value"]))
+        return self.state()
+
+    async def reset_picture(self):
+        self._check()
+        for setting in self.picture:
+            setting["value"] = setting["default"]
+        self.pictures.append("reset")
+        return self.state()
 
     def _check(self):
         from croom.devices.errors import DeviceUnavailable
@@ -2233,6 +2253,19 @@ class TestRoomDevices:
             assert response.status == 400 and (await response.json())["error"] == "preset slots are 1 to 3", slot
         assert (await client.post("/api/camera/presets/2", json={"action": "eat"})).status == 400
         assert devices.camera.setups == ["find_stops", "save_home"] and devices.camera.saves == [2] and devices.camera.recalls == [2]
+
+    async def test_picture_settings_are_changed_and_reset(self, client_factory):
+        camera = StubCamera(picture=[{"name": "brightness", "min": 0, "max": 255, "step": 1, "default": 128, "value": 128}])
+        client = await client_factory(make_service(devices=StubDevices(camera=camera)))
+        response = await client.post("/api/camera/picture", json={"name": "brightness", "value": 150})
+        assert response.status == 200 and (await response.json())["picture"][0]["value"] == 150
+        response = await client.post("/api/camera/picture", json={"reset": True})
+        assert response.status == 200 and (await response.json())["picture"][0]["value"] == 128
+        assert (await client.post("/api/camera/picture", json={})).status == 400
+        assert (await client.post("/api/camera/picture", json={"name": "brightness", "value": "bright"})).status == 400
+        response = await client.post("/api/camera/picture", json={"name": "contrast", "value": 10})
+        assert response.status == 409
+        assert camera.pictures == [("brightness", 150), "reset"]
 
     async def test_limits_are_set_and_cleared_through_setup(self, client_factory):
         devices = StubDevices(camera=StubCamera(limits={"down": False, "up": False, "left": False, "right": False}))

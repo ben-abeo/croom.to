@@ -4,13 +4,20 @@ import asyncio
 import threading
 import time
 
-from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
+from croom.devices.v4l2 import (V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION, V4L2_CID_BRIGHTNESS,
+                                V4L2_CID_CONTRAST, V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_SATURATION, V4L2_CID_SHARPNESS,
+                                V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED, V4L2_CID_WHITE_BALANCE_TEMPERATURE,
                                 V4L2_CID_ZOOM_ABSOLUTE)
 
 MEETUP = {V4L2_CID_ZOOM_ABSOLUTE: (100, 500, 1, 100), V4L2_CID_PAN_SPEED: (-1, 1, 1, 1), V4L2_CID_TILT_SPEED: (-1, 1, 1, 1)}
 # The Rally (Plus) camera, as v4l2-ctl --list-ctrls showed it in the Boardroom (2026-11-04): the MeetUp's controls and its position
 RALLY = {V4L2_CID_ZOOM_ABSOLUTE: (100, 1500, 1, 100), V4L2_CID_PAN_SPEED: (-1, 1, 1, 1), V4L2_CID_TILT_SPEED: (-1, 1, 1, 1),
          V4L2_CID_PAN_ABSOLUTE: (-324000, 324000, 3600, 0), V4L2_CID_TILT_ABSOLUTE: (-324000, 180000, 3600, 0)}
+# ... with the picture controls it reported there too (v4l2-ctl --list-ctrls-menus, the same day)
+RALLY_PICTURE = {**RALLY, V4L2_CID_BRIGHTNESS: (0, 255, 1, 128), V4L2_CID_CONTRAST: (0, 255, 1, 128),
+                 V4L2_CID_SATURATION: (0, 255, 1, 128), V4L2_CID_AUTO_WHITE_BALANCE: (0, 1, 1, 1),
+                 V4L2_CID_WHITE_BALANCE_TEMPERATURE: (2000, 7500, 10, 4000), V4L2_CID_SHARPNESS: (0, 255, 1, 128),
+                 V4L2_CID_BACKLIGHT_COMPENSATION: (0, 1, 1, 0)}
 DECODER = {}   # /dev/video19, the Pi's HEVC decoder: no camera controls
 
 
@@ -27,6 +34,7 @@ class FakeV4l2:
         self.in_flight = 0        # control calls running right now (the camera runs them in worker threads) ...
         self.overlapped = False   # ... and whether two of them were ever running at the same time
         self.set_many_calls = []  # one dict per set_many() call: the controls that were written together
+        self.refuse = set()       # controls whose writes the camera refuses (EBUSY), as it does an inactive one
         self._latency_s = latency_s
         self._counter = threading.Lock()
 
@@ -64,6 +72,8 @@ class FakeV4l2:
 
     def set(self, fd, cid, value):
         self._check_fault()
+        if cid in self.refuse:
+            raise OSError(16, "Device or resource busy")
         self._round_trip()
         self.calls.append(("set", fd, cid, value))
         self.values[(fd, cid)] = value

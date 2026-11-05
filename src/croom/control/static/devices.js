@@ -126,9 +126,10 @@
   function renderCamera(camera) {
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
-    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, framingHere, camera && camera.position_known,
-      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, camera && camera.limits, presetSaveMode, setupOpen, model.busy,
-      deviceNotes.camera, P.cameraMode()]);
+    const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, camera && camera.auto_framing,
+      framingHere, camera && camera.position_known,
+      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, camera && camera.limits, camera && camera.picture, presetSaveMode,
+      setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
     lastCameraKey = key;
     const panel = el("camera-panel");
@@ -142,6 +143,10 @@
     el("camera-status").textContent = camera.framing || framingHere ? FRAMING : camera.busy ? "Moving\u2026"
       : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
     el("frame-people").disabled = camera.busy || framingHere;
+    // Auto framing (the room's setting, during a call): on, or paused while a person has the camera
+    el("auto-framing-note").hidden = !camera.auto_framing;
+    el("auto-framing-note").textContent = camera.auto_framing === "paused" ? "Auto framing is paused while the camera is moved by hand: "
+      + "Frame people gives it back" : camera.auto_framing === "on" ? "Auto framing is on" : "";
     for (const b of document.querySelectorAll("#arrow-pad .pad")) b.disabled = camera.busy;
     el("camera-home").disabled = camera.busy || !camera.home_saved;
     const ready = camera.home_saved;
@@ -164,6 +169,7 @@
       b.classList.toggle("saved", set);
       b.disabled = camera.busy;
     }
+    renderPicture(camera.picture || []);
     el("preset-save-mode").setAttribute("aria-pressed", presetSaveMode ? "true" : "false");
     P.labelWithIcon(el("preset-save-mode"), presetSaveMode ? "Tap a preset to save it here" : "Save", el("preset-save-mode").dataset.icon);
     el("preset-row").replaceChildren(...camera.presets.map((p) => {
@@ -178,6 +184,53 @@
   const LIMITS_NOTE = "Nudge the camera to the view you want, then save that as Home. To keep it from showing too much, point it as far as it "
     + "should go and tap that limit; tap it again to clear it.";
   const EDGE_WORDS = { down: "lowest", up: "highest", left: "leftmost", right: "rightmost" };
+  // The picture: one row per setting the camera has, made once and then kept up to date (a slider under a finger is left alone). The
+  // white balance's temperature shows only with the automatic one off: the camera takes it only then.
+  const SETTING_WORDS = { brightness: "Brightness", contrast: "Contrast", saturation: "Colour", sharpness: "Sharpness",
+    backlight_compensation: "Bright window behind people", white_balance_automatic: "Automatic white balance",
+    white_balance_temperature: "White balance, warm to cool" };
+  let pictureNames = null;
+
+  function pictureRow(setting) {
+    const row = document.createElement("label");
+    row.className = "picture-setting";
+    const words = document.createElement("span");
+    words.textContent = SETTING_WORDS[setting.name] || setting.name;
+    const input = document.createElement("input");
+    input.dataset.picture = setting.name;
+    if (setting.min === 0 && setting.max === 1) {
+      input.type = "checkbox";
+    } else {
+      input.type = "range";
+      input.min = String(setting.min);
+      input.max = String(setting.max);
+      input.step = String(setting.step || 1);
+    }
+    input.addEventListener("change", () => deviceCall("camera", "/api/camera/picture",
+      { name: setting.name, value: input.type === "checkbox" ? (input.checked ? 1 : 0) : Number(input.value) }));
+    row.append(words, input);
+    return row;
+  }
+
+  function renderPicture(settings) {
+    el("camera-picture").hidden = settings.length === 0;
+    const box = el("picture-controls");
+    const names = settings.map((s) => s.name).join(",");
+    if (names !== pictureNames) {
+      pictureNames = names;
+      box.replaceChildren(...settings.map(pictureRow));
+    }
+    const automatic = settings.find((s) => s.name === "white_balance_automatic");
+    for (const s of settings) {
+      const input = box.querySelector("[data-picture='" + s.name + "']");
+      if (!input) continue;
+      if (input.type === "checkbox") input.checked = s.value !== 0;
+      else if (document.activeElement !== input) input.value = String(s.value);
+      if (s.name === "white_balance_temperature") input.closest(".picture-setting").hidden = !automatic || automatic.value !== 0;
+    }
+  }
+  el("picture-reset").addEventListener("click", () => deviceCall("camera", "/api/camera/picture", { reset: true }));
+
   for (const b of el("camera-limits").querySelectorAll("button")) {
     b.addEventListener("click", () => deviceCall("camera", "/api/camera/setup",
       { action: b.getAttribute("aria-pressed") === "true" ? "clear_limit" : "set_limit", edge: b.dataset.edge }));

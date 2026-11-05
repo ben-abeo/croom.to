@@ -94,6 +94,7 @@ PLATFORMS = (("zoom", "Zoom"), ("google_meet", "Google Meet"), ("teams", "Teams"
 # that the root helper need not import the AI backends). Another name is not a backend the room would use: AIService falls back to auto.
 AI_BACKENDS = (("auto", "Automatic"), ("hailo", "Hailo"), ("coral", "Coral"), ("nvidia", "NVIDIA"), ("intel", "Intel (OpenVINO)"),
                ("cpu", "Processor only"))
+AUTO_FRAMING = (("off", "Off"), ("call_start", "At the start of calls"), ("dynamic", "Throughout calls"))   # as RightSight's modes
 AUTOMATIC = (("auto", "Automatic"),)   # the devices' choice before the room's own are added (croom.settings.devices)
 URL = r"https?://[^\s/$.?#][^\s]*"
 NO_SPACES = r"\S+"
@@ -142,6 +143,9 @@ SCHEMA: List[Setting] = [
     Setting("video.ptz_travel_seconds", "Camera travel time", "devices", "number", range=(1, 60), step=0.5,
             help="Seconds the camera takes from one end stop to the other"),
     Setting("control.camera_presets", "Camera preset names", "devices", "list", live=True, required=True, max_items=3, max_length=24),
+    Setting("control.camera_auto_framing", "Auto framing", "devices", "choice", live=True, choices=AUTO_FRAMING,
+            help="Frames the people in the room by itself, as Logitech RightSight does: once each call starts, or throughout calls, "
+                 "when people come in, leave or reach the edge. Moving the camera by hand pauses it until Frame people is tapped"),
     # Laptop switch
     Setting("laptop.enabled", "Laptop switch", "laptop", "switch"),
     Setting("laptop.gpio_pin", "GPIO pin", "laptop", "number", range=(0, 27), integer=True, help="BCM numbering: 17 is header pin 11"),

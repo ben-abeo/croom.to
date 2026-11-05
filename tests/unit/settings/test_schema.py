@@ -36,17 +36,20 @@ def test_the_schema_covers_every_setting_the_pages_edit():
             "meeting.dialogs.ask_everything", "meeting.controls.reactions"} <= paths
     assert {"calendar.google_calendar_id", "calendar.booking_start", "calendar.booking_end"} <= paths
     assert BY_PATH["calendar.google_credentials_path"].kind == "credential"
-    assert {"audio.input_device", "audio.output_device", "video.device", "video.ptz_travel_seconds", "control.camera_presets"} <= paths
+    assert {"audio.input_device", "audio.output_device", "video.device", "video.ptz_travel_seconds", "control.camera_presets",
+            "control.camera_auto_framing"} <= paths
     assert {f"laptop.{name}" for name in ("enabled", "gpio_pin", "active_low", "press_ms", "usb_id", "switch_wait_s")} <= paths
     assert {f"ai.{name}" for name in ("enabled", "backend", "person_detection", "noise_reduction", "echo_cancellation", "auto_framing",
                                       "occupancy_counting", "speaker_detection", "hand_raise_detection", "privacy_mode")} <= paths
     assert {"dashboard.enabled", "dashboard.url", "dashboard.enrollment_token"} <= paths
     assert BY_PATH["dashboard.enrollment_token"].kind == "secret"
-    assert not any(path.startswith("control.") and path != "control.camera_presets" for path in paths)   # never the room page's own
+    camera = {"control.camera_presets", "control.camera_auto_framing"}
+    assert not any(path.startswith("control.") and path not in camera for path in paths)   # never the room page's own
 
 
-def test_live_settings_are_the_booking_hours_and_the_camera_preset_names():
-    assert {s.path for s in SCHEMA if s.live} == {"calendar.booking_start", "calendar.booking_end", "control.camera_presets"}
+def test_live_settings_are_the_booking_hours_the_camera_preset_names_and_auto_framing():
+    assert {s.path for s in SCHEMA if s.live} == {"calendar.booking_start", "calendar.booking_end", "control.camera_presets",
+                                                  "control.camera_auto_framing"}
 
 
 def test_the_room_page_has_name_location_company_and_the_systems_time_zones():

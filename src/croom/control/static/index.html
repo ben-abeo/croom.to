@@ -138,6 +138,7 @@
             <div class="camera-right">
               <!-- Frame people (spec 2026-11-01, section 5): on every device with these controls; it zooms and turns toward the faces it finds -->
               <button type="button" id="frame-people" class="button quiet" data-icon="users">Frame people</button>
+              <p id="auto-framing-note" class="note" hidden></p>
               <div id="preset-row" class="presets" hidden></div>
               <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" data-icon="save" hidden>Save</button>
               <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
@@ -154,6 +155,13 @@
                   <button type="button" class="button quiet" data-edge="left" aria-pressed="false">Set leftmost</button>
                   <button type="button" class="button quiet" data-edge="right" aria-pressed="false">Set rightmost</button>
                 </div>
+                <!-- The picture settings the camera has (brightness, contrast, colour, sharpness, a bright window behind people, white
+                     balance), kept for the room: devices.js draws them from the status's camera.picture -->
+                <details id="camera-picture" class="picture-settings" hidden>
+                  <summary>Picture</summary>
+                  <div id="picture-controls" class="picture-settings-rows"></div>
+                  <button type="button" id="picture-reset" class="button quiet">Reset picture</button>
+                </details>
               </div>
             </div>
           </div>

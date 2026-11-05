@@ -3546,7 +3546,7 @@ def test_the_save_button_keeps_its_icon_when_it_changes_its_words(browser):
     with PageServer() as server:
         page = open_page(browser, server)
         open_camera_screen(page)
-        assert drawn_icons(page, "#camera-setup") == ["Find the stops: #icon-locate", "Save as Home: #icon-home"]
+        assert drawn_icons(page, "#camera-setup .setup-buttons") == ["Find the stops: #icon-locate", "Save as Home: #icon-home"]
         assert drawn_icons(page, ".zoom-buttons") == ["Zoom out: #icon-zoom-out", "Zoom in: #icon-zoom-in"]
         page.click("#preset-save-mode")
         page.wait_for_function("document.getElementById('preset-save-mode').innerText.trim() === 'Tap a preset to save it here'", timeout=5000)
@@ -6256,6 +6256,7 @@ def test_the_setup_flow_until_a_home_is_saved(browser):
         open_camera_screen(page)
         assert page.locator("#preset-row").is_hidden() and page.locator("#camera-home").is_disabled()
         assert page.locator("#save-home").is_disabled()
+        assert page.locator("#camera-limits").is_hidden()                  # the MeetUp cannot keep to limits
         page.click("#find-stops")
         page.wait_for_function("!document.getElementById('save-home').disabled", timeout=5000)
         page.click("#save-home")
@@ -6264,6 +6265,28 @@ def test_the_setup_flow_until_a_home_is_saved(browser):
         assert page.locator("#camera-setup").is_hidden()
         page.click("#setup-link")
         assert page.locator("#camera-setup").is_visible()
+        page.close()
+
+
+def test_a_camera_that_says_where_it_points_offers_limits_in_set_up_instead_of_the_stops(browser):
+    camera = StubCamera(home_saved=False, limits={"down": False, "up": False, "left": False, "right": False})
+    with PageServer(devices=StubDevices(camera=camera)) as server:
+        page = open_page(browser, server)
+        open_camera_screen(page)
+        assert page.locator("#find-stops").is_hidden() and page.locator("#camera-limits").is_visible()
+        assert "limit" in page.locator("#setup-note").inner_text()
+        lowest = page.locator("#camera-limits button[data-edge='down']")
+        assert lowest.inner_text() == "Set lowest" and lowest.get_attribute("aria-pressed") == "false"
+        lowest.click()
+        page.wait_for_function("document.querySelector(\"#camera-limits button[data-edge='down']\").getAttribute('aria-pressed') === 'true'",
+                               timeout=5000)
+        assert lowest.inner_text() == "Clear lowest"
+        assert page.locator("#camera-limits button[data-edge='up']").inner_text() == "Set highest"
+        lowest.click()
+        page.wait_for_function("document.querySelector(\"#camera-limits button[data-edge='down']\").getAttribute('aria-pressed') === 'false'",
+                               timeout=5000)
+        assert camera.setups == [("set_limit", "down"), ("clear_limit", "down")]
+        assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
         page.close()
 
 

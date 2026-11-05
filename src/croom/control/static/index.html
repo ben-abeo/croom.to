@@ -142,10 +142,17 @@
               <button type="button" id="preset-save-mode" class="button quiet" aria-pressed="false" data-icon="save" hidden>Save</button>
               <button type="button" id="setup-link" class="link-button" hidden>Set up</button>
               <div id="camera-setup" class="setup" hidden>
-                <p class="note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
+                <p class="note" id="setup-note">Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.</p>
                 <div class="setup-buttons">
                   <button type="button" id="find-stops" class="button quiet" data-icon="locate">Find the stops</button>
                   <button type="button" id="save-home" class="button primary" data-icon="home" disabled>Save as Home</button>
+                </div>
+                <!-- A camera that says where it points (the Rally): how far its picture may go each way. devices.js draws the words. -->
+                <div id="camera-limits" class="limit-buttons" role="group" aria-label="Limits" hidden>
+                  <button type="button" class="button quiet" data-edge="down" aria-pressed="false">Set lowest</button>
+                  <button type="button" class="button quiet" data-edge="up" aria-pressed="false">Set highest</button>
+                  <button type="button" class="button quiet" data-edge="left" aria-pressed="false">Set leftmost</button>
+                  <button type="button" class="button quiet" data-edge="right" aria-pressed="false">Set rightmost</button>
                 </div>
               </div>
             </div>

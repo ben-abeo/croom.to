@@ -127,7 +127,8 @@
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
     const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, framingHere, camera && camera.position_known,
-      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, presetSaveMode, setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
+      camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, camera && camera.limits, presetSaveMode, setupOpen, model.busy,
+      deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
     lastCameraKey = key;
     const panel = el("camera-panel");
@@ -151,6 +152,18 @@
     el("camera-setup").hidden = !setupAllowed || (ready && !setupOpen);
     el("save-home").disabled = !camera.position_known || camera.busy;
     el("find-stops").disabled = camera.busy;
+    // A camera that says where it points (camera.limits, the Rally) has no end stops to find, and keeps to limits instead
+    const limits = camera.limits || null;
+    el("find-stops").hidden = !!limits;
+    el("camera-limits").hidden = !limits;
+    el("setup-note").textContent = limits ? LIMITS_NOTE : STOPS_NOTE;
+    for (const b of el("camera-limits").querySelectorAll("button")) {
+      const set = !!(limits && limits[b.dataset.edge]);
+      b.textContent = (set ? "Clear " : "Set ") + EDGE_WORDS[b.dataset.edge];
+      b.setAttribute("aria-pressed", set ? "true" : "false");
+      b.classList.toggle("saved", set);
+      b.disabled = camera.busy;
+    }
     el("preset-save-mode").setAttribute("aria-pressed", presetSaveMode ? "true" : "false");
     P.labelWithIcon(el("preset-save-mode"), presetSaveMode ? "Tap a preset to save it here" : "Save", el("preset-save-mode").dataset.icon);
     el("preset-row").replaceChildren(...camera.presets.map((p) => {
@@ -159,6 +172,15 @@
       if (!p.saved && !presetSaveMode) b.title = "Nothing saved yet";
       return b;
     }));
+  }
+
+  const STOPS_NOTE = "Set up once: find the camera's end stops, nudge it to the view you want, then save that as Home.";
+  const LIMITS_NOTE = "Nudge the camera to the view you want, then save that as Home. To keep it from showing too much, point it as far as it "
+    + "should go and tap that limit; tap it again to clear it.";
+  const EDGE_WORDS = { down: "lowest", up: "highest", left: "leftmost", right: "rightmost" };
+  for (const b of el("camera-limits").querySelectorAll("button")) {
+    b.addEventListener("click", () => deviceCall("camera", "/api/camera/setup",
+      { action: b.getAttribute("aria-pressed") === "true" ? "clear_limit" : "set_limit", edge: b.dataset.edge }));
   }
 
   function presetAction(slot) {

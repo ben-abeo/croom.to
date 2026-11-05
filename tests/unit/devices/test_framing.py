@@ -158,12 +158,84 @@ async def test_a_tap_while_the_camera_moves_is_refused():
     await camera.stop()
 
 
-async def test_a_camera_that_says_where_it_is_is_only_zoomed_by_frame_people():
-    # A turn by speed would leave the Rally saying it is where it was, and its Home and presets would be saved wrong
+async def test_frame_people_turns_a_camera_that_says_where_it_is_straight_to_both_people_and_not_after_one_of_them():
+    # The Boardroom, 2026-11-04: two people either side of the table were framed together, then the camera went after one of them
     from tests.unit.devices.fake_v4l2 import RALLY
+    from croom.devices.v4l2 import V4L2_CID_PAN_ABSOLUTE, V4L2_CID_TILT_ABSOLUTE
     camera, v4l2, _ = camera_for(nodes={"/dev/video0": RALLY})
     await camera.discover()
-    await camera.find_stops()
-    answer = await camera.frame_people(Stills(), detect=finds(RIGHT_OF_MIDDLE))
-    assert answer["framed"] == 1 and answer["turned"] is False
+    looks = iter([EITHER_SIDE, [(600, 320, 120, 120)]])       # the second look finds only one of them
+    answer = await camera.frame_people(Stills(), detect=lambda jpeg: (list(next(looks)), SIZE))
+    assert answer["framed"] == 2 and answer["turned"] is True
+    zoom, pan, tilt = framing.aim(EITHER_SIDE, SIZE, (0.0, 0.0), {}, 1500)
+    assert v4l2.set_many_calls == [{V4L2_CID_PAN_ABSOLUTE: round(pan) * 3600, V4L2_CID_TILT_ABSOLUTE: round(tilt) * 3600}]  # no nudge
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE) == [100, zoom]
     assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []
+
+
+async def test_frame_people_nudges_a_camera_that_says_where_it_is_once_toward_everyone_and_keeps_to_its_limits():
+    from tests.unit.devices.fake_v4l2 import RALLY
+    from croom.devices.v4l2 import V4L2_CID_PAN_ABSOLUTE, V4L2_CID_TILT_ABSOLUTE
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values[(10, V4L2_CID_TILT_ABSOLUTE)] = -20 * 3600
+    await camera.set_limit("down", True)                      # nothing lower than this view's bottom edge
+    low = [(500, 600, 50, 50), (700, 610, 50, 50)]            # two people low in the picture
+    right = [(900, 300, 80, 80), (1100, 300, 80, 80)]         # the second look: still both, right of the middle
+    looks = iter([low, right])
+    await camera.frame_people(Stills(), detect=lambda jpeg: (list(next(looks)), SIZE))
+    assert len(v4l2.set_many_calls) == 2                      # the aim and one nudge
+    assert v4l2.sets(V4L2_CID_PAN_ABSOLUTE)[-1] > v4l2.sets(V4L2_CID_PAN_ABSOLUTE)[0]   # toward the right
+    zoom = v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE)[-1]
+    for tilt in v4l2.sets(V4L2_CID_TILT_ABSOLUTE):            # the picture's bottom edge never below the limit
+        assert tilt / 3600 - framing.half_view(zoom)[1] >= -20 - framing.half_view(100)[1] - 0.01
+
+
+# --- the geometry of a camera that says where it points ---
+
+EITHER_SIDE = [(150, 330, 60, 60), (1050, 300, 60, 60)]
+
+
+def everyone_in(faces, at, zoom, pan, tilt):
+    """Each face's head and shoulders inside the picture at `zoom` with the camera at pan and tilt, from a picture taken at zoom 100
+    with the camera at `at`."""
+    half_w, half_h = framing.half_view(zoom)
+    for face in faces:
+        left, top, right, bottom = framing.head_and_shoulders(face, SIZE)
+        for place in ((left, top), (right, bottom)):
+            by_pan, by_tilt = framing._angles(place, 100, framing.RALLY_TANGENTS)
+            if abs(at[0] + by_pan - pan) > half_w + 1e-6 or abs(at[1] + by_tilt - tilt) > half_h + 1e-6:
+                return False
+    return True
+
+
+def test_aim_puts_the_group_in_the_middle_and_everyone_in_the_picture():
+    zoom, pan, tilt = framing.aim(EITHER_SIDE, SIZE, (10.0, -15.0), {}, 1500)
+    assert 100 <= zoom <= 1500 and everyone_in(EITHER_SIDE, (10.0, -15.0), zoom, pan, tilt)
+    far = [(700, 300, 30, 30)]                               # one person at the far end of the room
+    zoom_far, _, _ = framing.aim(far, SIZE, (0.0, 0.0), {}, 1500)
+    assert zoom_far > 500                                    # past the MeetUp's 500, as the Rally can
+
+
+def test_aim_held_off_by_a_limit_zooms_out_to_keep_everyone_in():
+    on_the_left = [(60, 300, 60, 60), (300, 300, 60, 60)]
+    free = framing.aim(on_the_left, SIZE, (0.0, 0.0), {}, 1500)
+    held = framing.aim(on_the_left, SIZE, (0.0, 0.0), {"left": -45.0}, 1500)
+    zoom, pan, tilt = held
+    assert zoom < free[0] and pan - framing.half_view(zoom)[0] >= -45.0 - 1e-6
+    assert everyone_in(on_the_left, (0.0, 0.0), zoom, pan, tilt)
+
+
+def test_the_lowest_limit_keeps_the_bottom_of_the_picture_where_it_was_set_at_any_zoom():
+    limits = {"down": -56.1}
+    assert framing.within(0.0, -60.0, 100, limits)[1] == pytest.approx(-30.0)
+    assert framing.within(0.0, -60.0, 300, limits)[1] < -30.0          # a narrower picture may point lower
+    assert framing.within(10.0, -5.0, 100, limits) == (10.0, -5.0)      # inside: as asked
+    squeezed = framing.within(0.0, 0.0, 100, {"down": -10.0, "up": 10.0})   # too close for the picture: the lowest wins
+    assert squeezed[1] == pytest.approx(-10.0 + framing.half_view(100)[1])
+
+
+def test_the_check_after_the_turn_never_turns_toward_fewer_people_than_were_found():
+    one = [(1000, 300, 60, 60)]
+    assert framing.nudge(one, SIZE, 300, people=2) is None and framing.correction(one, SIZE, 300, 8.0, people=2) is None
+    assert framing.nudge(one, SIZE, 300, people=1) is not None and framing.correction(one, SIZE, 300, 8.0, people=1) is not None

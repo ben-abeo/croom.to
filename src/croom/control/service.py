@@ -900,7 +900,7 @@ class ControlService(Service):
         if camera is not None:
             return camera.state()
         return dict(self.NO_DEVICES, device=None, moving=False, busy=False, framing=False, zoom={"level": 0, "min": 0, "max": 0},
-                    position_known=False, home_saved=False, presets=[], preview=False)
+                    position_known=False, home_saved=False, presets=[], limits=None, preview=False)
 
     async def _device_call(self, request: web.Request, device, action) -> web.Response:
         """Run one device action: JSON in, the device's block out.
@@ -1045,7 +1045,9 @@ class ControlService(Service):
                 return await camera.find_stops()
             if verb == "save_home":
                 return await camera.save_home()
-            raise ValueError("action must be find_stops or save_home")
+            if verb in ("set_limit", "clear_limit"):        # a camera that says where it points: an edge its picture keeps to
+                return await camera.set_limit(data.get("edge"), verb == "set_limit")
+            raise ValueError("action must be find_stops, save_home, set_limit or clear_limit")
 
         return await self._device_call(request, camera, action)
 

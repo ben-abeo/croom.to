@@ -6,14 +6,15 @@ detector, OpenCV's YuNet with its model committed beside this file, is at the en
 Places in a picture are fractions of its width and height: x from 0 (left) to 1 (right), y from 0 (top) to 1 (bottom). The picture
 is never mirrored, so its right is the camera's right. Pan +1 turns the camera right and tilt +1 turns it up (the arrow pad's
 directions), and positions are seconds of travel from the end stops that Set up (Find the stops) drove into: pan 0 is the left
-stop and tilt 0 the bottom one.
+stop and tilt 0 the bottom one. A camera that says where it points (the Rally) is aimed in degrees instead (aim, nudge), with its
+picture kept inside the limits set for it (within).
 """
 
 import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 Face = Tuple[float, float, float, float]       # x, y, width, height in pixels of the picture
 Box = Tuple[float, float, float, float]        # left, top, right, bottom as fractions of the picture
@@ -33,12 +34,57 @@ PAN_RANGE_DEG = 50.0            # the mechanical pan, -25 to +25 deg, covered in
 TILT_RANGE_DEG = 30.0           # the mechanical tilt, -15 to +15 deg, in the same travel time
 # The zoom level is taken as the magnification times 100 (500: five times), the field of view narrowing with it as a pinhole's does.
 
+# A camera that says where it is (the Rally) is turned to a pan and tilt in degrees, measured from where it points. Its lens at zoom 100:
+# Logitech's figures for the Rally camera (90 deg diagonal), which pictures from the Boardroom's matched on 2026-11-04 (a 20 deg tilt moved
+# the picture by 53.7 deg of its height; zoom 200 magnified 2.05 times). The knob to turn if a turn falls short or overshoots.
+RALLY_FOV_DEG = (82.1, 52.2)    # wide, high
+EDGES = ("down", "up", "left", "right")   # the limits: the furthest the picture's bottom, top, left and right edges may go, in degrees
+
 
 def _half_tangents(fov_diagonal_deg: float = FOV_DIAGONAL_DEG, aspect: float = ASPECT) -> Tuple[float, float]:
     """The tangents of half the horizontal and half the vertical field of view at zoom 100, from the diagonal one (a pinhole)."""
     half_diagonal = math.tan(math.radians(fov_diagonal_deg) / 2)
     diagonal = math.hypot(aspect, 1.0)
     return half_diagonal * aspect / diagonal, half_diagonal / diagonal
+
+
+RALLY_TANGENTS = (math.tan(math.radians(RALLY_FOV_DEG[0]) / 2), math.tan(math.radians(RALLY_FOV_DEG[1]) / 2))
+
+
+def _angles(place: Tuple[float, float], zoom: int, tangents: Tuple[float, float]) -> Tuple[float, float]:
+    """The pan and tilt, in degrees, that bring a place of a picture taken at `zoom` to its middle. Up the picture is tilt +1."""
+    magnification = max(zoom, ZOOM_MIN) / 100
+    return (math.degrees(math.atan((place[0] - 0.5) * 2 * tangents[0] / magnification)),
+            -math.degrees(math.atan((place[1] - 0.5) * 2 * tangents[1] / magnification)))
+
+
+def _place(pan_deg: float, tilt_deg: float, tangents: Tuple[float, float]) -> Tuple[float, float]:
+    """The place of a picture at zoom 100 that a turn of pan_deg and tilt_deg brings to its middle (_angles undone)."""
+    return (0.5 + math.tan(math.radians(pan_deg)) / (2 * tangents[0]),
+            0.5 - math.tan(math.radians(tilt_deg)) / (2 * tangents[1]))
+
+
+def half_view(zoom: int, tangents: Tuple[float, float] = RALLY_TANGENTS) -> Tuple[float, float]:
+    """Half the picture's width and height in degrees at `zoom`: how far its edges are from where the camera points."""
+    magnification = max(zoom, ZOOM_MIN) / 100
+    return math.degrees(math.atan(tangents[0] / magnification)), math.degrees(math.atan(tangents[1] / magnification))
+
+
+def within(pan: float, tilt: float, zoom: int, limits: Dict[str, float],
+           tangents: Tuple[float, float] = RALLY_TANGENTS) -> Tuple[float, float]:
+    """The pan and tilt (degrees) nearest the ones asked for that keep the picture at `zoom` inside the limits (EDGES, degrees; any
+    of them may be missing). Limits too close together for the picture to fit between: the lowest and leftmost win, so the camera's
+    base, below it, stays out. Edges are taken as pan or tilt plus half the view, which a camera tilted far up or down bends a little."""
+    half_w, half_h = half_view(zoom, tangents)
+    if "right" in limits:
+        pan = min(pan, limits["right"] - half_w)
+    if "left" in limits:
+        pan = max(pan, limits["left"] + half_w)
+    if "up" in limits:
+        tilt = min(tilt, limits["up"] - half_h)
+    if "down" in limits:
+        tilt = max(tilt, limits["down"] + half_h)
+    return pan, tilt
 
 
 @dataclass(frozen=True)
@@ -79,31 +125,25 @@ def group_box(faces: Sequence[Face], size: Tuple[int, int]) -> Box:
     return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
 
 
-def zoom_for(box: Box, middle: Tuple[float, float] = (0.5, 0.5)) -> int:
+def zoom_for(box: Box, middle: Tuple[float, float] = (0.5, 0.5), top: int = ZOOM_MAX) -> int:
     """The zoom level at which the box fills the picture once the place `middle` (of the picture at zoom 100) is in its middle:
-    the box's furthest side from there sets it. 100 to 500."""
+    the box's furthest side from there sets it. 100 to `top` (the MeetUp's 500, or the camera's own)."""
     cx, cy = middle
     reach_x = max(cx - box[0], box[2] - cx, 1e-6)
     reach_y = max(cy - box[1], box[3] - cy, 1e-6)
     magnification = min(0.5 / reach_x, 0.5 / reach_y)
-    return max(ZOOM_MIN, min(ZOOM_MAX, int(math.floor(100 * magnification))))
+    return max(ZOOM_MIN, min(top, int(math.floor(100 * magnification))))
 
 
 def turn_to(place: Tuple[float, float], zoom: int, travel_s: float) -> Tuple[float, float]:
     """The pan and tilt, in seconds of travel, that bring a place of the picture (taken at `zoom`) to its middle."""
-    tan_x, tan_y = _half_tangents()
-    magnification = max(zoom, ZOOM_MIN) / 100
-    pan_deg = math.degrees(math.atan((place[0] - 0.5) * 2 * tan_x / magnification))
-    tilt_deg = -math.degrees(math.atan((place[1] - 0.5) * 2 * tan_y / magnification))   # up the picture is tilt +1
+    pan_deg, tilt_deg = _angles(place, zoom, _half_tangents())
     return pan_deg * travel_s / PAN_RANGE_DEG, tilt_deg * travel_s / TILT_RANGE_DEG
 
 
 def place_after(pan_s: float, tilt_s: float, travel_s: float) -> Tuple[float, float]:
     """The place of the picture at zoom 100 that a turn of pan_s and tilt_s seconds brings to its middle (turn_to undone)."""
-    tan_x, tan_y = _half_tangents()
-    pan = math.radians(pan_s * PAN_RANGE_DEG / travel_s)
-    tilt = math.radians(tilt_s * TILT_RANGE_DEG / travel_s)
-    return 0.5 + math.tan(pan) / (2 * tan_x), 0.5 - math.tan(tilt) / (2 * tan_y)
+    return _place(pan_s * PAN_RANGE_DEG / travel_s, tilt_s * TILT_RANGE_DEG / travel_s, _half_tangents())
 
 
 def plan(faces: Sequence[Face], size: Tuple[int, int], travel_s: float,
@@ -123,16 +163,49 @@ def plan(faces: Sequence[Face], size: Tuple[int, int], travel_s: float,
     return Plan(zoom_for(box, reached), pan_s, tilt_s, len(faces))
 
 
-def correction(faces: Sequence[Face], size: Tuple[int, int], zoom: int, travel_s: float) -> Optional[Tuple[float, float]]:
-    """Step 7: the small turn (pan, tilt seconds) that brings the group back to the middle of a picture taken at `zoom`, or None when it
-    is near enough (or no one is in it)."""
-    if not faces:
+def aim(faces: Sequence[Face], size: Tuple[int, int], at: Tuple[float, float], limits: Dict[str, float], top: int,
+        tangents: Tuple[float, float] = RALLY_TANGENTS) -> Tuple[int, float, float]:
+    """Steps 4 to 6 for a camera that says where it is, from faces found in a picture taken at zoom 100 with the camera at `at` (pan,
+    tilt in degrees): (zoom, pan, tilt) that put the group in the middle and fill the picture with it, up to the zoom `top`, with the
+    picture kept inside the limits. A limit that holds the camera off the group's middle lowers the zoom so everyone stays in, and a
+    lower zoom widens the picture, which can move the limit's hold again: a few rounds settle it."""
+    box = group_box(faces, size)
+    middle = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+    turn = _angles(middle, ZOOM_MIN, tangents)
+    want = (at[0] + turn[0], at[1] + turn[1])
+    zoom = zoom_for(box, middle, top)
+    for _ in range(4):
+        pan, tilt = within(want[0], want[1], zoom, limits, tangents)
+        zoom = min(zoom, zoom_for(box, _place(pan - at[0], tilt - at[1], tangents), top))
+    pan, tilt = within(want[0], want[1], zoom, limits, tangents)
+    return zoom, pan, tilt
+
+
+def _off_centre(faces: Sequence[Face], size: Tuple[int, int], people: int) -> Optional[Tuple[float, float]]:
+    """The group's middle when step 7 should correct toward it: never with fewer people than step 3 found (`people`), which would
+    turn toward some of them and leave the rest out, and not when the middle is near enough."""
+    if not faces or len(faces) < people:
         return None
     box = group_box(faces, size)
     middle = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
     if abs(middle[0] - 0.5) <= OFF_CENTRE and abs(middle[1] - 0.5) <= OFF_CENTRE:
         return None
-    return turn_to(middle, zoom, travel_s)
+    return middle
+
+
+def correction(faces: Sequence[Face], size: Tuple[int, int], zoom: int, travel_s: float,
+               people: int = 0) -> Optional[Tuple[float, float]]:
+    """Step 7: the small turn (pan, tilt seconds) that brings the group back to the middle of a picture taken at `zoom`, or None when it
+    is near enough, no one is in it, or fewer people are in it than step 3 found (`people`)."""
+    middle = _off_centre(faces, size, people)
+    return None if middle is None else turn_to(middle, zoom, travel_s)
+
+
+def nudge(faces: Sequence[Face], size: Tuple[int, int], zoom: int, people: int,
+          tangents: Tuple[float, float] = RALLY_TANGENTS) -> Optional[Tuple[float, float]]:
+    """Step 7 for a camera that says where it is: correction's turn, in degrees."""
+    middle = _off_centre(faces, size, people)
+    return None if middle is None else _angles(middle, zoom, tangents)
 
 
 # ----------------------------------------------------------------------

@@ -239,3 +239,12 @@ def test_the_check_after_the_turn_never_turns_toward_fewer_people_than_were_foun
     one = [(1000, 300, 60, 60)]
     assert framing.nudge(one, SIZE, 300, people=2) is None and framing.correction(one, SIZE, 300, 8.0, people=2) is None
     assert framing.nudge(one, SIZE, 300, people=1) is not None and framing.correction(one, SIZE, 300, 8.0, people=1) is not None
+
+
+def test_how_far_the_rally_turns_by_speed_follows_what_was_measured_in_the_boardroom():
+    # Holds against where it came to rest at zoom 100 (2026-11-05), and a second's hold at zoom 500 (10 deg)
+    measured = {0.15: 1, 0.3: 2, 0.45: 3, 0.6: 5, 0.8: 9, 1.0: 14, 1.4: 23}
+    assert {s: framing.turn_degrees(s, 100) for s in measured} == measured
+    assert framing.turn_degrees(0, 100) == 0 and framing.turn_degrees(-1, 100) == 0
+    assert framing.turn_degrees(2.3, 100) == 45 and framing.turn_degrees(1.0, 500) == 10
+    assert framing.turn_degrees(1.0, 1500) == framing.turn_degrees(1.0, 1000)       # no slower past the table

@@ -50,6 +50,36 @@ def _half_tangents(fov_diagonal_deg: float = FOV_DIAGONAL_DEG, aspect: float = A
 
 RALLY_TANGENTS = (math.tan(math.radians(RALLY_FOV_DEG[0]) / 2), math.tan(math.radians(RALLY_FOV_DEG[1]) / 2))
 
+# How far the Rally turns under its speed controls (pan_speed or tilt_speed at 1) for how long the turn is held, as measured in the
+# Boardroom on 2026-11-05 against its own targets: the hold in seconds, and where it comes to rest in degrees, at zoom 100. It speeds up
+# the longer it is held, comes to rest on a whole degree, and turns as far for the same hold every time (0.6 s: 5 deg, three times over);
+# pan and tilt agree to a degree. Past the table it keeps up about RALLY_TURN_DEG_S. Zoomed in it turns slower: RALLY_TURN_ZOOM is the
+# zoom and the part of the table's turn it makes there. The knobs to turn if a turn by an arrow ends somewhere the room does not think it
+# is. ponytail: an open-loop table, right to a degree at zoom 100 to 250 and to about two at 500 and past; checking a turn against the
+# picture is the upgrade if that is not close enough.
+RALLY_TURN = ((0.0, 0.0), (0.15, 1.0), (0.3, 1.5), (0.45, 3.0), (0.6, 5.0), (0.7, 7.5), (0.8, 9.0), (1.0, 13.5), (1.2, 19.0),
+              (1.4, 23.0))
+RALLY_TURN_DEG_S = 24.0
+RALLY_TURN_ZOOM = ((200, 1.0), (250, 0.9), (500, 0.75), (1000, 0.7))
+
+
+def _between(table: Sequence[Tuple[float, float]], x: float) -> float:
+    """Straight-line interpolation in a table of (x, y) rising in x, flat past its ends."""
+    if x <= table[0][0]:
+        return table[0][1]
+    for (x0, y0), (x1, y1) in zip(table, table[1:]):
+        if x <= x1:
+            return y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    return table[-1][1]
+
+
+def turn_degrees(seconds: float, zoom: int) -> int:
+    """How far the Rally comes to rest from where a turn by speed began, the turn held `seconds` at `zoom`: whole degrees."""
+    seconds = max(0.0, seconds)
+    end_s, end_deg = RALLY_TURN[-1]
+    deg = _between(RALLY_TURN, seconds) if seconds <= end_s else end_deg + RALLY_TURN_DEG_S * (seconds - end_s)
+    return math.floor(deg * _between(RALLY_TURN_ZOOM, zoom) + 0.5)
+
 
 def _angles(place: Tuple[float, float], zoom: int, tangents: Tuple[float, float]) -> Tuple[float, float]:
     """The pan and tilt, in degrees, that bring a place of a picture taken at `zoom` to its middle. Up the picture is tilt +1."""

@@ -5,9 +5,10 @@ The room camera's framing through V4L2 (spec 2026-10-08 sound and camera, sectio
 where it is in seconds of travel from the end stops, found by homing, and presets
 are stored against that estimate. A camera that says where it is (the Rally:
 pan_absolute and tilt_absolute) keeps its own position in its home and presets
-instead, and is sent back there. It is never turned by speed: the Rally goes on
-saying the last place it was sent whatever a turn by speed does, so an arrow
-steps its position instead. It also keeps to limits set in Set up: the furthest
+instead, and is sent back there. An arrow still turns it by speed, which starts at
+once (a target only moves it once it has stopped changing): it goes on saying the
+last place it was sent, so how far each turn took it is counted from how long it
+was held (framing.turn_degrees). It also keeps to limits set in Set up: the furthest
 its picture's edges may go down, up, left and right (past the bottom one, its
 own base comes into the picture). Control calls go through a second file
 descriptor next to Chromium's stream; nothing here streams video.
@@ -18,7 +19,7 @@ import errno
 import logging
 import math
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from croom.devices import framing
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
@@ -88,10 +89,17 @@ class RoomCamera:
     PREVIEW_S = 180.0
     SLOTS = 3
     SETTLE_S = 1.0         # Frame people: the picture settles this long after a zoom or a turn before it is looked at
-    # A camera that says where it is, turned by an arrow or a drag: its position moved STEP_DEG every STEP_S (10 deg/s, near the
-    # MeetUp's speed). The knobs for how it feels; the Rally counts its position in 1/3600 deg and takes whole degrees.
-    STEP_S = 0.1
-    STEP_DEG = 1
+    # A camera that says where it points (the Rally), as measured in the Boardroom on 2026-11-05. Sent a target, it waits until the
+    # target has stopped changing for TARGET_WAIT_S, then turns there at about TARGET_DEG_S: so an arrow that stepped its target moved it
+    # only once let go. Turned by speed it starts within 0.1 s, and comes to rest within TURN_REST_S of being told to stop; but it goes on
+    # saying the last target it was sent, so how far a turn took it is counted from how long it was held (framing.turn_degrees). A target
+    # still on its way when a turn starts, or sent into a turn, sends it somewhere neither asked for (27 deg off, once), so each waits for
+    # the other (TARGET_SLACK_S on top). GUARD_S: how often a turn is looked at against the limits and the ends of its range.
+    TARGET_WAIT_S = 0.9
+    TARGET_DEG_S = 30.0
+    TARGET_SLACK_S = 0.3
+    TURN_REST_S = 0.3
+    GUARD_S = 0.05
 
     def __init__(self, device: str = "auto", travel_s: float = 8.0, preset_names: Optional[List[str]] = None,
                  store=None, v4l2=None, clock=time.monotonic, sleep=asyncio.sleep):
@@ -119,7 +127,17 @@ class RoomCamera:
         self._has_tilt = False
         self._absolute = False   # the camera says where it is (pan_absolute and tilt_absolute): no estimate needed
         self._pan_range = self._tilt_range = (0, 0)   # its pan and tilt, lowest to highest, in its own units (1/3600 deg)
-        self._stepper: Optional[asyncio.Task] = None
+        # Such a camera turned by speed: how far (pan, tilt, in its units) since it was last sent a target, which it does not count; the
+        # turns running now, by axis (0 pan, 1 tilt): (direction, when it began, where that axis pointed then in degrees, how far it had
+        # turned then); when the last target sent will have been reached, and when the last turn will have come to rest; a count of the
+        # turn requests, so that one that waited for a target is dropped when a newer one (a let-go) came meanwhile; the task that keeps
+        # turns inside.
+        self._turned = [0, 0]
+        self._turns: Dict[int, Tuple[int, float, float, int]] = {}
+        self._target_done_at = 0.0
+        self._rest_at = 0.0
+        self._asked = 0
+        self._guard: Optional[asyncio.Task] = None
         self._zoom: Optional[int] = None
         self._zoom_read_at: Optional[float] = None
         self._pan = 0
@@ -219,6 +237,11 @@ class RoomCamera:
         return self._absolute or self._position_known
 
     @property
+    def says_where(self) -> bool:
+        """Whether the open camera says where it points (the Rally): it goes straight to a home, never into its stops."""
+        return self._absolute
+
+    @property
     def home_saved(self) -> bool:
         return self._usable(self._home)
 
@@ -290,6 +313,7 @@ class RoomCamera:
             self._absolute = pan_at is not None and tilt_at is not None
             if self._absolute:
                 self._pan_range, self._tilt_range = (pan_at[0], pan_at[1]), (tilt_at[0], tilt_at[1])
+            self._turned, self._turns, self._target_done_at, self._rest_at = [0, 0], {}, 0.0, 0.0
             if zoom is not None:
                 self._zoom_range = (zoom[0], zoom[1])
                 self._zoom = zoom[3]
@@ -321,14 +345,12 @@ class RoomCamera:
         self._segment_started = None
         self._position_known = False
         self._absolute = False
+        self._turned, self._turns = [0, 0], {}
         self._picture_ranges, self._picture_now = {}, {}
 
     def _speed_controls(self, pan: int, tilt: int) -> Dict[int, int]:
-        """The speed controls this node has, with the values to write; pan and tilt go out in one call. None on a camera that says
-        where it is: a turn by speed is not counted in the place it says (the Rally), so it is turned by its position (_step)."""
+        """The speed controls this node has, with the values to write; pan and tilt go out in one call."""
         speeds: Dict[int, int] = {}
-        if self._absolute:
-            return speeds
         if self._has_pan:
             speeds[V4L2_CID_PAN_SPEED] = pan
         if self._has_tilt:
@@ -410,17 +432,28 @@ class RoomCamera:
     # ------------------------------------------------------------------
 
     async def move(self, pan: int, tilt: int) -> Dict[str, Any]:
-        """Start, change or stop motion; a second request within WATCHDOG_S keeps it going."""
+        """Start, change or stop motion; a second request within WATCHDOG_S keeps it going. A camera that says where it points (the
+        Rally) turns by speed as well, but only once a target it was sent has been reached, and not past a limit or the end of its
+        range (_room, and _keep_turns_inside while it turns): how far it turned is counted from how long (_end_turns)."""
         if (isinstance(pan, bool) or isinstance(tilt, bool)   # True and False equal 1 and 0 but are not directions
                 or pan not in (-1, 0, 1) or tilt not in (-1, 0, 1)):
             raise ValueError("pan and tilt must each be -1, 0 or 1")
         await self._require()
         if pan or tilt:
             self._by_hand()
+        self._asked += 1
+        mine = self._asked
         await self._cancel_long_move()
-        await self._apply_speeds(int(pan), int(tilt))
-        if self._absolute and (self._pan or self._tilt) and (self._stepper is None or self._stepper.done()):
-            self._stepper = asyncio.create_task(self._step())
+        place = None
+        if self._absolute and (pan or tilt):
+            await self._sleep_until(self._target_done_at)
+            if mine != self._asked:                     # let go, or turned another way, while this waited: the newer one stands
+                return self.state()
+            place = await self._place()
+            pan, tilt = self._room(place, pan, tilt)
+        await self._apply_speeds(int(pan), int(tilt), place)
+        if self._turns and (self._guard is None or self._guard.done()):
+            self._guard = asyncio.create_task(self._keep_turns_inside())
         self._cancel_watchdog()
         if pan or tilt:
             self._watchdog = asyncio.create_task(self._watch())
@@ -429,6 +462,7 @@ class RoomCamera:
     async def stop(self) -> Dict[str, Any]:
         """Stop all motion. A node lost while the camera was moving is looked for again first, so the stop
         can still reach it; when no camera is found this simply reports the state."""
+        self._asked += 1
         await self._cancel_long_move()
         self._cancel_watchdog()
         if self._fd is None:
@@ -450,29 +484,111 @@ class RoomCamera:
             except DeviceUnavailable:
                 pass
 
-    async def _step(self) -> None:
-        """A camera that says where it is, turned by an arrow or a drag: its pan and tilt moved a step every STEP_S, within its range,
-        for as long as the direction move() set stays (a let-go, the watchdog, a Home or a preset set it to nothing). Each step starts
-        from the place the camera says, so the place it says stays where it is."""
-        step = self.STEP_DEG * ARCSEC
+    async def _keep_turns_inside(self) -> None:
+        """While a camera that says where it points turns by speed: stop each axis before its turn would come to rest past a limit or
+        the end of its range. Looked at every GUARD_S of real time; how far a turn has gone is the camera's clock's to say."""
         try:
-            while self._fd is not None and (self._pan or self._tilt):
-                async with self._io_lock:
-                    if not (self._pan or self._tilt):     # stopped while this step waited for the camera
-                        break
-                    pan = await self._get(V4L2_CID_PAN_ABSOLUTE) + self._pan * step
-                    tilt = await self._get(V4L2_CID_TILT_ABSOLUTE) + self._tilt * step
-                    await self._set_many(self._inside(pan, tilt, self._zoom if self._zoom is not None else self._zoom_range[0]))
-                await self._sleep(self.STEP_S)
+            while self._fd is not None and self._turns:
+                await asyncio.sleep(self.GUARD_S)
+                zoom = self._zoom_now()
+                band = self._band(zoom)
+                ahead = self._clock() + self.GUARD_S
+                ending = set()
+                for k, (direction, began, start, _) in self._turns.items():
+                    end = start + direction * framing.turn_degrees(ahead - began, zoom)   # where it would rest at the next look
+                    if (direction > 0 and end >= band[k][1]) or (direction < 0 and end <= band[k][0]):
+                        ending.add(k)
+                if ending:
+                    await self._apply_speeds(0 if 0 in ending else self._pan, 0 if 1 in ending else self._tilt)
         except DeviceUnavailable:
             pass        # the camera has gone, and _fail has said so
+
+    async def _sleep_until(self, when: float) -> None:
+        left = when - self._clock()
+        if left > 0:
+            await self._sleep(left)
+
+    def _zoom_now(self) -> int:
+        return self._zoom if self._zoom is not None else self._zoom_range[0]
+
+    def _band(self, zoom: int) -> Tuple[Tuple[float, float], Tuple[float, float]]:
+        """For pan and for tilt, the lowest and the highest the middle of a picture at `zoom` may point, in degrees: inside the camera's
+        range, and with the picture's edges no further than the limits set for them."""
+        half_w, half_h = framing.half_view(zoom)
+        limits = self._limit_degrees()
+
+        def side(lowest: int, highest: int, low_edge: str, high_edge: str, half: float) -> Tuple[float, float]:
+            low, high = lowest / ARCSEC, highest / ARCSEC
+            if low_edge in limits:
+                low = max(low, limits[low_edge] + half)
+            if high_edge in limits:
+                high = min(high, limits[high_edge] - half)
+            return low, high
+
+        return side(*self._pan_range, "left", "right", half_w), side(*self._tilt_range, "down", "up", half_h)
+
+    def _room(self, place: Tuple[float, float], pan: int, tilt: int) -> Tuple[int, int]:
+        """The directions asked for, less any with less than a degree left before a limit or the end of the range (a turn is a degree
+        at the least)."""
+        band = self._band(self._zoom_now())
+        kept = [d if not ((d > 0 and place[k] > band[k][1] - 0.99) or (d < 0 and place[k] < band[k][0] + 0.99)) else 0
+                for k, d in ((0, pan), (1, tilt))]
+        return kept[0], kept[1]
+
+    @staticmethod
+    def _turn_end(start: float, direction: int, degrees: float, band: Tuple[float, float]) -> float:
+        """Where a turn from `start` comes to rest: `degrees` on, but no further than the band's edge it turns toward (one already past
+        that edge stays where it was)."""
+        end = start + direction * degrees
+        return min(end, max(band[1], start)) if direction > 0 else max(end, min(band[0], start))
+
+    def _place_from(self, pan: int, tilt: int) -> Tuple[float, float]:
+        """Where a camera that says where it points points now, in degrees, from the target it says (`pan`, `tilt`): that, and its turns
+        by speed since, a turn running now counted as far as it would come to rest if stopped now."""
+        zoom = self._zoom_now()
+        band = self._band(zoom)
+        now = self._clock()
+        place = [(pan + self._turned[0]) / ARCSEC, (tilt + self._turned[1]) / ARCSEC]
+        for k, (direction, began, start, _) in self._turns.items():
+            place[k] = self._turn_end(start, direction, framing.turn_degrees(now - began, zoom), band[k])
+        return place[0], place[1]
+
+    async def _place(self) -> Tuple[float, float]:
+        async with self._io_lock:
+            return self._place_from(await self._get(V4L2_CID_PAN_ABSOLUTE), await self._get(V4L2_CID_TILT_ABSOLUTE))
+
+    def _end_turns(self, at: float, pan: int, tilt: int, place: Optional[Tuple[float, float]]) -> None:
+        """Under the control lock, the speeds written: each axis whose turn ends (stopped, or turned the other way) adds where it came
+        to rest to how far it has turned since its last target, and comes to rest TURN_REST_S on; each that starts a turn notes when,
+        and from where (`place`, or where the turn it reverses came to rest)."""
+        zoom = self._zoom_now()
+        band = self._band(zoom)
+        for k, direction in ((0, pan), (1, tilt)):
+            turn = self._turns.get(k)
+            start = None
+            if turn is not None and turn[0] != direction:
+                was, began, origin, turned_then = turn
+                start = self._turn_end(origin, was, framing.turn_degrees(at - began, zoom), band[k])
+                self._turned[k] = turned_then + round((start - origin) * ARCSEC)
+                del self._turns[k]
+                self._rest_at = max(self._rest_at, at + self.TURN_REST_S)
+            if direction and k not in self._turns:
+                self._turns[k] = (direction, at, start if start is not None else place[k], self._turned[k])
+
+    async def _send(self, values: Dict[int, int], place: Tuple[float, float]) -> None:
+        """Under the control lock: send a camera that says where it points to a target (its pan and tilt, in one call) from `place`
+        (where it points now, in degrees). Its turns by speed are behind it then, and it is there once it has waited and turned."""
+        await self._set_many(values)
+        self._turned = [0, 0]
+        far = max(abs(values[V4L2_CID_PAN_ABSOLUTE] / ARCSEC - place[0]), abs(values[V4L2_CID_TILT_ABSOLUTE] / ARCSEC - place[1]))
+        self._target_done_at = self._clock() + self.TARGET_WAIT_S + far / self.TARGET_DEG_S + self.TARGET_SLACK_S
 
     def _cancel_watchdog(self) -> None:
         if self._watchdog is not None and not self._watchdog.done() and self._watchdog is not asyncio.current_task():
             self._watchdog.cancel()
         self._watchdog = None
 
-    async def _apply_speeds(self, pan: int, tilt: int) -> None:
+    async def _apply_speeds(self, pan: int, tilt: int, place: Optional[Tuple[float, float]] = None) -> None:
         """Set the speed controls and close the motion segment that ends here (the position estimate).
 
         The whole sequence runs under the control lock, so no other request's write lands in the middle of
@@ -480,12 +596,25 @@ class RoomCamera:
         and two separate writes could cancel each other. The clock is read after the write has landed: the
         old speeds applied up to that reading and the new ones apply from it, so the time the write itself
         takes is not dropped from the estimate.
+
+        A camera that says where it points: the speeds it has already (the page renewing a held arrow) are not written again, so its
+        turn runs on unrestarted, and its turns are counted by _end_turns, timed from when this was asked (a turn starting from
+        `place`, where it points now in degrees, looked up when not given).
         """
+        asked = self._clock()
         async with self._io_lock:
+            if self._absolute:
+                pan, tilt = (pan if self._has_pan else 0), (tilt if self._has_tilt else 0)
+                if (pan, tilt) == (self._pan, self._tilt):
+                    return
+                if place is None and any(d and k not in self._turns for k, d in ((0, pan), (1, tilt))):
+                    place = self._place_from(await self._get(V4L2_CID_PAN_ABSOLUTE), await self._get(V4L2_CID_TILT_ABSOLUTE))
             speeds = self._speed_controls(pan, tilt)
             if speeds:
                 await self._set_many(speeds)
             now = self._clock()
+            if self._absolute:
+                self._end_turns(asked, pan, tilt, place)
             self._account(now)
             self._pan, self._tilt = (pan if self._has_pan else 0), (tilt if self._has_tilt else 0)
             self._segment_started = now if (self._pan or self._tilt) else None
@@ -620,6 +749,9 @@ class RoomCamera:
         level = _whole_number(level, "the zoom level")
         await self._require()
         level = max(self._zoom_range[0], min(self._zoom_range[1], level))
+        if self._absolute and self._limits and self._turns:    # a wider picture may need a target, and a target must not meet a turn
+            await self._apply_speeds(0, 0)
+            await self._sleep_until(self._rest_at)
         async with self._io_lock:
             if self._absolute and self._limits:
                 await self._keep_inside(level)      # first: a wider picture is moved in before it can show what is past a limit
@@ -717,6 +849,8 @@ class RoomCamera:
         return "the position is unknown until the camera is homed again"
 
     async def _find_stops_work(self) -> None:
+        if self._absolute:      # it says where it points: there is nothing to find, and nothing to drive into its stops
+            return
         await self._apply_speeds(-1, -1)
         if self._speed_controls(-1, -1):        # a zoom-only node has nothing to drive into a stop: no wait
             await self._wait(self._travel_s)
@@ -762,12 +896,16 @@ class RoomCamera:
     async def _go_to(self, saved: Dict[str, Any], zoom: int) -> None:
         """A camera that says where it is: stop any turn, then send it to the saved pan and tilt in one call (on a UVC camera they are
         the two halves of one control), kept inside the limits at the zoom it is going to, and to the zoom. The camera drives itself
-        there."""
+        there: a turn by speed comes to rest before the target is sent, and the move lasts until the camera has had time to get there
+        (it starts TARGET_WAIT_S after a target), so a Frame people looks at a picture that has stopped moving."""
         zoom = max(self._zoom_range[0], min(self._zoom_range[1], int(zoom)))
         await self._apply_speeds(0, 0)
+        await self._wait(self._rest_at - self._clock())
         async with self._io_lock:
-            await self._set_many(self._inside(float(saved["pan"]), float(saved["tilt"]), zoom))
+            place = self._place_from(await self._get(V4L2_CID_PAN_ABSOLUTE), await self._get(V4L2_CID_TILT_ABSOLUTE))
+            await self._send(self._inside(float(saved["pan"]), float(saved["tilt"]), zoom), place)
         await self._zoom_to(zoom)
+        await self._wait(self._target_done_at - self._clock())
 
     def _limit_degrees(self) -> Dict[str, float]:
         return {edge: value / ARCSEC for edge, value in self._limits.items()}
@@ -791,18 +929,18 @@ class RoomCamera:
 
     async def _keep_inside(self, zoom: int) -> None:
         """Under the control lock: move the camera back inside the limits for a picture at `zoom`, when it is not."""
-        now = {V4L2_CID_PAN_ABSOLUTE: await self._get(V4L2_CID_PAN_ABSOLUTE),
-               V4L2_CID_TILT_ABSOLUTE: await self._get(V4L2_CID_TILT_ABSOLUTE)}
-        inside = self._inside(now[V4L2_CID_PAN_ABSOLUTE], now[V4L2_CID_TILT_ABSOLUTE], zoom)
-        if inside != now:
-            await self._set_many(inside)
+        place = self._place_from(await self._get(V4L2_CID_PAN_ABSOLUTE), await self._get(V4L2_CID_TILT_ABSOLUTE))
+        inside = self._inside(place[0] * ARCSEC, place[1] * ARCSEC, zoom)
+        if inside != {V4L2_CID_PAN_ABSOLUTE: round(place[0] * ARCSEC), V4L2_CID_TILT_ABSOLUTE: round(place[1] * ARCSEC)}:
+            await self._send(inside, place)
 
     async def _where(self) -> Dict[str, Any]:
-        """Where the camera is, as a home or preset keeps it: the camera's own pan and tilt when it says, else the estimate."""
+        """Where the camera is, as a home or preset keeps it: in its own units when it says where it points (with its turns by speed
+        since), else the estimate."""
         if not self._absolute:
             return self._estimate_now()
-        async with self._io_lock:
-            return {"pan": await self._get(V4L2_CID_PAN_ABSOLUTE), "tilt": await self._get(V4L2_CID_TILT_ABSOLUTE)}
+        pan, tilt = await self._place()
+        return {"pan": round(pan * ARCSEC), "tilt": round(tilt * ARCSEC)}
 
     async def find_stops(self) -> Dict[str, Any]:
         """Drive both axes into their end stops and call that (0, 0): the one place the position is known for sure."""

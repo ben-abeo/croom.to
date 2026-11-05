@@ -900,7 +900,7 @@ class ControlService(Service):
         if camera is not None:
             return camera.state()
         return dict(self.NO_DEVICES, device=None, moving=False, busy=False, framing=False, zoom={"level": 0, "min": 0, "max": 0},
-                    position_known=False, home_saved=False, presets=[], preview=False)
+                    position_known=False, home_saved=False, presets=[], limits=None, preview=False)
 
     async def _device_call(self, request: web.Request, device, action) -> web.Response:
         """Run one device action: JSON in, the device's block out.

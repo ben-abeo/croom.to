@@ -32,7 +32,7 @@ class DevicesService(Service):
     LIGHT_S = 1.0           # how often the speakerphone's mute light is brought into line with the call's mute
 
     def __init__(self, volume: RoomVolume, camera: RoomCamera, mic: Optional[RoomMic] = None, meeting=None,
-                 buttons_finder: Optional[Callable[[], List[Any]]] = None, auto_framing: bool = False):
+                 buttons_finder: Optional[Callable[[], List[Any]]] = None, auto_framing: Any = "off"):
         super().__init__("devices")
         self.volume = volume
         self.camera = camera
@@ -55,12 +55,12 @@ class DevicesService(Service):
         self.buttons = RoomButtons(self._mute_pressed, self._volume_pressed, finder=buttons_finder) if buttons_finder else None
         self._light_task: Optional[asyncio.Task] = None
         # Auto framing (autoframe.py): Frame people by itself during calls, with the room's setting on; it needs the meeting
-        self.autoframer = AutoFramer(camera, meeting, enabled=auto_framing) if meeting is not None else None
+        self.autoframer = AutoFramer(camera, meeting, mode=auto_framing) if meeting is not None else None
 
     @classmethod
     def from_config(cls, config, store, meeting=None) -> "DevicesService":
         return cls(RoomVolume.from_config(config), RoomCamera.from_config(config, store), RoomMic.from_config(config, store), meeting,
-                   buttons_finder=usb_devices, auto_framing=bool(getattr(config.control, "camera_auto_framing", False)))
+                   buttons_finder=usb_devices, auto_framing=getattr(config.control, "camera_auto_framing", "off"))
 
     async def start(self) -> None:
         await self._check(self.volume.refresh, force=True)

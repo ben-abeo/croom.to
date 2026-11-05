@@ -1452,10 +1452,10 @@ class ControlService(Service):
             camera.set_preset_names(values["control.camera_presets"])
 
     def _apply_auto_framing(self, values: Dict[str, Any]) -> None:
-        """Auto framing on or off, at once: from its next look."""
+        """Auto framing's mode (off, at the start of calls, throughout calls), at once: from its next look."""
         framer = getattr(self._devices, "autoframer", None)
         if framer is not None:
-            framer.set_enabled(bool(values["control.camera_auto_framing"]))
+            framer.set_mode(values["control.camera_auto_framing"])
 
     async def _handle_config(self, request: web.Request) -> web.Response:
         """A Settings page's values as config.yaml has them, the fields its form draws, and whether a saved change waits for a restart."""

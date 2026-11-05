@@ -129,10 +129,14 @@ async def test_camera_preset_names_apply_at_once(client, unlocked, room):
     assert [p["name"] for p in room.camera.state()["presets"]] == ["Door", "Table", "Board"]
 
 
-async def test_auto_framing_turns_on_and_off_at_once(client, unlocked, room):
-    for on in (True, False):
-        response = await client.post("/api/settings/config/devices", json={"values": {"control.camera_auto_framing": on}}, headers=unlocked)
-        assert (await response.json())["restart"] is False and room.devices.autoframer.enabled is on
+async def test_auto_framing_changes_mode_at_once(client, unlocked, room):
+    for mode in ("dynamic", "call_start", "off"):
+        response = await client.post("/api/settings/config/devices", json={"values": {"control.camera_auto_framing": mode}},
+                                     headers=unlocked)
+        assert (await response.json())["restart"] is False and room.devices.autoframer.mode == mode
+    response = await client.post("/api/settings/config/devices", json={"values": {"control.camera_auto_framing": "always"}},
+                                 headers=unlocked)
+    assert response.status == 400 and room.devices.autoframer.mode == "off"
 
 
 async def test_the_helpers_refusal_is_said(client, unlocked, admin):

@@ -41,11 +41,11 @@ class Room:
         return list(self.faces), SIZE
 
 
-async def framer_for(faces=TWO, enabled=True):
+async def framer_for(faces=TWO, mode="dynamic"):
     camera, v4l2, clock = camera_for(nodes={"/dev/video0": RALLY})
     await camera.discover()
     room = Room(faces)
-    framer = AutoFramer(camera, room.meeting, enabled=enabled, detect=room.detect, clock=clock, sleep=clock.sleep)
+    framer = AutoFramer(camera, room.meeting, mode=mode, detect=room.detect, clock=clock, sleep=clock.sleep)
     framings = []
     frame_people = camera.frame_people
 
@@ -143,14 +143,35 @@ async def test_a_new_call_is_framed_afresh_and_a_hand_move_before_it_does_not_co
 
 
 async def test_it_does_nothing_when_off_outside_a_call_or_with_the_call_camera_off():
-    framer, camera, room, clock, framings = await framer_for(enabled=False)
+    framer, camera, room, clock, framings = await framer_for(mode="off")
     await framed_at_the_start(framer, clock)
     await looks(framer, clock, 5)
     assert framings == [] and room.meeting.camera_view.stills == 0 and camera.state()["auto_framing"] is None
-    framer.set_enabled(True)
+    framer.set_mode("dynamic")
     room.meeting.camera_view.blocked_by = "camera_off"
     await framed_at_the_start(framer, clock)
     assert framings == [] and room.meeting.camera_view.stills == 0
     room.meeting.camera_view.blocked_by = None
     await framed_at_the_start(framer, clock)
     assert framings == [False]
+
+
+async def test_at_the_start_of_calls_it_frames_once_per_call_and_then_leaves_the_camera_alone():
+    framer, camera, room, clock, framings = await framer_for(mode="call_start")
+    await framed_at_the_start(framer, clock)
+    assert framings == [False] and camera.state()["auto_framing"] is None
+    stills = room.meeting.camera_view.stills
+    room.faces = THREE
+    await looks(framer, clock, 20)
+    assert framings == [False] and room.meeting.camera_view.stills == stills      # no more looks in this call
+    room.meeting.state = MeetingState.IDLE
+    await looks(framer, clock, 1)
+    room.meeting.state = MeetingState.CONNECTED
+    await framed_at_the_start(framer, clock)
+    assert framings == [False, False]
+
+
+def test_the_setting_is_one_of_the_modes_and_a_hand_written_switch_is_understood():
+    from croom.devices.autoframe import mode_of
+    assert [mode_of(v) for v in ("off", "call_start", "dynamic", True, False, None, "sometimes")] == \
+        ["off", "call_start", "dynamic", "dynamic", "off", "off", "off"]

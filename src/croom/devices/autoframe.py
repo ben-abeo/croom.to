@@ -1,9 +1,9 @@
 """
 Auto framing: Frame people by itself during calls, as Logitech's RightSight does (which runs only in Logitech's own apps for Windows
-and macOS, so not on the room Pi). With the room's setting on (control.camera_auto_framing), a call that connects with the room's
-camera on is framed once people have had a moment to sit down; then the picture is looked at every few seconds, and framed again
-when someone has come into it or reached its edge, or someone has left it, for long enough to believe. Never sooner than a rest after
-the last framing, so it does not hunt.
+and Intel Macs and on its RoomMate, so not on the room Pi). Its modes are RightSight's (control.camera_auto_framing): "off";
+"call_start", where a call that connects with the room's camera on is framed once people have had a moment to sit down; and
+"dynamic", where after that the picture is looked at every few seconds, and framed again when someone has come into it or reached its
+edge, or someone has left it, for long enough to believe. Never sooner than a rest after the last framing, so it does not hunt.
 
 A person who takes the camera by hand during the call (an arrow or a drag, the zoom, Home, a preset) pauses it for the rest of that
 call; their tap on Frame people gives the camera back to it. The camera screen says which (RoomCamera.auto_framing). Each look is one
@@ -13,13 +13,26 @@ still from the call's own picture (CameraView.still) and the face detector in a 
 import asyncio
 import logging
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Optional, Union
 
 from croom.devices import framing
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 
 logger = logging.getLogger(__name__)
+
+MODES = ("off", "call_start", "dynamic")
+
+
+def mode_of(value: Union[str, bool, None]) -> str:
+    """The setting as a mode: one of MODES; true and false (a hand-written file) are "dynamic" and "off"; anything else is "off"."""
+    if value is True:
+        return "dynamic"
+    if value in MODES:
+        return str(value)
+    if value not in (False, None):
+        logger.warning(f"control.camera_auto_framing must be one of {', '.join(MODES)}, not {value!r}: Auto framing is off")
+    return "off"
 
 
 class AutoFramer:
@@ -30,11 +43,11 @@ class AutoFramer:
     REST_S = 20.0       # never framed again sooner than this after the last framing
     EDGE = 0.04         # a head and shoulders this near the picture's edge (a fraction of it): someone at the edge
 
-    def __init__(self, camera, meeting, enabled: bool = False, detect: Optional[Callable[[bytes], Any]] = None,
+    def __init__(self, camera, meeting, mode: Union[str, bool, None] = "off", detect: Optional[Callable[[bytes], Any]] = None,
                  clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep):
         self._camera = camera
         self._meeting = meeting
-        self._enabled = bool(enabled)
+        self._mode = mode_of(mode)
         self._detect = detect or framing.detect_faces
         self._clock, self._sleep = clock, sleep
         self._task: Optional[asyncio.Task] = None
@@ -45,13 +58,13 @@ class AutoFramer:
         self._said: Optional[str] = None
 
     @property
-    def enabled(self) -> bool:
-        return self._enabled
+    def mode(self) -> str:
+        return self._mode
 
-    def set_enabled(self, on: bool) -> None:
+    def set_mode(self, mode: Union[str, bool, None]) -> None:
         """The room's setting, at start and when Settings changes it (at once)."""
-        self._enabled = bool(on)
-        if not self._enabled:
+        self._mode = mode_of(mode)
+        if self._mode == "off":
             self._show(None)
 
     def start(self) -> None:
@@ -86,7 +99,7 @@ class AutoFramer:
         if not in_call:
             self._call = None                   # the next call is framed afresh
         view = getattr(self._meeting, "camera_view", None)
-        if not (self._enabled and in_call and view is not None and view.blocked() is None and self._camera.available):
+        if not (self._mode != "off" and in_call and view is not None and view.blocked() is None and self._camera.available):
             self._show(None)
             return
         now = self._clock()
@@ -95,6 +108,9 @@ class AutoFramer:
         taken = self._camera.taken_over_at
         if taken is not None and taken > self._call:   # a hand move since the call was first seen; one before it does not count
             self._show("paused")                # a person has the camera in this call; their Frame people gives it back
+            return
+        if self._mode == "call_start" and self._framed is not None:
+            self._show(None)                    # framed at the start of this call: nothing more until the next
             return
         self._show("on")
         state = self._camera.state()
@@ -122,6 +138,8 @@ class AutoFramer:
             return
         self._framed, self._last, self._more, self._fewer = int(answer.get("framed") or 0), self._clock(), 0, 0
         logger.info(f"Auto framing framed {self._framed} {'person' if self._framed == 1 else 'people'}")
+        if self._mode == "call_start":
+            self._show(None)                    # done for this call
 
     async def _look(self, view):
         picture = await view.still()

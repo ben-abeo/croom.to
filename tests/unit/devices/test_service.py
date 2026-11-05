@@ -13,9 +13,10 @@ from croom.control.settings import SettingsStore
 from croom.devices.camera import RoomCamera
 from croom.devices.errors import NotReady
 from croom.devices.service import DevicesService
-from croom.devices.v4l2 import V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED
+from croom.devices.v4l2 import V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED
 from croom.devices.volume import RoomVolume
-from tests.unit.devices.fake_v4l2 import MEETUP, FakeClock, FakeV4l2
+from croom.meeting.providers.base import MeetingState
+from tests.unit.devices.fake_v4l2 import MEETUP, RALLY, FakeClock, FakeV4l2
 from tests.unit.devices.test_volume import FakeRunner
 
 HOME = {"pan_s": 1.0, "tilt_s": 0.5}
@@ -521,5 +522,90 @@ async def test_reclaim_gives_up_on_a_camera_that_does_not_come_back(tmp_path):
         v4l2._nodes.pop("/dev/video0")
         await asyncio.wait_for(service.reclaim(), 2)
         assert not service.camera.available
+    finally:
+        await service.stop()
+
+
+# ----------------------------------------------------------------------
+# The Rally kept at Home when nobody uses it (Ben, 2026-11-05): sent there when a call is over, and when it comes back after it went
+# ----------------------------------------------------------------------
+
+RALLY_HOME = {"pan": -46800, "tilt": -104400}
+GONE_HOME = {V4L2_CID_PAN_ABSOLUTE: -46800, V4L2_CID_TILT_ABSOLUTE: -104400}
+
+
+class Meeting:
+    def __init__(self):
+        self.state = MeetingState.IDLE
+        self.callbacks = []
+
+    def add_state_callback(self, callback):
+        self.callbacks.append(callback)
+
+    def tell(self, *states):
+        for state in states:
+            self.state = state
+            for callback in self.callbacks:
+                callback(state)
+
+
+def rally_service(tmp_path, nodes=None, home=RALLY_HOME):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": home, "presets": {}})
+    clock = FakeClock()
+    v4l2 = FakeV4l2(nodes if nodes is not None else {"/dev/video0": dict(RALLY)})
+    camera = RoomCamera(store=store, v4l2=v4l2, clock=clock, sleep=clock.sleep)
+    meeting = Meeting()
+    return DevicesService(RoomVolume(runner=FakeRunner()), camera, meeting=meeting), v4l2, meeting
+
+
+async def test_a_call_that_is_over_sends_the_rally_home_and_nothing_else_does(tmp_path, caplog):
+    service, v4l2, meeting = rally_service(tmp_path)
+    await service.start()
+    try:
+        await service.homing                                  # at start, as ever
+        v4l2.set_many_calls.clear()
+        meeting.tell(MeetingState.IDLE)                       # no call has been on: nothing
+        meeting.tell(MeetingState.JOINING, MeetingState.IN_LOBBY, MeetingState.CONNECTED, MeetingState.LEAVING)
+        assert v4l2.set_many_calls == []                      # not while it is on, or ending
+        with caplog.at_level(logging.INFO):
+            meeting.tell(MeetingState.IDLE)
+            await service.homing
+        assert v4l2.set_many_calls == [GONE_HOME] and levels(caplog, "Camera homed after the call") == [logging.INFO]
+        meeting.tell(MeetingState.IDLE)                       # over already: not again
+        assert v4l2.set_many_calls == [GONE_HOME]
+    finally:
+        await service.stop()
+
+
+async def test_a_call_that_is_over_leaves_the_meetup_where_it_is(tmp_path):
+    store = SettingsStore(tmp_path / "control-settings.json")
+    store.save("camera", {"home": HOME, "presets": {}})
+    clock = FakeClock()
+    v4l2 = FakeV4l2()
+    meeting = Meeting()
+    service = DevicesService(RoomVolume(runner=FakeRunner()), RoomCamera(store=store, v4l2=v4l2, clock=clock, sleep=clock.sleep),
+                             meeting=meeting)
+    await service.start()
+    try:
+        await service.homing
+        v4l2.calls.clear()
+        meeting.tell(MeetingState.CONNECTED, MeetingState.IDLE)
+        await asyncio.sleep(0.01)
+        assert not any(c[0] == "set" for c in v4l2.calls)    # the MeetUp homes by driving into its stops: not after every call
+    finally:
+        await service.stop()
+
+
+async def test_a_rally_that_comes_back_is_sent_home(tmp_path):
+    service, v4l2, _ = rally_service(tmp_path, nodes={"/dev/video19": {}})
+    service.REDISCOVER_S = 0.01
+    await service.start()
+    try:
+        assert service.homing is None                         # not there at start
+        v4l2._nodes["/dev/video0"] = dict(RALLY)              # back: restarted, it points wherever Logitech's default is
+        await until(lambda: service.homing is not None)
+        await service.homing
+        assert v4l2.set_many_calls == [GONE_HOME]
     finally:
         await service.stop()

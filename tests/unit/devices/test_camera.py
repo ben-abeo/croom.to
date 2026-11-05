@@ -13,6 +13,7 @@ import pytest
 
 from croom.control.settings import SettingsStore
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
+from croom.devices import framing
 from croom.devices.camera import RoomCamera
 from croom.devices.v4l2 import (V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_TILT_ABSOLUTE, V4L2_CID_TILT_SPEED,
                                 V4L2_CID_ZOOM_ABSOLUTE)
@@ -1197,37 +1198,82 @@ async def test_travel_times_saved_for_a_meetup_are_not_a_home_or_presets_for_a_c
     assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_PAN_ABSOLUTE) == []   # nothing was moved by the old times
 
 
-async def test_an_arrow_held_on_a_camera_that_says_where_it_is_steps_its_position_and_a_save_keeps_where_it_got_to(tmp_path):
-    # The Rally keeps saying the last place it was sent whatever a turn by speed does (the Boardroom, 2026-11-04): so an arrow
-    # turns it by its own position, a step at a time, and never by speed
-    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+async def test_an_arrow_turns_a_camera_that_says_where_it_is_by_speed_at_once_and_counts_how_far_from_how_long(tmp_path):
+    # The Rally waits for its target to stop changing before it moves, so an arrow that stepped its target did not move it until let go
+    # (the Boardroom, 2026-11-05). Turned by speed it starts at once, but goes on saying the last target it was sent: where it got to
+    # is counted from how long the arrow was held (0.6 s turned it 5 degrees, every time).
+    camera, v4l2, clock = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
     await camera.discover()
     v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 0, (10, V4L2_CID_TILT_ABSOLUTE): -7200})
-    await camera.move(0, -1)                           # the down arrow, held
-    assert camera.state()["moving"]
-    await asyncio.sleep(0.05)
+    await camera.move(1, 0)                            # the right arrow
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1] and camera.state()["moving"]
+    await camera.move(1, 0)                            # the page renewing the hold: not written again, so the turn runs on unrestarted
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1]
+    clock.now += 0.6
     await camera.move(0, 0)                            # let go
-    await asyncio.sleep(0.02)
-    tilts = v4l2.sets(V4L2_CID_TILT_ABSOLUTE)
-    assert len(tilts) >= 2 and tilts[0] == -7200 - 3600            # a degree a step, downward ...
-    assert all(b - a in (-3600, 0) for a, b in zip(tilts, tilts[1:])) and min(tilts) >= -324000   # ... and not past the stop
-    assert set(v4l2.sets(V4L2_CID_PAN_ABSOLUTE)) == {0}
-    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []           # never by speed
-    written = len(v4l2.calls)
-    await asyncio.sleep(0.02)
-    assert len(v4l2.calls) == written and not camera.state()["moving"]                           # let go: no more steps
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1, 0] and not camera.state()["moving"]
+    assert v4l2.sets(V4L2_CID_PAN_ABSOLUTE) == [] and v4l2.sets(V4L2_CID_TILT_ABSOLUTE) == []     # no target written meanwhile
     await camera.save_home()
-    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["home"] == {"pan": 0, "tilt": tilts[-1]}
-
-
-async def test_an_arrow_against_the_stop_of_a_camera_that_says_where_it_is_stays_at_the_stop(tmp_path):
-    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
-    await camera.discover()
-    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 324000, (10, V4L2_CID_TILT_ABSOLUTE): -320400})
-    await camera.move(1, -1)
-    await asyncio.sleep(0.03)
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["home"] == {"pan": 5 * 3600, "tilt": -7200}
+    await camera.move(-1, 1)                           # up and to the left, for longer
+    clock.now += 1.0
     await camera.stop()
-    assert set(v4l2.sets(V4L2_CID_PAN_ABSOLUTE)) == {324000} and v4l2.sets(V4L2_CID_TILT_ABSOLUTE)[-1] == -324000
+    await camera.save(1)
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["presets"]["1"] == {
+        "pan": (5 - 14) * 3600, "tilt": -7200 + 14 * 3600, "zoom": 100}
+    await camera.home()                                # a target again: what was turned is behind it
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 5 * 3600, V4L2_CID_TILT_ABSOLUTE: -7200}
+    await camera.save(2)
+    assert SettingsStore(tmp_path / "control-settings.json").get("camera")["presets"]["2"]["pan"] == 5 * 3600
+
+
+async def test_a_turn_waits_for_a_target_still_on_its_way_and_a_target_for_a_turn_to_come_to_rest(tmp_path):
+    # A target still on its way when a turn starts, or sent into a turn, sent the Rally 27 degrees from either (the Boardroom,
+    # 2026-11-05): so an arrow right after Home waits until the camera is there, and Home right after an arrow until it is at rest
+    camera, v4l2, clock = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 20 * 3600})
+    await camera.save_home()
+    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 0})
+    started = clock.now
+    await camera.home()                                # 20 degrees away: it waits 0.9 s, then turns there
+    assert clock.now - started >= camera.TARGET_WAIT_S + 20 / camera.TARGET_DEG_S   # busy until it is there
+    v4l2.calls.clear()
+    await camera.move(1, 0)
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [1]
+    clock.now += 0.3
+    await camera.move(0, 0)
+    stopped = clock.now
+    await camera.home()
+    assert [c[2] for c in v4l2.calls if c[0] == "set"] == [V4L2_CID_PAN_SPEED, V4L2_CID_TILT_SPEED, V4L2_CID_PAN_SPEED,
+                                                          V4L2_CID_TILT_SPEED, V4L2_CID_PAN_ABSOLUTE, V4L2_CID_TILT_ABSOLUTE,
+                                                          V4L2_CID_ZOOM_ABSOLUTE]
+    assert clock.now - stopped >= camera.TURN_REST_S   # the target went once the turn had come to rest
+
+
+async def test_a_let_go_while_a_turn_waits_for_a_target_drops_the_turn(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    async with camera._io_lock:                        # a target just sent (Home's, say)
+        await camera._send({V4L2_CID_PAN_ABSOLUTE: 3600, V4L2_CID_TILT_ABSOLUTE: 0}, (0.0, 0.0))
+    press = asyncio.create_task(camera.move(1, 0))     # the arrow, held: it waits for the target ...
+    await asyncio.sleep(0)
+    await camera.stop()                                # ... and is let go before the camera is there
+    await press
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and not camera.state()["moving"]
+
+
+async def test_an_arrow_against_the_stop_of_a_camera_that_says_where_it_is_does_not_turn_past_it(tmp_path):
+    camera, v4l2, clock = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): 324000, (10, V4L2_CID_TILT_ABSOLUTE): -317000})
+    await camera.move(1, -1)                           # at the right stop, two degrees above the bottom one
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [0] and v4l2.sets(V4L2_CID_TILT_SPEED) == [-1]   # no room to the right
+    clock.now += 3.0                                   # held past the bottom
+    await asyncio.sleep(0.15)                          # the turn is looked at against the stops ...
+    assert v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0]   # ... and stopped there
+    await camera.stop()
+    assert await camera._where() == {"pan": 324000, "tilt": -324000}
 
 
 async def test_find_the_stops_does_not_turn_a_camera_that_says_where_it_is(tmp_path):
@@ -1250,30 +1296,38 @@ def tilt_now(v4l2):
     return v4l2.values[(10, V4L2_CID_TILT_ABSOLUTE)] / DEG
 
 
-async def held(camera, pan, tilt):
+async def held(camera, clock, pan, tilt, seconds=5.0):
+    """An arrow held `seconds` (long enough to reach any limit) and let go."""
     await camera.move(pan, tilt)
-    await asyncio.sleep(0.05)
+    clock.now += seconds
     await camera.stop()
 
 
+async def place(camera):
+    """Where the camera points, in degrees: what it says, and its turns by speed since."""
+    at = await camera._where()
+    return at["pan"] / DEG, at["tilt"] / DEG
+
+
 async def test_a_lowest_limit_stops_the_down_arrow_where_it_was_set_and_a_wider_picture_is_lifted_to_keep_to_it(tmp_path):
-    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    camera, v4l2, clock = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
     await camera.discover()
     assert camera.state()["limits"] == {"down": False, "up": False, "left": False, "right": False}
     pointed(v4l2, 0, -30)
     await camera.set_limit("down", True)                 # the lowest view that is still clean, at the widest zoom
     assert camera.state()["limits"]["down"] is True
-    await held(camera, 0, -1)
-    assert tilt_now(v4l2) == -30                         # the down arrow stops there
+    await held(camera, clock, 0, -1)
+    assert (await place(camera))[1] == -30 and v4l2.sets(V4L2_CID_TILT_SPEED) == []   # the down arrow does not turn past it
     await camera.zoom(300)                               # a narrower picture can look lower without its bottom edge going further
-    await held(camera, 0, -1)
-    assert tilt_now(v4l2) < -30
+    await held(camera, clock, 0, -1)
+    lower = (await place(camera))[1]
+    assert lower < -30 and v4l2.sets(V4L2_CID_TILT_SPEED) == [-1, 0]
+    assert lower == pytest.approx(camera._limits["down"] / DEG + framing.half_view(300)[1], abs=0.01)     # its bottom edge at the limit, not past it
     await camera.zoom(100)                               # wider again: lifted back before the base can show
-    assert tilt_now(v4l2) == -30
-    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []
+    assert tilt_now(v4l2) == -30 and (await place(camera))[1] == -30
     await camera.set_limit("down", False)                # cleared: it goes lower again
-    await held(camera, 0, -1)
-    assert tilt_now(v4l2) < -30 and camera.state()["limits"]["down"] is False
+    await held(camera, clock, 0, -1)
+    assert (await place(camera))[1] < -30 and camera.state()["limits"]["down"] is False
 
 
 async def test_limits_are_kept_on_disk_and_home_and_presets_saved_past_them_stop_at_them(tmp_path):
@@ -1286,7 +1340,7 @@ async def test_limits_are_kept_on_disk_and_home_and_presets_saved_past_them_stop
     pointed(v4l2, 20, -30)
     await camera.set_limit("down", True)
     await camera.set_limit("right", True)
-    again, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})   # a restart
+    again, v4l2, clock = camera_for(tmp_path, nodes={"/dev/video0": RALLY})   # a restart
     await again.discover()
     assert again.state()["limits"] == {"down": True, "up": False, "left": False, "right": True}
     pointed(v4l2, 40, 0)
@@ -1294,8 +1348,8 @@ async def test_limits_are_kept_on_disk_and_home_and_presets_saved_past_them_stop
     assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 0, V4L2_CID_TILT_ABSOLUTE: -30 * DEG}
     await again.recall(1)
     assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 0, V4L2_CID_TILT_ABSOLUTE: -30 * DEG}
-    await held(again, 1, 0)                               # the right arrow stops at the rightmost limit
-    assert v4l2.values[(10, V4L2_CID_PAN_ABSOLUTE)] == 20 * DEG
+    await held(again, clock, 1, 0)                        # the right arrow stops at the rightmost limit
+    assert (await place(again))[0] == pytest.approx(20, abs=0.01)
 
 
 async def test_limits_need_a_camera_that_says_where_it_points(tmp_path):

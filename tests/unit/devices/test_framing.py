@@ -156,3 +156,14 @@ async def test_a_tap_while_the_camera_moves_is_refused():
         await camera.frame_people(stills, detect=finds(RIGHT_EDGE))
     assert v4l2.sets(V4L2_CID_PAN_SPEED)[-1] == 1 and stills.taken == 0
     await camera.stop()
+
+
+async def test_a_camera_that_says_where_it_is_is_only_zoomed_by_frame_people():
+    # A turn by speed would leave the Rally saying it is where it was, and its Home and presets would be saved wrong
+    from tests.unit.devices.fake_v4l2 import RALLY
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    await camera.find_stops()
+    answer = await camera.frame_people(Stills(), detect=finds(RIGHT_OF_MIDDLE))
+    assert answer["framed"] == 1 and answer["turned"] is False
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []

@@ -7,7 +7,9 @@ are stored against that estimate. A camera that says where it is (the Rally:
 pan_absolute and tilt_absolute) keeps its own position in its home and presets
 instead, and is sent back there. It is never turned by speed: the Rally goes on
 saying the last place it was sent whatever a turn by speed does, so an arrow
-steps its position instead. Control calls go through a second file
+steps its position instead. It also keeps to limits set in Set up: the furthest
+its picture's edges may go down, up, left and right (past the bottom one, its
+own base comes into the picture). Control calls go through a second file
 descriptor next to Chromium's stream; nothing here streams video.
 """
 
@@ -33,6 +35,8 @@ DEFAULT_PRESET_NAMES = ("Wide", "Table", "Whiteboard")
 ALREADY_FRAMING = "Already framing"
 MOVING = "Moving\u2026"                 # what the camera screen says while the camera homes or recalls a preset (devices.js)
 NO_PICTURE = "No picture from the camera"
+NO_LIMITS = "This camera does not say where it points, so it cannot keep to limits"
+ARCSEC = 3600                           # a camera's pan and tilt are counted in 1/3600 deg (UVC)
 
 
 def _sign(value: float) -> int:
@@ -148,6 +152,11 @@ class RoomCamera:
                 self._presets[str(slot)] = dict(preset)
             else:
                 logger.debug(f"Ignoring the saved camera preset {slot}: {preset!r}")
+        # The limits: the furthest the picture's edges may go, by edge (framing.EDGES), in the camera's units
+        limits = saved.get("limits")
+        self._limits: Dict[str, int] = {}
+        if isinstance(limits, dict):
+            self._limits = {edge: int(limits[edge]) for edge in framing.EDGES if _finite(limits.get(edge))}
 
     def set_preset_names(self, preset_names: Optional[List[str]]) -> None:
         """The three slots' names (control.camera_presets): at start, and when Settings changes them, which applies at once. Slots past
@@ -213,6 +222,8 @@ class RoomCamera:
             "home_saved": self.home_saved,
             "presets": [{"slot": slot, "name": self._names[slot - 1], "saved": self._usable(self._presets.get(str(slot)))}
                         for slot in range(1, self.SLOTS + 1)],
+            # which limits are set, on a camera that can keep to them (one that says where it points); None on any other
+            "limits": {edge: edge in self._limits for edge in framing.EDGES} if self._absolute else None,
             "preview": self.preview,
         }
 
@@ -407,7 +418,7 @@ class RoomCamera:
         """A camera that says where it is, turned by an arrow or a drag: its pan and tilt moved a step every STEP_S, within its range,
         for as long as the direction move() set stays (a let-go, the watchdog, a Home or a preset set it to nothing). Each step starts
         from the place the camera says, so the place it says stays where it is."""
-        step = self.STEP_DEG * 3600
+        step = self.STEP_DEG * ARCSEC
         try:
             while self._fd is not None and (self._pan or self._tilt):
                 async with self._io_lock:
@@ -415,8 +426,7 @@ class RoomCamera:
                         break
                     pan = await self._get(V4L2_CID_PAN_ABSOLUTE) + self._pan * step
                     tilt = await self._get(V4L2_CID_TILT_ABSOLUTE) + self._tilt * step
-                    await self._set_many({V4L2_CID_PAN_ABSOLUTE: max(self._pan_range[0], min(self._pan_range[1], pan)),
-                                          V4L2_CID_TILT_ABSOLUTE: max(self._tilt_range[0], min(self._tilt_range[1], tilt))})
+                    await self._set_many(self._inside(pan, tilt, self._zoom if self._zoom is not None else self._zoom_range[0]))
                 await self._sleep(self.STEP_S)
         except DeviceUnavailable:
             pass        # the camera has gone, and _fail has said so
@@ -483,6 +493,8 @@ class RoomCamera:
         await self._require()
         level = max(self._zoom_range[0], min(self._zoom_range[1], level))
         async with self._io_lock:
+            if self._absolute and self._limits:
+                await self._keep_inside(level)      # first: a wider picture is moved in before it can show what is past a limit
             await self._set(V4L2_CID_ZOOM_ABSOLUTE, level)
             self._zoom = level
             self._zoom_read_at = self._clock()
@@ -621,11 +633,41 @@ class RoomCamera:
 
     async def _go_to(self, saved: Dict[str, Any], zoom: int) -> None:
         """A camera that says where it is: stop any turn, then send it to the saved pan and tilt in one call (on a UVC camera they are
-        the two halves of one control) and to the zoom. The camera drives itself there."""
+        the two halves of one control), kept inside the limits at the zoom it is going to, and to the zoom. The camera drives itself
+        there."""
+        zoom = max(self._zoom_range[0], min(self._zoom_range[1], int(zoom)))
         await self._apply_speeds(0, 0)
         async with self._io_lock:
-            await self._set_many({V4L2_CID_PAN_ABSOLUTE: int(saved["pan"]), V4L2_CID_TILT_ABSOLUTE: int(saved["tilt"])})
+            await self._set_many(self._inside(float(saved["pan"]), float(saved["tilt"]), zoom))
         await self.zoom(zoom)
+
+    def _limit_degrees(self) -> Dict[str, float]:
+        return {edge: value / ARCSEC for edge, value in self._limits.items()}
+
+    def _inside(self, pan: float, tilt: float, zoom: int) -> Dict[int, int]:
+        """The pan and tilt (camera units) to write for the ones asked for: moved as little as keeps the picture at `zoom` inside the
+        limits and the camera inside its range, in whole degrees (the Rally's step). A degree that rounding puts past a limit is
+        moved back inside it; within 0.01 deg of a limit is at it (a limit is stored to the 1/3600 deg, and the sums carry float dust)."""
+        limits = self._limit_degrees()
+        kept = framing.within(pan / ARCSEC, tilt / ARCSEC, zoom, limits)
+        near = (round(kept[0]), round(kept[1]))
+        held = framing.within(near[0], near[1], zoom, limits)
+
+        def whole(n: int, h: float) -> int:
+            if abs(h - n) < 0.01:
+                return n * ARCSEC
+            return (math.ceil(h - 0.01) if h > n else math.floor(h + 0.01)) * ARCSEC
+
+        return {V4L2_CID_PAN_ABSOLUTE: max(self._pan_range[0], min(self._pan_range[1], whole(near[0], held[0]))),
+                V4L2_CID_TILT_ABSOLUTE: max(self._tilt_range[0], min(self._tilt_range[1], whole(near[1], held[1])))}
+
+    async def _keep_inside(self, zoom: int) -> None:
+        """Under the control lock: move the camera back inside the limits for a picture at `zoom`, when it is not."""
+        now = {V4L2_CID_PAN_ABSOLUTE: await self._get(V4L2_CID_PAN_ABSOLUTE),
+               V4L2_CID_TILT_ABSOLUTE: await self._get(V4L2_CID_TILT_ABSOLUTE)}
+        inside = self._inside(now[V4L2_CID_PAN_ABSOLUTE], now[V4L2_CID_TILT_ABSOLUTE], zoom)
+        if inside != now:
+            await self._set_many(inside)
 
     async def _where(self) -> Dict[str, Any]:
         """Where the camera is, as a home or preset keeps it: the camera's own pan and tilt when it says, else the estimate."""
@@ -671,6 +713,29 @@ class RoomCamera:
         self._persist(home, self._presets)      # written first: a write that fails leaves the camera as it was
         self._home = home
         logger.info(f"Camera home saved at {self._home}")
+        return self.state()
+
+    async def set_limit(self, edge: Any, on: bool) -> Dict[str, Any]:
+        """Set Up: keep the picture's edge `edge` (down, up, left or right) from going past where it is now, at the zoom it is at now (a
+        wider picture is moved in to keep to it), or clear that limit. Only on a camera that says where it points."""
+        if edge not in framing.EDGES:
+            raise ValueError("edge must be down, up, left or right")
+        await self._require()
+        if not self._absolute:
+            raise NotReady(NO_LIMITS)
+        limits = dict(self._limits)
+        if on:
+            zoom = await self.read_zoom()
+            at = await self._where()
+            half_w, half_h = framing.half_view(zoom if zoom is not None else self._zoom_range[0])
+            pan, tilt = at["pan"] / ARCSEC, at["tilt"] / ARCSEC
+            reach = {"down": tilt - half_h, "up": tilt + half_h, "left": pan - half_w, "right": pan + half_w}[edge]
+            limits[edge] = round(reach * ARCSEC)
+        else:
+            limits.pop(edge, None)
+        self._persist(self._home, self._presets, limits)    # written first: a write that fails leaves the camera as it was
+        self._limits = limits
+        logger.info(f"Camera limit {edge} {'set at ' + format(limits[edge] / ARCSEC, '.1f') + ' deg' if on else 'cleared'}")
         return self.state()
 
     def _slot(self, slot: Any) -> str:
@@ -728,7 +793,8 @@ class RoomCamera:
         It is a long move of its own, so the camera is busy throughout, and a drag, an arrow, Home or a preset cuts it short as
         they cut each other. It refuses, before touching anything, while it already runs ("Already framing") and while the
         camera moves ("Moving..."). No one found: the zoom goes back to where it was, and nothing has turned. Without Set up
-        (the position not known) it only zooms. Answers the camera's state with "framed" (people found) and "turned" (whether
+        (the position not known) it only zooms. A camera that says where it points is turned straight to the group, inside its
+        limits (_aim_work). Answers the camera's state with "framed" (people found) and "turned" (whether
         it could turn toward them)."""
         if self._framing:
             raise NotReady(ALREADY_FRAMING)
@@ -753,6 +819,8 @@ class RoomCamera:
                 raise NotReady(NO_PICTURE)
             outcome.update(framed=0, turned=False)
             return
+        if self._absolute:
+            return await self._aim_work(still, detect, faces, size, outcome)
         position = None
         if self._position_known and self._speed_controls(1, 1):
             self._account_now()
@@ -765,10 +833,25 @@ class RoomCamera:
         await self._move_to(target.pan_s, target.tilt_s)              # 6.
         await self._wait(self.SETTLE_S)
         faces, size = await self._look(still, detect)                # 7. one check, and one correction at most
-        fix = framing.correction(faces or [], size, zoom, self._travel_s)
+        fix = framing.correction(faces or [], size, zoom, self._travel_s, target.people)
         if fix is not None:
             self._account_now()
             await self._move_to(self._pan_s + fix[0], self._tilt_s + fix[1])
+
+    async def _aim_work(self, still, detect, faces, size, outcome: Dict[str, Any]) -> None:
+        """Steps 4 to 7 on a camera that says where it is: from where it points, straight to the pan, tilt and zoom that frame the group
+        (framing.aim, inside the limits), then one look and one nudge at most, never toward fewer people than were found."""
+        at = await self._where()
+        zoom, pan, tilt = framing.aim(faces, size, (at["pan"] / ARCSEC, at["tilt"] / ARCSEC), self._limit_degrees(),
+                                      self._zoom_range[1])
+        outcome.update(framed=len(faces), turned=True)
+        await self._go_to({"pan": pan * ARCSEC, "tilt": tilt * ARCSEC}, zoom)
+        await self._wait(self.SETTLE_S)
+        seen, size = await self._look(still, detect)
+        fix = framing.nudge(seen or [], size, zoom, len(faces))
+        if fix is not None:
+            at = await self._where()
+            await self._go_to({"pan": at["pan"] + fix[0] * ARCSEC, "tilt": at["tilt"] + fix[1] * ARCSEC}, zoom)
 
     async def _look(self, still, detect):
         """One picture and the faces in it: (faces, (width, height)), or (None, None) when the camera gave no picture or the
@@ -801,14 +884,16 @@ class RoomCamera:
             raise Interrupted("the camera move was interrupted")
         return task.result()
 
-    def _persist(self, home: Optional[Dict[str, Any]], presets: Dict[str, Dict[str, Any]]) -> None:
-        """Write a home and presets through the store, as copies: the store keeps what it is given by
-        reference, so a later save of another key would otherwise write a preset that is half edited.
-        The callers write the new values first and keep them only once this has returned: a save that
-        raises (a full disk) must not leave the camera reporting a home or preset that is not on disk."""
+    def _persist(self, home: Optional[Dict[str, Any]], presets: Dict[str, Dict[str, Any]],
+                 limits: Optional[Dict[str, int]] = None) -> None:
+        """Write a home, presets and limits (the ones kept now when not given) through the store, as copies: the store keeps what it is
+        given by reference, so a later save of another key would otherwise write a preset that is half edited. The callers write the
+        new values first and keep them only once this has returned: a save that raises (a full disk) must not leave the camera
+        reporting a home, preset or limit that is not on disk."""
         if self._store is not None:
             self._store.save("camera", {"home": dict(home) if home is not None else None,
-                                        "presets": {k: dict(v) for k, v in presets.items()}})
+                                        "presets": {k: dict(v) for k, v in presets.items()},
+                                        "limits": dict(self._limits if limits is None else limits)})
 
     # ------------------------------------------------------------------
     # Preview

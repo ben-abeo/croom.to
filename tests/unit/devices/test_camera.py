@@ -990,7 +990,8 @@ async def test_the_camera_gives_the_store_copies_of_its_home_and_presets(tmp_pat
     camera._presets["1"]["zoom"] = 999
     camera._store.save("screensaver", "clock")                   # ... while another key is saved, which rewrites the whole file
     saved = SettingsStore(tmp_path / "control-settings.json").get("camera")
-    assert saved == {"home": {"pan_s": 0.0, "tilt_s": 0.0}, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}}}
+    assert saved == {"home": {"pan_s": 0.0, "tilt_s": 0.0}, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}},
+                     "limits": {}}
 
 
 # --- the final fix pass: an explained open failure, settings with defaults, no wait without motors, every failure stops ---
@@ -1085,7 +1086,8 @@ async def test_a_home_or_preset_that_could_not_be_written_is_not_reported_saved(
     store.full = False
     await camera.save(3)                                         # the next write that works holds only what was saved
     assert SettingsStore(path).get("camera") == {"home": None, "presets": {"1": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100},
-                                                                          "3": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}}}
+                                                                          "3": {"pan_s": 0.0, "tilt_s": 0.0, "zoom": 100}},
+                                                 "limits": {}}
 
 
 async def test_a_long_move_that_fails_in_any_other_way_still_stops_the_motors():
@@ -1161,7 +1163,7 @@ async def test_a_camera_that_says_where_it_is_saves_and_returns_to_its_own_posit
     await camera.zoom(600)
     await camera.save(2)
     assert SettingsStore(tmp_path / "control-settings.json").get("camera") == {
-        "home": {"pan": 36000, "tilt": -7200}, "presets": {"2": {"pan": -108000, "tilt": 18000, "zoom": 600}}}
+        "home": {"pan": 36000, "tilt": -7200}, "presets": {"2": {"pan": -108000, "tilt": 18000, "zoom": 600}}, "limits": {}}
     assert camera.home_saved and camera.state()["presets"][1] == {"slot": 2, "name": "Table", "saved": True}
     camera.forget_position()                           # a laptop had it: the camera still says where it is
     assert camera.position_known
@@ -1233,3 +1235,76 @@ async def test_find_the_stops_does_not_turn_a_camera_that_says_where_it_is(tmp_p
     await camera.discover()
     await camera.find_stops()
     assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == [] and camera.position_known
+
+
+# --- limits (a camera that says where it points): how far its picture's edges may go; past the bottom one, its base shows ---
+
+DEG = 3600
+
+
+def pointed(v4l2, pan_deg, tilt_deg):
+    v4l2.values.update({(10, V4L2_CID_PAN_ABSOLUTE): pan_deg * DEG, (10, V4L2_CID_TILT_ABSOLUTE): tilt_deg * DEG})
+
+
+def tilt_now(v4l2):
+    return v4l2.values[(10, V4L2_CID_TILT_ABSOLUTE)] / DEG
+
+
+async def held(camera, pan, tilt):
+    await camera.move(pan, tilt)
+    await asyncio.sleep(0.05)
+    await camera.stop()
+
+
+async def test_a_lowest_limit_stops_the_down_arrow_where_it_was_set_and_a_wider_picture_is_lifted_to_keep_to_it(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    assert camera.state()["limits"] == {"down": False, "up": False, "left": False, "right": False}
+    pointed(v4l2, 0, -30)
+    await camera.set_limit("down", True)                 # the lowest view that is still clean, at the widest zoom
+    assert camera.state()["limits"]["down"] is True
+    await held(camera, 0, -1)
+    assert tilt_now(v4l2) == -30                         # the down arrow stops there
+    await camera.zoom(300)                               # a narrower picture can look lower without its bottom edge going further
+    await held(camera, 0, -1)
+    assert tilt_now(v4l2) < -30
+    await camera.zoom(100)                               # wider again: lifted back before the base can show
+    assert tilt_now(v4l2) == -30
+    assert v4l2.sets(V4L2_CID_PAN_SPEED) == [] and v4l2.sets(V4L2_CID_TILT_SPEED) == []
+    await camera.set_limit("down", False)                # cleared: it goes lower again
+    await held(camera, 0, -1)
+    assert tilt_now(v4l2) < -30 and camera.state()["limits"]["down"] is False
+
+
+async def test_limits_are_kept_on_disk_and_home_and_presets_saved_past_them_stop_at_them(tmp_path):
+    camera, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    pointed(v4l2, 0, -50)
+    await camera.save_home()                              # saved before the limits were set
+    await camera.zoom(100)
+    await camera.save(1)
+    pointed(v4l2, 20, -30)
+    await camera.set_limit("down", True)
+    await camera.set_limit("right", True)
+    again, v4l2, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})   # a restart
+    await again.discover()
+    assert again.state()["limits"] == {"down": True, "up": False, "left": False, "right": True}
+    pointed(v4l2, 40, 0)
+    await again.home()
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 0, V4L2_CID_TILT_ABSOLUTE: -30 * DEG}
+    await again.recall(1)
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 0, V4L2_CID_TILT_ABSOLUTE: -30 * DEG}
+    await held(again, 1, 0)                               # the right arrow stops at the rightmost limit
+    assert v4l2.values[(10, V4L2_CID_PAN_ABSOLUTE)] == 20 * DEG
+
+
+async def test_limits_need_a_camera_that_says_where_it_points(tmp_path):
+    camera, _, _ = camera_for(tmp_path)                   # the MeetUp
+    await camera.discover()
+    assert camera.state()["limits"] is None
+    with pytest.raises(NotReady):
+        await camera.set_limit("down", True)
+    rally, _, _ = camera_for(tmp_path, nodes={"/dev/video0": RALLY})
+    await rally.discover()
+    with pytest.raises(ValueError):
+        await rally.set_limit("sideways", True)

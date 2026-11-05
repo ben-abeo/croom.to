@@ -415,7 +415,8 @@ body.keyboard-open .schedule { display: none; }
 .link-button { background: none; border: 0; color: var(--periwinkle-300); font: inherit; text-decoration: underline; cursor: pointer; padding: 0; margin-top: 12px; display: block; }
 .link-button[hidden] { display: none; }   /* likewise */
 .setup { margin-top: 12px; }
-.setup-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.setup-buttons, .limit-buttons { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+.limit-buttons[hidden] { display: none; }   /* the display rule above would otherwise beat the hidden attribute */
 
 /* TV view (spec 2026-10-13 TV remote and touchpad, section 5): the remote on the table, or the card that comes before it (no TV set up,
    not paired, no longer accepted). One screen at 1280 by 800, built from the page's own buttons; scoped to the view. A key that wears a

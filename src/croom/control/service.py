@@ -1045,7 +1045,9 @@ class ControlService(Service):
                 return await camera.find_stops()
             if verb == "save_home":
                 return await camera.save_home()
-            raise ValueError("action must be find_stops or save_home")
+            if verb in ("set_limit", "clear_limit"):        # a camera that says where it points: an edge its picture keeps to
+                return await camera.set_limit(data.get("edge"), verb == "set_limit")
+            raise ValueError("action must be find_stops, save_home, set_limit or clear_limit")
 
         return await self._device_call(request, camera, action)
 

@@ -341,8 +341,9 @@ class StubVolume:
 
 
 class StubCamera:
-    def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2)):
+    def __init__(self, available=True, home_saved=True, position_known=True, saved=(1, 2), limits=None):
         self.available, self.home_saved = available, home_saved
+        self.limits = limits            # None: the MeetUp; a dict of edges set: a camera that says where it points (the Rally)
         self.position_known = position_known and available      # a missing camera never knows its position
         self.saved = set(saved)
         self.zoom_level, self.moving, self.busy = 100, False, False
@@ -361,7 +362,7 @@ class StubCamera:
                 "moving": self.moving, "busy": self.busy, "framing": False, "zoom": {"level": self.zoom_level, "min": 100, "max": 500},
                 "position_known": self.position_known, "home_saved": self.home_saved,
                 "presets": [{"slot": s, "name": self.names[s - 1], "saved": s in self.saved} for s in (1, 2, 3)],
-                "preview": self.preview_on}
+                "limits": dict(self.limits) if self.limits is not None else None, "preview": self.preview_on}
 
     def _check(self):
         from croom.devices.errors import DeviceUnavailable
@@ -403,6 +404,17 @@ class StubCamera:
         self._check()
         self.setups.append("find_stops")
         self.position_known = True
+        return self.state()
+
+    async def set_limit(self, edge, on):
+        from croom.devices.errors import NotReady
+        if edge not in ("down", "up", "left", "right"):
+            raise ValueError("edge must be down, up, left or right")
+        self._check()
+        if self.limits is None:
+            raise NotReady("This camera does not say where it points, so it cannot keep to limits")
+        self.setups.append(("set_limit" if on else "clear_limit", edge))
+        self.limits[edge] = bool(on)
         return self.state()
 
     async def save_home(self):
@@ -2221,6 +2233,19 @@ class TestRoomDevices:
             assert response.status == 400 and (await response.json())["error"] == "preset slots are 1 to 3", slot
         assert (await client.post("/api/camera/presets/2", json={"action": "eat"})).status == 400
         assert devices.camera.setups == ["find_stops", "save_home"] and devices.camera.saves == [2] and devices.camera.recalls == [2]
+
+    async def test_limits_are_set_and_cleared_through_setup(self, client_factory):
+        devices = StubDevices(camera=StubCamera(limits={"down": False, "up": False, "left": False, "right": False}))
+        client = await client_factory(make_service(devices=devices))
+        response = await client.post("/api/camera/setup", json={"action": "set_limit", "edge": "down"})
+        assert response.status == 200 and (await response.json())["limits"]["down"] is True
+        response = await client.post("/api/camera/setup", json={"action": "clear_limit", "edge": "down"})
+        assert response.status == 200 and (await response.json())["limits"]["down"] is False
+        assert (await client.post("/api/camera/setup", json={"action": "set_limit", "edge": "sideways"})).status == 400
+        meetup = StubDevices(camera=StubCamera())
+        client = await client_factory(make_service(devices=meetup))
+        response = await client.post("/api/camera/setup", json={"action": "set_limit", "edge": "down"})
+        assert response.status == 409 and "limits" in (await response.json())["error"]
 
     async def test_an_unavailable_camera_answers_409_everywhere(self, client_factory):
         client = await client_factory(make_service(devices=StubDevices(camera=StubCamera(available=False))))

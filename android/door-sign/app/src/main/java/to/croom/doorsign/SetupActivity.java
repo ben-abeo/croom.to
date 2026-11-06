@@ -94,6 +94,7 @@ public class SetupActivity extends Activity {
                         + "update the app. The setup guide says how to make it the device owner."));
         String state = DoorSignApp.checkInState();
         if (state != null) page.addView(text(state));
+        page.addView(text(CameraService.line(this)));
         page.addView(text("Version " + versionName()));
 
         page.addView(heading("Leave the sign"));

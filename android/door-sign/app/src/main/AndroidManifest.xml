@@ -12,6 +12,13 @@
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
+    <!-- The camera for UniFi Protect (spec 2026-11-06): a foreground service of the camera type, granted the camera as device owner. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+
     <!-- Exit to Android opens the panel's own home screen, so the app has to see the other home apps. -->
     <queries>
         <intent>
@@ -68,6 +75,12 @@
         <receiver
             android:name=".InstallReceiver"
             android:exported="false" />
+
+        <!-- The camera for UniFi Protect: ONVIF on 8000, RTSP on 8554, WS-Discovery on 3702, while the room has given a login. -->
+        <service
+            android:name=".CameraService"
+            android:exported="false"
+            android:foregroundServiceType="camera" />
 
         <!-- The app replaced by its update: the sign comes back at once. -->
         <receiver

@@ -53,5 +53,6 @@ public class MiniHttpTest {
         assertTrue(text.contains("Content-Length: 6\r\n"));       // bytes (é is two), not characters (5)
         assertTrue(text.contains("Connection: close\r\n"));
         assertTrue(text.endsWith("\r\n\r\n<x/>é"));
+        assertEquals("Service Unavailable", MiniHttp.reason(503));   // RTSP DESCRIBE before the encoder has started
     }
 }

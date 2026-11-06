@@ -22,8 +22,8 @@ android {
         minSdk 26
         targetSdk 34
         // Each release is a GitHub release door-sign-<versionCode> with the signed APK as app-release.apk: raise it for every one
-        versionCode 2
-        versionName "2.0"
+        versionCode 3
+        versionName "3.0"
         ndk {
             abiFilters "arm64-v8a", "armeabi-v7a"
         }

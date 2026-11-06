@@ -71,6 +71,7 @@ public class MainActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        CameraControl.ensure(this);      // with the sign in front, Android lets the camera service start (spec 2026-11-06)
         hideSystemBars();
         main.postDelayed(this::hideSystemBars, 2_000);   // at power-on the sign starts before the system bars are ready to be hidden
         String url = settings.url();

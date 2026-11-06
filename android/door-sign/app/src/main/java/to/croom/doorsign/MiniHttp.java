@@ -100,6 +100,7 @@ final class MiniHttp {
             case 405: return "Method Not Allowed";
             case 454: return "Session Not Found";
             case 461: return "Unsupported Transport";
+            case 503: return "Service Unavailable";
             default: return "Error";
         }
     }

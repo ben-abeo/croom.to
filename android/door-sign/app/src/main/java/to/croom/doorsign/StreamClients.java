@@ -54,15 +54,18 @@ final class StreamClients {
 
     private final int maxQueued;
     private final List<Client> clients = new CopyOnWriteArrayList<>();
+    private volatile boolean closed;
 
     /** @param maxQueued how many frames a connection may fall behind before it is dropped */
     StreamClients(int maxQueued) {
         this.maxQueued = maxQueued;
     }
 
+    /** A new viewer; one that comes after closeAll() (the camera stopped under it) is closed at once. */
     Client add(OutputStream out) {
         Client client = new Client(out);
         clients.add(client);
+        if (closed) client.close();
         return client;
     }
 
@@ -76,6 +79,7 @@ final class StreamClients {
     }
 
     void closeAll() {
+        closed = true;
         for (Client client : clients) client.close();
     }
 

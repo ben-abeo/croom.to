@@ -46,6 +46,8 @@ public class CameraService extends Service {
     private static final String CHANNEL = "camera";
     private static final long RETRY_MS = 10_000;
     private static final int MAX_QUEUED = 600;             // about 2 seconds of packets at 1.5 Mbit/s: behind that, a viewer is dropped
+    private static final int MAX_CONNECTIONS = 8;          // per server: more at once are turned away, so the LAN can't fill the process
+    private static final long STALL_MS = 15_000;           // no picture from the camera for this long: start it again
 
     private static volatile String trouble;                // why it is not running, or null
     private static volatile String on;                     // the setup screen's line while it runs
@@ -77,13 +79,28 @@ public class CameraService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
-        foreground();
+        try {
+            foreground();
+        } catch (RuntimeException e) {          // nothing in the camera may end the sign's process
+            failedToStart("Android would not run it: " + e.getMessage());
+            stopSelf();
+            return START_NOT_STICKY;
+        }
         CameraLogin login = CameraLogin.load(new Prefs(this, "check_in"));
         if (login == null || !Kiosk.isOwner(this)) {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (!login.equals(running)) restart(login);          // a new password: the old stream's path and sessions go with the old engine
+        if (!login.equals(running)) {           // a new password: the old stream's path and sessions go with the old engine
+            try {
+                restart(login);
+            } catch (RuntimeException e) {
+                failedToStart("the camera did not start: " + e.getMessage());
+                if (engine != null) engine.stop();
+                engine = null;
+                running = null;                 // the next ensure (the sign coming to the front, a check-in) tries again
+            }
+        }
         return START_STICKY;
     }
 
@@ -109,7 +126,7 @@ public class CameraService extends Service {
         notifications.createNotificationChannel(new NotificationChannel(CHANNEL, "Door sign camera", NotificationManager.IMPORTANCE_MIN));
         Notification notification = new Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_sign).setContentTitle("Door sign camera")
                 .setContentText("UniFi Protect can record this panel's camera").setOngoing(true).build();
-        if (Build.VERSION.SDK_INT >= 29) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
+        if (Build.VERSION.SDK_INT >= 30) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);   // the camera type is from Android 11
         else startForeground(1, notification);
     }
 
@@ -123,14 +140,15 @@ public class CameraService extends Service {
         private volatile boolean stopped;
         private volatile byte[] sps;
         private volatile byte[] pps;
-        private volatile String sdp;
         private ServerSocket onvif;
         private ServerSocket rtsp;
         private MulticastSocket discovery;
         private WifiManager.MulticastLock multicastLock;
-        private String host;
-        private Onvif.Info info;
+        private String host;                    // at start, for the setup screen's line; each connection uses the address it came in on
+        private String mac;
+        private String serial;
         private String urn;
+        private volatile long lastFrame;
 
         Engine(CameraLogin login) {
             this.login = login;
@@ -147,7 +165,8 @@ public class CameraService extends Service {
                 failed("the panel has no network address");
                 return;
             }
-            info = new Onvif.Info(login, host, mac(link), Build.MODEL == null ? "" : Build.MODEL, versionName(), identity.id.substring(0, 12));
+            mac = mac(link);
+            serial = identity.id.substring(0, 12);
             urn = "urn:uuid:" + UUID.nameUUIDFromBytes(identity.id.getBytes(StandardCharsets.UTF_8));
             try {
                 onvif = new ServerSocket(Onvif.PORT);
@@ -166,7 +185,9 @@ public class CameraService extends Service {
             thread("door-sign-onvif", () -> accept(onvif, this::onvifConnection));
             thread("door-sign-rtsp", () -> accept(rtsp, this::rtspConnection));
             thread("door-sign-discovery", this::discover);
+            lastFrame = System.nanoTime();
             stream.start();
+            main.postDelayed(this::watch, STALL_MS);
             trouble = null;
             on = "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user;
             Log.i(TAG, on);
@@ -183,15 +204,29 @@ public class CameraService extends Service {
             if (multicastLock != null && multicastLock.isHeld()) multicastLock.release();
         }
 
+        /** A camera that stops sending pictures without saying so leaves Protect recording nothing: start it again, and say why. */
+        private void watch() {
+            if (engine != this || stopped) return;
+            if (System.nanoTime() - lastFrame > STALL_MS * 1_000_000) {
+                failed("no picture from the camera for " + STALL_MS / 1000 + " seconds");
+                return;
+            }
+            main.postDelayed(this::watch, STALL_MS);
+        }
+
+        private Onvif.Info info(String at) {
+            return new Onvif.Info(login, at, mac, Build.MODEL == null ? "" : Build.MODEL, versionName(), serial);
+        }
+
         // --- CameraStream.Sink, on the camera's thread
 
         @Override public void config(byte[] sps, byte[] pps) {
-            this.sps = sps;
             this.pps = pps;
-            this.sdp = Rtsp.sdp(host, sps, pps);
+            this.sps = sps;
         }
 
         @Override public void frame(byte[] annexB, long presentationUs, boolean keyframe) {
+            lastFrame = System.nanoTime();
             if (clients.size() == 0) return;
             List<byte[]> nals = H264Rtp.nals(annexB);
             if (keyframe && sps != null && nals.stream().noneMatch(n -> (n[0] & 0x1f) == 7)) {
@@ -222,23 +257,11 @@ public class CameraService extends Service {
 
         // --- the servers, each connection on a thread of its own
 
-        private void accept(ServerSocket server, Connection handler) {
-            while (!stopped) {
-                try {
-                    Socket socket = server.accept();
-                    thread("door-sign-connection", () -> {
-                        try {
-                            handler.run(socket);
-                        } catch (IOException | RuntimeException e) {
-                            // the viewer left, or sent something that is not a request
-                        } finally {
-                            close(socket);
-                        }
-                    });
-                } catch (IOException e) {
-                    if (!stopped) failed("the camera's server stopped: " + e.getMessage());
-                    return;
-                }
+        private void accept(ServerSocket server, Acceptor.Handler handler) {
+            try {
+                Acceptor.serve(server, MAX_CONNECTIONS, "door-sign-connection", handler);
+            } catch (IOException e) {
+                if (!stopped) failed("the camera's server stopped: " + e.getMessage());
             }
         }
 
@@ -249,7 +272,7 @@ public class CameraService extends Service {
                 MiniHttp.write(socket.getOutputStream(), 404, "text/plain", "Not found");
                 return;
             }
-            Onvif.Reply reply = Onvif.handle(request.body, info, Instant.now());
+            Onvif.Reply reply = Onvif.handle(request.body, info(socket.getLocalAddress().getHostAddress()), Instant.now());
             if (reply.status == 400) Log.i(TAG, "ONVIF: Protect asked for " + reply.action + ", which the door sign does not answer");
             MiniHttp.write(socket.getOutputStream(), reply.status, "application/soap+xml; charset=utf-8", reply.xml);
         }
@@ -261,7 +284,9 @@ public class CameraService extends Service {
             String session = Long.toHexString(new SecureRandom().nextLong() & Long.MAX_VALUE).toUpperCase();
             while (!stopped) {
                 Rtsp.Request request = Rtsp.read(in);
-                String described = sdp;
+                byte[] s = sps;
+                byte[] p = pps;
+                String described = s == null || p == null ? null : Rtsp.sdp(socket.getLocalAddress().getHostAddress(), s, p);
                 Rtsp.Reply reply = request.method.equals("DESCRIBE") && described == null
                         ? new Rtsp.Reply(503, request.headers.get("cseq"))         // the encoder has not started yet: Protect asks again
                         : Rtsp.answer(request, streamPath, described == null ? "" : described, session);
@@ -277,13 +302,16 @@ public class CameraService extends Service {
 
         private void discover() {
             byte[] buffer = new byte[16 * 1024];
-            String xaddr = "http://" + host + ":" + Onvif.PORT + "/onvif/device_service";
             while (!stopped) {
                 try {
                     DatagramPacket packet = new DatagramPacket(buffer, buffer.length);
                     discovery.receive(packet);
                     String probe = new String(packet.getData(), 0, packet.getLength(), StandardCharsets.UTF_8);
-                    String match = Discovery.probeMatch(probe, urn, xaddr, login.name.isEmpty() ? "Door sign" : login.name, info.model);
+                    String now = currentHost();            // the address the panel has now, not the one it started with
+                    if (now == null) continue;
+                    String xaddr = "http://" + now + ":" + Onvif.PORT + "/onvif/device_service";
+                    String match = Discovery.probeMatch(probe, urn, xaddr, login.name.isEmpty() ? "Door sign" : login.name,
+                            Build.MODEL == null ? "" : Build.MODEL);
                     if (match == null) continue;
                     byte[] answer = match.getBytes(StandardCharsets.UTF_8);
                     discovery.send(new DatagramPacket(answer, answer.length, packet.getSocketAddress()));
@@ -295,8 +323,10 @@ public class CameraService extends Service {
         }
     }
 
-    private interface Connection {
-        void run(Socket socket) throws IOException;
+    private String currentHost() {
+        ConnectivityManager connectivity = getSystemService(ConnectivityManager.class);
+        Network network = connectivity.getActiveNetwork();
+        return network == null ? null : ipv4(connectivity.getLinkProperties(network));
     }
 
     /** A connection's output written a whole buffer at a time: the stream's packets and the RTSP replies never interleave. */

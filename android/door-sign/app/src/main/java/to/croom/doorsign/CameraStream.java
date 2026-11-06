@@ -112,6 +112,19 @@ final class CameraStream {
     }
 
     private MediaCodec encoder() throws Exception {
+        MediaCodec encoder = newEncoder();
+        try {
+            encoder.configure(format(true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        } catch (RuntimeException e) {
+            // The Main profile refused: a fresh encoder with its own choice of profile (reset() would also drop the callbacks below)
+            encoder.release();
+            encoder = newEncoder();
+            encoder.configure(format(false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+        }
+        return encoder;
+    }
+
+    private MediaCodec newEncoder() throws Exception {
         MediaCodec encoder = MediaCodec.createEncoderByType(MediaFormat.MIMETYPE_VIDEO_AVC);   // Android lists the hardware encoder first
         encoder.setCallback(new MediaCodec.Callback() {
             @Override public void onInputBufferAvailable(MediaCodec c, int index) {
@@ -127,17 +140,17 @@ final class CameraStream {
             }
 
             @Override public void onOutputFormatChanged(MediaCodec c, MediaFormat format) {
-                ByteBuffer sps = format.getByteBuffer("csd-0");
-                ByteBuffer pps = format.getByteBuffer("csd-1");
-                if (sps != null && pps != null) parameterSets(bytes(sps, sps.position(), sps.remaining()), bytes(pps, pps.position(), pps.remaining()));
+                try {
+                    ByteBuffer sps = format.getByteBuffer("csd-0");
+                    ByteBuffer pps = format.getByteBuffer("csd-1");
+                    if (sps != null && pps != null) {
+                        parameterSets(bytes(sps, sps.position(), sps.remaining()), bytes(pps, pps.position(), pps.remaining()));
+                    }
+                } catch (RuntimeException e) {          // on the camera's thread, in the sign's process: never let it end that
+                    fail("the encoder's format could not be read: " + e.getMessage());
+                }
             }
         }, handler);
-        try {
-            encoder.configure(format(true), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        } catch (RuntimeException e) {
-            encoder.reset();                     // the Main profile refused: the encoder's own choice of profile
-            encoder.configure(format(false), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
-        }
         return encoder;
     }
 

@@ -73,4 +73,14 @@ public class StreamClientsTest {
         clients.closeAll();
         assertEquals(0, clients.size());
     }
+
+    @Test public void aClientAddedAfterCloseAllIsClosedAtOnce() throws Exception {
+        // A viewer's PLAY that lands just as the camera stops (a new password, a retry) must not hang on an engine that is gone
+        StreamClients clients = new StreamClients(10);
+        clients.closeAll();
+        Stuck late = new Stuck();
+        clients.add(late);
+        assertEquals(0, clients.size());
+        assertEquals(0, late.closed.getCount());
+    }
 }

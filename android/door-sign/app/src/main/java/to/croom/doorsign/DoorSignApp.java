@@ -46,7 +46,8 @@ public class DoorSignApp extends Application {
         CameraControl.ensure(this);
         Agent checkIn = agent;
         Thread thread = new Thread(() -> {
-            panel.grantWifiPermissions();
+            panel.grantPermissions();
+            CameraControl.ensure(this);       // the camera granted: start it if the room has given a login
             try {
                 if (panel.isOwner()) wifi.recover();     // a Wi-Fi change the panel did not live through: kept if proven, undone if not
             } catch (RuntimeException e) {

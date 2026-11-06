@@ -72,12 +72,19 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         return context.getSystemService(DevicePolicyManager.class);
     }
 
-    /** As device owner: the location permission and location on, which Android asks for before it tells network names. */
-    void grantWifiPermissions() {
+    /**
+     * As device owner: the location permission and location on, which Android asks for before it tells network names; and the camera,
+     * for the camera service (spec 2026-11-06). On the check-in thread: the grants wait on Android's permission controller.
+     */
+    void grantPermissions() {
         if (!isOwner()) return;
         try {
             DevicePolicyManager dpm = dpm();
             String pkg = context.getPackageName();
+            if (context.checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                dpm.setPermissionGrantState(AdminReceiver.component(context), pkg, Manifest.permission.CAMERA,
+                        DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
+            }
             dpm.setPermissionGrantState(AdminReceiver.component(context), pkg, Manifest.permission.ACCESS_FINE_LOCATION,
                     DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
             if (Build.VERSION.SDK_INT >= 33) {
@@ -86,7 +93,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
             }
             if (Build.VERSION.SDK_INT >= 30) dpm.setLocationEnabled(AdminReceiver.component(context), true);
         } catch (RuntimeException e) {
-            Log.w(TAG, "Could not grant the Wi-Fi permissions: " + e);
+            Log.w(TAG, "Could not grant the Wi-Fi and camera permissions: " + e);
         }
     }
 
@@ -153,17 +160,17 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     }
 
     @Override public JSONObject scan() throws Refused {
-        grantWifiPermissions();
+        grantPermissions();
         return wifi.scan(true);
     }
 
     @Override public String connect(String ssid, String password, boolean hidden, String jobId, JobRunner.Progress progress) throws Refused {
-        grantWifiPermissions();
+        grantPermissions();
         return wifi.change(ssid, password, hidden, jobId, progress);
     }
 
     @Override public String forget(String ssid) throws Refused {
-        grantWifiPermissions();
+        grantPermissions();
         return wifi.forget(ssid);
     }
 

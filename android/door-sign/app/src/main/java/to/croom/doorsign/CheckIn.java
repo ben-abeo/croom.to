@@ -8,7 +8,8 @@ import org.json.JSONObject;
  * The check-in with the room's TV Pi (room settings spec 2026-10-29, section 7): POST /api/devices/checkin every 5 seconds, JSON
  * {"id", "kind": "sign", "version" (the app's versionCode), "version_name", "name", "network", "job" (the last job's state), "cannot"
  * (the jobs this panel can't do, and why)}, with the token in the header X-Croom-Device-Token. The answer is {"state": "pending"} until
- * Allow on Settings › Software, then {"state": "allowed", "job": the next job or null, "interval"}.
+ * Allow on Settings › Software, then {"state": "allowed", "job": the next job or null, "interval", and "camera": the room's camera login
+ * when it has a door sign camera password}.
  */
 final class CheckIn {
 
@@ -45,11 +46,13 @@ final class CheckIn {
         final boolean allowed;
         final Job job;          // null: none (or one that is not a job at all)
         final int intervalS;
+        final CameraLogin camera;   // the room's camera login for UniFi Protect (spec 2026-11-06); null: none, or not joined
 
-        Answer(boolean allowed, Job job, int intervalS) {
+        Answer(boolean allowed, Job job, int intervalS, CameraLogin camera) {
             this.allowed = allowed;
             this.job = job;
             this.intervalS = intervalS;
+            this.camera = camera;
         }
     }
 
@@ -61,6 +64,7 @@ final class CheckIn {
         int interval = answer.optInt("interval", INTERVAL_S);
         interval = Math.max(2, Math.min(60, interval));
         boolean allowed = state.equals("allowed");
-        return new Answer(allowed, allowed ? Job.from(answer.opt("job")) : null, interval);
+        return new Answer(allowed, allowed ? Job.from(answer.opt("job")) : null, interval,
+                allowed ? CameraLogin.from(answer.opt("camera")) : null);
     }
 }

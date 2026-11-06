@@ -86,6 +86,7 @@ public class AgentTest {
     String server;
     Identity identity;
     Agent agent;
+    List<CameraLogin> logins;
 
     @Before public void setUp() {
         http = new FakeHttp();
@@ -96,7 +97,8 @@ public class AgentTest {
         log = new ArrayList<>();
         server = "http://10.0.0.5:8080";
         identity = Identity.load(new MapStore(), new SecureRandom());
-        agent = new Agent(() -> server, identity, http, device, runner, log::add);
+        logins = new ArrayList<>();
+        agent = new Agent(() -> server, identity, http, device, runner, log::add, logins::add);
     }
 
     @Test public void aCheckInSaysWhoItIsWithItsTokenInTheHeader() throws Exception {
@@ -150,5 +152,27 @@ public class AgentTest {
         assertFalse(agent.state().isEmpty());
         assertNull(runner.report());
         assertEquals(Collections.emptyList(), queued);
+    }
+
+    static final String WITH_LOGIN = "{\"state\": \"allowed\", \"job\": null, \"interval\": 5, \"camera\": "
+            + "{\"user\": \"camera\", \"password\": \"p&ss<w>rd1\", \"name\": \"Conference Room B door sign\"}}";
+
+    @Test public void anAnswerWithoutCameraKeepsTheStoredLogin() {
+        http.answers.add(new Agent.Response(200, WITH_LOGIN));
+        http.answers.add(new Agent.Response(200, "{\"state\": \"allowed\", \"job\": null, \"interval\": 5}"));
+        agent.once();
+        agent.once();
+        assertEquals(List.of(CameraLoginTest.LOGIN), logins);   // the second answer, from a TV Pi without a password, takes nothing away
+    }
+
+    @Test public void aNewLoginIsPassedOnOnce() {
+        http.answers.add(new Agent.Response(200, WITH_LOGIN));
+        http.answers.add(new Agent.Response(200, WITH_LOGIN));
+        http.answers.add(new Agent.Response(200, WITH_LOGIN.replace("p&ss<w>rd1", "other-pw1")));
+        agent.once();
+        agent.once();
+        agent.once();
+        assertEquals(2, logins.size());
+        assertEquals("other-pw1", logins.get(1).password);
     }
 }

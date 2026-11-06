@@ -39,19 +39,29 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     static final String OLD_ANDROID_UPDATE = "Updates from Settings need Android 12 or newer on the panel";
     static final int UPDATE_MIN_SDK = 31;
     static final long INSTALL_WAIT_MS = 3 * 60_000;
+    // Why the camera is off, on the door sign's card (spec 2026-11-06, section 6)
+    static final String CAMERA_NOT_OWNER = "Camera off: this panel is not the device owner";
+    static final String CAMERA_NO_PASSWORD = "Camera off: set the door sign camera password in Settings › Devices";
+    static final String CAMERA_FAILED = "Camera off: the camera did not start: ";
 
     private final Context context;
     private final WifiChange wifi;
     private final Agent.Http http;
     private final Supplier<String> server;
     private final Supplier<Identity> identity;
+    private final Store store;
+    private final Supplier<String> cameraTrouble;
 
-    Panel(Context context, WifiChange wifi, Agent.Http http, Supplier<String> server, Supplier<Identity> identity) {
+    /** @param cameraTrouble why the camera service is not running, or null while it runs. */
+    Panel(Context context, WifiChange wifi, Agent.Http http, Supplier<String> server, Supplier<Identity> identity, Store store,
+          Supplier<String> cameraTrouble) {
         this.context = context.getApplicationContext();
         this.wifi = wifi;
         this.http = http;
         this.server = server;
         this.identity = identity;
+        this.store = store;
+        this.cameraTrouble = cameraTrouble;
     }
 
     boolean isOwner() {
@@ -113,7 +123,16 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
             String why = cannot(type);
             if (why != null) cannot.put(type, why);
         }
+        String camera = cameraCannot(isOwner(), CameraLogin.load(store), cameraTrouble.get());
+        if (camera != null) cannot.put("camera", camera);
         return cannot;
+    }
+
+    /** Why the camera is off, in the card's words, or null while it runs (`trouble`: the service's own reason, null when it runs). */
+    static String cameraCannot(boolean owner, CameraLogin login, String trouble) {
+        if (!owner) return CAMERA_NOT_OWNER;
+        if (login == null) return CAMERA_NO_PASSWORD;
+        return trouble == null ? null : CAMERA_FAILED + trouble;
     }
 
     // --- JobRunner.Abilities

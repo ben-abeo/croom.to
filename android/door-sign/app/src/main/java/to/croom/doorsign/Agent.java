@@ -5,6 +5,7 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 import org.json.JSONException;
 import org.json.JSONObject;
@@ -63,17 +64,23 @@ final class Agent {
     private final Device device;
     private final JobRunner runner;
     private final Log log;
+    private final Consumer<CameraLogin> camera;
+    private CameraLogin passedOn;
     private volatile String state = "Not checked in yet";
     private String trouble;
 
-    /** @param server the room's address (scheme, host and port: "http://10.0.0.5:8080"), or null before the sign is set up. */
-    Agent(Supplier<String> server, Identity identity, Http http, Device device, JobRunner runner, Log log) {
+    /**
+     * @param server the room's address (scheme, host and port: "http://10.0.0.5:8080"), or null before the sign is set up.
+     * @param camera given each camera login the room sends that differs from the last one it was given.
+     */
+    Agent(Supplier<String> server, Identity identity, Http http, Device device, JobRunner runner, Log log, Consumer<CameraLogin> camera) {
         this.server = server;
         this.identity = identity;
         this.http = http;
         this.device = device;
         this.runner = runner;
         this.log = log;
+        this.camera = camera;
     }
 
     /** One check-in. The time to wait before the next, in milliseconds. */
@@ -110,6 +117,10 @@ final class Agent {
             say("Waiting to join: tap Allow under Devices waiting to join on the touch Pi (Options › Settings › Software)");
         } else {
             say("Joined the room at " + base);
+            if (answer.camera != null && !answer.camera.equals(passedOn)) {
+                passedOn = answer.camera;
+                camera.accept(answer.camera);
+            }
             if (answer.job != null && runner.take(answer.job)) log.info("Job " + answer.job.type + " (" + answer.job.id + ")");
         }
         return answer.intervalS * 1000L;

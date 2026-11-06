@@ -53,4 +53,17 @@ public class CheckInTest {
             }
         }
     }
+
+    @Test public void anAllowedAnswerCarriesTheLogin() throws Exception {
+        CheckIn.Answer answer = CheckIn.parse("{\"state\": \"allowed\", \"job\": null, \"interval\": 5, \"camera\": "
+                + "{\"user\": \"camera\", \"password\": \"p&ss<w>rd1\", \"name\": \"Conference Room B door sign\"}}");
+        assertEquals(CameraLoginTest.LOGIN, answer.camera);
+    }
+
+    @Test public void aPendingAnswerNeverCarriesALogin() throws Exception {
+        CheckIn.Answer answer = CheckIn.parse("{\"state\": \"pending\", \"interval\": 5, \"camera\": "
+                + "{\"user\": \"camera\", \"password\": \"p&ss<w>rd1\"}}");
+        assertNull(answer.camera);
+        assertNull(CheckIn.parse("{\"state\": \"allowed\", \"job\": null, \"interval\": 5}").camera);
+    }
 }

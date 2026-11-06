@@ -187,3 +187,22 @@ def test_from_config_makes_the_real_helper_client_and_reads_etc_croom(tmp_path):
     assert str(service._editor.path) == "/etc/croom/config.yaml"
     fake = FakeAdmin()
     assert ControlService.from_config(config, admin=fake)._admin is fake
+
+
+async def test_the_door_sign_camera_password_applies_at_once(client_factory, config_file, admin, pins, unlocked):  # noqa: F811
+    """Saved on Settings › Devices, the next check-in of a joined door sign carries it, with no restart (spec 2026-11-06)."""
+    from croom.settings.checkin import Registry
+
+    registry = Registry(None)
+    client = await client_factory(make_service(pin_store=pins, admin=admin, config_file=str(config_file), registry=registry,
+                                               meeting=StubMeeting()))
+    sign = {"id": "s" * 32, "kind": "sign", "version": "3", "version_name": "3.0", "name": "WF2489T", "network": {}, "job": None}
+    header = {"X-Croom-Device-Token": "k" * 43}
+    await client.post("/api/devices/checkin", json=sign, headers=header)
+    registry.allow("s" * 32)
+    assert "camera" not in await (await client.post("/api/devices/checkin", json=sign, headers=header)).json()
+    response = await client.post("/api/settings/config/devices", json={"values": {"control.door_sign_camera_password": "new-pass-9"}},
+                                 headers=unlocked)
+    assert (await response.json())["restart"] is False
+    answer = await (await client.post("/api/devices/checkin", json=sign, headers=header)).json()
+    assert answer["camera"] == {"user": "camera", "password": "new-pass-9", "name": "Lab door sign"}

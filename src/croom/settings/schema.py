@@ -146,6 +146,9 @@ SCHEMA: List[Setting] = [
     Setting("control.camera_auto_framing", "Auto framing", "devices", "choice", live=True, choices=AUTO_FRAMING,
             help="Frames the people in the room by itself, as Logitech RightSight does: once each call starts, or throughout calls, "
                  "when people come in, leave or reach the edge. Moving the camera by hand pauses it until Frame people is tapped"),
+    Setting("control.door_sign_camera_password", "Door sign camera password", "devices", "secret", live=True, max_length=64,
+            pattern=r"[!-~]{8,64}", pattern_words="8 to 64 letters, digits or symbols, with no spaces",
+            help="Protect adopts each door sign's camera with the user camera and this password"),
     # Laptop switch
     Setting("laptop.enabled", "Laptop switch", "laptop", "switch"),
     Setting("laptop.gpio_pin", "GPIO pin", "laptop", "number", range=(0, 27), integer=True, help="BCM numbering: 17 is header pin 11"),

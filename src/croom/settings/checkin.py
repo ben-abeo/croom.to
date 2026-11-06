@@ -44,6 +44,8 @@ logger = logging.getLogger(__name__)
 
 KINDS = {"touch": "touch Pi", "sign": "door sign"}            # a device's kind, and how the page names it
 COMMIT_KINDS = ("touch",)          # the kinds that run a commit of main (updated to one: update {commit})
+SIGN_CAMERA_USER = "camera"        # the door signs' camera login for UniFi Protect (spec 2026-11-06): this user, the room's password
+CANNOT_EXTRA = ("camera",)         # what a device may say it can't do besides its jobs
 APK_KINDS = ("sign",)              # the kinds that run an APK of a GitHub release door-sign-<versionCode> (update {version_code})
 DEVICE_ID = re.compile(r"[A-Za-z0-9_-]{16,64}")
 TOKEN = re.compile(r"[A-Za-z0-9_-]{32,128}")
@@ -165,10 +167,12 @@ def check_job(job: Any, args: Any, kind: str = "touch") -> Dict[str, Any]:
 
 
 def _cannot(value: Any) -> Dict[str, str]:
-    """What a device says it can't do ({job: why}, e.g. a door sign that is not the panel's device owner), cleaned."""
+    """What a device says it can't do ({job: why}, e.g. a door sign that is not the panel's device owner; or "camera": why the door
+    sign's camera is off), cleaned."""
     if not isinstance(value, dict):
         return {}
-    return {job: _text(words, MAX_WORDS) for job, words in value.items() if job in JOBS and isinstance(words, str) and words.strip()}
+    return {job: _text(words, MAX_WORDS) for job, words in value.items()
+            if (job in JOBS or job in CANNOT_EXTRA) and isinstance(words, str) and words.strip()}
 
 
 def _text(value: Any, limit: int = MAX_TEXT) -> str:

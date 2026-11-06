@@ -436,3 +436,9 @@ def test_authorize_lets_only_a_joined_device_of_the_kind_with_its_token(registry
     assert refusal(lambda: registry.authorize(SIGN, "", ("sign",)))[0] == 401
     registry.checkin(body("p" * 32, kind="sign"), TOKEN)      # waiting to join
     assert refusal(lambda: registry.authorize("p" * 32, TOKEN, ("sign",)))[0] == 403
+
+
+def test_a_door_sign_may_say_why_its_camera_is_off(registry):
+    """The camera is not a job, but the card shows why it is off (spec 2026-11-06, section 6): kept beside the jobs, nothing else is."""
+    sign_joined(registry, cannot={"camera": "Camera off: the camera did not start: busy", "selfie": "x"})
+    assert registry.get(SIGN)["cannot"] == {"camera": "Camera off: the camera did not start: busy"}

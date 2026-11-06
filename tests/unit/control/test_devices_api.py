@@ -252,3 +252,53 @@ def test_from_config_keeps_the_registry_in_the_data_directory(tmp_path):
     config.data_dir = str(tmp_path)
     service = ControlService.from_config(config, admin=Fake())
     assert service._registry.path == tmp_path / "devices.json"
+
+
+# --- the door sign camera (spec 2026-11-06): the room's login, handed to joined door signs only
+
+SIGN = "s" * 32
+LOGIN = {"user": "camera", "password": "secret-pw1", "name": "Conference Room B door sign"}
+
+
+def sign_body():
+    return {"id": SIGN, "kind": "sign", "version": "3", "version_name": "3.0", "name": "WF2489T", "network": {}, "job": None}
+
+
+def camera_service(pins, registry, password="secret-pw1"):
+    return make_service(pin_store=pins, registry=registry, meeting=StubMeeting(), room_name="Conference Room B",
+                        sign_camera_password=password)
+
+
+async def test_a_joined_door_sign_gets_the_camera_login(client_factory, pins, registry):  # noqa: F811
+    client = await client_factory(camera_service(pins, registry))
+    pending = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
+    assert pending["state"] == "pending" and "camera" not in pending
+    registry.allow(SIGN)
+    answer = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
+    assert answer["state"] == "allowed" and answer["camera"] == LOGIN
+
+
+async def test_a_touch_pi_never_gets_the_camera_login(client_factory, pins, registry):  # noqa: F811
+    client = await client_factory(camera_service(pins, registry))
+    await joined(client, registry)
+    answer = await (await client.post("/api/devices/checkin", json=checkin_body(), headers=HEADER)).json()
+    assert answer["state"] == "allowed" and "camera" not in answer
+
+
+async def test_no_password_no_camera_block(client_factory, pins, registry):  # noqa: F811
+    client = await client_factory(camera_service(pins, registry, password=""))
+    await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)
+    registry.allow(SIGN)
+    answer = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
+    assert answer["state"] == "allowed" and "camera" not in answer
+
+
+async def test_old_panels_ignore_the_camera_block(client_factory, pins, registry, unlocked):  # noqa: F811
+    """A door sign from before the camera says nothing of it: it checks in and gets its jobs as before."""
+    client = await client_factory(camera_service(pins, registry))
+    old = dict(sign_body(), version="2", version_name="2.0")
+    await client.post("/api/devices/checkin", json=old, headers=HEADER)
+    registry.allow(SIGN)
+    job = (await (await client.post(f"/api/settings/devices/{SIGN}/jobs", json={"type": "reboot"}, headers=unlocked)).json())["job"]
+    answer = await (await client.post("/api/devices/checkin", json=old, headers=HEADER)).json()
+    assert answer["job"]["id"] == job["id"] and answer["camera"] == LOGIN

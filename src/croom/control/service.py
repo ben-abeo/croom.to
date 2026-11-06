@@ -36,7 +36,8 @@ from croom.meeting.meet_capture import ALREADY_CAPTURING, JOIN_MEET_FIRST, NO_CA
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 from croom.meeting.signin_session import CANCELLED, ENDED_WORDS, NO_SESSION, SIGN_IN_FIRST, SIGNED_IN_AS, SignInError
 from croom.settings.apk import ApkError, ApkStore
-from croom.settings.checkin import APK_KINDS, COMMIT_KINDS, DEVICE_ID_HEADER, KINDS, TOKEN_HEADER, CheckinError, Registry
+from croom.settings.checkin import (APK_KINDS, COMMIT_KINDS, DEVICE_ID_HEADER, KINDS, SIGN_CAMERA_USER, TOKEN_HEADER, CheckinError,
+                                   Registry)
 from croom.settings.checks import CheckBusy, Checks
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
@@ -312,6 +313,7 @@ class ControlService(Service):
         self._room_name = self.config.get("room_name", "Conference Room")
         self._room_location = self.config.get("room_location", "")
         self._room_company = self.config.get("room_company", DEFAULT_COMPANY)
+        self._sign_camera_password = str(self.config.get("sign_camera_password") or "")   # the door signs' camera (spec 2026-11-06)
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
         self._store = store or SettingsStore(
             self.config.get("settings_file", "control-settings.json")
@@ -373,6 +375,7 @@ class ControlService(Service):
         self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
         self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
         self._editor.on_change(("control.camera_auto_framing",), self._apply_auto_framing)
+        self._editor.on_change(("control.door_sign_camera_password",), self._apply_sign_camera_password)
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -408,6 +411,7 @@ class ControlService(Service):
                 "room_name": config.room.name,
                 "room_location": config.room.location,
                 "room_company": config.room.company,
+                "sign_camera_password": config.control.door_sign_camera_password,
                 "static_dir": str(STATIC_DIR),
                 "screensaver": config.control.screensaver,
                 "settings_file": str(data_dir / "control-settings.json"),
@@ -1451,6 +1455,10 @@ class ControlService(Service):
         if camera is not None:
             camera.set_preset_names(values["control.camera_presets"])
 
+    def _apply_sign_camera_password(self, values: Dict[str, Any]) -> None:
+        """The door signs' camera password, at once: each joined door sign has it at its next check-in."""
+        self._sign_camera_password = str(values["control.door_sign_camera_password"] or "")
+
     def _apply_auto_framing(self, values: Dict[str, Any]) -> None:
         """Auto framing's mode (off, at the start of calls, throughout calls), at once: from its next look."""
         framer = getattr(self._devices, "autoframer", None)
@@ -2080,6 +2088,9 @@ class ControlService(Service):
             answer = self._registry.checkin(data, request.headers.get(TOKEN_HEADER, ""), request.remote or "")
         except CheckinError as e:
             return self._error_response(str(e), e.status)
+        if answer.get("state") == "allowed" and data.get("kind") == "sign" and self._sign_camera_password:
+            # The camera login for UniFi Protect (spec 2026-11-06), to a door sign that has joined only: on the LAN, as Wi-Fi jobs carry passwords
+            answer["camera"] = {"user": SIGN_CAMERA_USER, "password": self._sign_camera_password, "name": f"{self._room_name} door sign"}
         return web.json_response(answer)
 
     async def _handle_apk(self, request: web.Request) -> web.Response:

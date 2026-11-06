@@ -37,19 +37,19 @@ def test_the_schema_covers_every_setting_the_pages_edit():
     assert {"calendar.google_calendar_id", "calendar.booking_start", "calendar.booking_end"} <= paths
     assert BY_PATH["calendar.google_credentials_path"].kind == "credential"
     assert {"audio.input_device", "audio.output_device", "video.device", "video.ptz_travel_seconds", "control.camera_presets",
-            "control.camera_auto_framing"} <= paths
+            "control.camera_auto_framing", "control.door_sign_camera_password"} <= paths
     assert {f"laptop.{name}" for name in ("enabled", "gpio_pin", "active_low", "press_ms", "usb_id", "switch_wait_s")} <= paths
     assert {f"ai.{name}" for name in ("enabled", "backend", "person_detection", "noise_reduction", "echo_cancellation", "auto_framing",
                                       "occupancy_counting", "speaker_detection", "hand_raise_detection", "privacy_mode")} <= paths
     assert {"dashboard.enabled", "dashboard.url", "dashboard.enrollment_token"} <= paths
     assert BY_PATH["dashboard.enrollment_token"].kind == "secret"
-    camera = {"control.camera_presets", "control.camera_auto_framing"}
+    camera = {"control.camera_presets", "control.camera_auto_framing", "control.door_sign_camera_password"}
     assert not any(path.startswith("control.") and path not in camera for path in paths)   # never the room page's own
 
 
-def test_live_settings_are_the_booking_hours_the_camera_preset_names_and_auto_framing():
+def test_live_settings_are_the_booking_hours_the_camera_preset_names_auto_framing_and_the_door_sign_camera_password():
     assert {s.path for s in SCHEMA if s.live} == {"calendar.booking_start", "calendar.booking_end", "control.camera_presets",
-                                                  "control.camera_auto_framing"}
+                                                  "control.camera_auto_framing", "control.door_sign_camera_password"}
 
 
 def test_the_room_page_has_name_location_company_and_the_systems_time_zones():
@@ -399,3 +399,13 @@ def test_every_default_of_the_config_passes_its_setting():
     for s in SCHEMA:
         validate(s.path, default_of(s.path))
     assert validate("room.timezone", "UTC") == "UTC"
+
+
+def test_door_sign_camera_password_is_a_live_secret_on_devices():
+    """The door sign camera (spec 2026-11-06): one password per room, which Protect adopts each door sign's camera with."""
+    s = BY_PATH["control.door_sign_camera_password"]
+    assert (s.kind, s.page, s.live, s.label) == ("secret", "devices", True, "Door sign camera password")
+    assert validate("control.door_sign_camera_password", "p&ss<w>rd1") == "p&ss<w>rd1"
+    for bad in ("short7!", "has space here", "x" * 65):
+        with pytest.raises(SettingError):
+            validate("control.door_sign_camera_password", bad)

@@ -274,6 +274,7 @@ class ControlConfig:
     screensaver: str = "info"  # what the TV shows when idle until someone picks another style on the room page
     camera_presets: List[str] = field(default_factory=lambda: ["Wide", "Table", "Whiteboard"])  # the three slot names
     camera_auto_framing: str = "off"    # Auto framing (devices/autoframe.py): "off", "call_start" or "dynamic"
+    door_sign_camera_password: str = ""  # the door signs' camera login for UniFi Protect (user "camera"); blank: no camera
 
 
 @dataclass
@@ -435,6 +436,7 @@ class Config:
                 "screensaver": self.control.screensaver,
                 "camera_presets": list(self.control.camera_presets),
                 "camera_auto_framing": self.control.camera_auto_framing,
+                "door_sign_camera_password": self.control.door_sign_camera_password,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

@@ -14,7 +14,7 @@
   <p class="promise">Everything the person who installs, changes and troubleshoots the room's door sign needs: the panel, the app, the page it shows, how it talks to the room, and what to do when it misbehaves.</p>
   <div class="meta">
     <div><p class="kicker">Device</p><p>SMT1019 10.1" PoE wall panel</p></div>
-    <div><p class="kicker">App</p><p>Crystal Meet Door Sign, version 2 (2.0)</p></div>
+    <div><p class="kicker">App</p><p>Crystal Meet Door Sign, version 3 (3.0)</p></div>
     <div><p class="kicker">Talks to</p><p>The room's TV Pi on port 8080</p></div>
     <div><p class="kicker">Edition</p><p>November 2026</p></div>
   </div>
@@ -247,7 +247,7 @@ adb shell am start -n to.croom.doorsign/.MainActivity</pre>
       <tr><td>Crystal Meet server</td><td><span class="chip">10.0.0.5:8080</span> becomes <span class="chip">http://10.0.0.5:8080/sign</span>. A full http(s) address is kept as typed. Anything else: "Enter the server's address, for example 10.0.0.5:8080".</td></tr>
       <tr><td>PIN</td><td>4 to 8 digits, else "The PIN must be 4 to 8 digits". Stored only as a salted SHA-256 hash.</td></tr>
       <tr><td>Test the light bar</td><td>Green, Yellow, Red, Off drive the bar directly.</td></tr>
-      <tr><td>Room settings</td><td>Whether the app is device owner, the check-in state line, and "Version 2 (2.0)".</td></tr>
+      <tr><td>Room settings</td><td>Whether the app is device owner, the check-in state line, the camera line, and "Version 3 (3.0)".</td></tr>
       <tr><td>Leave the sign</td><td><span class="ui">Exit to Android</span>: bar off, kiosk lock released, status bar shown, the panel's own launcher opens. <span class="ui">Home</span> brings the sign back.</td></tr>
     </tbody>
   </table>
@@ -290,7 +290,7 @@ adb uninstall to.croom.doorsign</pre>
   <ul>
     <li><strong>Title:</strong> "Door sign" plus the panel's model name.</li>
     <li><strong>Seen:</strong> "Checked in just now" or "N seconds ago" while online (checked in within 20 seconds); otherwise "Not seen since 10:42 AM".</li>
-    <li><strong>Version:</strong> "Version 2 (2.0)"; <strong>Newest:</strong> "Newest: version N, date" or "Up to date".</li>
+    <li><strong>Version:</strong> "Version 3 (3.0)"; <strong>Newest:</strong> "Newest: version N, date" or "Up to date".</li>
     <li><strong>Buttons:</strong> <span class="ui">Update</span>, <span class="ui">Reboot</span>, and <span class="ui">Forget</span> (second tap) for a replaced panel. Network changes are on <span class="ui">Settings › Network</span>.</li>
   </ul>
 
@@ -340,6 +340,34 @@ sudo systemctl start croom</pre>
     <li>Success: "Joined X. The door sign reaches the TV Pi". Failure: it goes back to the old network and says why, for example "Could not join X within 90 seconds" (often a wrong password).</li>
   </ol>
   <p>Refused on purpose: enterprise (user-name) networks, WEP, a new password for the network it is on ("join another network first"), and a new password for another saved network ("Forget X first"). The room can't move the panel to a network that can't reach the TV Pi.</p>
+
+  <h3 class="sub">The camera in UniFi Protect</h3>
+  <p>From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's <span class="ui">Door sign camera password</span>. Until the room sends that password, nothing listens on the panel.</p>
+  <ol class="steps">
+    <li>On each room's touch screen: <span class="ui">Options › Settings › Devices</span>, set <span class="ui">Door sign camera password</span> (8 to 64 characters, no spaces). It applies at once. Using the same password in every room is simplest. Keep it in the office password manager.</li>
+    <li><span class="ui">Update</span> the door sign on <span class="ui">Settings › Software</span> to version 3 or later.</li>
+    <li>In Protect: <span class="ui">Settings › System › Discover Third-Party Cameras</span> on.</li>
+    <li>On the UniFi Devices page, adopt the door sign with user <span class="chip">camera</span> and the password. If it isn't listed, use <span class="ui">Advanced Adoption</span> with the panel's IP address and port <strong>8000</strong>.</li>
+    <li>Set its recording to <strong>Always</strong>. The panel sends no motion events.</li>
+  </ol>
+  <table class="plain">
+    <tbody>
+      <tr><td>Picture</td><td>H.264, 1280 × 720, 15 frames a second, about 1.5 Mbit/s (about 16 GB a day per panel when recorded Always), no sound</td></tr>
+      <tr><td>Ports on the panel</td><td>ONVIF TCP 8000, RTSP TCP 8554, WS-Discovery UDP 3702</td></tr>
+      <tr><td>Login</td><td>User <span class="chip">camera</span>, the room's password. The stream's address is handed out only to a client that logged in, and changes with the password</td></tr>
+      <tr><td>On the sign</td><td>Android's small green camera dot in a top corner, always. It is normal</td></tr>
+      <tr><td>Setup screen</td><td>"Camera on: 192.168.0.194, ONVIF port 8000, user camera", or why it is off</td></tr>
+    </tbody>
+  </table>
+  <table>
+    <thead><tr><th>The card says</th><th>Meaning</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Camera off: set the door sign camera password in Settings › Devices</td><td>The room has no password, or the panel hasn't checked in since it was set.</td><td>Set it; the panel picks it up within 5 seconds.</td></tr>
+      <tr><td>Camera off: this panel is not the device owner</td><td>Set up the old way.</td><td>Factory reset and follow Section 04.</td></tr>
+      <tr><td>Camera off: the camera did not start: …</td><td>The camera, encoder or a port failed. It tries again every 10 seconds.</td><td>Reboot the panel from the card. If it stays, read <span class="chip">adb logcat -s DoorSign</span>.</td></tr>
+    </tbody>
+  </table>
+  <div class="callout warn"><p class="kicker">A new password</p><p>Changing the password locks out the old login: Protect stops recording until the camera is adopted again with the new one.</p></div>
 </section>
 
 <!-- 07 -->

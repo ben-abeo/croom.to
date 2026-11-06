@@ -213,7 +213,7 @@ adb shell am start -n to.croom.doorsign/.MainActivity
 | Crystal Meet server | `10.0.0.5:8080` becomes `http://10.0.0.5:8080/sign`. A full http(s) address is kept as typed. Anything else: "Enter the server's address, for example 10.0.0.5:8080". |
 | PIN | 4 to 8 digits, else "The PIN must be 4 to 8 digits". Stored only as a salted SHA-256 hash. |
 | Test the light bar | Green, Yellow, Red, Off drive the bar directly. |
-| Room settings | Whether the app is device owner, the check-in state line, and "Version 2 (2.0)". |
+| Room settings | Whether the app is device owner, the check-in state line, the camera line, and "Version 3 (3.0)". |
 | Leave the sign | **Exit to Android**: bar off, kiosk lock released, status bar shown, the panel's own launcher opens. **Home** brings the sign back. |
 
 ### Check-in state line
@@ -256,7 +256,7 @@ Once allowed, the panel checks in with the TV Pi every 5 seconds. Each answer ca
 
 - **Title:** "Door sign" plus the panel's model name.
 - **Seen:** "Checked in just now" or "N seconds ago" while online (checked in within 20 seconds); otherwise "Not seen since 10:42 AM".
-- **Version:** "Version 2 (2.0)"; **Newest:** "Newest: version N, date" or "Up to date".
+- **Version:** "Version 3 (3.0)"; **Newest:** "Newest: version N, date" or "Up to date".
 - **Buttons:** **Update**, **Reboot**, and **Forget** (second tap) for a replaced panel. Network changes are on **Settings › Network**.
 
 ### Allow, Refuse, Forget
@@ -306,6 +306,32 @@ sudo systemctl start croom
 3. Success: "Joined X. The door sign reaches the TV Pi". Failure: it goes back to the old network and says why, for example "Could not join X within 90 seconds" (often a wrong password).
 
 Refused on purpose: enterprise (user-name) networks, WEP, a new password for the network it is on ("join another network first"), and a new password for another saved network ("Forget X first"). The room can't move the panel to a network that can't reach the TV Pi.
+
+### The camera in UniFi Protect
+
+From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's **Door sign camera password**. Until the room sends that password, nothing listens on the panel.
+
+1. On each room's touch screen: **Options › Settings › Devices**, set **Door sign camera password** (8 to 64 characters, no spaces). It applies at once. Using the same password in every room is simplest. Keep it in the office password manager.
+2. **Update** the door sign on **Settings › Software** to version 3 or later.
+3. In Protect: **Settings › System › Discover Third-Party Cameras** on.
+4. On the UniFi Devices page, adopt the door sign with user `camera` and the password. If it isn't listed, use **Advanced Adoption** with the panel's IP address and port **8000**.
+5. Set its recording to **Always**. The panel sends no motion events.
+
+| | |
+| --- | --- |
+| Picture | H.264, 1280 × 720, 15 frames a second, about 1.5 Mbit/s (about 16 GB a day per panel when recorded Always), no sound |
+| Ports on the panel | ONVIF TCP 8000, RTSP TCP 8554, WS-Discovery UDP 3702 |
+| Login | User `camera`, the room's password. The stream's address is handed out only to a client that logged in, and changes with the password |
+| On the sign | Android's small green camera dot in a top corner, always. It is normal |
+| Setup screen | "Camera on: 192.168.0.194, ONVIF port 8000, user camera", or why it is off |
+
+| The card says | Meaning | Fix |
+| --- | --- | --- |
+| Camera off: set the door sign camera password in Settings › Devices | The room has no password, or the panel hasn't checked in since it was set. | Set it; the panel picks it up within 5 seconds. |
+| Camera off: this panel is not the device owner | Set up the old way. | Factory reset and follow Section 04. |
+| Camera off: the camera did not start: … | The camera, encoder or a port failed. It tries again every 10 seconds. | Reboot the panel from the card. If it stays, read `adb logcat -s DoorSign`. |
+
+Changing the password locks out the old login: Protect stops recording until the camera is adopted again with the new one.
 
 ## Building and releasing the app
 

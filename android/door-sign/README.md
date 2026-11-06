@@ -126,6 +126,16 @@ To take the device owner away again (to give the panel to something else): facto
   "Updated to version N". There is no going back (Android does not install an older version over a newer one): a panel that has not
   checked in within 5 minutes of installing shows "Door sign didn't check in after updating", and someone looks at the panel.
 
+- **The camera for UniFi Protect** (from version 3; spec `docs/superpowers/specs/2026-11-06-door-sign-camera-design.md`): once the
+  room has a **Door sign camera password** (Settings › Devices), a joined panel's check-in answer carries `{"user": "camera",
+  "password", "name": "<room> door sign"}`, and `CameraService` (a foreground service of the camera type) runs: the front camera
+  into the hardware H.264 encoder (1280 × 720, 15 fps, 1.5 Mbit/s, a keyframe every 2 s, no sound), ONVIF on TCP 8000
+  (`Onvif`, WS-UsernameToken on everything but GetSystemDateAndTime), RTSP on TCP 8554 (`Rtsp`, `H264Rtp`, `StreamClients`; TCP
+  interleaved only, at a path derived from the password that only an authenticated GetStreamUri hands out) and WS-Discovery on
+  UDP 3702 (`Discovery`). No login, nothing listens. A failure stops it, puts "Camera off: …" on the card (`cannot.camera`) and
+  is retried in 10 seconds. Android shows its green camera dot on the sign while it runs. Adopting it in Protect: the door sign
+  manual, "The camera in UniFi Protect".
+
 The check-in is the touch Pi's protocol (`POST /api/devices/checkin`, kind `sign`, the version being the app's `versionCode`); the
 id and token are made by the app at its first start and kept in its private storage. Clearing the app's data makes a new id, which
 asks to join again (a refused id stays refused).

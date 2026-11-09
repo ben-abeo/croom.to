@@ -61,8 +61,12 @@ public class MainActivity extends Activity {
     private volatile String pageUrl = "";      // the page the WebView is on, for the bridge, which runs off the UI thread
     private volatile String lastState;         // the state the light bar shows, to put back when the sign comes to the front again
 
+    /** The sign has been opened in this process and not closed (SignWatchdog opens it when not). */
+    static volatile boolean created;
+
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        created = true;
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         settings = new SignSettings(this);
         lights = new LightBar(new LedDevice());
@@ -98,6 +102,7 @@ public class MainActivity extends Activity {
     }
 
     @Override protected void onDestroy() {
+        created = false;
         main.removeCallbacksAndMessages(null);
         web.destroy();
         lightThread.shutdown();

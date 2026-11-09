@@ -44,6 +44,7 @@ public class DoorSignApp extends Application {
             CameraControl.ensure(this);           // a new password: the camera starts again with it
         });
         CameraControl.ensure(this);
+        SignWatchdog.schedule(this);
         Agent checkIn = agent;
         Thread thread = new Thread(() -> {
             panel.grantPermissions();

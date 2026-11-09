@@ -82,9 +82,9 @@
             android:exported="false"
             android:foregroundServiceType="camera" />
 
-        <!-- The app replaced by its update: the sign comes back at once. -->
+        <!-- The sign back after its process ended: at once after the app's own update, else within a minute or two (an alarm). -->
         <receiver
-            android:name=".UpdatedReceiver"
+            android:name=".SignWatchdog"
             android:exported="false">
             <intent-filter>
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />

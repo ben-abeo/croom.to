@@ -47,9 +47,19 @@
     return response.json();
   }
 
+  // The room's page files when this page was loaded (status.page): other ones mean the room was updated under it (Update all reboots a
+  // touch Pi onto its update before the TV Pi's own switch), so the page reloads itself rather than stay the old one.
+  let pageFiles = null;
+  const pageFilesChanged = (status) => {
+    if (pageFiles === null) pageFiles = status.page || "";
+    return Boolean(status.page) && status.page !== pageFiles;
+  };
+
   async function refreshStatus() {
     try {
-      model.status = await getJson("/api/status");
+      const status = await getJson("/api/status");
+      if (pageFilesChanged(status)) { location.reload(); return; }
+      model.status = status;
       model.offline = false;
     } catch (e) {
       model.offline = true;

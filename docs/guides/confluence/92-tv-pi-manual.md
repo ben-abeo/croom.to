@@ -665,7 +665,7 @@ With no change waiting it leaves the room as it is ("down"). After a reboot or p
 - **Refused** for a commit not on main, during a meeting, a restart or a Wi-Fi change, and while a saved config waits ("Restart now first, then update"). Joins are refused while it runs: "The room is updating: it restarts in a few minutes".
 - **A cut-off build never touches the running release.** Unfinished folders are swept at the helper's next start.
 - **Switch back to** offers the previous release, only if its helper starts.
-- **Update all** queues the touch Pi and door sign first and the TV Pi last.
+- **Update all** queues the touch Pi and door sign first and the TV Pi last. The pages on the touch Pi, the TV and the door sign reload themselves when the TV Pi comes back with other page files (`page` in `/api/status`).
 - **GitHub** is asked without an account (60 requests an hour per address), cached 10 minutes; "Can't check for updates right now" when it doesn't answer.
 
 > **UPDATES DON'T RE-RUN THE INSTALLER**

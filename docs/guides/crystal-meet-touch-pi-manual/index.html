@@ -415,6 +415,7 @@ sudo systemctl restart croom-kiosk-agent</pre>
     <li>After the reboot the old agent starts the new one on trial and waits up to <strong>5 minutes</strong> for it to check in.</li>
     <li>It checks in: the card says "Updated to …" and the new release becomes the good one.</li>
   </ol>
+  <p>The screens reload themselves when the TV Pi comes back on a new version, so the touch Pi never needs a restart after <span class="ui">Update all</span>, whichever of the two finishes first.</p>
   <div class="callout tip"><p class="kicker">It rolls itself back</p><p>If the new version's setup fails, the Pi stays where it was: "The update to X did not happen: its kiosk setup did not finish". If the new version does not check in within 5 minutes (or crashes 3 times), the Pi goes back and reboots: "The update to X was undone: the touch Pi did not check in with it within 5 minutes. It is back on Y". A power cut at any step is recovered at the next start.</p></div>
 
   <h3 class="sub">Changing Wi-Fi safely</h3>

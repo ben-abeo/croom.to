@@ -375,6 +375,8 @@ Versions are commits of `main` on GitHub `ben-abeo/croom.to`. The TV Pi checks t
 4. After the reboot the old agent starts the new one on trial and waits up to **5 minutes** for it to check in.
 5. It checks in: the card says "Updated to …" and the new release becomes the good one.
 
+The screens reload themselves when the TV Pi comes back on a new version, so the touch Pi never needs a restart after **Update all**, whichever of the two finishes first.
+
 > **IT ROLLS ITSELF BACK**
 >
 > If the new version's setup fails, the Pi stays where it was: "The update to X did not happen: its kiosk setup did not finish". If the new version does not check in within 5 minutes (or crashes 3 times), the Pi goes back and reboots: "The update to X was undone: the touch Pi did not check in with it within 5 minutes. It is back on Y". A power cut at any step is recovered at the next start.

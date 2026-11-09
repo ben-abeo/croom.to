@@ -88,6 +88,20 @@ def test_style_change_re_renders_without_a_reload(browser):
         page.close()
 
 
+def test_the_tv_page_reloads_itself_once_when_the_room_comes_back_with_other_page_files(browser):
+    from tests.unit.control.test_page import from_an_updated_room
+    with PageServer(room_name="Room 1") as server:
+        page = open_tv(browser, server)
+        loads = []
+        page.on("load", lambda _: loads.append(1))
+        page.route("**/api/status", from_an_updated_room)
+        page.wait_for_event("load", timeout=10000)
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.wait_for_timeout(5000)
+        assert loads == [1]
+        page.close()
+
+
 def test_bounce_logo_fits_a_narrow_window_so_it_never_strobes(browser):
     with PageServer() as server:
         page = open_tv(browser, server, width=200, height=400)   # narrower than the logo's TV size

@@ -1633,6 +1633,16 @@ class TestPage:
         assert again.status == 304
         assert again.headers["Cache-Control"] == "no-cache"
 
+    def test_the_status_names_the_page_files_so_an_open_page_reloads_after_an_update(self, tmp_path):
+        """A page open in a browser (the touch Pi's, the TV's, the door sign's) reloads itself when the room comes back with other page
+        files: a touch Pi that loaded the page before the TV Pi's update finished (Update all) is not left on the old one."""
+        (tmp_path / "app.js").write_text("one")
+        (tmp_path / "index.html").write_text("<html>")
+        first = make_service(static_dir=str(tmp_path))._status()["page"]
+        assert make_service(static_dir=str(tmp_path))._status()["page"] == first      # a restart with the same files: the same
+        (tmp_path / "app.js").write_text("two")
+        assert make_service(static_dir=str(tmp_path))._status()["page"] != first      # an update's files: another
+
     async def test_missing_assets_explain_themselves(self, client_factory, tmp_path):
         client = await client_factory(make_service(static_dir=str(tmp_path)))
         resp = await client.get("/")

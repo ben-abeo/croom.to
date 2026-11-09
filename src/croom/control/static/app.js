@@ -183,10 +183,19 @@
     return data;
   }
 
+  // The room's page files when this page was loaded (status.page): other ones mean the room was updated under it (Update all reboots a
+  // touch Pi onto its update before the TV Pi's own switch), so the page reloads itself rather than stay the old one.
+  let pageFiles = null;
+  const pageFilesChanged = (status) => {
+    if (pageFiles === null) pageFiles = status.page || "";
+    return Boolean(status.page) && status.page !== pageFiles;
+  };
+
   async function refreshStatus() {
     const epochs = Object.assign({}, deviceEpoch);
     try {
       const status = await api("/api/status");
+      if (pageFilesChanged(status)) { location.reload(); return; }
       for (const kind of Object.keys(epochs)) {
         // A device answered a command while this poll was on its way: its block is newer than the poll's. The other
         // device's block is still the poll's to give.

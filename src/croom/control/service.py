@@ -10,6 +10,7 @@ whoever is in the room.
 import asyncio
 import contextlib
 import copy
+import hashlib
 import ipaddress
 import json
 import logging
@@ -239,6 +240,18 @@ async def _static_no_cache(
     return response
 
 
+def page_files_hash(static_dir: Path) -> str:
+    """A short hash of the pages' own files (HTML, CSS, JS), which /api/status gives as "page": a page open in a browser (the touch Pi's,
+    the TV's, the door sign's) reloads itself when the room comes back with other ones. Update all reboots a touch Pi onto its update
+    while the TV Pi still builds its own, so the touch Pi loads the old page, and the TV Pi's switch to the new one comes after."""
+    digest = hashlib.sha256()
+    if static_dir.is_dir():
+        for path in sorted(static_dir.iterdir()):
+            if path.suffix in (".html", ".css", ".js") and path.is_file():
+                digest.update(path.name.encode() + b"\0" + path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 class ControlService(Service):
     """
     Room control service ("control" under the ServiceManager).
@@ -315,6 +328,7 @@ class ControlService(Service):
         self._room_company = self.config.get("room_company", DEFAULT_COMPANY)
         self._sign_camera_password = str(self.config.get("sign_camera_password") or "")   # the door signs' camera (spec 2026-11-06)
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
+        self._page_files = page_files_hash(self._static_dir)
         self._store = store or SettingsStore(
             self.config.get("settings_file", "control-settings.json")
         )
@@ -747,6 +761,7 @@ class ControlService(Service):
             "camera": dict(self._camera_state(), view={"allowed": self._camera_view_allowed(request)}),
             "tv": self._tv_status(),
             "laptop": self._laptop_status(),
+            "page": self._page_files,
         }
         scores = self._scores_status()
         if scores:

@@ -371,6 +371,42 @@ def test_door_sign_tells_the_panel_app_its_state_for_the_light_bar(browser):
         page.close()
 
 
+def from_an_updated_room(route):
+    """/api/status as the room answers it, from a room whose page files are no longer the ones the page was loaded with (an update)."""
+    response = route.fetch()
+    route.fulfill(response=response, json=dict(response.json(), page="another"))
+
+
+def test_the_touch_page_reloads_itself_once_when_the_room_comes_back_with_other_page_files(browser):
+    """Update all: the touch Pi reboots onto its update while the TV Pi still builds its own and loads the page, then the TV Pi switches to
+    the new version. The page reloads itself, once, rather than staying the old one until someone restarts the touch Pi."""
+    with PageServer(room_name="Room 1") as server:
+        page = open_page(browser, server)
+        loads = []
+        page.on("load", lambda _: loads.append(1))
+        page.route("**/api/status", from_an_updated_room)
+        page.wait_for_event("load", timeout=10000)
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        page.wait_for_timeout(5000)                       # more polls: the page it reloaded into is the new one, and stays
+        assert loads == [1]
+        page.close()
+
+
+def test_the_sign_reloads_itself_once_when_the_room_comes_back_with_other_page_files(browser):
+    with PageServer(room_name="Room 1") as server:
+        page = sign_on_a_stopped_clock(browser, server, 1024, 600)
+        loads = []
+        page.on("load", lambda _: loads.append(1))
+        page.route("**/api/status", from_an_updated_room)
+        with page.expect_event("load", timeout=10000):
+            page.clock.run_for(5000)
+        page.wait_for_function("document.body.dataset.state === 'free'", timeout=5000)
+        poll(page)
+        poll(page)
+        assert loads == [1]
+        page.close()
+
+
 def test_door_sign_without_the_panel_app_has_no_light_bar_to_tell(browser):
     with PageServer(room_name="Room 1") as server:
         page = sign_on_a_stopped_clock(browser, server, 1024, 600)

@@ -683,7 +683,7 @@ sudo systemctl start croom</pre>
     <li><strong>Refused</strong> for a commit not on main, during a meeting, a restart or a Wi-Fi change, and while a saved config waits ("Restart now first, then update"). Joins are refused while it runs: "The room is updating: it restarts in a few minutes".</li>
     <li><strong>A cut-off build never touches the running release.</strong> Unfinished folders are swept at the helper's next start.</li>
     <li><strong>Switch back to</strong> offers the previous release, only if its helper starts.</li>
-    <li><strong>Update all</strong> queues the touch Pi and door sign first and the TV Pi last.</li>
+    <li><strong>Update all</strong> queues the touch Pi and door sign first and the TV Pi last. The pages on the touch Pi, the TV and the door sign reload themselves when the TV Pi comes back with other page files (<code>page</code> in <code>/api/status</code>).</li>
     <li><strong>GitHub</strong> is asked without an account (60 requests an hour per address), cached 10 minutes; "Can't check for updates right now" when it doesn't answer.</li>
   </ul>
   <div class="callout dark"><p class="kicker">Updates don't re-run the installer</p><p>An update from Settings › Software replaces only the Python release. Unit files, udev rules, sudoers, apt packages and the keyboard layout are refreshed only by an installer run. When a release changes any of those, or the card says "This TV Pi can't update itself until its installer has been run once more", run the installer by hand:</p>

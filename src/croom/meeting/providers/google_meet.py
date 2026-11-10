@@ -11,6 +11,7 @@ import tempfile
 import time
 from collections import Counter
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional, Dict, Any, Callable, List, Tuple
 
@@ -158,10 +159,11 @@ class GoogleMeetProvider(MeetingProvider):
     JOIN_SELECTORS = ['button:has-text("Ask to join")', 'button:has-text("Join now")',
                       '[role="button"]:has-text("Ask to join")', '[role="button"]:has-text("Join now")',
                       '[aria-label*="join" i][role="button"]', 'button[jsname="Qx7uuf"]']
-    JOIN_FIND_TIMEOUT_MS = 4000      # per selector while looking for the join control
+    JOIN_FIND_TIMEOUT_MS = 4000      # while looking for the join control, once the page has shown it (any of JOIN_SELECTORS)
+    PREJOIN_TIMEOUT_MS = 30000       # for the join control to be on the TV after the page starts loading
     JOIN_ENABLE_TIMEOUT_MS = 10000   # how long the control may stay disabled after the name is typed
-    TOGGLE_TIMEOUT_MS = 3000         # per selector while looking for a camera or microphone button
-    PAGE_SETTLE_S = 2                # after the page has loaded, before the pre-join screen is looked at
+    TOGGLE_TIMEOUT_MS = 3000         # while looking for a camera or microphone button
+    PAGE_SETTLE_S = 2                # after the join control is on the TV, before the pre-join screen is touched: the touch Pi counts it down
     LEAVE_SETTLE_S = 1               # after the Leave button is pressed, before the TV goes back to the screensaver
     CONNECT_TIMEOUT_MS = 30000       # for Meet's in-call controls after pressing Join
     ADMIT_TIMEOUT_MS = 300000        # how long a host may take to admit the room
@@ -337,10 +339,10 @@ class GoogleMeetProvider(MeetingProvider):
         logger.info(f"Joining Google Meet: {meeting_id}")
 
         try:
-            # Navigate to meeting
-            await self._page.goto(full_url, wait_until="networkidle")
-
-            # Wait for page to load
+            # The pre-join screen is ready when its join control is on the TV, not when Meet's network has gone quiet (it seldom does
+            # soon): from then the touch Pi counts down to the press, PAGE_SETTLE_S, which the room presses by itself (Ben, 2026-11-09).
+            await self._page.goto(full_url, wait_until="domcontentloaded")
+            await self._join_control_shown()
             await asyncio.sleep(self.PAGE_SETTLE_S)
 
             # Handle pre-join screen
@@ -382,9 +384,10 @@ class GoogleMeetProvider(MeetingProvider):
         camera_on: bool,
         mic_on: bool
     ) -> None:
-        """Handle pre-join screen settings."""
+        """Handle pre-join screen settings, once its join control is on the TV: the name field, when there is one, is drawn with it, and a
+        signed-in room has none, so it is not waited for."""
         # Type the room's name: "Ask to join" stays disabled without one.
-        name_input = await self._find_first(self.NAME_SELECTORS, timeout=2500)
+        name_input = await self._find_first(self.NAME_SELECTORS, timeout=None)
         if name_input is None:
             try:
                 by_placeholder = self._page.get_by_placeholder(re.compile(r"your name", re.IGNORECASE))
@@ -429,16 +432,43 @@ class GoogleMeetProvider(MeetingProvider):
         logger.info(f"Meet pre-join {device} is now {'on' if 'turn off' in label else 'off'} "
                     f"(wanted {'on' if wanted_on else 'off'})")
 
-    async def _find_first(self, selectors, timeout=3000):
-        """The first element any of the selectors finds, or None."""
+    async def _find_first(self, selectors, timeout: Optional[float] = 3000):
+        """The element of the first selector that finds one, in the selectors' order, once any of them does within `timeout` ms (None:
+        only what is there now), or None. One wait for all of them: a wait for each in turn spent its whole timeout on every selector the
+        page does not use (10 s on a name field a signed-in room never has, 4 s on "Ask to join" before "Join now"). Only what is on the TV
+        counts (:visible): the wait for a list looks at its first match in the page, which may be one Meet keeps hidden."""
+        selectors = [f"{selector}:visible" for selector in selectors]
+        if timeout is not None:
+            try:
+                await self._page.wait_for_selector(", ".join(selectors), timeout=timeout)
+            except Exception:
+                return None
         for selector in selectors:
             try:
-                element = await self._page.wait_for_selector(selector, timeout=timeout)
+                element = await self._page.query_selector(selector)
             except Exception:
                 continue
             if element:
                 return element
         return None
+
+    @staticmethod
+    async def _words_of(control) -> str:
+        """What a join control says ("Join now", "Ask to join"), for the touch Pi."""
+        try:
+            words = " ".join((await control.inner_text()).split()) or (await control.get_attribute("aria-label") or "")
+        except Exception:
+            return "Join"
+        return words[:40] or "Join"
+
+    async def _join_control_shown(self) -> None:
+        """Wait for Meet's join control to be on the TV (PREJOIN_TIMEOUT_MS at most) and say on the touch Pi which button the room presses
+        by itself, and when: PAGE_SETTLE_S from now. A page that never shows one is left to _click_join_button, which says what it shows."""
+        control = await self._find_first(self.JOIN_SELECTORS, timeout=self.PREJOIN_TIMEOUT_MS)
+        if control is None or self._current_meeting is None:
+            return
+        at = datetime.now().astimezone() + timedelta(seconds=self.PAGE_SETTLE_S)
+        self._current_meeting.join = {"button": await self._words_of(control), "at": at.isoformat(timespec="milliseconds")}
 
     async def _page_words(self) -> str:
         """The first words on the page, for an error message a person can act on."""
@@ -477,7 +507,10 @@ class GoogleMeetProvider(MeetingProvider):
         while True:
             aria_disabled = await button.get_attribute("aria-disabled")
             if await button.is_enabled() and aria_disabled != "true":
+                words = await self._words_of(button)
                 await button.click(timeout=self.JOIN_ENABLE_TIMEOUT_MS)
+                if self._current_meeting is not None:
+                    self._current_meeting.join = {"button": words, "pressed": True}
                 return
             if time.monotonic() > deadline:
                 raise await self._failure("Meet's join button stayed disabled")

@@ -7664,7 +7664,7 @@ def test_the_meeting_screen_names_the_meeting_and_says_why_the_room_waits(browse
         page.wait_for_function("document.body.dataset.state === 'meeting'", timeout=5000)
         detail = page.locator("#meeting-detail")
         assert detail.is_visible() and detail.inner_text() == "Design review, Zoom"   # the title and the platform; the elapsed time is the bar's
-        for state, bar, words in ((MeetingState.JOINING, "Joining", "Joining Design review\nThe room's screen is connecting."),
+        for state, bar, words in ((MeetingState.JOINING, "Joining", "Joining Design review\nThe TV is opening the meeting. The room presses Join by itself."),
                                   (MeetingState.IN_LOBBY, "In the lobby", "Waiting for the host to let the room in."),
                                   (MeetingState.LEAVING, "Leaving", "Leaving"),
                                   (MeetingState.CONNECTED, "In a meeting", "Design review, Zoom")):
@@ -7680,7 +7680,30 @@ def test_a_call_joined_by_link_is_named_by_its_platform_while_it_joins(browser):
         join_by_id(page)
         server.meeting.set_state(MeetingState.JOINING)
         page.wait_for_function("document.getElementById('meeting-state').innerText === 'Joining'", timeout=5000)
-        assert page.locator("#meeting-detail").inner_text() == "Joining Zoom meeting\nThe room's screen is connecting."
+        assert page.locator("#meeting-detail").inner_text() == "Joining Zoom meeting\nThe TV is opening the meeting. The room presses Join by itself."
+        page.close()
+
+
+def test_while_it_joins_the_page_says_the_room_presses_the_join_button_by_itself_and_when(browser):
+    """Meet's Join now sat on the TV long enough that people pressed it themselves (Ben, 2026-11-09): the touch Pi says the room presses
+    it, counts down to the press once the TV shows the button, and says when it has."""
+    with PageServer() as server:
+        page = open_page(browser, server)
+        join_by_id(page)
+        info = server.meeting.current_meeting
+        server.meeting.set_state(MeetingState.JOINING)
+        detail = page.locator("#meeting-detail")
+        page.wait_for_function("document.getElementById('meeting-state').innerText === 'Joining'", timeout=5000)
+        assert detail.inner_text() == "Joining Zoom meeting\nThe TV is opening the meeting. The room presses Join by itself."
+        info.join = {"button": "Join now", "at": (datetime.now().astimezone() + timedelta(seconds=30)).isoformat(timespec="milliseconds")}
+        page.wait_for_function("document.getElementById('meeting-detail').innerText.includes('by itself in')", timeout=5000)
+        assert re.fullmatch("Joining Zoom meeting\nThe room presses \u201cJoin now\u201d by itself in (30|29|28) seconds\\.", detail.inner_text())
+        info.join = {"button": "Ask to join", "at": (datetime.now().astimezone() - timedelta(seconds=1)).isoformat(timespec="milliseconds")}
+        page.wait_for_function("document.getElementById('meeting-detail').innerText.includes('is pressing')", timeout=5000)
+        assert detail.inner_text() == "Joining Zoom meeting\nThe room is pressing \u201cAsk to join\u201d."
+        info.join = {"button": "Join now", "pressed": True}
+        page.wait_for_function("document.getElementById('meeting-detail').innerText.includes('pressed')", timeout=5000)
+        assert detail.inner_text() == "Joining Zoom meeting\nThe room pressed \u201cJoin now\u201d. Connecting\u2026"
         page.close()
 
 

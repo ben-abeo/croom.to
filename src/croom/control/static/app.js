@@ -420,11 +420,22 @@
     return (m.title ? m.title + ", " : "") + platformName(m.platform) + (m.joined_at ? ", " + elapsedSince(m.joined_at) : "");
   }
 
+  // While the room joins: that it presses the platform's join button by itself, and in how long, so nobody presses it on the TV (Ben,
+  // 2026-11-09). The agent names the button once the TV shows it, with when the room presses it (meeting.join.at), then that it has.
+  function joiningWords(m) {
+    const join = m.join;
+    if (!join) return "The TV is opening the meeting. The room presses Join by itself.";
+    const button = "\u201C" + join.button + "\u201D";
+    if (join.pressed) return "The room pressed " + button + ". Connecting\u2026";
+    const left = Math.ceil((new Date(join.at).getTime() - Date.now()) / 1000);
+    return left > 0 ? "The room presses " + button + " by itself in " + plural(left, "second") + "." : "The room is pressing " + button + ".";
+  }
+
   // The meeting screen's first line: which meeting the room is in, and why it may be waiting. The idle status card says
   // the same things (#headline, #detail) but is hidden in meeting mode. The elapsed time is the top bar's, so it is not here.
   function meetingLine(m, label) {
     if (m.state === "connected") return m.title && m.platform ? m.title + ", " + platformName(m.platform) : label;
-    if (m.state === "joining") return "Joining " + label + "\nThe room's screen is connecting.";
+    if (m.state === "joining") return "Joining " + label + "\n" + joiningWords(m);
     if (m.state === "in_lobby") return "Waiting for the host to let the room in.";
     if (m.state === "leaving") return "Leaving";
     return "";
@@ -1224,7 +1235,8 @@
       body.dataset.state = "joining";
       el("kicker").textContent = m.state === "leaving" ? "Leaving" : "Joining";
       el("headline").textContent = m.state === "leaving" ? "Leaving" : "Joining " + label;
-      el("detail").textContent = m.state === "in_lobby" ? "Waiting for the host to let the room in." : "The room's screen is connecting.";
+      el("detail").textContent = m.state === "in_lobby" ? "Waiting for the host to let the room in."
+        : m.state === "joining" ? joiningWords(m) : "The room's screen is connecting.";
       if (m.state !== "leaving") specs = [{ label: "Cancel", className: "quiet", icon: "x-circle", onClick: leave }];
     } else if (m.state === "connected") {
       body.dataset.state = "meeting";
@@ -1507,6 +1519,8 @@
         el("meeting-clock").textContent = el("meeting-elapsed").textContent;   // the meeting card's large time, every second as the top bar's
       }
     }
+    const m = model.status && model.status.meeting;
+    if (m && m.state === "joining" && m.join && !m.join.pressed) render();   // the count down to the room's press of Join, every second
     if (model.reactionsUntil && !reactionsOpen()) closeReactions();   // the row's ten seconds are over
     if (model.layoutUntil && !layoutsOpen()) closeLayouts();          // and the layouts' row's
   }

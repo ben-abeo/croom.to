@@ -354,6 +354,8 @@ class StubCamera:
         self.moves, self.zooms, self.homes, self.recalls, self.saves, self.setups, self.previews = [], [], 0, [], [], [], []
         self.names = ["Wide", "Table", "Whiteboard"]
         self.zoom_reads = 0
+        self.frames = 0                                     # Frame people's taps, and what each answers besides the state
+        self.frame_answer = {"framed": 2, "turned": True}
 
     @property
     def preview(self):
@@ -411,6 +413,12 @@ class StubCamera:
 
     async def zoom_step(self, delta):
         return await self.zoom(self.zoom_level + int(delta))
+
+    async def frame_people(self, still, detect=None, by_person=True):
+        self._check()
+        self.frames += 1
+        await still()
+        return dict(self.state(), **self.frame_answer)
 
     async def home(self):
         from croom.devices.errors import NotReady
@@ -876,7 +884,7 @@ class TestStatus:
             "state": "idle", "platform": None, "meeting_id": None, "title": "", "url": None,
             "joined_at": None, "muted": False, "camera_on": False, "error": None,
             "controls": {}, "participants": {"count": 0, "list": []}, "chat": {"unread": 0, "messages": []},
-            "notice": "", "dialog": None,
+            "notice": "", "dialog": None, "join": None,
         }
         assert data["calendar"] == {"connected": False, "provider": None, "current": None, "next": None, "booking": None}
         datetime.fromisoformat(data["server_time"])
@@ -1408,6 +1416,17 @@ class TestMeetingControls:
         client, meeting = await joined_meeting(client_factory, controls=False)               # a meeting with no model has none to show
         data = (await (await client.get("/api/status")).json())["meeting"]
         assert data["dialog"] is None and data["controls"] == {} and data["participants"] == {"count": 0, "list": []}
+
+    async def test_the_join_button_the_room_presses_is_in_the_status_while_it_joins(self, client_factory):
+        """The touch Pi says which of the platform's buttons the room presses by itself, and when (Ben, 2026-11-09): the provider's join,
+        while the room joins and not once it is in."""
+        client, meeting = await joined_meeting(client_factory)
+        meeting.current_meeting.join = {"button": "Join now", "at": "2026-11-09T21:00:02.000-06:00"}
+        meeting.set_state(MeetingState.JOINING)
+        data = (await (await client.get("/api/status")).json())["meeting"]
+        assert data["join"] == {"button": "Join now", "at": "2026-11-09T21:00:02.000-06:00"}
+        meeting.set_state(MeetingState.CONNECTED)
+        assert (await (await client.get("/api/status")).json())["meeting"]["join"] is None
 
     async def test_an_errored_meeting_shows_no_model_whatever_the_provider_still_holds(self, client_factory):
         """What the table draws from is the joined meeting's: when the meeting errors, nothing of it is left to draw (the title and the error

@@ -52,6 +52,8 @@ class MeetingInfo:
     chat: Dict[str, Any] = field(default_factory=lambda: {"unread": 0, "messages": []})     # the last 20 incoming messages
     notice: str = ""                                    # what the meeting says of itself (recorded, transcribed), from the notices pressed at once
     dialog: Optional[Dict[str, Any]] = None             # the dialog waiting for a tap on the table: {id, title, text, buttons}
+    join: Optional[Dict[str, Any]] = None               # while joining, the platform's join button the room presses by itself: {button, at}
+                                                        # (when, ISO), then {button, pressed: True}; None before the button is on the TV
     recording: bool = False
     locked: bool = False
 
@@ -73,6 +75,7 @@ class MeetingInfo:
             "chat": self.chat,
             "notice": self.notice,
             "dialog": self.dialog,
+            "join": self.join,
             "recording": self.recording,
             "locked": self.locked,
         }

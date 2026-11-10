@@ -744,6 +744,8 @@ class ControlService(Service):
             "chat": dict(joined.chat) if joined is not None else {"unread": 0, "messages": []},
             "notice": joined.notice if joined is not None else "",
             "dialog": dict(joined.dialog) if joined is not None and joined.dialog else None,
+            # The platform's join button the room presses by itself, and when, for the touch Pi to say (Ben, 2026-11-09): while joining only.
+            "join": dict(current.join) if state == "joining" and current is not None and getattr(current, "join", None) else None,
         }
 
     def _status(self, request: Optional[web.Request] = None) -> Dict[str, Any]:

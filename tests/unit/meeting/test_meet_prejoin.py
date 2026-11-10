@@ -250,3 +250,78 @@ async def test_a_toggle_that_cannot_be_clicked_does_not_stop_the_join(tmp_path):
             await page.wait_for_selector("#meeting:not([hidden])", timeout=5000)
         finally:
             await browser.close()
+
+
+async def test_a_signed_in_room_presses_join_now_at_once(tmp_path):
+    """No name field to find and "Join now", not "Ask to join": the room once looked 2.5 s for each of four name selectors and 4 s for "Ask
+    to join" first, so Meet's own Join now sat on the TV long enough that people pressed it themselves (Ben, 2026-11-09)."""
+    import time
+
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(SIGNED_IN_FORM)
+        provider = GoogleMeetProvider(FakeDisplay(profile_dir=str(tmp_path / "profile")))
+        provider._page = page
+        try:
+            began = time.monotonic()
+            await provider._handle_prejoin("Room 3", True, True)
+            await provider._click_join_button()
+            assert time.monotonic() - began < 2.5
+            await page.wait_for_selector("#meeting:not([hidden])", timeout=5000)
+        finally:
+            await browser.close()
+
+
+LATE_FORM = SIGNED_IN_FORM.replace('<button id="join">Join now</button>', "").replace(
+    "</body>", "<script>setTimeout(() => { const b = document.createElement('button'); b.id = 'join'; b.textContent = 'Join now';"
+               " b.onclick = () => setTimeout(() => { document.getElementById('meeting').hidden = false; }, 300);"
+               " document.body.append(b); }, 400);</script></body>")
+
+
+async def test_the_join_says_which_button_the_room_presses_and_when_then_that_it_pressed_it(tmp_path):
+    """The touch Pi says the room presses Meet's button by itself, and in how long (Ben, 2026-11-09): from when the button is on the TV,
+    PAGE_SETTLE_S on, and once it is pressed, that it was."""
+    from datetime import datetime
+
+    from croom.meeting.providers.base import MeetingInfo
+
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(LATE_FORM)
+        provider = GoogleMeetProvider(FakeDisplay(profile_dir=str(tmp_path / "profile")))
+        provider._page = page
+        provider._current_meeting = info = MeetingInfo(platform="google_meet", meeting_id="abc-defg-hij", meeting_url="")
+        try:
+            assert info.join is None
+            await provider._join_control_shown()
+            assert info.join["button"] == "Join now" and "pressed" not in info.join
+            ahead = (datetime.fromisoformat(info.join["at"]) - datetime.now().astimezone()).total_seconds()
+            assert provider.PAGE_SETTLE_S - 0.5 < ahead <= provider.PAGE_SETTLE_S
+            await provider._handle_prejoin("Room 3", True, True)
+            await provider._click_join_button()
+            assert info.join == {"button": "Join now", "pressed": True}
+        finally:
+            await browser.close()
+
+
+HIDDEN_ASK_FORM = SIGNED_IN_FORM.replace('<button id="join">Join now</button>',
+                                         '<button id="ask" style="display:none">Ask to join</button><button id="join">Join now</button>')
+
+
+async def test_a_join_control_the_page_keeps_hidden_is_passed_over_for_the_one_on_the_tv(tmp_path):
+    """Only what is on the TV counts: a hidden "Ask to join" in Meet's page, first in the selectors' order, is not the room's button."""
+    async with playwright.async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.set_content(HIDDEN_ASK_FORM)
+        provider = GoogleMeetProvider(FakeDisplay(profile_dir=str(tmp_path / "profile")))
+        provider._page = page
+        provider.JOIN_ENABLE_TIMEOUT_MS = 1500
+        try:
+            await provider._handle_prejoin("Room 3", True, True)
+            await provider._click_join_button()
+            await page.wait_for_selector("#meeting:not([hidden])", timeout=5000)
+        finally:
+            await browser.close()

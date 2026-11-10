@@ -84,10 +84,11 @@ final class H264Rtp {
         if (to > from) nals.add(Arrays.copyOfRange(buffer, from, to));
     }
 
-    /** An RTP packet framed for an RTSP connection: '$', channel 0, its length. */
-    static byte[] interleaved(byte[] rtp) {
+    /** An RTP packet framed for an RTSP connection: '$', its channel (0 the picture, 2 the sound), its length. */
+    static byte[] interleaved(byte[] rtp, int channel) {
         byte[] framed = new byte[4 + rtp.length];
         framed[0] = '$';
+        framed[1] = (byte) channel;
         framed[2] = (byte) (rtp.length >> 8);
         framed[3] = (byte) rtp.length;
         System.arraycopy(rtp, 0, framed, 4, rtp.length);

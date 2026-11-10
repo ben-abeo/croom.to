@@ -37,19 +37,20 @@ def test_the_schema_covers_every_setting_the_pages_edit():
     assert {"calendar.google_calendar_id", "calendar.booking_start", "calendar.booking_end"} <= paths
     assert BY_PATH["calendar.google_credentials_path"].kind == "credential"
     assert {"audio.input_device", "audio.output_device", "video.device", "video.ptz_travel_seconds", "control.camera_presets",
-            "control.camera_auto_framing", "control.door_sign_camera_password"} <= paths
+            "control.camera_auto_framing", "control.door_sign_camera_password", "control.door_sign_camera_sound"} <= paths
     assert {f"laptop.{name}" for name in ("enabled", "gpio_pin", "active_low", "press_ms", "usb_id", "switch_wait_s")} <= paths
     assert {f"ai.{name}" for name in ("enabled", "backend", "person_detection", "noise_reduction", "echo_cancellation", "auto_framing",
                                       "occupancy_counting", "speaker_detection", "hand_raise_detection", "privacy_mode")} <= paths
     assert {"dashboard.enabled", "dashboard.url", "dashboard.enrollment_token"} <= paths
     assert BY_PATH["dashboard.enrollment_token"].kind == "secret"
-    camera = {"control.camera_presets", "control.camera_auto_framing", "control.door_sign_camera_password"}
+    camera = {"control.camera_presets", "control.camera_auto_framing", "control.door_sign_camera_password", "control.door_sign_camera_sound"}
     assert not any(path.startswith("control.") and path not in camera for path in paths)   # never the room page's own
 
 
-def test_live_settings_are_the_booking_hours_the_camera_preset_names_auto_framing_and_the_door_sign_camera_password():
+def test_live_settings_are_the_booking_hours_the_camera_preset_names_auto_framing_and_the_door_sign_camera():
     assert {s.path for s in SCHEMA if s.live} == {"calendar.booking_start", "calendar.booking_end", "control.camera_presets",
-                                                  "control.camera_auto_framing", "control.door_sign_camera_password"}
+                                                  "control.camera_auto_framing", "control.door_sign_camera_password",
+                                                  "control.door_sign_camera_sound"}
 
 
 def test_the_room_page_has_name_location_company_and_the_systems_time_zones():
@@ -409,3 +410,12 @@ def test_door_sign_camera_password_is_a_live_secret_on_devices():
     for bad in ("short7!", "has space here", "x" * 65):
         with pytest.raises(SettingError):
             validate("control.door_sign_camera_password", bad)
+
+
+def test_door_sign_camera_sound_is_a_live_switch_on_devices_that_is_off_until_someone_turns_it_on():
+    """Sound with the door signs' picture: a room records the hallway's conversations only once someone has chosen to."""
+    from croom.settings.config_edit import default_of
+    s = BY_PATH["control.door_sign_camera_sound"]
+    assert (s.kind, s.page, s.live, s.label) == ("switch", "devices", True, "Door sign camera sound")
+    assert default_of("control.door_sign_camera_sound") is False
+    assert "consent" in s.help

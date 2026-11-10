@@ -74,6 +74,21 @@ public class StreamClientsTest {
         assertEquals(0, clients.size());
     }
 
+    @Test public void soundGoesOnlyToClientsThatSetItUpOnceTheirPictureHasStarted() throws Exception {
+        StreamClients clients = new StreamClients(10);
+        ByteArrayOutputStream withSound = new ByteArrayOutputStream();
+        ByteArrayOutputStream pictureOnly = new ByteArrayOutputStream();
+        clients.add(withSound, true);
+        clients.add(pictureOnly, false);
+        clients.sendSound(new byte[] {8});                   // before the first keyframe: neither has a picture to go with it
+        clients.send(new byte[] {2}, true);
+        clients.sendSound(new byte[] {9});
+        waitFor(() -> withSound.size() == 2 && pictureOnly.size() == 1);
+        assertEquals(9, withSound.toByteArray()[1]);
+        assertEquals(2, pictureOnly.toByteArray()[0]);
+        clients.closeAll();
+    }
+
     @Test public void aClientAddedAfterCloseAllIsClosedAtOnce() throws Exception {
         // A viewer's PLAY that lands just as the camera stops (a new password, a retry) must not hang on an engine that is gone
         StreamClients clients = new StreamClients(10);

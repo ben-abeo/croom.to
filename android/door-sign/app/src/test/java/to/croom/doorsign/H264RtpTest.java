@@ -77,10 +77,11 @@ public class H264RtpTest {
 
     @Test public void interleavedFraming() {
         byte[] rtp = new byte[300];
-        byte[] framed = H264Rtp.interleaved(rtp);
+        byte[] framed = H264Rtp.interleaved(rtp, 0);
         assertEquals('$', framed[0]);
         assertEquals(0, framed[1]);
         assertEquals(300, u16(framed, 2));
         assertEquals(304, framed.length);
+        assertEquals(2, H264Rtp.interleaved(rtp, 2)[1]);                // the sound's channel
     }
 }

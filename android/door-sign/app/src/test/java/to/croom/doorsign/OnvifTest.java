@@ -133,6 +133,30 @@ public class OnvifTest {
         }
     }
 
+    @Test public void withSoundTheProfileHasAnAacMicrophone() throws Exception {
+        Onvif.Info sound = new Onvif.Info(new CameraLogin("camera", "secret-pw1", "Conference Room B door sign", true), "192.168.0.194",
+                "f8:7a:39:7c:f6:25", "WF2489T", "4.0", "abc123");
+        for (String action : new String[] {"trt:GetProfiles", "trt:GetProfile"}) {
+            Onvif.Reply reply = Onvif.handle(request(action, "camera", "secret-pw1", NOW), sound, NOW);
+            for (String needle : new String[] {"<tt:AudioSourceConfiguration token=\"asc\"", "<tt:SourceToken>as</tt:SourceToken>",
+                    "<tt:AudioEncoderConfiguration token=\"aec\"", "<tt:Encoding>AAC</tt:Encoding>", "<tt:Bitrate>32</tt:Bitrate>",
+                    "<tt:SampleRate>16</tt:SampleRate>"}) {
+                assertTrue(action + " " + needle, reply.xml.contains(needle));
+            }
+            wellFormed(reply.xml);
+        }
+        for (String action : new String[] {"trt:GetAudioSources", "trt:GetAudioSourceConfigurations", "trt:GetAudioEncoderConfigurations"}) {
+            Onvif.Reply reply = Onvif.handle(request(action, "camera", "secret-pw1", NOW), sound, NOW);
+            assertEquals(action, 200, reply.status);
+            wellFormed(reply.xml);
+        }
+    }
+
+    @Test public void withoutSoundThereIsNoMicrophone() throws Exception {
+        assertFalse(ask("trt:GetProfiles").xml.contains("Audio"));
+        assertEquals(400, ask("trt:GetAudioSources").status);
+    }
+
     @Test public void theDeviceAndItsServices() throws Exception {
         Onvif.Reply info = ask("tds:GetDeviceInformation");
         assertTrue(info.xml.contains("<tds:Manufacturer>Crystal Meet</tds:Manufacturer>"));

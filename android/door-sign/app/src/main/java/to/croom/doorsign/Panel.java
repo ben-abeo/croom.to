@@ -43,6 +43,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     static final String CAMERA_NOT_OWNER = "Camera off: this panel is not the device owner";
     static final String CAMERA_NO_PASSWORD = "Camera off: set the door sign camera password in Settings › Devices";
     static final String CAMERA_FAILED = "Camera off: the camera did not start: ";
+    static final String SOUND_OFF = "Sound off: ";          // the room records sound but the panel sends none (spec 2026-11-10)
 
     private final Context context;
     private final WifiChange wifi;
@@ -51,10 +52,11 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     private final Supplier<Identity> identity;
     private final Store store;
     private final Supplier<String> cameraTrouble;
+    private final Supplier<String> soundTrouble;
 
-    /** @param cameraTrouble why the camera service is not running, or null while it runs. */
+    /** @param cameraTrouble why the camera service is not running, or null while it runs; soundTrouble, why it sends no sound. */
     Panel(Context context, WifiChange wifi, Agent.Http http, Supplier<String> server, Supplier<Identity> identity, Store store,
-          Supplier<String> cameraTrouble) {
+          Supplier<String> cameraTrouble, Supplier<String> soundTrouble) {
         this.context = context.getApplicationContext();
         this.wifi = wifi;
         this.http = http;
@@ -62,6 +64,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         this.identity = identity;
         this.store = store;
         this.cameraTrouble = cameraTrouble;
+        this.soundTrouble = soundTrouble;
     }
 
     boolean isOwner() {
@@ -73,8 +76,9 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     }
 
     /**
-     * As device owner: the location permission and location on, which Android asks for before it tells network names; and the camera,
-     * for the camera service (spec 2026-11-06). On the check-in thread: the grants wait on Android's permission controller.
+     * As device owner: the location permission and location on, which Android asks for before it tells network names; the camera,
+     * for the camera service (spec 2026-11-06); and the microphone while the room records sound, denied again when it stops (spec
+     * 2026-11-10). On the check-in thread: the grants wait on Android's permission controller.
      */
     void grantPermissions() {
         if (!isOwner()) return;
@@ -85,6 +89,9 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
                 dpm.setPermissionGrantState(AdminReceiver.component(context), pkg, Manifest.permission.CAMERA,
                         DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
             }
+            CameraLogin login = CameraLogin.load(store);
+            dpm.setPermissionGrantState(AdminReceiver.component(context), pkg, Manifest.permission.RECORD_AUDIO, login != null && login.sound
+                    ? DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED : DevicePolicyManager.PERMISSION_GRANT_STATE_DENIED);
             dpm.setPermissionGrantState(AdminReceiver.component(context), pkg, Manifest.permission.ACCESS_FINE_LOCATION,
                     DevicePolicyManager.PERMISSION_GRANT_STATE_GRANTED);
             if (Build.VERSION.SDK_INT >= 33) {
@@ -93,7 +100,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
             }
             if (Build.VERSION.SDK_INT >= 30) dpm.setLocationEnabled(AdminReceiver.component(context), true);
         } catch (RuntimeException e) {
-            Log.w(TAG, "Could not grant the Wi-Fi and camera permissions: " + e);
+            Log.w(TAG, "Could not grant the Wi-Fi, camera and microphone permissions: " + e);
         }
     }
 
@@ -130,8 +137,11 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
             String why = cannot(type);
             if (why != null) cannot.put(type, why);
         }
-        String camera = cameraCannot(isOwner(), CameraLogin.load(store), cameraTrouble.get());
+        CameraLogin login = CameraLogin.load(store);
+        String camera = cameraCannot(isOwner(), login, cameraTrouble.get());
         if (camera != null) cannot.put("camera", camera);
+        String sound = camera == null ? soundCannot(login, soundTrouble.get()) : null;     // a camera that is off says enough
+        if (sound != null) cannot.put("sound", sound);
         return cannot;
     }
 
@@ -140,6 +150,11 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         if (!owner) return CAMERA_NOT_OWNER;
         if (login == null) return CAMERA_NO_PASSWORD;
         return trouble == null ? null : CAMERA_FAILED + trouble;
+    }
+
+    /** Why the room's sound is not being sent, in the card's words, or null (`trouble`: the camera service's reason, null while it sends it). */
+    static String soundCannot(CameraLogin login, String trouble) {
+        return login == null || !login.sound || trouble == null ? null : SOUND_OFF + trouble;
     }
 
     // --- JobRunner.Abilities

@@ -342,7 +342,7 @@ sudo systemctl start croom</pre>
   <p>Refused on purpose: enterprise (user-name) networks, WEP, a new password for the network it is on ("join another network first"), and a new password for another saved network ("Forget X first"). The room can't move the panel to a network that can't reach the TV Pi.</p>
 
   <h3 class="sub">The camera in UniFi Protect</h3>
-  <p>From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's <span class="ui">Door sign camera password</span>. Until the room sends that password, nothing listens on the panel.</p>
+  <p>From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's <span class="ui">Door sign camera password</span>. Until the room sends that password, nothing listens on the panel. From version 4 it can send the panel's microphone too, room by room: see <strong>Sound</strong> below.</p>
   <ol class="steps">
     <li>On each room's touch screen: <span class="ui">Options › Settings › Devices</span>, set <span class="ui">Door sign camera password</span> (8 to 64 characters, no spaces). It applies at once. Using the same password in every room is simplest. Keep it in the office password manager.</li>
     <li><span class="ui">Update</span> the door sign on <span class="ui">Settings › Software</span> to version 3 or later.</li>
@@ -352,11 +352,12 @@ sudo systemctl start croom</pre>
   </ol>
   <table class="plain">
     <tbody>
-      <tr><td>Picture</td><td>H.264, 1280 × 720, 15 frames a second, about 1.5 Mbit/s (about 16 GB a day per panel when recorded Always), no sound</td></tr>
+      <tr><td>Picture</td><td>H.264, 1280 × 720, 15 frames a second, about 1.5 Mbit/s (about 16 GB a day per panel when recorded Always)</td></tr>
+      <tr><td>Sound</td><td>Only while the room's <span class="ui">Door sign camera sound</span> is on: AAC, 16 kHz mono, 32 kbit/s (about 350 MB a day per panel)</td></tr>
       <tr><td>Ports on the panel</td><td>ONVIF TCP 8000, RTSP TCP 8554, WS-Discovery UDP 3702</td></tr>
       <tr><td>Login</td><td>User <span class="chip">camera</span>, the room's password. The stream's address is handed out only to a client that logged in, and changes with the password</td></tr>
-      <tr><td>On the sign</td><td>Android's small green camera dot in a top corner, always. It is normal</td></tr>
-      <tr><td>Setup screen</td><td>"Camera on: 192.168.0.194, ONVIF port 8000, user camera", or why it is off</td></tr>
+      <tr><td>On the sign</td><td>Android's small green dot in a top corner, always: the camera, and the microphone too while the sound is on. It is normal</td></tr>
+      <tr><td>Setup screen</td><td>"Camera on: 192.168.0.194, ONVIF port 8000, user camera" (ending ", with sound" while it sends the microphone), or why it is off</td></tr>
     </tbody>
   </table>
   <table>
@@ -368,6 +369,25 @@ sudo systemctl start croom</pre>
     </tbody>
   </table>
   <div class="callout warn"><p class="kicker">A new password</p><p>Changing the password locks out the old login: Protect stops recording until the camera is adopted again with the new one.</p></div>
+
+  <h4>Sound</h4>
+  <p>Off in every room until someone turns it on. With it on, each door sign sends its microphone with its picture, and Protect records the hallway's sound.</p>
+  <div class="callout warn"><p class="kicker">Check before you turn it on</p><p>A door sign hears the conversations in the hallway. In many US states, recording a conversation needs the consent of everyone in it, which recording video does not. Check the law where the room is, and put up a notice by the door that sound is recorded.</p></div>
+  <ol class="steps">
+    <li>On the room's touch screen: <span class="ui">Options › Settings › Devices</span>, turn on <span class="ui">Door sign camera sound</span>. It applies at once: each door sign turns its microphone on at its next check-in (within 5 seconds), and its camera starts again, so Protect reconnects.</li>
+    <li><span class="ui">Update</span> the door sign on <span class="ui">Settings › Software</span> to version 4 or later.</li>
+    <li>In Protect, <strong>remove the door sign's camera and adopt it again</strong> (user <span class="chip">camera</span>, the password): Protect reads whether a camera has sound only when it adopts it.</li>
+    <li>Play back a recording to check the sound. In Protect's default stream mode the camera has no Enable Audio switch, and Protect records the sound as it comes. If a recording has none, set the camera's stream compatibility mode to <strong>Improved</strong> and turn on <strong>Enable Audio</strong>: Protect then converts the sound on the console, which uses some of its processing. Going back to the default mode means adopting the camera again.</li>
+  </ol>
+  <p>Turning it off stops the microphone at the next check-in, and the app takes its own microphone permission away again.</p>
+  <table>
+    <thead><tr><th>The card says</th><th>Meaning</th><th>Fix</th></tr></thead>
+    <tbody>
+      <tr><td>Sound off: Android has not granted the app the microphone</td><td>The panel hasn't taken the permission yet.</td><td>Wait for the next check-in; if it stays, reboot the panel from the card.</td></tr>
+      <tr><td>Sound off: Android would not let the app use the microphone: …</td><td>Android refused the camera service the microphone. The picture carries on.</td><td>Reboot the panel from the card.</td></tr>
+      <tr><td>Sound off: the microphone did not start: …</td><td>The microphone or its encoder failed. The picture carries on; the sound is tried again when the camera next starts.</td><td>Reboot the panel from the card. If it stays, read <span class="chip">adb logcat -s DoorSign</span>.</td></tr>
+    </tbody>
+  </table>
 </section>
 
 <!-- 07 -->

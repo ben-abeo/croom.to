@@ -205,4 +205,8 @@ async def test_the_door_sign_camera_password_applies_at_once(client_factory, con
                                  headers=unlocked)
     assert (await response.json())["restart"] is False
     answer = await (await client.post("/api/devices/checkin", json=sign, headers=header)).json()
-    assert answer["camera"] == {"user": "camera", "password": "new-pass-9", "name": "Lab door sign"}
+    assert answer["camera"] == {"user": "camera", "password": "new-pass-9", "name": "Lab door sign", "sound": False}
+    response = await client.post("/api/settings/config/devices", json={"values": {"control.door_sign_camera_sound": True}}, headers=unlocked)
+    assert (await response.json())["restart"] is False
+    answer = await (await client.post("/api/devices/checkin", json=sign, headers=header)).json()
+    assert answer["camera"]["sound"] is True

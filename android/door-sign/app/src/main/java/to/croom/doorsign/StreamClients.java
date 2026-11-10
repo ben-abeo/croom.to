@@ -18,11 +18,13 @@ final class StreamClients {
     final class Client {
         private final OutputStream out;
         private final BlockingQueue<byte[]> queue;
+        private final boolean sound;      // it set up the sound track as well as the picture
         private volatile boolean started;
         private volatile boolean closed;
 
-        Client(OutputStream out) {
+        Client(OutputStream out, boolean sound) {
             this.out = out;
+            this.sound = sound;
             this.queue = new ArrayBlockingQueue<>(maxQueued);
             Thread writer = new Thread(this::write, "door-sign-stream-client");
             writer.setDaemon(true);
@@ -61,9 +63,14 @@ final class StreamClients {
         this.maxQueued = maxQueued;
     }
 
-    /** A new viewer; one that comes after closeAll() (the camera stopped under it) is closed at once. */
+    /** A new viewer of the picture only. */
     Client add(OutputStream out) {
-        Client client = new Client(out);
+        return add(out, false);
+    }
+
+    /** A new viewer, with the sound if it set that track up; one that comes after closeAll() (the camera stopped under it) is closed at once. */
+    Client add(OutputStream out, boolean sound) {
+        Client client = new Client(out, sound);
         clients.add(client);
         if (closed) client.close();
         return client;
@@ -75,6 +82,13 @@ final class StreamClients {
             if (!client.started && !startsKeyframe) continue;
             client.started = true;
             if (!client.queue.offer(frame)) client.close();
+        }
+    }
+
+    /** One framed RTP packet of sound, to the connections that set its track up and whose picture has started. */
+    void sendSound(byte[] frame) {
+        for (Client client : clients) {
+            if (client.sound && client.started && !client.queue.offer(frame)) client.close();
         }
     }
 

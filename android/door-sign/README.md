@@ -135,6 +135,12 @@ To take the device owner away again (to give the panel to something else): facto
   UDP 3702 (`Discovery`). No login, nothing listens. A failure stops it, puts "Camera off: …" on the card (`cannot.camera`) and
   is retried in 10 seconds. Android shows its green camera dot on the sign while it runs. Adopting it in Protect: the door sign
   manual, "The camera in UniFi Protect".
+- **Its sound** (from version 4; spec `docs/superpowers/specs/2026-11-10-door-sign-camera-sound-design.md`): while the room's **Door
+  sign camera sound** is on, the login carries `"sound": true`, the app grants itself `RECORD_AUDIO` as device owner (and denies it
+  again when the switch goes off), the service runs as camera and microphone, and `SoundStream` sends the microphone as AAC-LC
+  (16 kHz mono, 32 kbit/s) on a second RTSP track (`trackID=1`, interleaved channels 2-3, RFC 3640 AAC-hbr, `AacRtp`); ONVIF's
+  profile gets an audio source and an AAC encoder. A microphone that fails turns only the sound off ("Sound off: …" on the card,
+  `cannot.sound`); the picture carries on. No RTCP: a viewer lines the two tracks up by when each began.
 
 The check-in is the touch Pi's protocol (`POST /api/devices/checkin`, kind `sign`, the version being the app's `versionCode`); the
 id and token are made by the app at its first start and kept in its private storage. Clearing the app's data makes a new id, which

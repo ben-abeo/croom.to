@@ -257,16 +257,16 @@ def test_from_config_keeps_the_registry_in_the_data_directory(tmp_path):
 # --- the door sign camera (spec 2026-11-06): the room's login, handed to joined door signs only
 
 SIGN = "s" * 32
-LOGIN = {"user": "camera", "password": "secret-pw1", "name": "Conference Room B door sign"}
+LOGIN = {"user": "camera", "password": "secret-pw1", "name": "Conference Room B door sign", "sound": False}
 
 
 def sign_body():
     return {"id": SIGN, "kind": "sign", "version": "3", "version_name": "3.0", "name": "WF2489T", "network": {}, "job": None}
 
 
-def camera_service(pins, registry, password="secret-pw1"):
+def camera_service(pins, registry, password="secret-pw1", sound=False):
     return make_service(pin_store=pins, registry=registry, meeting=StubMeeting(), room_name="Conference Room B",
-                        sign_camera_password=password)
+                        sign_camera_password=password, sign_camera_sound=sound)
 
 
 async def test_a_joined_door_sign_gets_the_camera_login(client_factory, pins, registry):  # noqa: F811
@@ -276,6 +276,14 @@ async def test_a_joined_door_sign_gets_the_camera_login(client_factory, pins, re
     registry.allow(SIGN)
     answer = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
     assert answer["state"] == "allowed" and answer["camera"] == LOGIN
+
+
+async def test_a_room_that_records_sound_tells_its_door_signs_to_send_it(client_factory, pins, registry):  # noqa: F811
+    client = await client_factory(camera_service(pins, registry, sound=True))
+    await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)
+    registry.allow(SIGN)
+    answer = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
+    assert answer["camera"] == dict(LOGIN, sound=True)
 
 
 async def test_a_touch_pi_never_gets_the_camera_login(client_factory, pins, registry):  # noqa: F811

@@ -149,6 +149,9 @@ SCHEMA: List[Setting] = [
     Setting("control.door_sign_camera_password", "Door sign camera password", "devices", "secret", live=True, max_length=64,
             pattern=r"[!-~]{8,64}", pattern_words="8 to 64 letters, digits or symbols, with no spaces",
             help="Protect adopts each door sign's camera with the user camera and this password"),
+    Setting("control.door_sign_camera_sound", "Door sign camera sound", "devices", "switch", live=True,
+            help="Each door sign's microphone goes to Protect with its picture. Recording people's conversations can need everyone's "
+                 "consent: check the law where the room is, and put up a notice"),
     # Laptop switch
     Setting("laptop.enabled", "Laptop switch", "laptop", "switch"),
     Setting("laptop.gpio_pin", "GPIO pin", "laptop", "number", range=(0, 27), integer=True, help="BCM numbering: 17 is header pin 11"),

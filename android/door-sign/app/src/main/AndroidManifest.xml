@@ -16,8 +16,12 @@
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <!-- Its sound, while the room's Door sign camera sound is on (spec 2026-11-10): granted then as device owner, denied again when off. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
     <uses-feature android:name="android.hardware.camera.front" android:required="false" />
+    <uses-feature android:name="android.hardware.microphone" android:required="false" />
 
     <!-- Exit to Android opens the panel's own home screen, so the app has to see the other home apps. -->
     <queries>
@@ -80,7 +84,7 @@
         <service
             android:name=".CameraService"
             android:exported="false"
-            android:foregroundServiceType="camera" />
+            android:foregroundServiceType="camera|microphone" />
 
         <!-- The sign back after its process ended: at once after the app's own update, else within a minute or two (an alarm). -->
         <receiver

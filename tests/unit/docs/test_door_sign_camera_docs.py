@@ -46,3 +46,17 @@ def test_the_manual_gives_the_ports_and_the_user():
         for needle in (f"ONVIF TCP {onvif}", f"RTSP TCP {rtsp}", f"WS-Discovery UDP {discovery}", f"user {user}",
                        f"ONVIF port {onvif}, user {user}"):
             assert needle in text, (name, needle)
+
+
+def test_the_manual_gives_the_sound_switch_its_format_and_the_cards_words():
+    """The sound (spec 2026-11-10): the switch's name from the schema, the format and "Sound off" from the app's source."""
+    from croom.settings.schema import BY_PATH
+
+    label = BY_PATH["control.door_sign_camera_sound"].label
+    rate = int(java_int("Onvif.java", "SAMPLE_RATE")) // 1000
+    kbps = java_int("Onvif.java", "SOUND_BITRATE_KBPS")
+    off = java_string("Panel.java", "SOUND_OFF").rstrip(": ")
+    for name, text in manuals().items():
+        for needle in (label, f"AAC, {rate} kHz mono, {kbps} kbit/s", off, "Android has not granted the app the microphone",
+                       "the microphone did not start", ", with sound", "consent"):
+            assert needle in text, (name, needle)

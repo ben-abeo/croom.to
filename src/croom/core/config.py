@@ -281,6 +281,7 @@ class ControlConfig:
     camera_presets: List[str] = field(default_factory=lambda: ["Wide", "Table", "Whiteboard"])  # the three slot names
     camera_auto_framing: str = "off"    # Auto framing (devices/autoframe.py): "off", "call_start" or "dynamic"
     door_sign_camera_password: str = ""  # the door signs' camera login for UniFi Protect (user "camera"); blank: no camera
+    door_sign_camera_sound: bool = False  # the door signs' microphone with their picture; off until someone chooses it (consent)
 
 
 @dataclass
@@ -443,6 +444,7 @@ class Config:
                 "camera_presets": list(self.control.camera_presets),
                 "camera_auto_framing": self.control.camera_auto_framing,
                 "door_sign_camera_password": self.control.door_sign_camera_password,
+                "door_sign_camera_sound": self.control.door_sign_camera_sound,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

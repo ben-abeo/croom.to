@@ -303,7 +303,7 @@ To point the touch Pi at a new TV Pi address, re-run the installer with the new 
 | Room | Name (required, up to 80 characters), location, company (shown on the door sign; blank shows the logo alone), time zone. |
 | Calendar | Google calendar id; the service-account key, by **Upload** or **From USB stick** (a `.json` at the top of a stick in the **TV Pi**), then shown only as "Key for …, saved …"; booking hours. |
 | Meetings | Platforms, camera and mic on at join, kiosk mode, the dialogs the room answers, ask about every dialog, reactions, Zoom SDK keys (upload, USB or **Type the keys**), Meet participants domain, **Sign in to Google**. |
-| Devices | Speaker, microphone and camera on the TV Pi (or Automatic), camera travel time (1 to 60 s), the three camera preset names, the door sign camera password (UniFi Protect adopts the door signs' cameras with user `camera` and it; applies at once). |
+| Devices | Speaker, microphone and camera on the TV Pi (or Automatic), camera travel time (1 to 60 s), the three camera preset names, the door sign camera password (UniFi Protect adopts the door signs' cameras with user `camera` and it; applies at once), and Door sign camera sound (off: on, the door signs send their microphones to Protect too; applies at once; check the consent law first). |
 | TV | Opens **Options › TV**; its Back returns to Settings. |
 | Laptop switch | On or off, GPIO pin (BCM 0 to 27), press length (50 to 2000 ms), the camera's USB id, wait for a move (1 to 60 s), **Test the switch**. |
 | AI & dashboard | AI switches and backend; the fleet dashboard's on/off, URL and enrolment token. |

@@ -37,6 +37,7 @@ the sign goes on exactly as it is.
 **Non-goals**
 
 - **Sound.** Video only (my call, agreed in playback): recording hallway conversations raises consent questions that video does not.
+  *Superseded 2026-11-10:* sound behind a per-room switch, off by default (`2026-11-10-door-sign-camera-sound-design.md`).
 - **Motion events.** Protect only gets motion from a third-party camera that sends ONVIF events. The panel doesn't, so its camera
   is recorded with Protect's "Always" recording mode (my call; see section 9).
 - **PTZ, a second stream, snapshots, smart detections.** Protect does not offer these for third-party cameras, or they aren't needed.

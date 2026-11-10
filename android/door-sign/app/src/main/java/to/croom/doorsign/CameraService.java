@@ -16,6 +16,8 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.Manifest;
+import android.content.pm.PackageManager;
 import android.util.Log;
 import java.io.FilterOutputStream;
 import java.io.IOException;
@@ -39,6 +41,8 @@ import java.util.UUID;
  * shows: the camera and its encoder (CameraStream), the ONVIF answers on TCP 8000, the stream on RTSP 8554 and WS-Discovery on UDP 3702.
  * It runs only while the app is the device owner and holds the room's camera login (CameraControl starts and stops it); without the
  * login nothing listens. Anything that fails stops the lot, says why on the door sign's card, and is tried again in 10 seconds.
+ * While the room's Door sign camera sound is on, the microphone (SoundStream) goes with the picture (spec 2026-11-10): a microphone
+ * that fails turns only the sound off, and says so; the picture carries on.
  */
 public class CameraService extends Service {
 
@@ -51,27 +55,37 @@ public class CameraService extends Service {
 
     private static volatile String trouble;                // why it is not running, or null
     private static volatile String on;                     // the setup screen's line while it runs
+    private static volatile String soundTrouble;           // why the room's sound is not being sent, or null
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private Engine engine;
     private CameraLogin running;
+    private boolean runningSound;
 
     /** Why the camera is not running (the card's words come from Panel.cameraCannot), or null while it runs or is starting. */
     static String trouble() {
         return trouble;
     }
 
+    /** Why the room's sound is not being sent (the card's words come from Panel.soundCannot), or null. */
+    static String soundTrouble() {
+        return soundTrouble;
+    }
+
     static void failedToStart(String why) {
         trouble = why;
     }
 
-    /** The setup screen's line about the camera. */
+    /** The setup screen's line about the camera, and its sound. */
     static String line(Context context) {
         Context app = context.getApplicationContext();
-        String why = Panel.cameraCannot(Kiosk.isOwner(app), CameraLogin.load(new Prefs(app, "check_in")), trouble);
+        CameraLogin login = CameraLogin.load(new Prefs(app, "check_in"));
+        String why = Panel.cameraCannot(Kiosk.isOwner(app), login, trouble);
         if (why != null) return why;
         String now = on;
-        return now != null ? now : "Camera starting";
+        if (now == null) return "Camera starting";
+        String sound = Panel.soundCannot(login, soundTrouble);
+        return sound == null ? now : now + ". " + sound;
     }
 
     @Override public IBinder onBind(Intent intent) {
@@ -79,21 +93,26 @@ public class CameraService extends Service {
     }
 
     @Override public int onStartCommand(Intent intent, int flags, int startId) {
+        CameraLogin login = CameraLogin.load(new Prefs(this, "check_in"));
+        boolean granted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED;
+        String soundRefused = login == null || !login.sound ? null : granted ? null : "Android has not granted the app the microphone";
         try {
-            foreground();
+            soundRefused = foreground(soundRefused == null && login != null && login.sound, soundRefused);
         } catch (RuntimeException e) {          // nothing in the camera may end the sign's process
             failedToStart("Android would not run it: " + e.getMessage());
             stopSelf();
             return START_NOT_STICKY;
         }
-        CameraLogin login = CameraLogin.load(new Prefs(this, "check_in"));
         if (login == null || !Kiosk.isOwner(this)) {
             stopSelf();
             return START_NOT_STICKY;
         }
-        if (!login.equals(running)) {           // a new password: the old stream's path and sessions go with the old engine
+        boolean sound = login.sound && soundRefused == null;
+        if (!login.sound) soundTrouble = null;                   // the room records no sound: nothing to say
+        else if (soundRefused != null) soundTrouble = soundRefused;   // else the running engine's word stands (a microphone that failed)
+        if (!login.equals(running) || sound != runningSound) {   // a new password: the old stream's path and sessions go with the old engine
             try {
-                restart(login);
+                restart(login, sound);
             } catch (RuntimeException e) {
                 failedToStart("the camera did not start: " + e.getMessage());
                 if (engine != null) engine.stop();
@@ -113,33 +132,55 @@ public class CameraService extends Service {
         super.onDestroy();
     }
 
-    private void restart(CameraLogin login) {
+    private void restart(CameraLogin login, boolean sound) {
         main.removeCallbacksAndMessages(null);
         if (engine != null) engine.stop();
         running = login;
-        engine = new Engine(login);
+        runningSound = sound;
+        engine = new Engine(login, sound);
         engine.start();
     }
 
-    private void foreground() {
+    /**
+     * A foreground service of the camera type, and of the microphone type too when it is to send sound (from Android 11 Android
+     * silences a microphone used outside one). Returns why the sound can't go (`refused`, or Android refusing the microphone type).
+     */
+    private String foreground(boolean sound, String refused) {
         NotificationManager notifications = getSystemService(NotificationManager.class);
         notifications.createNotificationChannel(new NotificationChannel(CHANNEL, "Door sign camera", NotificationManager.IMPORTANCE_MIN));
         Notification notification = new Notification.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_sign).setContentTitle("Door sign camera")
-                .setContentText("UniFi Protect can record this panel's camera").setOngoing(true).build();
-        if (Build.VERSION.SDK_INT >= 30) startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);   // the camera type is from Android 11
-        else startForeground(1, notification);
+                .setContentText(sound ? "UniFi Protect can record this panel's camera and microphone" : "UniFi Protect can record this panel's camera")
+                .setOngoing(true).build();
+        if (Build.VERSION.SDK_INT < 30) {                    // the camera and microphone types are from Android 11
+            startForeground(1, notification);
+            return refused;
+        }
+        if (sound) {
+            try {
+                startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA | ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE);
+                return null;
+            } catch (RuntimeException e) {                   // the picture without the sound, rather than nothing
+                refused = "Android would not let the app use the microphone: " + e.getMessage();
+            }
+        }
+        startForeground(1, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
+        return refused;
     }
 
     /** One run of the camera and its three servers, with one login. Stopped as a whole, and replaced by a new one to try again. */
-    private final class Engine implements CameraStream.Sink {
+    private final class Engine implements CameraStream.Sink, SoundStream.Sink {
         private final CameraLogin login;
         private final String streamPath;
         private final StreamClients clients = new StreamClients(MAX_QUEUED);
         private final H264Rtp rtp = new H264Rtp(new SecureRandom().nextInt());
         private final CameraStream stream;
+        private final SoundStream sound;        // null: picture only
+        private final AacRtp aac = new AacRtp(new SecureRandom().nextInt());
         private volatile boolean stopped;
+        private volatile boolean soundGone;     // the microphone failed: picture only from here
         private volatile byte[] sps;
         private volatile byte[] pps;
+        private volatile byte[] aacConfig;
         private ServerSocket onvif;
         private ServerSocket rtsp;
         private MulticastSocket discovery;
@@ -149,11 +190,13 @@ public class CameraService extends Service {
         private String serial;
         private String urn;
         private volatile long lastFrame;
+        private volatile long lastSound;
 
-        Engine(CameraLogin login) {
+        Engine(CameraLogin login, boolean sound) {
             this.login = login;
             this.streamPath = Onvif.streamPath(login.password);
             this.stream = new CameraStream(CameraService.this, this);
+            this.sound = sound ? new SoundStream(this) : null;
         }
 
         void start() {
@@ -186,10 +229,15 @@ public class CameraService extends Service {
             thread("door-sign-rtsp", () -> accept(rtsp, this::rtspConnection));
             thread("door-sign-discovery", this::discover);
             lastFrame = System.nanoTime();
+            lastSound = lastFrame;
             stream.start();
+            if (sound != null) {
+                sound.start();
+                soundTrouble = null;
+            }
             main.postDelayed(this::watch, STALL_MS);
             trouble = null;
-            on = "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user;
+            on = "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user + (sound != null ? ", with sound" : "");
             Log.i(TAG, on);
         }
 
@@ -197,6 +245,7 @@ public class CameraService extends Service {
             if (stopped) return;
             stopped = true;
             stream.stop();
+            if (sound != null) sound.stop();
             clients.closeAll();
             close(onvif);
             close(rtsp);
@@ -211,11 +260,16 @@ public class CameraService extends Service {
                 failed("no picture from the camera for " + STALL_MS / 1000 + " seconds");
                 return;
             }
+            // A microphone that opened but gives nothing would hold every DESCRIBE (and so the picture) waiting for its config
+            if (sound != null && !soundGone && System.nanoTime() - lastSound > STALL_MS * 1_000_000) {
+                soundFailed("no sound from it for " + STALL_MS / 1000 + " seconds");
+            }
             main.postDelayed(this::watch, STALL_MS);
         }
 
         private Onvif.Info info(String at) {
-            return new Onvif.Info(login, at, mac, Build.MODEL == null ? "" : Build.MODEL, versionName(), serial);
+            CameraLogin sent = sound != null && !soundGone ? login : new CameraLogin(login.user, login.password, login.name, false);
+            return new Onvif.Info(sent, at, mac, Build.MODEL == null ? "" : Build.MODEL, versionName(), serial);
         }
 
         // --- CameraStream.Sink, on the camera's thread
@@ -236,10 +290,36 @@ public class CameraService extends Service {
             boolean first = true;
             for (int i = 0; i < nals.size(); i++) {
                 for (byte[] packet : rtp.packets(nals.get(i), presentationUs, i == nals.size() - 1)) {
-                    clients.send(H264Rtp.interleaved(packet), keyframe && first);
+                    clients.send(H264Rtp.interleaved(packet, 0), keyframe && first);
                     first = false;
                 }
             }
+        }
+
+        // --- SoundStream.Sink, on the sound's thread
+
+        @Override public void soundConfig(byte[] audioSpecificConfig) {
+            lastSound = System.nanoTime();
+            aacConfig = audioSpecificConfig;
+        }
+
+        // ponytail: no RTCP sender reports, so a viewer lines the sound up with the picture by when each began (both start at its first
+        // keyframe, within a frame of each other); send RTCP SRs from one clock if Protect ever plays them out of step
+        @Override public void sound(byte[] frame, long presentationUs) {
+            lastSound = System.nanoTime();
+            if (clients.size() == 0) return;
+            clients.sendSound(H264Rtp.interleaved(aac.packet(frame, presentationUs), 2));
+        }
+
+        @Override public void soundFailed(String why) {
+            main.post(() -> {
+                if (engine != this || stopped) return;
+                Log.w(TAG, "Sound off: " + why);
+                soundGone = true;                  // new viewers are described the picture only; it is tried again when the camera next starts
+                sound.stop();
+                soundTrouble = "the microphone did not start: " + why;
+                on = "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user;
+            });
         }
 
         @Override public void failed(String why) {
@@ -250,7 +330,7 @@ public class CameraService extends Service {
                 on = null;
                 stop();
                 main.postDelayed(() -> {
-                    if (engine == this && running != null) restart(running);
+                    if (engine == this && running != null) restart(running, runningSound);
                 }, RETRY_MS);
             });
         }
@@ -282,19 +362,23 @@ public class CameraService extends Service {
             InputStream in = socket.getInputStream();
             OutputStream out = new Atomic(socket.getOutputStream());
             String session = Long.toHexString(new SecureRandom().nextLong() & Long.MAX_VALUE).toUpperCase();
+            boolean withSound = false;
             while (!stopped) {
                 Rtsp.Request request = Rtsp.read(in);
                 byte[] s = sps;
                 byte[] p = pps;
-                String described = s == null || p == null ? null : Rtsp.sdp(socket.getLocalAddress().getHostAddress(), s, p);
+                byte[] a = sound == null || soundGone ? null : aacConfig;
+                boolean soundPending = sound != null && !soundGone && a == null;     // its encoder has not started yet
+                String described = s == null || p == null || soundPending ? null : Rtsp.sdp(socket.getLocalAddress().getHostAddress(), s, p, a);
                 Rtsp.Reply reply = request.method.equals("DESCRIBE") && described == null
                         ? new Rtsp.Reply(503, request.headers.get("cseq"))         // the encoder has not started yet: Protect asks again
                         : Rtsp.answer(request, streamPath, described == null ? "" : described, session);
                 out.write(reply.bytes());
                 if (reply.close) return;
+                if (reply.sound && reply.status == 200) withSound = true;
                 if (reply.play) {
                     socket.setSoTimeout(0);      // from here a dead viewer shows as a full queue, not a quiet connection
-                    clients.add(out);
+                    clients.add(out, withSound);
                     stream.requestKeyframe();
                 }
             }

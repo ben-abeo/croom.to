@@ -309,7 +309,7 @@ Refused on purpose: enterprise (user-name) networks, WEP, a new password for the
 
 ### The camera in UniFi Protect
 
-From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's **Door sign camera password**. Until the room sends that password, nothing listens on the panel.
+From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's **Door sign camera password**. Until the room sends that password, nothing listens on the panel. From version 4 it can send the panel's microphone too, room by room: see **Sound** below.
 
 1. On each room's touch screen: **Options › Settings › Devices**, set **Door sign camera password** (8 to 64 characters, no spaces). It applies at once. Using the same password in every room is simplest. Keep it in the office password manager.
 2. **Update** the door sign on **Settings › Software** to version 3 or later.
@@ -319,11 +319,12 @@ From version 3, every door sign's front camera can be recorded by UniFi Protect 
 
 | | |
 | --- | --- |
-| Picture | H.264, 1280 × 720, 15 frames a second, about 1.5 Mbit/s (about 16 GB a day per panel when recorded Always), no sound |
+| Picture | H.264, 1280 × 720, 15 frames a second, about 1.5 Mbit/s (about 16 GB a day per panel when recorded Always) |
+| Sound | Only while the room's **Door sign camera sound** is on: AAC, 16 kHz mono, 32 kbit/s (about 350 MB a day per panel) |
 | Ports on the panel | ONVIF TCP 8000, RTSP TCP 8554, WS-Discovery UDP 3702 |
 | Login | User `camera`, the room's password. The stream's address is handed out only to a client that logged in, and changes with the password |
-| On the sign | Android's small green camera dot in a top corner, always. It is normal |
-| Setup screen | "Camera on: 192.168.0.194, ONVIF port 8000, user camera", or why it is off |
+| On the sign | Android's small green dot in a top corner, always: the camera, and the microphone too while the sound is on. It is normal |
+| Setup screen | "Camera on: 192.168.0.194, ONVIF port 8000, user camera" (ending ", with sound" while it sends the microphone), or why it is off |
 
 | The card says | Meaning | Fix |
 | --- | --- | --- |
@@ -332,6 +333,27 @@ From version 3, every door sign's front camera can be recorded by UniFi Protect 
 | Camera off: the camera did not start: … | The camera, encoder or a port failed. It tries again every 10 seconds. | Reboot the panel from the card. If it stays, read `adb logcat -s DoorSign`. |
 
 Changing the password locks out the old login: Protect stops recording until the camera is adopted again with the new one.
+
+#### Sound
+
+Off in every room until someone turns it on. With it on, each door sign sends its microphone with its picture, and Protect records the hallway's sound.
+
+> **CHECK BEFORE YOU TURN IT ON**
+>
+> A door sign hears the conversations in the hallway. In many US states, recording a conversation needs the consent of everyone in it, which recording video does not. Check the law where the room is, and put up a notice by the door that sound is recorded.
+
+1. On the room's touch screen: **Options › Settings › Devices**, turn on **Door sign camera sound**. It applies at once: each door sign turns its microphone on at its next check-in (within 5 seconds), and its camera starts again, so Protect reconnects.
+2. **Update** the door sign on **Settings › Software** to version 4 or later.
+3. In Protect, **remove the door sign's camera and adopt it again** (user `camera`, the password): Protect reads whether a camera has sound only when it adopts it.
+4. Play back a recording to check the sound. In Protect's default stream mode the camera has no Enable Audio switch, and Protect records the sound as it comes. If a recording has none, set the camera's stream compatibility mode to **Improved** and turn on **Enable Audio**: Protect then converts the sound on the console, which uses some of its processing. Going back to the default mode means adopting the camera again.
+
+Turning it off stops the microphone at the next check-in, and the app takes its own microphone permission away again.
+
+| The card says | Meaning | Fix |
+| --- | --- | --- |
+| Sound off: Android has not granted the app the microphone | The panel hasn't taken the permission yet. | Wait for the next check-in; if it stays, reboot the panel from the card. |
+| Sound off: Android would not let the app use the microphone: … | Android refused the camera service the microphone. The picture carries on. | Reboot the panel from the card. |
+| Sound off: the microphone did not start: … | The microphone or its encoder failed. The picture carries on; the sound is tried again when the camera next starts. | Reboot the panel from the card. If it stays, read `adb logcat -s DoorSign`. |
 
 ## Building and releasing the app
 

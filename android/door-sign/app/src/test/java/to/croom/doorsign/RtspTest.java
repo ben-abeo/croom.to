@@ -16,7 +16,8 @@ public class RtspTest {
     static final String URI = "rtsp://192.168.0.194:8554" + PATH;
     static final byte[] SPS = {0x67, 0x4d, 0x00, 0x1f, (byte) 0x95, (byte) 0xa8};
     static final byte[] PPS = {0x68, (byte) 0xee, 0x3c, (byte) 0x80};
-    static final String SDP = Rtsp.sdp("192.168.0.194", SPS, PPS);
+    static final String SDP = Rtsp.sdp("192.168.0.194", SPS, PPS, null);
+    static final byte[] AAC_CONFIG = {0x14, 0x08};                        // AAC-LC, 16 kHz, mono
 
     static Rtsp.Request request(String text) throws Exception {
         return Rtsp.read(new ByteArrayInputStream(text.getBytes(StandardCharsets.ISO_8859_1)));
@@ -95,6 +96,23 @@ public class RtspTest {
         assertTrue(wire.contains("CSeq: 7\r\n"));
         assertTrue(wire.contains("Content-Length: " + SDP.getBytes(StandardCharsets.UTF_8).length + "\r\n"));
         assertTrue(wire.endsWith("\r\n\r\n" + SDP));
+    }
+
+    @Test public void withSoundTheSdpHasAnAacTrackAfterThePicture() {
+        String sdp = Rtsp.sdp("192.168.0.194", SPS, PPS, AAC_CONFIG);
+        assertTrue(sdp.startsWith(SDP));
+        assertTrue(sdp.endsWith("m=audio 0 RTP/AVP 97\r\na=rtpmap:97 MPEG4-GENERIC/16000/1\r\n"
+                + "a=fmtp:97 streamtype=5;profile-level-id=15;mode=AAC-hbr;sizelength=13;indexlength=3;indexdeltalength=3;config=1408\r\n"
+                + "a=control:trackID=1\r\n"));
+        assertFalse(SDP.contains("m=audio"));
+    }
+
+    @Test public void theSoundTrackIsSetUpOnChannelsTwoAndThree() throws Exception {
+        Rtsp.Reply sound = ask("SETUP", URI + "/trackID=1", "Transport: RTP/AVP/TCP;unicast;interleaved=2-3\r\nSession: 1A2B3C4D\r\n");
+        assertEquals(200, sound.status);
+        assertEquals("RTP/AVP/TCP;unicast;interleaved=2-3", sound.headers.get("Transport"));
+        assertTrue(sound.sound);
+        assertFalse(ask("SETUP", URI + "/trackID=0", "Transport: RTP/AVP/TCP;unicast;interleaved=0-1\r\n").sound);
     }
 
     @Test public void sdpHasTheParameterSets() {

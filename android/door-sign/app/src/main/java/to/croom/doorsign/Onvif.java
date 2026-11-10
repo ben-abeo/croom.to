@@ -30,6 +30,8 @@ final class Onvif {
     static final int FPS = 15;
     static final int BITRATE_KBPS = 1500;
     static final int GOP = 30;          // a keyframe every 2 seconds at 15 frames a second
+    static final int SAMPLE_RATE = 16000;           // the sound (spec 2026-11-10): AAC-LC, mono, as IP cameras send it
+    static final int SOUND_BITRATE_KBPS = 32;
     static final Duration CLOCK_SKEW = Duration.ofMinutes(15);
 
     private static final Pattern BODY_ACTION = Pattern.compile("<(?:[\\w.-]+:)?Body\\b[^>]*>\\s*<(?:[\\w.-]+:)?([\\w.-]+)");
@@ -166,9 +168,9 @@ final class Onvif {
                 return scopes.append("</tds:GetScopesResponse>").toString();
             }
             case "GetProfiles":
-                return "<trt:GetProfilesResponse>" + profile("trt:Profiles") + "</trt:GetProfilesResponse>";
+                return "<trt:GetProfilesResponse>" + profile("trt:Profiles", info.login.sound) + "</trt:GetProfilesResponse>";
             case "GetProfile":
-                return "<trt:GetProfileResponse>" + profile("trt:Profile") + "</trt:GetProfileResponse>";
+                return "<trt:GetProfileResponse>" + profile("trt:Profile", info.login.sound) + "</trt:GetProfileResponse>";
             case "GetVideoSources":
                 return "<trt:GetVideoSourcesResponse><trt:VideoSources token=\"vs\"><tt:Framerate>" + FPS + "</tt:Framerate><tt:Resolution><tt:Width>"
                         + WIDTH + "</tt:Width><tt:Height>" + HEIGHT + "</tt:Height></tt:Resolution></trt:VideoSources></trt:GetVideoSourcesResponse>";
@@ -178,6 +180,18 @@ final class Onvif {
             case "GetVideoEncoderConfigurations":
                 return "<trt:GetVideoEncoderConfigurationsResponse>" + encoderConfiguration("trt:Configurations")
                         + "</trt:GetVideoEncoderConfigurationsResponse>";
+            case "GetAudioSources":
+                if (!info.login.sound) return null;
+                return "<trt:GetAudioSourcesResponse><trt:AudioSources token=\"as\"><tt:Channels>1</tt:Channels></trt:AudioSources>"
+                        + "</trt:GetAudioSourcesResponse>";
+            case "GetAudioSourceConfigurations":
+                if (!info.login.sound) return null;
+                return "<trt:GetAudioSourceConfigurationsResponse>" + soundSourceConfiguration("trt:Configurations")
+                        + "</trt:GetAudioSourceConfigurationsResponse>";
+            case "GetAudioEncoderConfigurations":
+                if (!info.login.sound) return null;
+                return "<trt:GetAudioEncoderConfigurationsResponse>" + soundEncoderConfiguration("trt:Configurations")
+                        + "</trt:GetAudioEncoderConfigurationsResponse>";
             case "GetStreamUri":
                 return "<trt:GetStreamUriResponse><trt:MediaUri><tt:Uri>rtsp://" + esc(info.host) + ":" + RTSP_PORT + streamPath(info.login.password)
                         + "</tt:Uri><tt:InvalidAfterConnect>false</tt:InvalidAfterConnect><tt:InvalidAfterReboot>false</tt:InvalidAfterReboot>"
@@ -196,9 +210,21 @@ final class Onvif {
                 + "<tt:Minor>5</tt:Minor></tds:Version></tds:Service>";
     }
 
-    private static String profile(String element) {
+    /** The one profile; with sound, its microphone too, in the schema's order (video source, audio source, video encoder, audio encoder). */
+    private static String profile(String element, boolean sound) {
         return "<" + element + " token=\"main\" fixed=\"true\"><tt:Name>main</tt:Name>" + sourceConfiguration("tt:VideoSourceConfiguration")
-                + encoderConfiguration("tt:VideoEncoderConfiguration") + "</" + element + ">";
+                + (sound ? soundSourceConfiguration("tt:AudioSourceConfiguration") : "") + encoderConfiguration("tt:VideoEncoderConfiguration")
+                + (sound ? soundEncoderConfiguration("tt:AudioEncoderConfiguration") : "") + "</" + element + ">";
+    }
+
+    private static String soundSourceConfiguration(String element) {
+        return "<" + element + " token=\"asc\"><tt:Name>asc</tt:Name><tt:UseCount>1</tt:UseCount><tt:SourceToken>as</tt:SourceToken></" + element + ">";
+    }
+
+    private static String soundEncoderConfiguration(String element) {
+        return "<" + element + " token=\"aec\"><tt:Name>aec</tt:Name><tt:UseCount>1</tt:UseCount><tt:Encoding>AAC</tt:Encoding><tt:Bitrate>"
+                + SOUND_BITRATE_KBPS + "</tt:Bitrate><tt:SampleRate>" + SAMPLE_RATE / 1000 + "</tt:SampleRate>" + MULTICAST
+                + "<tt:SessionTimeout>PT60S</tt:SessionTimeout></" + element + ">";
     }
 
     // go2rtc's ONVIF server for Protect (PR AlexxIT/go2rtc#1520): Protect breaks without the source configuration, and needs RateControl
@@ -212,9 +238,11 @@ final class Onvif {
                 + "<tt:Width>" + WIDTH + "</tt:Width><tt:Height>" + HEIGHT + "</tt:Height></tt:Resolution><tt:Quality>5</tt:Quality><tt:RateControl>"
                 + "<tt:FrameRateLimit>" + FPS + "</tt:FrameRateLimit><tt:EncodingInterval>1</tt:EncodingInterval><tt:BitrateLimit>" + BITRATE_KBPS
                 + "</tt:BitrateLimit></tt:RateControl><tt:H264><tt:GovLength>" + GOP + "</tt:GovLength><tt:H264Profile>Main</tt:H264Profile></tt:H264>"
-                + "<tt:Multicast><tt:Address><tt:Type>IPv4</tt:Type><tt:IPv4Address>0.0.0.0</tt:IPv4Address></tt:Address><tt:Port>0</tt:Port>"
-                + "<tt:TTL>1</tt:TTL><tt:AutoStart>false</tt:AutoStart></tt:Multicast><tt:SessionTimeout>PT60S</tt:SessionTimeout></" + element + ">";
+                + MULTICAST + "<tt:SessionTimeout>PT60S</tt:SessionTimeout></" + element + ">";
     }
+
+    private static final String MULTICAST = "<tt:Multicast><tt:Address><tt:Type>IPv4</tt:Type><tt:IPv4Address>0.0.0.0</tt:IPv4Address></tt:Address>"
+            + "<tt:Port>0</tt:Port><tt:TTL>1</tt:TTL><tt:AutoStart>false</tt:AutoStart></tt:Multicast>";
 
     private static String envelope(String body) {
         return "<?xml version=\"1.0\" encoding=\"UTF-8\"?><s:Envelope xmlns:s=\"http://www.w3.org/2003/05/soap-envelope\" "

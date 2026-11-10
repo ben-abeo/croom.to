@@ -174,13 +174,19 @@ class MeetingConfig:
 class CalendarConfig:
     """Calendar integration configuration."""
     providers: List[str] = field(default_factory=lambda: ["google", "microsoft"])
-    sync_interval_seconds: int = 60
+    sync_interval_seconds: int = 15   # a meeting the room is added to in Google shows within this
     google_credentials_path: str = ""
     google_calendar_id: str = ""  # the room's calendar address, e.g. c_18...@resource.calendar.google.com
     booking_start: str = "08:00"  # the first start time the door sign and the room page offer for a booking (spec 2026-10-25)
     booking_end: str = "18:00"    # and the time a booking made there ends by
     microsoft_tenant_id: str = ""
     microsoft_client_id: str = ""
+
+    def __post_init__(self):
+        # Every room's config.yaml has the old default, 60, written out (the installer and Settings write the whole section). Read
+        # unedited, it is the new default (the file is not written): an update alone moves the room to 15.
+        if self.sync_interval_seconds == 60:
+            self.sync_interval_seconds = 15
 
 
 @dataclass

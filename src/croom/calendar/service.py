@@ -86,7 +86,7 @@ class CalendarService(Service):
         self._initialized = False
         self._provider: Optional[CalendarProvider] = None
         self._calendar_ids: List[str] = []
-        self._poll_interval = self.config.get('poll_interval', 60)
+        self._poll_interval = self.config.get('poll_interval', 15)
         self._auto_join_minutes = self.config.get('auto_join_minutes', 1)
 
         # Event cache: Google's events as the last poll had them (or, until one has, as the device kept them)

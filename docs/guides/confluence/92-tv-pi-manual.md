@@ -266,7 +266,7 @@ If the installer stops with an error, `sudo systemctl start croom` brings the ro
 | calendar.providers | room files [google] | — | Only the first is used. |
 | calendar.google_credentials_path | "" | Calendar | `/etc/croom/google-service-account.json` |
 | calendar.google_calendar_id | "" | Calendar | `c_…@resource.calendar.google.com` |
-| calendar.sync_interval_seconds | 60 | — | Poll interval. |
+| calendar.sync_interval_seconds | 15 | — | How often the room reads Google Calendar: a meeting the room is added to in Google shows within this. An unedited 60 (the old default) is read as 15. |
 | calendar.booking_start, booking_end | 08:00, 18:00 | Calendar (live) | On the quarter hour; end after start. |
 | control.enabled, host, port | true, 0.0.0.0, 8080 | Refused | Settings refuses to change them. |
 | control.screensaver | info | — | First style only; the table's choice is kept in `control-settings.json`. |

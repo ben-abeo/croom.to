@@ -304,7 +304,7 @@ sudo reboot</pre>
       <tr><td>calendar.providers</td><td>room files [google]</td><td>—</td><td>Only the first is used.</td></tr>
       <tr><td>calendar.google_credentials_path</td><td>""</td><td>Calendar</td><td><span class="chip">/etc/croom/google-service-account.json</span></td></tr>
       <tr><td>calendar.google_calendar_id</td><td>""</td><td>Calendar</td><td><span class="chip">c_…@resource.calendar.google.com</span></td></tr>
-      <tr><td>calendar.sync_interval_seconds</td><td>60</td><td>—</td><td>Poll interval.</td></tr>
+      <tr><td>calendar.sync_interval_seconds</td><td>15</td><td>—</td><td>How often the room reads Google Calendar: a meeting the room is added to in Google shows within this. An unedited 60 (the old default) is read as 15.</td></tr>
       <tr><td>calendar.booking_start, booking_end</td><td>08:00, 18:00</td><td>Calendar (live)</td><td>On the quarter hour; end after start.</td></tr>
       <tr><td>control.enabled, host, port</td><td>true, 0.0.0.0, 8080</td><td>Refused</td><td>Settings refuses to change them.</td></tr>
       <tr><td>control.screensaver</td><td>info</td><td>—</td><td>First style only; the table's choice is kept in <span class="chip">control-settings.json</span>.</td></tr>

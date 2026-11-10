@@ -59,6 +59,21 @@ class TestRoomConfig:
         assert config.timezone == "America/New_York"
 
 
+class TestCalendarConfig:
+    """How often the room reads Google: a meeting the room is added to in Google shows within 15 seconds (Ben, 2026-11-10)."""
+
+    def test_the_room_reads_google_every_15_seconds(self):
+        assert CalendarConfig().sync_interval_seconds == 15
+
+    def test_a_room_whose_config_has_the_old_60_reads_every_15_seconds_once_updated(self):
+        """Every room's config.yaml has 60 written out (the installer and Settings write the whole section); unedited, it is the old
+        default, and an update alone moves the room to 15."""
+        assert CalendarConfig(sync_interval_seconds=60).sync_interval_seconds == 15
+
+    def test_any_other_interval_is_kept(self):
+        assert CalendarConfig(sync_interval_seconds=30).sync_interval_seconds == 30
+
+
 class TestMeetingConfig:
     """Tests for MeetingConfig dataclass."""
 

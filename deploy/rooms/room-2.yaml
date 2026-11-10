@@ -40,7 +40,7 @@ calendar:
   providers: [google]
   google_credentials_path: /etc/croom/google-service-account.json
   google_calendar_id: "REPLACE_WITH_ROOM_CALENDAR_ID"
-  sync_interval_seconds: 60
+  sync_interval_seconds: 15
 
 ai:
   enabled: false

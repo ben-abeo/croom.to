@@ -267,6 +267,7 @@ sudo reboot</pre>
       <tr><td><strong>Autostart</strong></td><td>Adds <span class="chip">/usr/local/bin/crystal-meet-kiosk &amp;</span> once to <span class="chip">~/.config/labwc/autostart</span>.</td></tr>
       <tr><td><strong>Desktop icon</strong></td><td><span class="ui">Room controls</span> on the desktop, to reopen the kiosk.</td></tr>
       <tr><td><strong>Blanking off</strong></td><td><span class="chip">raspi-config nonint do_blanking 1</span>.</td></tr>
+      <tr><td><strong>Touch as touch</strong></td><td>Sets <span class="chip">mouseEmulation="no"</span> on the panel's <span class="chip">&lt;touch&gt;</span> line in <span class="chip">~/.config/labwc/rc.xml</span> (Raspberry Pi's screen settings write <span class="chip">yes</span>, which makes a finger a mouse) and reloads labwc.</td></tr>
       <tr><td><strong>Agent</strong></td><td>A bare clone in <span class="chip">/opt/croom-kiosk/repo.git</span>, a sealed release of the clone's current commit in <span class="chip">/opt/croom-kiosk/releases/</span>, the links <span class="chip">current</span> and <span class="chip">good</span>, the state folder <span class="chip">/var/lib/croom-kiosk</span> with <span class="chip">config.json</span>, and the service <span class="chip">croom-kiosk-agent</span>, enabled and started.</td></tr>
     </tbody>
   </table>
@@ -590,6 +591,7 @@ curl http://&lt;TV Pi&gt;:8080/api/meeting/diagnostics   <span class="c"># in a 
       <tr><td>A <span class="chip">.local</span> address fails</td><td>Name lookup (mDNS) not working on the network.</td><td>Re-run the installer with the TV Pi's IP address.</td></tr>
       <tr><td>No on-screen keyboard</td><td>The URL lacks <span class="chip">?keyboard=1</span> (a tablet, or a browser opened by hand).</td><td>Re-run the installer, which adds it.</td></tr>
       <tr><td>Everything tiny or huge</td><td>An old launcher without the 1.5× scale.</td><td>Re-run the installer and reboot.</td></tr>
+      <tr><td>Dragging a finger highlights text instead of scrolling; only the scroll bar scrolls</td><td>The panel's <span class="chip">&lt;touch&gt;</span> line in <span class="chip">~/.config/labwc/rc.xml</span> has <span class="chip">mouseEmulation="yes"</span>, so touches reach the browser as a mouse.</td><td>Update the touch Pi from <strong>Settings › Software</strong>, or re-run the installer. By hand: change it to <span class="chip">"no"</span>, then <span class="chip">kill -HUP $(pgrep -x labwc)</span>.</td></tr>
       <tr><td>Screen goes blank when idle</td><td>Blanking was not turned off.</td><td><span class="chip">sudo raspi-config nonint do_blanking 1</span>, then reboot.</td></tr>
       <tr><td>No key click</td><td>Key click is off, or the touch Pi has no audio output.</td><td><span class="ui">Options › Key click on</span>; check the touch Pi's audio output.</td></tr>
       <tr><td>Screens did not change after the TV Pi was updated</td><td>The kiosk still has the old page loaded.</td><td>Reboot the touch Pi from <span class="ui">Settings › Software</span>.</td></tr>

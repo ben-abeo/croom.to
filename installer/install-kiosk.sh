@@ -151,6 +151,19 @@ disable_blanking() {
     fi
 }
 
+# Raspberry Pi's screen settings write the touch panel into labwc's rc.xml with mouseEmulation="yes": the browser then gets a
+# mouse, and a finger's drag selects text instead of scrolling. Touches go to the browser as touches; labwc reloads its
+# settings on a hangup, so the kiosk need not restart.
+# ponytail: only the desktop user's rc.xml; a Pi touch display listed in /etc/xdg/labwc/rc.xml would need an entry of its own here.
+touch_as_touch() {
+    local rc
+    rc="$(kiosk_home)/.config/labwc/rc.xml"
+    [[ -f "$rc" ]] && grep -q 'mouseEmulation="yes"' "$rc" || return 0
+    sed -i 's/mouseEmulation="yes"/mouseEmulation="no"/g' "$rc"
+    pkill -HUP -u "$KIOSK_USER" -x labwc 2>/dev/null || true
+    log "Touches reach the browser as touches, so a drag scrolls: $rc"
+}
+
 # --- The touch Pi's agent ---------------------------------------------------------------
 
 # git on this checkout, which belongs to the desktop user while this runs as root.
@@ -282,6 +295,7 @@ main() {
     write_autostart
     write_desktop_icon
     disable_blanking
+    touch_as_touch
     install_agent
     print_completion
 }

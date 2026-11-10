@@ -88,6 +88,33 @@ def test_desktop_icon_reopens_the_room_page(tmp_path):
     assert f"Icon={icon}" in text
 
 
+PANEL_RC = """<?xml version="1.0"?>
+<openbox_config xmlns="http://openbox.org/3.4/rc">
+\t<touch deviceName="TSTP CTouch (USB 1-1)" mapToOutput="HDMI-A-1" mouseEmulation="yes"/>
+</openbox_config>
+"""
+
+
+def test_the_touch_screen_reaches_the_browser_as_touches_so_a_drag_scrolls(tmp_path):
+    """Raspberry Pi's screen settings write the panel into labwc's rc.xml as a mouse (mouseEmulation="yes"): a finger's drag in
+    Settings then selects text, and only the scroll bar scrolls (Ben, 2026-11-10, PiTouch-1). The panel stays mapped to its screen."""
+    home = tmp_path / "home"
+    rc = home / ".config" / "labwc" / "rc.xml"
+    rc.parent.mkdir(parents=True)
+    rc.write_text(PANEL_RC)
+    result = run_bash(f"source {SCRIPT}; KIOSK_HOME={home}; KIOSK_USER={me()}; touch_as_touch")
+    assert result.returncode == 0, result.stderr
+    assert rc.read_text() == PANEL_RC.replace('mouseEmulation="yes"', 'mouseEmulation="no"')
+
+
+def test_a_pi_with_no_touch_settings_is_left_alone(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    result = run_bash(f"source {SCRIPT}; KIOSK_HOME={home}; KIOSK_USER={me()}; touch_as_touch")
+    assert result.returncode == 0, result.stderr
+    assert not (home / ".config").exists()
+
+
 def test_embedded_icon_is_the_packaged_one():
     """The kiosk Pi has no Crystal Meet package, so the script carries the icon; keep it in sync."""
     packaged = (REPO / "src" / "croom" / "control" / "static" / "crystal-meet.svg").read_text().strip()
@@ -209,7 +236,7 @@ def test_outside_a_clone_it_says_so(tmp_path):
 def test_the_whole_setup_installs_the_agent_and_says_how_to_let_it_in():
     text = SCRIPT.read_text()
     body = text[text.index("main() {"):text.index("run_installer() {")]
-    assert body.index("disable_blanking") < body.index("install_agent") < body.index("print_completion")
+    assert body.index("disable_blanking") < body.index("touch_as_touch") < body.index("install_agent") < body.index("print_completion")
     assert "tap Allow" in text
 
 

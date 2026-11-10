@@ -225,6 +225,7 @@ sudo reboot
 | **Autostart** | Adds `/usr/local/bin/crystal-meet-kiosk &` once to `~/.config/labwc/autostart`. |
 | **Desktop icon** | **Room controls** on the desktop, to reopen the kiosk. |
 | **Blanking off** | `raspi-config nonint do_blanking 1`. |
+| **Touch as touch** | Sets `mouseEmulation="no"` on the panel's `<touch>` line in `~/.config/labwc/rc.xml` (Raspberry Pi's screen settings write `yes`, which makes a finger a mouse) and reloads labwc. |
 | **Agent** | A bare clone in `/opt/croom-kiosk/repo.git`, a sealed release of the clone's current commit in `/opt/croom-kiosk/releases/`, the links `current` and `good`, the state folder `/var/lib/croom-kiosk` with `config.json`, and the service `croom-kiosk-agent`, enabled and started. |
 
 ### 3 · Allow it in Settings
@@ -561,6 +562,7 @@ From the touch Pi (or a laptop on its network), run `curl http://<TV Pi>:8080/ap
 | A `.local` address fails | Name lookup (mDNS) not working on the network. | Re-run the installer with the TV Pi's IP address. |
 | No on-screen keyboard | The URL lacks `?keyboard=1` (a tablet, or a browser opened by hand). | Re-run the installer, which adds it. |
 | Everything tiny or huge | An old launcher without the 1.5× scale. | Re-run the installer and reboot. |
+| Dragging a finger highlights text instead of scrolling; only the scroll bar scrolls | The panel's `<touch>` line in `~/.config/labwc/rc.xml` has `mouseEmulation="yes"`, so touches reach the browser as a mouse. | Update the touch Pi from **Settings › Software**, or re-run the installer. By hand: change it to `"no"`, then `kill -HUP $(pgrep -x labwc)`. |
 | Screen goes blank when idle | Blanking was not turned off. | `sudo raspi-config nonint do_blanking 1`, then reboot. |
 | No key click | Key click is off, or the touch Pi has no audio output. | **Options › Key click on**; check the touch Pi's audio output. |
 | Screens did not change after the TV Pi was updated | The kiosk still has the old page loaded. | Reboot the touch Pi from **Settings › Software**. |

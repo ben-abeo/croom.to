@@ -1066,8 +1066,9 @@ class RoomCamera:
         camera moves ("Moving..."). No one found: the zoom goes back to where it was, and nothing has turned. Without Set up
         (the position not known) it only zooms. A camera that says where it points is turned straight to the group, inside its
         limits (_aim_work). Answers the camera's state with "framed" (people found) and "turned" (whether
-        it could turn toward them). by_person: a person's tap, which also gives the camera back to Auto framing; Auto framing's own
-        framing is not."""
+        it could turn toward them). A framed picture with no one left in it (a turn that missed, or a face that was not one) sends the
+        camera back to the widest picture it found them in, answering "lost" too, and turned False. by_person: a person's tap, which also
+        gives the camera back to Auto framing; Auto framing's own framing is not."""
         if self._framing:
             raise NotReady(ALREADY_FRAMING)
         if self._busy or self._pan or self._tilt:
@@ -1085,6 +1086,7 @@ class RoomCamera:
     async def _frame_work(self, still, detect, outcome: Dict[str, Any]) -> None:
         before = await self.read_zoom()
         await self._zoom_to(self._zoom_range[0])                         # 1. everyone in reach in view
+        await self._wait(self._target_done_at - self._clock())         # a Rally sent back inside its limits for the wider picture: there first
         await self._wait(self.SETTLE_S)
         faces, size = await self._look(still, detect)               # 2. and 3.
         if faces is None or not faces:
@@ -1106,8 +1108,14 @@ class RoomCamera:
             return
         await self._move_to(target.pan_s, target.tilt_s)              # 6.
         await self._wait(self.SETTLE_S)
-        faces, size = await self._look(still, detect)                # 7. one check, and one correction at most
-        fix = framing.correction(faces or [], size, zoom, self._travel_s, target.people)
+        seen, size = await self._look(still, detect)                 # 7. one check, and one correction at most
+        if seen is not None and not seen:
+            self._said_lost(faces, size, position, (target.pan_s, target.tilt_s, zoom))
+            await self._move_to(*position)
+            await self._zoom_to(self._zoom_range[0])
+            outcome.update(turned=False, lost=True)
+            return
+        fix = framing.correction(seen or [], size, zoom, self._travel_s, target.people)
         if fix is not None:
             self._account_now()
             await self._move_to(self._pan_s + fix[0], self._tilt_s + fix[1])
@@ -1116,16 +1124,32 @@ class RoomCamera:
         """Steps 4 to 7 on a camera that says where it is: from where it points, straight to the pan, tilt and zoom that frame the group
         (framing.aim, inside the limits), then one look and one nudge at most, never toward fewer people than were found."""
         at = await self._where()
+        # No further than 5 times (the MeetUp's top): the Rally's 15 is a picture a few degrees across, which a turn a degree or two out
+        # (its backlash alone is 1.3 deg) leaves on the table below the person.
         zoom, pan, tilt = framing.aim(faces, size, (at["pan"] / ARCSEC, at["tilt"] / ARCSEC), self._limit_degrees(),
-                                      self._zoom_range[1])
+                                      min(self._zoom_range[1], framing.ZOOM_MAX))
         outcome.update(framed=len(faces), turned=True)
         await self._go_to({"pan": pan * ARCSEC, "tilt": tilt * ARCSEC}, zoom)
         await self._wait(self.SETTLE_S)
-        seen, size = await self._look(still, detect)
+        seen, size_now = await self._look(still, detect)
+        if seen is not None and not seen:
+            self._said_lost(faces, size, (at["pan"] / ARCSEC, at["tilt"] / ARCSEC), (pan, tilt, zoom))
+            await self._go_to(at, self._zoom_range[0])
+            outcome.update(turned=False, lost=True)
+            return
+        size = size_now
         fix = framing.nudge(seen or [], size, zoom, len(faces))
         if fix is not None:
             at = await self._where()
             await self._go_to({"pan": at["pan"] + fix[0] * ARCSEC, "tilt": at["tilt"] + fix[1] * ARCSEC}, zoom)
+
+    @staticmethod
+    def _said_lost(faces, size, at, aimed) -> None:
+        """A warning for a framing that lost everyone, with what it found and where it went: the evidence for the next time it happens."""
+        found = ", ".join(f"({x:.0f},{y:.0f} {w:.0f}x{h:.0f})" for x, y, w, h in faces)
+        logger.warning(f"Frame people: no one in the framed picture, so back to the widest one. {len(faces)} found in a {size[0]}x{size[1]} "
+                       f"picture taken at pan {at[0]:.1f}, tilt {at[1]:.1f}: {found}; aimed at pan {aimed[0]:.1f}, tilt {aimed[1]:.1f}, "
+                       f"zoom {aimed[2]}")
 
     async def _look(self, still, detect):
         """One picture and the faces in it: (faces, (width, height)), or (None, None) when the camera gave no picture or the

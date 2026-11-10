@@ -248,3 +248,79 @@ def test_how_far_the_rally_turns_by_speed_follows_what_was_measured_in_the_board
     assert framing.turn_degrees(0, 100) == 0 and framing.turn_degrees(-1, 100) == 0
     assert framing.turn_degrees(2.3, 100) == 45 and framing.turn_degrees(1.0, 500) == 10
     assert framing.turn_degrees(1.0, 1500) == framing.turn_degrees(1.0, 1000)       # no slower past the table
+
+
+# --- the Rally framed its own base (Ben, 2026-11-09): it looks once the camera has stopped, zooms no further than 5 times, and backs out
+#     of a framing that has no one in it ---
+
+class TimedStills(Stills):
+    """Stills that note, as each is taken, the time and when the camera's last target is due to have got there."""
+
+    def __init__(self, camera, clock):
+        super().__init__()
+        self.camera, self.clock, self.at = camera, clock, []
+
+    async def __call__(self):
+        self.at.append((self.clock(), self.camera._target_done_at))
+        return await super().__call__()
+
+
+async def test_frame_people_looks_only_once_a_rally_sent_back_inside_its_limits_has_got_there():
+    """A Rally framed low and tight is sent up as it zooms out, so the wider picture stays inside its limits; it waits about 0.85 s for a
+    target, then turns. The faces were looked for a fixed second after the zoom, before it had moved, then aimed at from where it was going."""
+    from tests.unit.devices.fake_v4l2 import RALLY
+    from croom.devices.v4l2 import V4L2_CID_TILT_ABSOLUTE
+    camera, v4l2, clock = camera_for(nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values[(10, V4L2_CID_TILT_ABSOLUTE)] = -20 * 3600
+    await camera.set_limit("down", True)                      # the bottom edge of this view, at zoom 100
+    v4l2.values[(10, V4L2_CID_TILT_ABSOLUTE)] = -40 * 3600    # a tight framing low down: inside the limit at zoom 500
+    await camera.zoom(500)
+    stills = TimedStills(camera, clock)
+    await camera.frame_people(stills, detect=finds([]))
+    assert v4l2.sets(V4L2_CID_TILT_ABSOLUTE)[0] > -40 * 3600   # sent up to keep the widest picture inside the limit
+    taken, due = stills.at[0]
+    assert taken >= due + camera.SETTLE_S
+
+
+async def test_frame_people_zooms_a_rally_no_further_than_five_times():
+    """The Rally zooms to 15 times: a picture a few degrees across, which a turn off by a degree or two (its backlash alone is 1.3 deg)
+    leaves on the table under the person. Frame people stops at 5 times, as on the MeetUp."""
+    from tests.unit.devices.fake_v4l2 import RALLY
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    one_far_away = [(630, 340, 20, 20)]
+    assert framing.aim(one_far_away, SIZE, (0.0, 0.0), {}, 1500)[0] > 500      # what it would have zoomed to
+    await camera.frame_people(Stills(), detect=finds(one_far_away))
+    assert max(v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE)) == 500
+
+
+async def test_frame_people_puts_a_rally_back_where_it_was_when_the_framed_picture_has_no_one_in_it(caplog):
+    """Framed, the picture is looked at once more: with no one in it, the camera goes back to where the faces were found, at the widest,
+    and says it lost them ("framed" stays the people found: Auto framing, counting them, does not frame again and again); a warning says
+    what was found and where it aimed, for the next time it happens."""
+    import logging
+    from tests.unit.devices.fake_v4l2 import RALLY
+    from croom.devices.v4l2 import V4L2_CID_PAN_ABSOLUTE, V4L2_CID_TILT_ABSOLUTE
+    camera, v4l2, _ = camera_for(nodes={"/dev/video0": RALLY})
+    await camera.discover()
+    v4l2.values[(10, V4L2_CID_PAN_ABSOLUTE)] = 10 * 3600
+    v4l2.values[(10, V4L2_CID_TILT_ABSOLUTE)] = -25 * 3600
+    looks = iter([EITHER_SIDE, []])
+    with caplog.at_level(logging.WARNING, logger="croom.devices.camera"):
+        answer = await camera.frame_people(Stills(), detect=lambda jpeg: (list(next(looks)), SIZE))
+    assert answer["framed"] == 2 and answer["turned"] is False and answer["lost"] is True   # found, as Auto framing counts them
+    assert v4l2.set_many_calls[-1] == {V4L2_CID_PAN_ABSOLUTE: 10 * 3600, V4L2_CID_TILT_ABSOLUTE: -25 * 3600}
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE)[-1] == 100
+    said = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(said) == 1 and "no one in the framed picture" in said[0] and "2 found" in said[0]
+
+
+async def test_frame_people_puts_a_meetup_back_where_it_was_when_the_framed_picture_has_no_one_in_it():
+    camera, v4l2, clock = camera_for()
+    await in_the_middle(camera, clock)
+    looks = iter([RIGHT_OF_MIDDLE, []])
+    answer = await camera.frame_people(Stills(), detect=lambda jpeg: (list(next(looks)), SIZE))
+    assert answer["framed"] == 1 and answer["turned"] is False and answer["lost"] is True
+    assert (camera._pan_s, camera._tilt_s) == (4.0, 4.0)
+    assert v4l2.sets(V4L2_CID_ZOOM_ABSOLUTE)[-1] == 100

@@ -254,6 +254,25 @@ set_pointer_parking() {
     chown "$CROOM_USER:" "$labwc_dir" "$autostart" 2>/dev/null || true
 }
 
+# The TV is driven at 1920x1080, 60 times a second. Raspberry Pi OS gives a TV its preferred mode, and a TV can prefer 4K at 30 Hz (the
+# Boardroom's Samsung): a call's video then judders on the TV, and the picture is no sharper, as the TV's browser draws at 1920x1080 under
+# Xwayland either way (Ben, 2026-11-09). kanshi's profile for the desktop user names the mode for whichever screen is on; the profile it
+# had is kept beside it, once, as config.before-croom. It applies when the desktop next starts (a reboot).
+set_screen_mode() {
+    local home kanshi_dir config profile
+    log "Setting the TV's picture to 1920x1080 at 60 Hz..."
+    home=$(getent passwd "$CROOM_USER" | cut -d: -f6)
+    kanshi_dir="${KANSHI_DIR:-$home/.config/kanshi}"
+    config="$kanshi_dir/config"
+    profile=$'profile {\n\toutput * enable mode 1920x1080@60.000 scale 1.000000 position 0,0 transform normal\n}'
+    mkdir -p "$kanshi_dir"
+    if [[ -f "$config" && "$(cat "$config")" != "$profile" && ! -e "$config.before-croom" ]]; then
+        cp -p "$config" "$config.before-croom"
+    fi
+    printf '%s\n' "$profile" > "$config"
+    chown "$CROOM_USER:" "$kanshi_dir" "$config" 2>/dev/null || true
+}
+
 # Create directory structure
 create_directories() {
     log "Creating directories..."
@@ -718,6 +737,7 @@ print_completion() {
     echo ""
     echo "If the service ever stops, the Start Crystal Meet icon on this device's desktop (over VNC) starts it again."
     echo "The keyboard layout is now US (Sign in to Google on the TV types with it): reboot once for the desktop to use it."
+    echo "The TV's picture is now 1920x1080 at 60 Hz (kanshi), which also needs that reboot."
     echo ""
     if [[ -n "$ROOM_CONFIG" ]]; then
         echo "Next steps:"
@@ -822,6 +842,7 @@ main() {
     install_virtual_mouse
     set_keyboard_layout
     set_pointer_parking
+    set_screen_mode
     create_directories
     install_dependencies
     install_croom

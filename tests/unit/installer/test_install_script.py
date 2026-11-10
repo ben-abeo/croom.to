@@ -515,6 +515,34 @@ def test_the_desktop_parks_the_tvs_pointer_as_it_starts(tmp_path):
     assert "set_pointer_parking" in SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
 
 
+TV_PROFILE = "profile {\n\toutput * enable mode 1920x1080@60.000 scale 1.000000 position 0,0 transform normal\n}\n"
+
+
+def test_the_tv_is_driven_at_1080p_60_whatever_the_tv_prefers(tmp_path):
+    """Raspberry Pi OS gives a TV its preferred mode, and the Boardroom's Samsung prefers 4K at 30 Hz: a call's video judders (Ben,
+    2026-11-09). kanshi's profile names 1920x1080 at 60 Hz for whichever screen is on; the profile it had is kept once, beside it."""
+    kanshi = tmp_path / "kanshi"
+    kanshi.mkdir()
+    pi_os = "profile {\n\t\toutput HDMI-A-1 enable scale 2.000000 mode 3840x2160@30.000 position 0,0 transform normal\n}\n"
+    (kanshi / "config").write_text(pi_os)
+    snippet = f"source {SCRIPT}; KANSHI_DIR={kanshi}; CROOM_USER=$(id -un); set_screen_mode"
+    for _ in range(2):
+        result = run_bash(snippet)
+        assert result.returncode == 0, result.stderr
+    assert (kanshi / "config").read_text() == TV_PROFILE
+    assert (kanshi / "config.before-croom").read_text() == pi_os          # the second run did not put its own profile over it
+    assert "set_screen_mode" in SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+    assert 'kanshi_dir="${KANSHI_DIR:-$home/.config/kanshi}"' in SCRIPT.read_text()
+
+
+def test_the_screen_mode_is_written_when_there_is_no_profile(tmp_path):
+    kanshi = tmp_path / "kanshi"
+    result = run_bash(f"source {SCRIPT}; KANSHI_DIR={kanshi}; CROOM_USER=$(id -un); set_screen_mode")
+    assert result.returncode == 0, result.stderr
+    assert (kanshi / "config").read_text() == TV_PROFILE
+    assert not (kanshi / "config.before-croom").exists()
+
+
 def test_the_keyboard_layout_goes_where_the_system_reads_it_and_is_part_of_every_install():
     text = SCRIPT.read_text()
     assert 'KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"' in text

@@ -231,6 +231,31 @@
       </section>
       <div id="meeting-actions" class="actions meeting-actions"></div>
       <div id="meeting-secondary" class="actions meeting-secondary"></div>
+      <!-- The camera's quick controls in a call (Ben, 2026-11-09): Frame people and the saved presets, the arrows with Home in their middle,
+           and the zoom: the Camera screen's own commands (devices.js). Not drawn without a camera, while the laptop has it, or under Meet's box. -->
+      <section id="meeting-camera" class="meeting-camera" aria-label="Camera" hidden>
+        <div class="meeting-camera-views">
+          <div id="meeting-views" class="meeting-views">
+            <button type="button" id="meeting-frame-people" class="button quiet" data-icon="users">Frame people</button>
+          </div>
+          <p id="meeting-camera-note" class="note"></p>
+        </div>
+        <div class="arrow-pad meeting-pad" role="group" aria-label="Pan and tilt">
+          <span></span>
+          <button type="button" class="button quiet pad" data-pan="0" data-tilt="1" aria-label="Tilt up">&#9650;</button>
+          <span></span>
+          <button type="button" class="button quiet pad" data-pan="-1" data-tilt="0" aria-label="Pan left">&#9664;</button>
+          <button type="button" id="meeting-camera-home" class="button quiet pad" aria-label="Home">&#8962;</button>
+          <button type="button" class="button quiet pad" data-pan="1" data-tilt="0" aria-label="Pan right">&#9654;</button>
+          <span></span>
+          <button type="button" class="button quiet pad" data-pan="0" data-tilt="-1" aria-label="Tilt down">&#9660;</button>
+          <span></span>
+        </div>
+        <div class="meeting-zoom">
+          <button type="button" class="button quiet" data-zoom="25" data-icon="zoom-in" aria-label="Zoom in"></button>
+          <button type="button" class="button quiet" data-zoom="-25" data-icon="zoom-out" aria-label="Zoom out"></button>
+        </div>
+      </section>
       <div class="meeting-dock">
         <section class="sound-section">
           <p class="kicker">Sound</p>

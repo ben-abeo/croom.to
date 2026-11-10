@@ -92,7 +92,7 @@ A status card with a kicker, a headline and a line under it, for example **Room 
 
 1. Tap the field **Zoom meeting ID, Meet code or link**. The page's own keyboard opens.
 2. Type a Zoom meeting ID, a Meet code (`abc-defg-hij`, with or without its dashes) or a link. For a bare Zoom ID, or a Zoom link without `pwd=`, a **Passcode** field appears: fill it in.
-3. Tap **Join** (on the screen or on the keyboard). The top bar shows Joining, then In a meeting, and the meeting screen opens.
+3. Tap **Join** (on the screen or on the keyboard). The top bar shows Joining, then In a meeting, and the meeting screen opens. While the TV opens the meeting, the card says the room presses Join by itself; once Meet's button is on the TV it counts down ("The room presses “Join now” by itself in 2 seconds"). Don't press it on the TV.
 
 If Zoom refuses over the passcode, a "Couldn't join" card says "Zoom needs the meeting passcode" with **Join again**.
 
@@ -132,6 +132,7 @@ Opens by itself during a call. It is laid out as a control deck.
 | Meeting card (left) | State (Joining, In the lobby, In a meeting, Leaving), time in call, "N people in the call", "N unread chat messages", "The room is host/co-host", and what the meeting disclosed (recorded, transcribed, AI Companion). **Leave** asks "Tap again to leave" within 5 seconds; a double tap on the glass does not count. |
 | Main tiles | **Mute** / **Unmute**, **Turn camera off** / **Turn camera on**, **Raise hand** / **Lower hand** (when the call offers it), **Reactions** (a row of choices for 10 seconds, with Cancel). |
 | Second row | **Captions on** / **off**; on Zoom **Gallery view** / **Speaker view**, on Meet **Layout** (Auto, Tiled, Spotlight, Sidebar); **Hide self view** / **Show self view**; **Participants (N)**; **Chat (N)**; **Host** when the room is host or co-host. |
+| Camera strip | **Frame people**, the saved presets (Wide, Table, Whiteboard by default), the arrows (hold to move; the middle key is Home) and **Zoom in** / **Zoom out**, with a line saying what the camera did. Not shown while the laptop has the camera or a dialog card is up. |
 | Dock | **Sound**: volume slider, **Quieter** / **Louder**, **Mute speaker**, and **Mic** for the mic level. **Camera**: presets and nudges. **Upcoming meetings**. |
 | Top bar | **Touchpad**: a full-screen touchpad on the TV Pi's mouse. **TV**: the remote. |
 | Dialog card | A Zoom or Meet question that waits for a tap ("Zoom asks" / "Meet asks" when untitled), with the platform's own buttons. Questions the room is set to answer are answered by themselves. |

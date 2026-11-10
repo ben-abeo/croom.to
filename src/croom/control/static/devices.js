@@ -133,6 +133,7 @@
     if (key === lastCameraKey) return;
     lastCameraKey = key;
     const panel = el("camera-panel");
+    el("meeting-camera").hidden = !camera || !camera.available;
     if (!camera || !camera.available) {
       panel.hidden = true;
       el("camera-note").textContent = "No controllable camera found";
@@ -142,13 +143,15 @@
     el("camera-note").textContent = deviceNotes.camera;
     el("camera-status").textContent = camera.framing || framingHere ? FRAMING : camera.busy ? "Moving\u2026"
       : "Zoom " + camera.zoom.level + " of " + camera.zoom.min + " to " + camera.zoom.max;
-    el("frame-people").disabled = camera.busy || framingHere;
+    el("frame-people").disabled = el("meeting-frame-people").disabled = camera.busy || framingHere;
+    // The meeting screen's line under its camera buttons: what the camera is doing, else its last words (Frame people's, a refusal)
+    el("meeting-camera-note").textContent = camera.framing || framingHere ? FRAMING : camera.busy ? "Moving\u2026" : deviceNotes.camera;
     // Auto framing (the room's setting, during a call): on, or paused while a person has the camera
     el("auto-framing-note").hidden = !camera.auto_framing;
     el("auto-framing-note").textContent = camera.auto_framing === "paused" ? "Auto framing is paused while the camera is moved by hand: "
       + "Frame people gives it back" : camera.auto_framing === "on" ? "Auto framing is on" : "";
-    for (const b of document.querySelectorAll("#arrow-pad .pad")) b.disabled = camera.busy;
-    el("camera-home").disabled = camera.busy || !camera.home_saved;
+    for (const b of document.querySelectorAll(".arrow-pad .pad")) b.disabled = camera.busy;   // the Camera screen's and the meeting screen's
+    el("camera-home").disabled = el("meeting-camera-home").disabled = camera.busy || !camera.home_saved;
     const ready = camera.home_saved;
     el("preset-row").hidden = !ready;
     const setupAllowed = P.cameraMode() === "idle";   // during a meeting: recall and nudge only
@@ -176,6 +179,12 @@
       const b = button(p.name, p.saved ? "quiet saved" : "quiet", () => presetAction(p.slot), camera.busy);
       b.dataset.slot = String(p.slot);
       if (!p.saved && !presetSaveMode) b.title = "Nothing saved yet";
+      return b;
+    }));
+    // The meeting screen's presets: the ones saved, after Frame people (a recall: a meeting has no Save)
+    el("meeting-views").replaceChildren(el("meeting-frame-people"), ...camera.presets.filter((p) => p.saved && ready).map((p) => {
+      const b = button(p.name, "quiet saved", () => presetAction(p.slot), camera.busy);
+      b.dataset.slot = String(p.slot);
       return b;
     }));
   }
@@ -252,18 +261,19 @@
       if (saved) { setupOpen = false; render(); }   // Set up closes only once the home is really saved
     });
   });
-  el("camera-home").addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, { long: true }));
+  for (const id of ["camera-home", "meeting-camera-home"]) el(id).addEventListener("click", () => deviceCall("camera", "/api/camera/home", {}, { long: true }));
 
   // Frame people (spec 2026-11-01, section 5): one tap zooms and turns toward the faces the camera finds, for some seconds inside the request.
   // "Framing..." shows at once here (and on every other screen from the status's camera.framing); the outcome is the camera's note.
   // A refusal ("Already framing", "Moving...", the picture's words) is the note as any refusal is.
   function framedWords(block) {
     const n = block.framed;
+    if (block.lost) return "Lost everyone after the turn: back to the wide picture";
     if (!n) return "No one found: the camera stayed where it was";
     const words = n === 1 ? "Framed 1 person" : "Framed " + n + " people";
     return block.turned === false ? words + ". Set up the camera to let it turn too" : words;
   }
-  el("frame-people").addEventListener("click", async () => {
+  async function framePeople() {
     if (framingHere) return;
     framingHere = true;
     lastCameraKey = null;
@@ -272,7 +282,8 @@
     if (block && typeof block === "object" && "framed" in block) deviceNotes.camera = framedWords(block);
     lastCameraKey = null;
     render();
-  });
+  }
+  for (const id of ["frame-people", "meeting-frame-people"]) el(id).addEventListener("click", framePeople);
 
   // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
   // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so
@@ -312,7 +323,7 @@
     buttonEl.addEventListener("contextmenu", (e) => e.preventDefault());   // a long press on a touch screen must not open a menu
   }
   const moveCamera = (pan, tilt) => deviceCall("camera", "/api/camera/move", { pan: pan, tilt: tilt });
-  for (const b of document.querySelectorAll("#arrow-pad [data-pan]")) {
+  for (const b of document.querySelectorAll(".arrow-pad [data-pan]")) {   // the Camera screen's and the meeting screen's
     const pan = Number(b.dataset.pan), tilt = Number(b.dataset.tilt);
     holdToMove(b, () => moveCamera(pan, tilt), 750, () => moveCamera(0, 0));
   }

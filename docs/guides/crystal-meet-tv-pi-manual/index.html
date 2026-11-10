@@ -104,12 +104,12 @@
       <li><strong>Turn the TV on and pick its input</strong> before every join, over the network.</li>
       <li><strong>Book the room</strong> in Google Calendar from the touch Pi and door sign, and keep bookings while Google is unreachable.</li>
       <li><strong>Move the camera</strong> to saved presets and set speaker and mic levels.</li>
+      <li><strong>Frame people</strong> on a tap, or by itself in calls (Settings' Auto framing), with its own face finder: no further than 5×, and back to the wide picture when the framed picture has no one in it.</li>
       <li><strong>Lend the MeetUp to a laptop</strong> where a USB switch is fitted.</li>
       <li><strong>Update itself</strong> from GitHub and undo an update the room does not start with.</li>
     </ul></div>
     <div class="card"><p class="kicker">Cannot</p><ul>
       <li><strong>Join or leave by itself.</strong> No auto-join, no auto-leave.</li>
-      <li><strong>Frame people automatically.</strong> The MeetUp's RightSight is Logitech software for Windows and macOS.</li>
       <li><strong>Control the TV over HDMI-CEC.</strong> TV control is over the network.</li>
       <li><strong>Lock its pages.</strong> Everything on 8080 is open to the LAN; only Settings has a PIN.</li>
       <li><strong>Refresh its installer pieces on update.</strong> Units, udev rules, sudoers and apt packages need the installer.</li>
@@ -197,7 +197,7 @@ sudo bash installer/install.sh --config ~/room.yaml \
      --credentials ~/google-service-account.json \
      --zoom-credentials ~/zoom-credentials.json       <span class="c"># 10 to 20 minutes</span>
 sudo systemctl start croom
-sudo reboot                                    <span class="c"># once, so the US keyboard layout takes effect</span>
+sudo reboot                                    <span class="c"># once, so the US keyboard layout and the TV's 1080p 60 Hz picture take effect</span>
 rm ~/google-service-account.json ~/zoom-credentials.json
 <span class="c"># the installed copies are in /etc/croom</span></pre>
   </div>
@@ -586,7 +586,7 @@ sudo raspi-config nonint do_vnc 1          <span class="c"># optional: VNC off a
     <li><strong>Preview.</strong> While someone uses Camera framing between meetings, the TV shows the camera for up to 180 seconds. Not during a call.</li>
     <li><strong>The camera stays free for calls.</strong> The room opens the camera only for control calls; Chromium owns the picture.</li>
   </ul>
-  <div class="callout"><p class="kicker">Good to know</p><p>Automatic framing is not available: the MeetUp's RightSight runs only in Logitech's Windows and macOS software, and upstream's AI features are off in every room. Coming in a later release: the live camera picture on the touch Pi, with drag to turn and pinch to zoom.</p></div>
+  <div class="callout"><p class="kicker">Good to know</p><p>Frame people zooms out, finds the faces in one picture once the camera has stopped, then turns and zooms to the group, no further than 5× (the Rally's own 15× leaves a turn a degree out on the table). When the framed picture has no one in it, the camera goes back to the wide one and the touch Pi says &ldquo;Lost everyone after the turn&rdquo;; the journal has a warning with what it found and where it aimed. Coming in a later release: the live camera picture on the touch Pi, with drag to turn and pinch to zoom.</p></div>
 
   <h3 class="sub">Sound</h3>
   <ul>
@@ -686,7 +686,7 @@ sudo systemctl start croom</pre>
     <li><strong>Update all</strong> queues the touch Pi and door sign first and the TV Pi last. The pages on the touch Pi, the TV and the door sign reload themselves when the TV Pi comes back with other page files (<code>page</code> in <code>/api/status</code>).</li>
     <li><strong>GitHub</strong> is asked without an account (60 requests an hour per address), cached 10 minutes; "Can't check for updates right now" when it doesn't answer.</li>
   </ul>
-  <div class="callout dark"><p class="kicker">Updates don't re-run the installer</p><p>An update from Settings › Software replaces only the Python release. Unit files, udev rules, sudoers, apt packages and the keyboard layout are refreshed only by an installer run. When a release changes any of those, or the card says "This TV Pi can't update itself until its installer has been run once more", run the installer by hand:</p>
+  <div class="callout dark"><p class="kicker">Updates don't re-run the installer</p><p>An update from Settings › Software replaces only the Python release. Unit files, udev rules, sudoers, apt packages, the keyboard layout and the TV's screen mode (1920x1080 at 60 Hz) are refreshed only by an installer run. When a release changes any of those, or the card says "This TV Pi can't update itself until its installer has been run once more", run the installer by hand:</p>
 <pre style="margin-top:6px">cd ~/croom.to &amp;&amp; git pull &amp;&amp; sudo bash installer/install.sh &amp;&amp; sudo reboot   <span class="c"># keeps config and keys</span></pre></div>
 
   <h3 class="sub">Reboot</h3>

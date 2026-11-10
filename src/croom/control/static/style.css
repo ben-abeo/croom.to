@@ -774,6 +774,21 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 .meeting-main .actions.meeting-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .meeting-main .meeting-secondary .button { min-height: 56px; padding: 0 12px; justify-content: center; white-space: nowrap; }
 .meeting-main #reaction-row, .meeting-main #layout-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
+/* The camera's quick controls (Ben, 2026-11-09), between the call's buttons and the dock, in the room they leave at the table's 1280 by 800:
+   Frame people and the presets two by two with the camera's last words under them, the arrows, the zoom. Gone while the laptop has the camera,
+   and while Meet's box is up, which needs the room, and an answer first. */
+.meeting-camera { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 14px; padding: 12px 14px;
+                  border-radius: 20px; background: var(--surface-800); }
+.meeting-camera[hidden], body[data-laptop="on"] .meeting-camera, .meeting-main:has(#meeting-dialog:not([hidden])) .meeting-camera { display: none; }
+.meeting-camera-views { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.meeting-views { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.meeting-views .button { min-height: 56px; padding: 0 12px; justify-content: center; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meeting-views .button.saved { border-color: var(--blue-600); }
+.meeting-camera .note { margin: 0; min-height: 1.2em; font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meeting-pad { grid-template-columns: repeat(3, 46px); grid-template-rows: repeat(3, 46px); gap: 6px; }
+.meeting-pad .pad { min-height: 46px; font-size: 1.1rem; }
+.meeting-zoom { display: grid; grid-template-rows: repeat(2, 66px); gap: 6px; }
+.meeting-zoom .button { width: 64px; min-height: 66px; padding: 0; justify-content: center; touch-action: none; user-select: none; -webkit-user-select: none; }
 /* The dock: the device's name (or why there is no sound) with Camera and Upcoming meetings beside it, then the volume slider and its buttons. The
    Sound strip's parts take their places in the dock's grid (display: contents), so the strip keeps its markup and its script (devices.js). */
 .meeting-dock { margin-top: auto; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; grid-template-areas: "device device mic-open menu" "slider buttons buttons buttons";
@@ -791,6 +806,7 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
 .view[data-view="meeting"] .meeting-dock #open-mic { min-height: 56px; font-size: 1rem; padding: 0 18px; }
 @media (max-width: 900px) {
   .view[data-view="meeting"] { grid-template-columns: minmax(0, 1fr); }   /* a tablet stood up, or a phone: the card over the controls */
+  .meeting-camera { display: none; }   /* no room under the stacked deck: the dock's Camera opens the same controls */
   .meeting-clock { font-size: 2.6rem; }
 }
 @media (max-width: 640px) {

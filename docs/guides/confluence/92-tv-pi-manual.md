@@ -56,13 +56,13 @@ systemd
 - **Turn the TV on and pick its input** before every join, over the network.
 - **Book the room** in Google Calendar from the touch Pi and door sign, and keep bookings while Google is unreachable.
 - **Move the camera** to saved presets and set speaker and mic levels.
+- **Frame people** on a tap, or by itself in calls (Settings' Auto framing), with its own face finder: no further than 5×, and back to the wide picture when the framed picture has no one in it.
 - **Lend the MeetUp to a laptop** where a USB switch is fitted.
 - **Update itself** from GitHub and undo an update the room does not start with.
 
 **CANNOT**
 
 - **Join or leave by itself.** No auto-join, no auto-leave.
-- **Frame people automatically.** The MeetUp's RightSight is Logitech software for Windows and macOS.
 - **Control the TV over HDMI-CEC.** TV control is over the network.
 - **Lock its pages.** Everything on 8080 is open to the LAN; only Settings has a PIN.
 - **Refresh its installer pieces on update.** Units, udev rules, sudoers and apt packages need the installer.
@@ -152,7 +152,7 @@ sudo bash installer/install.sh --config ~/room.yaml \
      --credentials ~/google-service-account.json \
      --zoom-credentials ~/zoom-credentials.json       # 10 to 20 minutes
 sudo systemctl start croom
-sudo reboot                                    # once, so the US keyboard layout takes effect
+sudo reboot                                    # once, so the US keyboard layout and the TV's 1080p 60 Hz picture take effect
 rm ~/google-service-account.json ~/zoom-credentials.json
 # the installed copies are in /etc/croom
 ```
@@ -571,7 +571,7 @@ The MeetUp reports no pan or tilt position, so the room estimates it in seconds 
 
 > **GOOD TO KNOW**
 >
-> Automatic framing is not available: the MeetUp's RightSight runs only in Logitech's Windows and macOS software, and upstream's AI features are off in every room. Coming in a later release: the live camera picture on the touch Pi, with drag to turn and pinch to zoom.
+> Frame people zooms out, finds the faces in one picture once the camera has stopped, then turns and zooms to the group, no further than 5× (the Rally's own 15× leaves a turn a degree out on the table). When the framed picture has no one in it, the camera goes back to the wide one and the touch Pi says "Lost everyone after the turn"; the journal has a warning with what it found and where it aimed. Coming in a later release: the live camera picture on the touch Pi, with drag to turn and pinch to zoom.
 
 ### Sound
 
@@ -670,7 +670,7 @@ With no change waiting it leaves the room as it is ("down"). After a reboot or p
 
 > **UPDATES DON'T RE-RUN THE INSTALLER**
 >
-> An update from Settings › Software replaces only the Python release. Unit files, udev rules, sudoers, apt packages and the keyboard layout are refreshed only by an installer run. When a release changes any of those, or the card says "This TV Pi can't update itself until its installer has been run once more", run the installer by hand:
+> An update from Settings › Software replaces only the Python release. Unit files, udev rules, sudoers, apt packages, the keyboard layout and the TV's screen mode (1920x1080 at 60 Hz) are refreshed only by an installer run. When a release changes any of those, or the card says "This TV Pi can't update itself until its installer has been run once more", run the installer by hand:
 >
 > ```
 > cd ~/croom.to && git pull && sudo bash installer/install.sh && sudo reboot   # keeps config and keys

@@ -508,6 +508,11 @@ window.ZoomMtg = {
   preLoadWasm() { window.__zoomCalls.push(["preLoadWasm"]); },
   prepareWebSDK() { window.__zoomCalls.push(["prepareWebSDK"]); },
   inMeetingServiceListener(name, cb) { this._listeners[name] = cb; },
+  subscribeStatisticData(opts) {
+    const copy = Object.assign({}, opts); delete copy.success; delete copy.error;
+    window.__zoomCalls.push(["subscribeStatisticData", copy]);
+    opts.success && opts.success();
+  },
   // onUserUpdate, onUserJoin and onUserLeave come from inside Zoom's reducer: the store cannot be read while they run.
   _fire(name, data) {
     const listener = this._listeners[name];

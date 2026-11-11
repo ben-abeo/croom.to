@@ -413,6 +413,26 @@ def test_the_installer_sets_the_virtual_mouse_up_with_the_rest():
     assert "install_virtual_mouse" in SCRIPT.read_text().split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
 
 
+def test_the_journal_is_kept_across_restarts_and_capped(tmp_path):
+    """Raspberry Pi OS keeps the journal in memory (/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf): what went wrong in a
+    meeting is gone with the next restart. The room's setting comes after that file (drop-ins are read in the order of their names, the
+    last one's setting kept), and caps the journal well under what an SD card can spare."""
+    result = run_bash(f"source {SCRIPT}; JOURNALD_DIR={tmp_path}; write_journal_settings")
+    assert result.returncode == 0, result.stderr
+    (conf,) = tmp_path.iterdir()
+    assert conf.suffix == ".conf" and conf.name > "40-rpi-volatile-storage.conf"
+    lines = conf.read_text().splitlines()
+    assert "[Journal]" in lines and "Storage=persistent" in lines and "SystemMaxUse=200M" in lines
+
+
+def test_the_installer_keeps_the_journal_with_the_rest():
+    text = SCRIPT.read_text()
+    assert 'JOURNALD_DIR="${JOURNALD_DIR:-/etc/systemd/journald.conf.d}"' in text
+    assert "keep_journal" in text.split("\nmain() {", 1)[1].split("\n}\n", 1)[0]
+    body = text.split("keep_journal() {", 1)[1].split("\n}\n", 1)[0]
+    assert body.index("write_journal_settings") < body.index("systemctl restart systemd-journald")     # in force now, not at the next boot
+
+
 def test_the_installer_adds_what_building_evdev_needs():
     """evdev has no wheel: pip compiles its C extension, which needs Python's headers, a compiler and the kernel's linux/input.h, which comes
     with libc6-dev and which gcc only recommends (a device that installs no recommends has the compiler and not the header)."""

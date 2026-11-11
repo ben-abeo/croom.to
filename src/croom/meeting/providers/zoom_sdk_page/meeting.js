@@ -335,7 +335,7 @@
     return {
       user_keys: state.keys, attendee_keys: attendeeKeys(), state: state, meeting: meeting, video: bridge.video(), buttons: buttons,
       popovers: await inventory, dialogs: bridge.dialogs(), dialogs_seen: dialogsSeen.map((d) => Object.assign({}, d)),
-      sdk_version: bridge.sdkVersion || null, page: document.title,
+      sdk_version: bridge.sdkVersion || null, page: document.title, video_qos: videoQos.slice(),
     };
   };
   // A change Zoom makes (the host muting the room, someone raising a hand, a person joining, recording starting) reaches
@@ -343,6 +343,10 @@
   // only when something about it changed. The detail is the model with the current user's fields at the top level too,
   // for a provider that still reads muted and videoOn from there.
   let lastSeen = null;
+  // Zoom's last QOS_KEPT video quality reports (onVideoQos, once subscribed at connect), for the diagnostics: whether Zoom is sending
+  // the room's picture, read while it looks black (2026-11-11). What a report holds is Zoom's own: kept as it came.
+  const QOS_KEPT = 3;
+  const videoQos = [];
   async function readAndReport() {
     if (bridge.state !== "connected") return;
     const now = await bridge.readMeeting();
@@ -855,6 +859,7 @@
       applyPendingMute();
       syncState().catch(() => {});
       startPolling();
+      try { Promise.resolve(ZoomMtg.subscribeStatisticData({ video: true })).catch(() => {}); } catch (e) { /* a build without it */ }
       scanDialogs();      // what the client has drawn over the meeting so far, after what the join needs of this has been done
     };
     ZoomMtg.getCurrentUser({
@@ -915,6 +920,10 @@
       queueSync();
     });
     ZoomMtg.inMeetingServiceListener("onReceiveChatMsg", chatListener);
+    ZoomMtg.inMeetingServiceListener("onVideoQos", (data) => {
+      videoQos.push({ at: new Date().toISOString(), data: data });
+      if (videoQos.length > QOS_KEPT) videoQos.shift();
+    });
     report("joining", "");
     ZoomMtg.init({
       leaveUrl: "/left",

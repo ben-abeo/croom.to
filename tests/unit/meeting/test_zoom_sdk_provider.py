@@ -14,7 +14,7 @@ import pytest
 playwright = pytest.importorskip("playwright.async_api")
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config  # noqa: E402
-from croom.core.logs import DIALOGS_LOGGER  # noqa: E402
+from croom.core.logs import DIALOGS_LOGGER, ZOOM_PAGE_LOGGER  # noqa: E402
 from croom.meeting.providers.base import (  # noqa: E402
     DialogPolicy,
     MeetingControlError,
@@ -651,6 +651,71 @@ class TestReviewFixes:
         try:
             await provider.join_meeting(LINK)
             assert provider.state == MeetingState.CONNECTED
+        finally:
+            await shutdown(provider)
+
+
+class TestWhatZoomsPageSays:
+    """What Zoom's page prints when its video breaks is the only account of it (2026-11-11: the room's video went black mid-call, and the
+    page's console went with the rejoin): during a Zoom call its errors, warnings and uncaught errors go to the journal, each once."""
+
+    @staticmethod
+    def said(caplog):
+        return [r.getMessage() for r in caplog.records if r.name == ZOOM_PAGE_LOGGER]
+
+    async def test_errors_warnings_and_uncaught_errors_reach_the_log_once_each_and_the_chatter_does_not(self, caplog):
+        caplog.set_level(logging.INFO, logger=ZOOM_PAGE_LOGGER)
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            await provider._page.evaluate("""() => {
+                console.error("VideoEncoder failed:", 3); console.error("VideoEncoder failed:", 3);
+                console.warn("WebGL context lost"); console.log("onVideoQos"); console.info("joined");
+                setTimeout(() => { throw new Error("video worker gone"); }, 0);
+            }""")
+            await asyncio.sleep(0.5)
+            said = self.said(caplog)      # (with what the test's page says of the Zoom servers it is kept from)
+            assert {"Zoom's page (error): VideoEncoder failed: 3", "Zoom's page (uncaught): video worker gone",
+                    "Zoom's page (warning): WebGL context lost"} <= set(said)
+            assert said.count("Zoom's page (error): VideoEncoder failed: 3") == 1
+            assert not [line for line in said if "onVideoQos" in line or "joined" in line]
+        finally:
+            await shutdown(provider)
+
+    async def test_the_page_between_calls_is_not_zooms(self, caplog):
+        caplog.set_level(logging.INFO, logger=ZOOM_PAGE_LOGGER)
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider._page.evaluate("() => console.error('the screensaver said this')")
+            await asyncio.sleep(0.3)
+            assert self.said(caplog) == []
+        finally:
+            await shutdown(provider)
+
+    async def test_a_page_that_never_stops_is_cut_off_with_a_line_saying_so(self, caplog):
+        caplog.set_level(logging.INFO, logger=ZOOM_PAGE_LOGGER)
+        provider = await provider_for(api=FakeApi())
+        provider.PAGE_LINES_MAX = 2
+        try:
+            await provider.join_meeting(LINK)
+            await provider._page.evaluate("() => { for (let i = 1; i <= 5; i++) console.error('error ' + i); }")
+            await asyncio.sleep(0.5)
+            said = self.said(caplog)      # (the first may be what the test's page says of the Zoom servers it is kept from)
+            assert len(said) == 3 and said[-1] == "Zoom's page printed more than 2 lines in this call: the rest are not logged"
+            assert not {"Zoom's page (error): error 3", "Zoom's page (error): error 4", "Zoom's page (error): error 5"} & set(said)
+        finally:
+            await shutdown(provider)
+
+    async def test_the_diagnostics_keep_zooms_last_three_video_quality_reports(self):
+        provider = await provider_for(api=FakeApi())
+        try:
+            await provider.join_meeting(LINK)
+            calls = await provider._page.evaluate("window.__zoomCalls")
+            assert ["subscribeStatisticData", {"video": True}] in calls
+            await provider._page.evaluate("() => { for (let i = 1; i <= 4; i++) window.ZoomMtg._fire('onVideoQos', { sample: i }); }")
+            data = await provider.diagnostics()
+            assert [q["data"] for q in data["video_qos"]] == [{"sample": 2}, {"sample": 3}, {"sample": 4}]
+            assert all(q["at"] for q in data["video_qos"])
         finally:
             await shutdown(provider)
 

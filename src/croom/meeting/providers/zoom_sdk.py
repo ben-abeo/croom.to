@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config
-from croom.core.logs import DIALOGS_LOGGER
+from croom.core.logs import DIALOGS_LOGGER, ZOOM_PAGE_LOGGER
 from croom.meeting.providers.base import (
     DialogPolicy,
     MeetingControlError,
@@ -37,6 +37,8 @@ logger = logging.getLogger(__name__)
 # The three lines each dialog gets (what Zoom drew, and whether it was pressed for the room or left for the table) come from a logger of their own,
 # which the agent keeps at INFO whatever -v says: a stock install logs warnings only, and a new dialog is judged from the journal (core/logs.py).
 dialog_log = logging.getLogger(DIALOGS_LOGGER)
+# What Zoom's meeting page prints as errors and warnings during a call (_page_said), on a logger the agent keeps at INFO too
+page_log = logging.getLogger(ZOOM_PAGE_LOGGER)
 
 # What Zoom's error carries when the passcode is the problem: its own words, or its wrong-passcode code (3004).
 PASSCODE_REFUSAL = re.compile(r"pass(?:word|code)|\bcode 3004\b", re.IGNORECASE)
@@ -93,6 +95,7 @@ class ZoomSdkProvider(MeetingProvider):
     """Joins Zoom meetings with Zoom's Meeting SDK in the room's browser."""
 
     SDK_VERSION = SDK_VERSION
+    PAGE_LINES_MAX = 200   # distinct lines of Zoom's page logged in a call (_page_said)
     CONNECT_TIMEOUT_S = 90
     PASSCODE_CHECK_S = 5  # at most this long between two readings of the page's words for Zoom's own passcode complaint
     CONNECT_GRACE_MS = 5000  # after join's success callback, how long the page waits for a status event
@@ -125,6 +128,7 @@ class ZoomSdkProvider(MeetingProvider):
         self._site = site or ZoomSdkSite()
         self._page = None
         self._exposed_on = None   # the page object crystalMeetEvent was exposed on
+        self._page_lines: Set[str] = set()   # the lines of Zoom's page logged in this call
         self._events: Optional[asyncio.Queue] = None
         self._join_task: Optional[asyncio.Task] = None
         self._watcher: Optional[asyncio.Task] = None
@@ -196,7 +200,25 @@ class ZoomSdkProvider(MeetingProvider):
         self._page = await (self._display.claim() if for_meeting else self._display.page())
         if self._exposed_on is not self._page:
             await self._page.expose_function("crystalMeetEvent", self._on_page_event)
+            self._page.on("console", lambda message: message.type in ("error", "warning") and self._page_said(message.type, message.text))
+            self._page.on("pageerror", lambda error: self._page_said("uncaught", getattr(error, "message", None) or str(error)))
             self._exposed_on = self._page
+
+    def _page_said(self, kind: str, text: str) -> None:
+        """A line Zoom's meeting page printed (an error or a warning on its console, or an error nothing caught) to the journal: each
+        once in a call, and at most PAGE_LINES_MAX of them. What the page says between calls (the screensaver, Meet) is not Zoom's."""
+        if self._page is None or self._page.url.split("#")[0] != self._site.url("/meeting"):
+            return
+        line = f"Zoom's page ({kind}): {' '.join(str(text).split())[:500]}"
+        if line in self._page_lines:
+            return
+        if len(self._page_lines) >= self.PAGE_LINES_MAX:
+            if "" not in self._page_lines:   # (the cut-off is said once, marked by the empty line)
+                self._page_lines.add("")
+                page_log.info(f"Zoom's page printed more than {self.PAGE_LINES_MAX} lines in this call: the rest are not logged")
+            return
+        self._page_lines.add(line)
+        page_log.info(line)
 
     async def shutdown(self) -> None:
         await self._cancel_tasks()
@@ -260,6 +282,7 @@ class ZoomSdkProvider(MeetingProvider):
         if self._display is None:
             raise RuntimeError("Provider not initialized")
         await self._take_page(for_meeting=True)
+        self._page_lines = set()
         meeting_id = self.extract_meeting_id(meeting_url)
         if not meeting_id:
             raise ValueError(f"Invalid Zoom URL: {meeting_url}")

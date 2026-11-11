@@ -5,7 +5,9 @@ The agent logs warnings and errors and nothing more unless it is started with -v
 starts it with neither, so a stock install's journal holds what went wrong and little else. The dialogs Zoom draws over the TV are the one
 thing the journal must always hold (spec 2026-10-13, section 5, "log and learn"): a new dialog is judged, and its phrase added to the
 acknowledge list, from the journal, a handful of lines in a meeting and read weeks after it. Their lines come from one logger of their own,
-DIALOGS_LOGGER, which is at INFO whatever the agent is started with.
+DIALOGS_LOGGER, which is at INFO whatever the agent is started with. So is ZOOM_PAGE_LOGGER: what Zoom's meeting page printed as errors and
+warnings during a call, the only account of a call whose video went black (2026-11-11), at INFO so that Zoom's everyday console chatter is
+not taken for the room's warnings in Settings › Logs.
 
 Under systemd the agent's standard error is the journal, which gives every line the priority info unless the line begins with one of its
 own, "<4>" (SyslogLevelPrefix, on by default). Each line the agent writes there begins with its level's priority, so that Settings › Logs
@@ -21,6 +23,8 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 
 # The logger of the three lines each dialog gets (what Zoom drew, what was done with it): see the Zoom provider.
 DIALOGS_LOGGER = "croom.meeting.dialogs"
+# What Zoom's meeting page printed (its console's errors and warnings, its uncaught errors): see the Zoom provider.
+ZOOM_PAGE_LOGGER = "croom.meeting.zoom_page"
 
 
 def priority_of(levelno: int) -> int:
@@ -69,4 +73,5 @@ def setup_logging(verbose: bool = False, debug: bool = False) -> None:
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.StreamHandler) and handler.stream is sys.stderr:
                 handler.setFormatter(JournalFormatter(LOG_FORMAT))
-    logging.getLogger(DIALOGS_LOGGER).setLevel(min(level, logging.INFO))
+    for name in (DIALOGS_LOGGER, ZOOM_PAGE_LOGGER):
+        logging.getLogger(name).setLevel(min(level, logging.INFO))

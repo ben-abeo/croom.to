@@ -38,6 +38,7 @@ ZOOM_CREDENTIALS_FILE=""
 # Where the touchpad's virtual mouse is given to the input group, and where the module that makes it is set to load at boot
 UDEV_RULES_DIR="${UDEV_RULES_DIR:-/etc/udev/rules.d}"
 MODULES_LOAD_DIR="${MODULES_LOAD_DIR:-/etc/modules-load.d}"
+JOURNALD_DIR="${JOURNALD_DIR:-/etc/systemd/journald.conf.d}"
 # The room Pi's keyboard layout (Sign in to Google on the TV types US key codes): the system's, and labwc's for the desktop user
 KEYBOARD_FILE="${KEYBOARD_FILE:-/etc/default/keyboard}"
 
@@ -192,6 +193,25 @@ install_virtual_mouse() {
     udevadm control --reload-rules || true
     modprobe uinput || warn "The uinput module could not be loaded now: the touchpad cannot move the room Pi's mouse until it is (it is set to load at boot)"
     udevadm trigger --subsystem-match=misc --sysname-match=uinput || true
+}
+
+# Raspberry Pi OS keeps the journal in memory only (/usr/lib/systemd/journald.conf.d/40-rpi-volatile-storage.conf), so what went wrong in a
+# meeting is gone at the next restart. The room keeps it on disk, capped: drop-ins are read in the order of their names, the last one's
+# setting kept, so 90-croom.conf comes after the Pi's.
+write_journal_settings() {
+    mkdir -p "$JOURNALD_DIR"
+    cat > "$JOURNALD_DIR/90-croom.conf" << 'EOF'
+# Crystal Meet: the room's log kept across restarts (Raspberry Pi OS keeps it in memory only), in at most 200 MB of the SD card
+[Journal]
+Storage=persistent
+SystemMaxUse=200M
+EOF
+}
+
+keep_journal() {
+    log "Keeping the room's log across restarts..."
+    write_journal_settings
+    systemctl restart systemd-journald || warn "systemd-journald did not restart: the room's log is kept on disk from the next boot"
 }
 
 # Set KEY=value in a file of KEY=value lines: the line that sets KEY is replaced, or the line added; the rest of the file is kept.
@@ -843,6 +863,7 @@ main() {
     set_keyboard_layout
     set_pointer_parking
     set_screen_mode
+    keep_journal
     create_directories
     install_dependencies
     install_croom

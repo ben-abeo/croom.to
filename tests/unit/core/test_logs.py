@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from croom.core import agent
-from croom.core.logs import DIALOGS_LOGGER, level_for
+from croom.core.logs import DIALOGS_LOGGER, ZOOM_PAGE_LOGGER, level_for
 
 PROVIDER = "croom.meeting.providers.zoom_sdk"
 
@@ -27,6 +27,12 @@ def test_with_no_v_a_dialogs_info_line_reaches_the_journal_and_the_providers_oth
     logging.getLogger(PROVIDER).debug("a debug line")
     logging.getLogger(PROVIDER).warning("The microphone was not muted at join")
     assert written(reached) == [f"{DIALOGS_LOGGER} INFO Zoom dialog: 'Recording consent'", f"{PROVIDER} WARNING The microphone was not muted at join"]
+
+
+def test_with_no_v_what_zooms_page_printed_reaches_the_journal(agent_logging):
+    reached = agent_logging()
+    logging.getLogger(ZOOM_PAGE_LOGGER).info("Zoom's page (error): VideoEncoder failed")
+    assert written(reached) == [f"{ZOOM_PAGE_LOGGER} INFO Zoom's page (error): VideoEncoder failed"]
 
 
 @pytest.mark.parametrize("verbose, debug, providers", [

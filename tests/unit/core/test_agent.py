@@ -68,6 +68,8 @@ class TestServiceRegistration:
         assert dashboard.config["url"] == "http://localhost:3001"
         assert dashboard.config["state_file"] == str(tmp_path / "dashboard-state.json")
         assert dashboard.config["device_info"]["name"] == agent.config.room.name
+        # the room's calls reach the dashboard's meeting stats (they read 0 in every room before this)
+        assert dashboard._on_meeting_state in agent.service_manager.get_service("meeting")._state_callbacks
 
     def test_laptop_mode_is_registered_when_enabled_and_handed_to_the_control_page(self, tmp_path, no_hardware):
         config = make_config(tmp_path, control=True)

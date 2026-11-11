@@ -149,7 +149,8 @@ class CroomAgent:
             try:
                 from croom.dashboard.client import DashboardClient
                 dashboard_client = DashboardClient.from_config(
-                    self.config, self.platform_info, self.capabilities
+                    self.config, self.platform_info, self.capabilities,
+                    meeting=self.service_manager.get_service("meeting"),   # the room's calls, for the dashboard's meeting stats
                 )
                 self.service_manager.register(dashboard_client)
                 logger.info("Dashboard client registered")

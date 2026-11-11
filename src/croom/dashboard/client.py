@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import tempfile
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
@@ -24,6 +25,7 @@ import aiohttp
 
 from croom.core.config import Config
 from croom.core.service import Service
+from croom.meeting.providers.base import MeetingState
 from croom.platform.capabilities import Capabilities
 from croom.platform.detector import PlatformInfo
 
@@ -126,7 +128,7 @@ class DashboardClient(Service):
     and reconnection with capped exponential backoff.
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
+    def __init__(self, config: Optional[Dict[str, Any]] = None, meeting: Any = None):
         """
         Args:
             config: Client configuration with:
@@ -138,6 +140,7 @@ class DashboardClient(Service):
                 - state_file: Path of the enrollment state file (default ./dashboard-state.json)
                 - initial_backoff / max_backoff: Reconnect delays in seconds (default 5 / 60)
                 - auth_timeout: Seconds to wait for the dashboard's reply to auth (default 15)
+            meeting: The meeting service, whose calls go to the dashboard's meeting stats (None: no calls are reported)
         """
         super().__init__("dashboard")
         self.config = config or {}
@@ -167,6 +170,14 @@ class DashboardClient(Service):
         self._on_disconnected: List[Callable] = []
         self._on_config_update: List[Callable[[Dict], None]] = []
 
+        # The call the room is in as the dashboard knows it, (id, platform): its joined and its left carry the one id, which the
+        # dashboard pairs into the call's length (backend routes/metrics.ts, pairMeetings)
+        self._meeting = meeting
+        self._call: Optional[tuple] = None
+        self._reports: set = set()
+        if meeting is not None:
+            meeting.add_state_callback(self._on_meeting_state)
+
     @staticmethod
     def _clamp_heartbeat(value: Any) -> float:
         interval = float(value)
@@ -190,9 +201,10 @@ class DashboardClient(Service):
         config: Config,
         platform_info: PlatformInfo,
         capabilities: Capabilities,
+        meeting: Any = None,
     ) -> "DashboardClient":
         """Build the client from the agent's Config plus detected platform and capabilities."""
-        return cls(config={
+        return cls(meeting=meeting, config={
             "url": config.dashboard.url,
             "enrollment_token": config.dashboard.enrollment_token,
             "room_name": config.room.name,
@@ -524,6 +536,23 @@ class DashboardClient(Service):
             MessageType.MEETING_EVENT,
             {"deviceId": self._device_id, "event": event, "meetingId": meeting_id, "platform": platform},
         )
+
+    def _on_meeting_state(self, state: MeetingState) -> None:
+        """The meeting service's state callback: a call that connects is "joined", and its end (idle, or an error) is "left".
+        A state can come more than once (the meeting service hands each on once per join it has had), so each is sent once."""
+        if state == MeetingState.CONNECTED and self._call is None:
+            info = getattr(self._meeting, "current_meeting", None)
+            self._call = (uuid.uuid4().hex, getattr(info, "platform", None) or "unknown")
+            self._report("joined")
+        elif state in (MeetingState.IDLE, MeetingState.ERROR) and self._call is not None:
+            self._report("left")
+            self._call = None
+
+    def _report(self, event: str) -> None:
+        # ponytail: an event is dropped while the dashboard is out of reach (the call then is not counted); queue them if rooms lose it often
+        task = asyncio.get_running_loop().create_task(self.send_meeting_event(event, *self._call))
+        self._reports.add(task)
+        task.add_done_callback(self._reports.discard)
 
     # ------------------------------------------------------------------
     # Callbacks

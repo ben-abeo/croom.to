@@ -10,6 +10,33 @@ import { logger } from '../services/logger';
 
 export const metricsRouter = Router();
 
+interface MeetingEvent {
+  deviceId: string;
+  type: string;
+  data: object;
+  timestamp: Date;
+}
+
+/** Each call from its meeting_joined and meeting_left (one meetingId), newest call first. The events come newest first, as the
+ * route reads them; a call is paired from its joined forwards, so they are walked oldest first. A call still going is left out. */
+export function pairMeetings(newestFirst: MeetingEvent[]) {
+  const meetings: any[] = [];
+  const joined: Map<string, any> = new Map();
+  [...newestFirst].reverse().forEach((m) => {
+    const { meetingId, platform } = m.data as any;
+    const key = `${m.deviceId}-${meetingId}`;
+    if (m.type === 'meeting_joined') {
+      joined.set(key, { deviceId: m.deviceId, meetingId, platform, joinedAt: m.timestamp });
+    } else if (m.type === 'meeting_left' && joined.has(key)) {
+      const call = joined.get(key);
+      joined.delete(key);
+      const duration = new Date(m.timestamp).getTime() - new Date(call.joinedAt).getTime();
+      meetings.push({ ...call, leftAt: m.timestamp, durationMinutes: Math.round(duration / 60000) });
+    }
+  });
+  return meetings.reverse();
+}
+
 // Get metrics for a device
 metricsRouter.get('/device/:deviceId', async (req: AuthRequest, res: Response) => {
   try {
@@ -168,39 +195,7 @@ metricsRouter.get('/meetings', async (req: AuthRequest, res: Response) => {
       limit: 500,
     });
 
-    // Calculate meeting duration
-    const meetings: any[] = [];
-    const joinEvents: Map<string, any> = new Map();
-
-    metrics.forEach((m) => {
-      const data = m.data as any;
-      const meetingId = data.meetingId;
-
-      if (m.type === 'meeting_joined') {
-        joinEvents.set(`${m.deviceId}-${meetingId}`, {
-          deviceId: m.deviceId,
-          meetingId,
-          platform: data.platform,
-          joinedAt: m.timestamp,
-        });
-      } else if (m.type === 'meeting_left') {
-        const key = `${m.deviceId}-${meetingId}`;
-        const joinEvent = joinEvents.get(key);
-
-        if (joinEvent) {
-          const duration = new Date(m.timestamp).getTime() - new Date(joinEvent.joinedAt).getTime();
-          meetings.push({
-            deviceId: m.deviceId,
-            meetingId,
-            platform: joinEvent.platform,
-            joinedAt: joinEvent.joinedAt,
-            leftAt: m.timestamp,
-            durationMinutes: Math.round(duration / 60000),
-          });
-          joinEvents.delete(key);
-        }
-      }
-    });
+    const meetings = pairMeetings(metrics);
 
     res.json({
       meetings,

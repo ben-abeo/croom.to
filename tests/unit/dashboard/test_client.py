@@ -19,6 +19,7 @@ from aiohttp.test_utils import TestServer
 from croom import __version__
 from croom.core.config import Config
 from croom.core.service import Service
+from croom.meeting.providers.base import MeetingState
 from croom.dashboard.client import (
     MAX_HEARTBEAT_INTERVAL,
     MIN_HEARTBEAT_INTERVAL,
@@ -117,7 +118,22 @@ def fast_heartbeats(monkeypatch):
     monkeypatch.setattr("croom.dashboard.client.MIN_HEARTBEAT_INTERVAL", 0.0)
 
 
-def make_client(fake: FakeDashboard, tmp_path, **overrides) -> DashboardClient:
+class FakeMeeting:
+    """The meeting service as the client hears it: state callbacks, and the meeting's platform."""
+
+    def __init__(self, platform="google_meet"):
+        self.callbacks = []
+        self.current_meeting = SimpleNamespace(platform=platform)
+
+    def add_state_callback(self, callback):
+        self.callbacks.append(callback)
+
+    def set(self, state):
+        for callback in self.callbacks:
+            callback(state)
+
+
+def make_client(fake: FakeDashboard, tmp_path, meeting=None, **overrides) -> DashboardClient:
     config = {
         "url": fake.url,
         "enrollment_token": "tok-1",
@@ -129,7 +145,7 @@ def make_client(fake: FakeDashboard, tmp_path, **overrides) -> DashboardClient:
         "device_info": {"name": "Lab", "platform": "pc", "softwareVersion": "2.0.0-dev", "capabilities": {}},
     }
     config.update(overrides)
-    return DashboardClient(config=config)
+    return DashboardClient(config=config, meeting=meeting)
 
 
 class TestWebsocketUrl:
@@ -366,6 +382,29 @@ class TestDashboardClientProtocol:
             assert seen == [{"delay": 5}]
             await client.stop()
 
+
+    async def test_each_call_reaches_the_dashboard_as_a_joined_and_a_left_with_one_id(self, tmp_path):
+        async with FakeDashboard() as fake:
+            meeting = FakeMeeting()
+            client = make_client(fake, tmp_path, meeting=meeting)
+            await client.start()
+            await fake.wait_for("status")
+            # the meeting service hands on each state once per join it has had, so a state can come twice
+            for state in (MeetingState.JOINING, MeetingState.CONNECTED, MeetingState.CONNECTED, MeetingState.LEAVING,
+                          MeetingState.IDLE, MeetingState.IDLE):
+                meeting.set(state)
+            meeting.current_meeting = SimpleNamespace(platform="zoom")
+            meeting.set(MeetingState.CONNECTED)
+            meeting.set(MeetingState.ERROR)
+            await fake.wait_for("meeting_event", count=4)
+            await asyncio.sleep(0.1)
+            events = [m["payload"] for m in fake.messages if m["type"] == "meeting_event"]
+            assert [(e["deviceId"], e["event"], e["platform"]) for e in events] == [
+                ("device-1", "joined", "google_meet"), ("device-1", "left", "google_meet"),
+                ("device-1", "joined", "zoom"), ("device-1", "left", "zoom"),
+            ]
+            assert events[0]["meetingId"] == events[1]["meetingId"] != events[2]["meetingId"] == events[3]["meetingId"]
+            await client.stop()
 
 class TestAuthPhase:
     async def test_error_reply_before_auth_ends_the_session_and_retries(self, tmp_path):

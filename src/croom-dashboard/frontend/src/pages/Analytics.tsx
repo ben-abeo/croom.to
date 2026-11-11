@@ -9,7 +9,7 @@ export default function Analytics() {
 
   const { data: meetings } = useQuery({
     queryKey: ['meetings'],
-    queryFn: () => metricsApi.getMeetings(),
+    queryFn: () => metricsApi.getMeetings(new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()),
   });
 
   return (

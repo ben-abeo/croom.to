@@ -268,9 +268,11 @@ async def test_tracking_turns_toward_people_who_move_and_stops_when_they_are_in_
     assert speeds(camera) == (1, 0) and camera.taken_over_at is None      # the room's own turn, not a person taking the camera
     await see(framer, room, clock, moved(TWO, 250))
     assert speeds(camera) == (1, 0)                            # still on its way
-    await see(framer, room, clock, moved(TWO, 10))             # in the middle again
+    for _ in range(4):                                         # in the middle again, for a few pictures (their place is smoothed)
+        await see(framer, room, clock, moved(TWO, 10))
     assert speeds(camera) == (0, 0) and framings == [False]    # no framing from the widest picture: it only turned
-    await see(framer, room, clock, moved(TWO, -300))
+    for _ in range(3):
+        await see(framer, room, clock, moved(TWO, -300))
     assert speeds(camera) == (-1, 0)
     await camera.stop()
 
@@ -279,31 +281,99 @@ async def test_a_fast_turn_stops_early_for_what_is_still_to_come():
     framer, camera, room, clock, framings = await tracking()
     await see(framer, room, clock, moved(TWO, 500))
     assert speeds(camera) == (1, 0)
-    await see(framer, room, clock, moved(TWO, 60), seconds=1.2)    # at full speed, and they are a few degrees off still
+    for _ in range(6):
+        await see(framer, room, clock, moved(TWO, 60), seconds=0.2)   # at full speed by now, and they are a few degrees off still
     assert speeds(camera) == (0, 0)                                # stopped: the camera comes to rest on them
     slow, camera2, room2, clock2, _ = await tracking()
     await see(slow, room2, clock2, moved(TWO, 150))
+    slow._middle = None
     await see(slow, room2, clock2, moved(TWO, 60), seconds=0.1)    # the same place early in a turn, still slow: on it goes
     assert speeds(camera2) == (1, 0)
     await camera2.stop()
 
 
-async def test_people_who_get_out_of_the_picture_are_turned_after_and_then_looked_for_from_the_widest():
+async def test_people_who_get_out_of_the_picture_are_found_by_zooming_out_where_the_camera_is_and_never_by_turning():
     framer, camera, room, clock, framings = await tracking()
-    clock.now += framer.TRACK_FIND_S
+    await camera.zoom(280, by_person=False)
+    await see(framer, room, clock, moved(TWO, 150))            # a little to the right: after them
+    assert speeds(camera) == (1, 0)
+    await see(framer, room, clock, [], seconds=0.05)           # gone (the picture mid-turn is blurred): on to where they were ...
+    assert speeds(camera) == (1, 0)
+    await see(framer, room, clock, [], seconds=2.0)            # ... and no further
+    assert speeds(camera) == (0, 0) and framings == [False]
+    zooms = []
+    for _ in range(12):
+        await see(framer, room, clock, [], seconds=framer.TRACK_ZOOM_S)
+        zooms.append(camera.state()["zoom"]["level"])
+    assert zooms[0] < 280 and zooms == sorted(zooms, reverse=True) and zooms[-1] == camera.state()["zoom"]["min"]
+    assert speeds(camera) == (0, 0) and framings == [False]    # found by the zoom: no turn, no framing from the widest
+    await see(framer, room, clock, moved(TWO, 30))             # in the picture again: tracked as before
+    await see(framer, room, clock, moved(TWO, 400))
     await see(framer, room, clock, moved(TWO, 400))
     assert speeds(camera) == (1, 0)
-    await see(framer, room, clock, [], seconds=0.3)            # gone from the picture: the turn after them goes on
-    assert speeds(camera) == (1, 0) and framings == [False]
-    await see(framer, room, clock, [], seconds=framer.TRACK_COAST_S)
-    assert speeds(camera) == (0, 0) and framings == [False]    # ... and stops
-    room.faces = moved(TWO, 100)                               # where they went, as the widest picture shows them
-    await framer.steer([], SIZE, room.meeting.camera_view)
-    clock.now += framer.TRACK_LOST_S
-    await framer.steer([], SIZE, room.meeting.camera_view)
-    assert framings == [False, False]                          # looked for at once, not after the count believes they left
-    await framer.steer([], SIZE, room.meeting.camera_view)
-    assert framings == [False, False]                          # and not over and over
+    await camera.stop()
+
+
+async def test_a_turn_up_or_down_stops_the_moment_they_are_out_of_the_picture():
+    framer, camera, room, clock, framings = await tracking()
+    await see(framer, room, clock, [(x, y - 250, w, h) for x, y, w, h in TWO])     # they stood up
+    await see(framer, room, clock, [(x, y - 250, w, h) for x, y, w, h in TWO])
+    assert speeds(camera) == (0, 1)
+    await see(framer, room, clock, [], seconds=0.05)
+    assert speeds(camera) == (0, 0)                            # never up or down unseen: no ceiling
+
+
+async def at_home(framer, camera):
+    await camera.save_home()
+    return camera.home_place
+
+
+async def test_only_people_in_the_room_homes_picture_are_followed_and_the_camera_keeps_near_home():
+    framer, camera, room, clock, framings = await tracking()
+    home = await at_home(framer, camera)
+    assert home is not None
+    await camera.zoom(100, by_person=False)
+    far = [(1270, 300, 8, 8)]                                  # at the very edge of Home's widest picture: in the room, just
+    await see(framer, room, clock, TWO + far)
+    assert len(framer._in_the_room(TWO + far, SIZE, 100, home, home)) == 3
+    away = (home[0] + 60, home[1])                             # the camera 60 degrees off Home: what it sees there is not the room
+    assert framer._in_the_room(TWO, SIZE, 100, away, home) == []
+    assert framer._reach(0, 1, (home[0] + framer.TRACK_REACH[0], home[1]), home) == 0      # no further from Home than its reach
+    assert framer._reach(0, -1, (home[0] + framer.TRACK_REACH[0], home[1]), home) == -1    # but back toward it
+    assert framer._reach(1, 1, (home[0], home[1] + framer.TRACK_REACH[1]), home) == 0      # nor up to the ceiling
+
+
+async def test_no_one_at_the_widest_for_a_while_sends_the_camera_home_once():
+    framer, camera, room, clock, framings = await tracking()
+    await at_home(framer, camera)
+    homes = []
+    home = camera.home
+
+    async def counted(**kwargs):
+        homes.append(kwargs)
+        return await home(**kwargs)
+
+    camera.home = counted
+    await camera.zoom(100, by_person=False)
+    await see(framer, room, clock, [], seconds=framer.TRACK_LOST_S)
+    assert homes == []
+    await see(framer, room, clock, [], seconds=framer.TRACK_HOME_S)
+    await see(framer, room, clock, [], seconds=1.0)
+    assert homes == [{"by_person": False}] and framings == [False]
+
+
+async def test_with_room_to_spare_the_zoom_steps_in_and_out_again_when_they_reach_the_edge():
+    framer, camera, room, clock, framings = await tracking()
+    await camera.zoom(150, by_person=False)
+    close = [(600, 330, 30, 30), (650, 330, 30, 30)]           # small in the middle of the picture
+    await see(framer, room, clock, close, seconds=1.0)
+    assert camera.state()["zoom"]["level"] == 150              # not at once
+    await see(framer, room, clock, close, seconds=framer.TRACK_ROOMY_S)
+    assert camera.state()["zoom"]["level"] > 150 and camera.taken_over_at is None
+    level = camera.state()["zoom"]["level"]
+    wide = [(40, 300, 200, 200), (1040, 300, 200, 200)]        # filling it, at its edges
+    await see(framer, room, clock, wide, seconds=1.0)
+    assert camera.state()["zoom"]["level"] < level
 
 
 async def test_tracking_never_turns_toward_fewer_people_than_it_framed():

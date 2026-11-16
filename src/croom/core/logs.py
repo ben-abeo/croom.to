@@ -25,6 +25,8 @@ LOG_FORMAT = "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
 DIALOGS_LOGGER = "croom.meeting.dialogs"
 # What Zoom's meeting page printed (its console's errors and warnings, its uncaught errors): see the Zoom provider.
 ZOOM_PAGE_LOGGER = "croom.meeting.zoom_page"
+# What Auto framing's tracking did with the camera and why (a turn, people lost, a zoom): see devices/autoframe.py.
+TRACKING_LOGGER = "croom.devices.tracking"
 
 
 def priority_of(levelno: int) -> int:
@@ -73,5 +75,5 @@ def setup_logging(verbose: bool = False, debug: bool = False) -> None:
         for handler in logging.getLogger().handlers:
             if isinstance(handler, logging.StreamHandler) and handler.stream is sys.stderr:
                 handler.setFormatter(JournalFormatter(LOG_FORMAT))
-    for name in (DIALOGS_LOGGER, ZOOM_PAGE_LOGGER):
+    for name in (DIALOGS_LOGGER, ZOOM_PAGE_LOGGER, TRACKING_LOGGER):
         logging.getLogger(name).setLevel(min(level, logging.INFO))

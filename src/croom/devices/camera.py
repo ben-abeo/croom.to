@@ -739,11 +739,40 @@ class RoomCamera:
     def _by_hand(self) -> None:
         self._taken_over_at = self._clock()
 
-    async def zoom(self, level: int) -> int:
-        """The zoom a person asks for (the page's zoom buttons and slider)."""
+    async def zoom(self, level: int, by_person: bool = True) -> int:
+        """The zoom a person asks for (the page's zoom buttons and slider); by_person False: Auto framing's tracking's own."""
         level = _whole_number(level, "the zoom level")
-        self._by_hand()
+        if by_person:
+            self._by_hand()
         return await self._zoom_to(level)
+
+    async def place(self) -> Optional[Tuple[float, float]]:
+        """Where a camera that says where it points points now: (pan, tilt) in degrees, its turns by speed counted in. None for a
+        camera that does not say (the MeetUp), or one that is not there."""
+        if not self._absolute or self._fd is None:
+            return None
+        return await self._place()
+
+    @property
+    def home_place(self) -> Optional[Tuple[float, float]]:
+        """The saved home of a camera that says where it points, (pan, tilt) in degrees; None without one."""
+        if not (self._absolute and self.home_saved):
+            return None
+        return self._home["pan"] / ARCSEC, self._home["tilt"] / ARCSEC
+
+    async def reseat(self) -> bool:
+        """Send a camera that has turned by speed since its last target to where it is counted to be: how far a turn by speed went
+        is counted from how long it was held, a degree or two out after many, and a target puts the camera where it says. Whether
+        it was sent: not while it moves or is busy, and not when it has not turned by speed."""
+        if not self._absolute or self._fd is None or self._busy or self._framing or self._pan or self._tilt \
+                or not (self._turned[0] or self._turned[1]):
+            return False
+        zoom = self._zoom_now()
+        await self._long(lambda: self._reseat_work(zoom), keeps_position=True)
+        return True
+
+    async def _reseat_work(self, zoom: int) -> None:
+        await self._go_to(await self._where(), zoom)
 
     async def _zoom_to(self, level: int) -> int:
         """The zoom, as the camera's own moves set it (Home, a preset, Frame people): not a person's."""
@@ -1091,6 +1120,10 @@ class RoomCamera:
         await self._zoom_to(self._zoom_range[0])                         # 1. everyone in reach in view
         await self._wait(self._target_done_at - self._clock())         # a Rally sent back inside its limits for the wider picture: there first
         await self._wait(self.SETTLE_S)
+        if self._absolute and (self._turned[0] or self._turned[1]):
+            # Turned by speed since its last target (arrows, or Auto framing's tracking): where it points is counted, a degree or
+            # two out after many turns, and the aim below is from there. A target to that place makes it where it says.
+            await self._go_to(await self._where(), self._zoom_range[0])
         faces, size = await self._look(still, detect)               # 2. and 3.
         if faces is None or not faces:
             await self._zoom_to(before if before is not None else self._zoom_range[0])

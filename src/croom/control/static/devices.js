@@ -122,12 +122,14 @@
 
   // --- Camera ---
   let previewTimer = null;
+  let trackingBusy = false;   // a tap on Tracking is on its way
+  const trackingButton = el("meeting-tracking");   // kept: it is out of the page where the room cannot follow people
 
   function renderCamera(camera) {
     // Keyed like the other controls, so a button is never replaced under a finger when nothing about it changed.
     // model.busy is in the key because button() reads it.
     const key = JSON.stringify([camera && camera.available, camera && camera.busy, camera && camera.framing, camera && camera.auto_framing,
-      framingHere, camera && camera.position_known,
+      camera && camera.tracking, trackingBusy, framingHere, camera && camera.position_known,
       camera && camera.home_saved, camera && camera.zoom, camera && camera.presets, camera && camera.limits, camera && camera.picture, presetSaveMode,
       setupOpen, model.busy, deviceNotes.camera, P.cameraMode()]);
     if (key === lastCameraKey) return;
@@ -182,7 +184,16 @@
       return b;
     }));
     // The meeting screen's presets: the ones saved, after Frame people (a recall: a meeting has no Save)
-    el("meeting-views").replaceChildren(el("meeting-frame-people"), ...camera.presets.filter((p) => p.saved && ready).map((p) => {
+    // Tracking: on or off for this call, where the room can follow people (null: it cannot, or no call is on)
+    const tracking = trackingButton;
+    const canTrack = typeof camera.tracking === "boolean";
+    tracking.hidden = !canTrack;
+    tracking.textContent = camera.tracking ? "Tracking on" : "Tracking off";
+    tracking.setAttribute("aria-pressed", String(Boolean(camera.tracking)));
+    tracking.classList.toggle("primary", Boolean(camera.tracking));
+    tracking.classList.toggle("quiet", !camera.tracking);
+    tracking.disabled = trackingBusy;
+    el("meeting-views").replaceChildren(el("meeting-frame-people"), ...(canTrack ? [tracking] : []), ...camera.presets.filter((p) => p.saved && ready).map((p) => {
       const b = button(p.name, "quiet saved", () => presetAction(p.slot), camera.busy);
       b.dataset.slot = String(p.slot);
       return b;
@@ -284,6 +295,19 @@
     render();
   }
   for (const id of ["frame-people", "meeting-frame-people"]) el(id).addEventListener("click", framePeople);
+
+  // Tracking on or off for this call: the camera's block comes back with what it is now
+  async function toggleTracking() {
+    if (trackingBusy) return;
+    trackingBusy = true;
+    lastCameraKey = null;
+    render();
+    await deviceCall("camera", "/api/camera/tracking", { on: trackingButton.getAttribute("aria-pressed") !== "true" });
+    trackingBusy = false;
+    lastCameraKey = null;
+    render();
+  }
+  trackingButton.addEventListener("click", toggleTracking);
 
   // Hold to move: press starts, release stops; re-sent every 750 ms while held so the agent's watchdog stays quiet.
   // Sliding the finger off the button is a release too (spec 2026-10-08, section 4.6): the pointer stays captured so

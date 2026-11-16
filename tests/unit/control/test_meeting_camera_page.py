@@ -110,3 +110,24 @@ def test_the_strip_fits_between_the_calls_buttons_and_the_dock_and_gives_way_to_
             page.wait_for_selector("#meeting-dialog:not([hidden])", timeout=5000)
             assert page.locator("#meeting-camera").is_hidden(), role      # Meet's box needs the room, and a decision first
             page.close()
+
+
+def test_tracking_is_on_the_meeting_screen_only_where_the_room_can_follow_people_and_a_tap_turns_it(browser):  # noqa: F811
+    with PageServer() as server:
+        camera, framer = server.devices.camera, server.devices.autoframer
+        page = in_a_call(browser, server)
+        assert page.locator("#meeting-views button").all_inner_texts() == ["Frame people", "Wide", "Table"]   # this room cannot
+        camera.tracking = False                              # the AI HAT and a Rally: Tracking, off for now
+        page.wait_for_selector("#meeting-tracking:not([hidden])", timeout=5000)
+        assert page.locator("#meeting-views button").all_inner_texts() == ["Frame people", "Tracking off", "Wide", "Table"]
+        box = page.locator("#meeting-tracking").bounding_box()
+        row = page.locator("#meeting-frame-people").bounding_box()
+        assert abs(box["y"] - row["y"]) < 2 and box["x"] + box["width"] <= page.viewport_size["width"]    # in Frame people's row, on the screen
+        page.click("#meeting-tracking")
+        assert eventually(lambda: framer.asked == [True])
+        page.wait_for_function("document.getElementById('meeting-tracking').textContent === 'Tracking on'", timeout=5000)
+        assert page.get_attribute("#meeting-tracking", "aria-pressed") == "true"
+        page.click("#meeting-tracking")
+        assert eventually(lambda: framer.asked == [True, False])
+        page.wait_for_function("document.getElementById('meeting-tracking').textContent === 'Tracking off'", timeout=5000)
+        page.close()

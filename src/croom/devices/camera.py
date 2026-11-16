@@ -154,6 +154,8 @@ class RoomCamera:
         # ("on", "paused", or None: off, or not in a call), for the camera screen.
         self._taken_over_at: Optional[float] = None
         self.auto_framing: Optional[str] = None
+        # Auto framing's tracking as the camera's controls show it (autoframe.py): True on, False off, None where it cannot be had
+        self.tracking: Optional[bool] = None
         self._interrupt = asyncio.Event()
         self._long_done = asyncio.Event()
         self._long_done.set()
@@ -260,6 +262,7 @@ class RoomCamera:
             "device": self._path,
             "reason": None if self.available else self._reason,
             "moving": bool(self._pan or self._tilt),
+            "tracking": self.tracking,
             "busy": self._busy,
             "framing": self._framing,
             "auto_framing": self.auto_framing,
@@ -738,6 +741,10 @@ class RoomCamera:
 
     def _by_hand(self) -> None:
         self._taken_over_at = self._clock()
+
+    def hand_back(self) -> None:
+        """Give the camera back to Auto framing (Tracking turned on at the camera's controls), as a person's Frame people does."""
+        self._taken_over_at = None
 
     async def zoom(self, level: int, by_person: bool = True) -> int:
         """The zoom a person asks for (the page's zoom buttons and slider); by_person False: Auto framing's tracking's own."""

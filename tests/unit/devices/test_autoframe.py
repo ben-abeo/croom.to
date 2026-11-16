@@ -424,3 +424,44 @@ async def test_tracking_gives_the_people_room_so_that_someone_beside_them_is_in_
     await see(framer, room, clock, snug, seconds=1.0)
     await see(framer, room, clock, snug, seconds=1.0)
     assert camera.state()["zoom"]["level"] < 250
+
+
+# --- Tracking turned on and off for the call, at the camera's controls
+
+async def test_tracking_is_turned_off_and_on_for_the_call_and_the_next_call_has_the_setting_again():
+    import pytest
+    from croom.devices.errors import NotReady
+    framer, camera, room, clock, framings = await tracking()
+    await framer.tick()
+    assert camera.state()["tracking"] is True
+    framer.set_tracking(False)                                 # off: no Auto framing for the rest of this call
+    assert camera.state()["tracking"] is False and not framer._tracks()
+    await framer.tick()
+    assert camera.state()["auto_framing"] is None and camera.state()["tracking"] is False
+    camera._taken_over_at = clock.now                          # and someone moved the camera by hand meanwhile
+    framer.set_tracking(True)                                  # on: the camera is Auto framing's again
+    await framer.tick()
+    assert camera.taken_over_at is None and framer._tracks() and camera.state()["tracking"] is True
+    room.meeting.state = MeetingState.IDLE
+    await framer.tick()
+    assert camera.state()["tracking"] is None                  # no call: nothing to turn
+    with pytest.raises(NotReady, match="during a call"):
+        framer.set_tracking(True)
+
+
+async def test_tracking_can_be_turned_on_in_a_room_set_to_frame_at_the_start_of_calls_and_not_where_it_cannot_be_had():
+    import pytest
+    from croom.devices.errors import NotReady
+    framer, camera, room, clock, framings = await framer_for(mode="call_start", follow=True)
+    room.meeting.camera_view = LiveView()
+    await framer.tick()
+    assert camera.state()["tracking"] is False                 # the room can follow people, and its setting does not
+    framer.set_tracking(True)
+    clock.now += framer.SOON_S
+    await framer.tick()
+    assert framings == [False] and framer._tracks()            # framed soon, as tracking is, and tracked from there
+    without, camera, room, clock, _ = await framer_for(mode="dynamic", follow=False)
+    await without.tick()
+    assert camera.state()["tracking"] is None
+    with pytest.raises(NotReady, match="AI HAT"):
+        without.set_tracking(True)

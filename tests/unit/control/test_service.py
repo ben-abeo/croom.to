@@ -347,6 +347,7 @@ class StubCamera:
         self.picture = [dict(setting) for setting in picture]   # the picture settings the camera has, as RoomCamera.state() lists them
         self.pictures = []              # what set_picture and reset_picture were asked, in order
         self.auto_framing = auto_framing    # what Auto framing says: "on", "paused", or None
+        self.tracking = None                # Tracking as the camera's controls show it: True, False, or None where it cannot be had
         self.position_known = position_known and available      # a missing camera never knows its position
         self.saved = set(saved)
         self.zoom_level, self.moving, self.busy = 100, False, False
@@ -368,7 +369,8 @@ class StubCamera:
                 "position_known": self.position_known, "home_saved": self.home_saved,
                 "presets": [{"slot": s, "name": self.names[s - 1], "saved": s in self.saved} for s in (1, 2, 3)],
                 "limits": dict(self.limits) if self.limits is not None else None,
-                "picture": [dict(setting) for setting in self.picture], "auto_framing": self.auto_framing, "preview": self.preview_on}
+                "picture": [dict(setting) for setting in self.picture], "auto_framing": self.auto_framing, "tracking": self.tracking,
+                "preview": self.preview_on}
 
     async def set_picture(self, name, value):
         from croom.devices.errors import NotReady
@@ -523,6 +525,21 @@ class StubDevices:
         self.volume = volume if volume is not None else StubVolume()
         self.camera = camera if camera is not None else StubCamera()
         self.mic = mic if mic is not None else StubMic()
+        self.autoframer = StubAutoFramer(self.camera)
+
+
+class StubAutoFramer:
+    """Auto framing as the camera's controls ask it: Tracking on or off for the call, refused in `refusal`'s words."""
+
+    def __init__(self, camera):
+        self.camera, self.asked, self.refusal = camera, [], None
+
+    def set_tracking(self, on):
+        from croom.devices.errors import NotReady
+        if self.refusal:
+            raise NotReady(self.refusal)
+        self.asked.append(on)
+        self.camera.tracking = on
 
 
 class StubTv:
@@ -2336,6 +2353,18 @@ class TestRoomDevices:
         assert (await (await client.post("/api/camera/preview", json={"on": False})).json())["preview"] is False
         assert devices.camera.previews == [True, False]
         assert (await client.post("/api/camera/preview", json={"on": "yes"})).status == 400
+
+    async def test_tracking_is_turned_on_and_off_for_the_call_and_refused_in_the_rooms_words(self, client_factory):
+        devices = StubDevices()
+        client = await client_factory(make_service(devices=devices))
+        assert (await (await client.get("/api/status")).json())["camera"]["tracking"] is None
+        assert (await (await client.post("/api/camera/tracking", json={"on": True})).json())["tracking"] is True
+        assert (await (await client.post("/api/camera/tracking", json={"on": False})).json())["tracking"] is False
+        assert devices.autoframer.asked == [True, False]
+        assert (await client.post("/api/camera/tracking", json={"on": "yes"})).status == 400
+        devices.autoframer.refusal = "Tracking is turned on and off during a call"
+        response = await client.post("/api/camera/tracking", json={"on": True})
+        assert response.status == 409 and (await response.json())["error"] == "Tracking is turned on and off during a call"
 
     async def test_preview_is_refused_when_the_camera_is_unavailable(self, client_factory):
         devices = StubDevices(camera=StubCamera(available=False))

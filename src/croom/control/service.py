@@ -507,6 +507,7 @@ class ControlService(Service):
         app.router.add_post("/api/camera/presets/{slot}", self._handle_camera_preset)
         app.router.add_post("/api/camera/setup", self._handle_camera_setup)
         app.router.add_post("/api/camera/frame", self._handle_camera_frame)
+        app.router.add_post("/api/camera/tracking", self._handle_camera_tracking)
         app.router.add_post("/api/camera/picture", self._handle_camera_picture)
         app.router.add_post("/api/camera/preview", self._handle_camera_preview)
         app.router.add_post("/api/tv/control", self._handle_tv_control)
@@ -933,7 +934,7 @@ class ControlService(Service):
         if camera is not None:
             return camera.state()
         return dict(self.NO_DEVICES, device=None, moving=False, busy=False, framing=False, zoom={"level": 0, "min": 0, "max": 0},
-                    position_known=False, home_saved=False, presets=[], limits=None, picture=[], auto_framing=None, preview=False)
+                    position_known=False, home_saved=False, presets=[], limits=None, picture=[], auto_framing=None, tracking=None, preview=False)
 
     async def _device_call(self, request: web.Request, device, action) -> web.Response:
         """Run one device action: JSON in, the device's block out.
@@ -1100,6 +1101,23 @@ class ControlService(Service):
 
     # Frame people (spec 2026-11-01 camera view, section 5): on a tap only, from any device that shows the camera's controls
     FRAME_REFUSALS = {"laptop": "The camera is on the laptop", "camera_off": "Your camera is off in the call"}
+
+    async def _handle_camera_tracking(self, request: web.Request) -> web.Response:
+        """POST /api/camera/tracking {"on": true or false}: Auto framing's tracking on or off for the call that is on (AutoFramer.
+        set_tracking). Answers the camera's block, or 409 with the words: outside a call, or in a room that cannot follow people."""
+        camera = self._camera()
+
+        async def action(data):
+            on = data.get("on")
+            if not isinstance(on, bool):
+                raise ValueError("on must be true or false")
+            framer = getattr(self._devices, "autoframer", None)
+            if framer is None:
+                raise NotReady("This room has no Auto framing")
+            framer.set_tracking(on)
+            return camera.state()
+
+        return await self._device_call(request, camera, action)
 
     async def _handle_camera_frame(self, request: web.Request) -> web.Response:
         """POST /api/camera/frame: frame the people in the room once (RoomCamera.frame_people, with one picture from the TV's tap). Answers

@@ -111,10 +111,34 @@ class AutoFramer:
         self._lost_said = False
         self._counted, self._counted_at = (-1, -1), 0.0     # how many people the journal was last told were in the picture
         self._said: Optional[str] = None
+        self._override: Optional[bool] = None   # tracking turned on or off for this call at the camera's controls; None: the setting
 
     @property
     def mode(self) -> str:
         return self._mode
+
+    def _mode_now(self) -> str:
+        """The mode for the call that is on: the room's setting, or what the camera's controls chose for this call (Tracking on
+        is "track"; off is no Auto framing at all, so the camera stays where it is)."""
+        if self._override is None:
+            return self._mode
+        return "track" if self._override else "off"
+
+    def _can_track(self) -> bool:
+        return bool(self._follow and getattr(self._camera, "says_where", False))
+
+    def set_tracking(self, on: bool) -> None:
+        """The camera's controls' Tracking, during a call: on or off for the rest of it, whatever the room's setting; the next call
+        has the setting again. On also gives the camera back to Auto framing, as Frame people does."""
+        if not self._can_track():
+            raise NotReady("This room's camera cannot follow people (it needs the AI HAT and a camera that says where it points)")
+        if self._meeting is None or self._meeting.state != MeetingState.CONNECTED:
+            raise NotReady("Tracking is turned on and off during a call")
+        self._override = bool(on)
+        if on:
+            self._camera.hand_back()
+        self._camera.tracking = bool(on)
+        track_log.info(f"Tracking turned {'on' if on else 'off'} for this call at the camera's controls")
 
     def set_mode(self, mode: Union[str, bool, None]) -> None:
         """The room's setting, at start and when Settings changes it (at once)."""
@@ -155,7 +179,7 @@ class AutoFramer:
     def _tracks(self) -> bool:
         """Whether the camera is kept on the people just now: the mode, the HAT, a camera that says where it points, and a call it
         has framed and that nobody has taken the camera in."""
-        return (self._mode == "track" and self._follow and self._call is not None and self._framed is not None
+        return (self._mode_now() == "track" and self._follow and self._call is not None and self._framed is not None
                 and self._camera.auto_framing == "on" and getattr(self._camera, "says_where", False))
 
     async def tick(self) -> None:
@@ -163,8 +187,13 @@ class AutoFramer:
         in_call = self._meeting is not None and self._meeting.state == MeetingState.CONNECTED
         if not in_call:
             self._call = None                   # the next call is framed afresh
+            self._override = None               # ... and has the room's setting again
+        mode = self._mode_now()
+        taken_over = self._call is not None and self._camera.taken_over_at is not None and self._camera.taken_over_at > self._call
+        # What the camera's controls show for Tracking: None where it cannot be had, or outside a call
+        self._camera.tracking = (mode == "track" and not taken_over) if in_call and self._can_track() else None
         view = getattr(self._meeting, "camera_view", None)
-        if not (self._mode != "off" and in_call and view is not None and view.blocked() is None and self._camera.available):
+        if not (mode != "off" and in_call and view is not None and view.blocked() is None and self._camera.available):
             self._show(None)
             return
         now = self._clock()
@@ -174,7 +203,7 @@ class AutoFramer:
         if taken is not None and taken > self._call:   # a hand move since the call was first seen; one before it does not count
             self._show("paused")                # a person has the camera in this call; their Frame people gives it back
             return
-        if self._mode == "call_start" and self._framed is not None:
+        if mode == "call_start" and self._framed is not None:
             self._show(None)                    # framed at the start of this call: nothing more until the next
             return
         self._show("on")
@@ -182,7 +211,7 @@ class AutoFramer:
         if state["busy"] or state["moving"] or state["framing"]:
             return
         if self._framed is None:
-            if now - self._call >= (self.START_S if self._mode == "call_start" else self.SOON_S):
+            if now - self._call >= (self.START_S if mode == "call_start" else self.SOON_S):
                 await self._frame(view)
             return
         faces, size = await self._look(view)
@@ -411,7 +440,7 @@ class AutoFramer:
 
     async def _frame(self, view) -> None:
         try:
-            top = self.TRACK_ZOOM if self._mode == "track" and self._follow else None
+            top = self.TRACK_ZOOM if self._mode_now() == "track" and self._follow else None
             answer = await self._camera.frame_people(view.still, detect=self._detect, by_person=False, zoom_top=top)
         except (NotReady, DeviceUnavailable, Interrupted) as e:
             logger.info(f"Auto framing did not frame just now: {e}")
@@ -420,7 +449,7 @@ class AutoFramer:
         self._settled, self._moved, self._turn, self._seen, self._rested = None, 0, (0, 0), self._clock(), self._clock()
         self._lost_said, self._roomy, self._middle = False, None, None
         logger.info(f"Auto framing framed {self._framed} {'person' if self._framed == 1 else 'people'}")
-        if self._mode == "call_start":
+        if self._mode_now() == "call_start":
             self._show(None)                    # done for this call
 
     async def _look(self, view):

@@ -281,6 +281,7 @@ class ControlConfig:
     camera_presets: List[str] = field(default_factory=lambda: ["Wide", "Table", "Whiteboard"])  # the three slot names
     camera_auto_framing: str = "off"    # Auto framing (devices/autoframe.py): "off", "call_start" or "dynamic"
     door_sign_camera_password: str = ""  # the door signs' camera login for UniFi Protect (user "camera"); blank: no camera
+    release_empty_minutes: int = 0      # a booking nobody came to is ended after this many empty minutes (needs occupancy); 0: never
     occupancy: bool = False             # Occupancy (devices/occupancy.py): the people in the room counted from the camera; off until chosen
     door_sign_camera_sound: bool = False  # the door signs' microphone with their picture; off until someone chooses it (consent)
 
@@ -445,6 +446,7 @@ class Config:
                 "camera_presets": list(self.control.camera_presets),
                 "camera_auto_framing": self.control.camera_auto_framing,
                 "occupancy": self.control.occupancy,
+                "release_empty_minutes": self.control.release_empty_minutes,
                 "door_sign_camera_password": self.control.door_sign_camera_password,
                 "door_sign_camera_sound": self.control.door_sign_camera_sound,
             },

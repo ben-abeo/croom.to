@@ -390,7 +390,7 @@ class ControlService(Service):
         self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
         self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
         self._editor.on_change(("control.camera_auto_framing",), self._apply_auto_framing)
-        self._editor.on_change(("control.occupancy",), self._apply_occupancy)
+        self._editor.on_change(("control.occupancy", "control.release_empty_minutes"), self._apply_occupancy)
         self._editor.on_change(("control.door_sign_camera_password",), self._apply_sign_camera_password)
         self._editor.on_change(("control.door_sign_camera_sound",), self._apply_sign_camera_sound)
 
@@ -1501,6 +1501,7 @@ class ControlService(Service):
         occupancy = getattr(self._devices, "occupancy", None)
         if occupancy is not None:
             occupancy.set_on(values["control.occupancy"])
+            occupancy.set_release(values["control.release_empty_minutes"])
 
     async def _handle_config(self, request: web.Request) -> web.Response:
         """A Settings page's values as config.yaml has them, the fields its form draws, and whether a saved change waits for a restart."""

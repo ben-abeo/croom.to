@@ -36,7 +36,8 @@ class DevicesService(Service):
     WAKE_S = 2.0            # lengthen in a room whose camera is still at Logitech's home when the call starts
 
     def __init__(self, volume: RoomVolume, camera: RoomCamera, mic: Optional[RoomMic] = None, meeting=None,
-                 buttons_finder: Optional[Callable[[], List[Any]]] = None, auto_framing: Any = "off", occupancy: Any = False):
+                 buttons_finder: Optional[Callable[[], List[Any]]] = None, auto_framing: Any = "off", occupancy: Any = False,
+                 release_empty_minutes: Any = 0):
         super().__init__("devices")
         self.volume = volume
         self.camera = camera
@@ -63,13 +64,14 @@ class DevicesService(Service):
         # Auto framing (autoframe.py): Frame people by itself during calls, with the room's setting on; it needs the meeting
         self.autoframer = AutoFramer(camera, meeting, mode=auto_framing) if meeting is not None else None
         # Occupancy (occupancy.py): the people in the room, counted once a minute, with the room's setting on; it needs the meeting's picture
-        self.occupancy = Occupancy(camera, meeting, on=occupancy) if meeting is not None else None
+        self.occupancy = Occupancy(camera, meeting, on=occupancy, release_minutes=release_empty_minutes) if meeting is not None else None
 
     @classmethod
     def from_config(cls, config, store, meeting=None) -> "DevicesService":
         return cls(RoomVolume.from_config(config), RoomCamera.from_config(config, store), RoomMic.from_config(config, store), meeting,
                    buttons_finder=usb_devices, auto_framing=getattr(config.control, "camera_auto_framing", "off"),
-                   occupancy=getattr(config.control, "occupancy", False))
+                   occupancy=getattr(config.control, "occupancy", False),
+                   release_empty_minutes=getattr(config.control, "release_empty_minutes", 0))
 
     async def start(self) -> None:
         await self._check(self.volume.refresh, force=True)

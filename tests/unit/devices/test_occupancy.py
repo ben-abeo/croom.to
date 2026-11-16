@@ -66,3 +66,93 @@ async def test_no_picture_is_not_known_and_never_an_empty_room():
     view.blocked_by, view.picture = None, None
     await occupancy.tick()
     assert occupancy.state()["count"] is None and seen.sent == [2]
+
+
+# --- a booking nobody came to is released
+
+class Bookings:
+    def __init__(self):
+        self.now = types.SimpleNamespace(id="g1", booking_id=None, title="Budget review")
+        self.ended, self.refuse = [], None
+
+    def in_progress(self):
+        return self.now
+
+    async def end(self, key):
+        if self.refuse:
+            raise ValueError(self.refuse)
+        self.ended.append(key)
+
+
+def releasing(people=0, minutes=3):
+    occupancy, view, seen = room(people=people)
+    occupancy.set_release(minutes)
+    bookings = Bookings()
+    occupancy.bookings = lambda: bookings
+    return occupancy, view, seen, bookings
+
+
+async def test_a_booking_nobody_came_to_is_ended_after_the_rooms_minutes_and_once():
+    occupancy, view, seen, bookings = releasing()
+    await occupancy.tick()
+    await occupancy.tick()
+    assert bookings.ended == []
+    await occupancy.tick()
+    assert bookings.ended == ["g1"]
+    await occupancy.tick()
+    assert bookings.ended == ["g1"]
+
+
+async def test_anyone_seen_once_keeps_the_booking_even_if_they_step_out():
+    occupancy, view, seen, bookings = releasing()
+    await occupancy.tick()
+    seen.people = 1
+    await occupancy.tick()
+    seen.people = 0
+    for _ in range(6):
+        await occupancy.tick()
+    assert bookings.ended == []
+
+
+async def test_a_call_joined_keeps_the_booking_and_a_look_with_no_picture_says_nothing():
+    occupancy, view, seen, bookings = releasing()
+    occupancy._meeting.state = "connected"                 # anything but idle: the room is in use
+    await occupancy.tick()
+    occupancy._meeting.state = occupancy_idle()
+    for _ in range(5):
+        await occupancy.tick()
+    assert bookings.ended == []
+    other, view, seen, bookings = releasing()
+    view.blocked_by = "laptop"                             # Laptop mode: no picture, so nobody is known to be absent
+    for _ in range(5):
+        await other.tick()
+    assert bookings.ended == []
+
+
+async def test_the_next_booking_starts_its_own_count_and_nought_minutes_never_releases():
+    occupancy, view, seen, bookings = releasing()
+    await occupancy.tick()
+    await occupancy.tick()
+    bookings.now = types.SimpleNamespace(id="g2", booking_id="b2", title="Stand-up")
+    await occupancy.tick()
+    await occupancy.tick()
+    assert bookings.ended == []
+    await occupancy.tick()
+    assert bookings.ended == ["b2"]                        # the room's own booking, by its own tag
+    never, view, seen, bookings = releasing(minutes=0)
+    for _ in range(10):
+        await never.tick()
+    assert bookings.ended == []
+
+
+async def test_a_booking_that_cannot_be_ended_is_left_and_not_tried_again(caplog):
+    occupancy, view, seen, bookings = releasing(minutes=1)
+    bookings.refuse = "That meeting has already ended"
+    await occupancy.tick()
+    await occupancy.tick()
+    assert bookings.ended == [] and occupancy.state()["count"] == 0
+
+
+def occupancy_idle():
+    from croom.meeting.providers.base import MeetingState
+    return MeetingState.IDLE

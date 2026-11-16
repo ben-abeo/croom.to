@@ -150,6 +150,10 @@ SCHEMA: List[Setting] = [
     Setting("control.occupancy", "Count the people in the room", "devices", "switch", live=True,
             help="The camera looks at the room once a minute, in and out of calls, and its light comes on as it does. Only the number is "
                  "kept, for the dashboard: no picture is. Tell the people who use the room"),
+    Setting("control.release_empty_minutes", "Release a booking nobody came to after (minutes)", "devices", "number", range=(0, 60),
+            integer=True, live=True,
+            help="0 never releases. Needs Count the people in the room. A booking in progress with the room empty at every look "
+                 "for this long is ended, so the room can be booked. Only where the camera's home shows every seat"),
     Setting("control.door_sign_camera_password", "Door sign camera password", "devices", "secret", live=True, max_length=64,
             pattern=r"[!-~]{8,64}", pattern_words="8 to 64 letters, digits or symbols, with no spaces",
             help="Protect adopts each door sign's camera with the user camera and this password"),

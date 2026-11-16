@@ -43,7 +43,8 @@ def test_the_schema_covers_every_setting_the_pages_edit():
                                       "occupancy_counting", "speaker_detection", "hand_raise_detection", "privacy_mode")} <= paths
     assert {"dashboard.enabled", "dashboard.url", "dashboard.enrollment_token"} <= paths
     assert BY_PATH["dashboard.enrollment_token"].kind == "secret"
-    camera = {"control.camera_presets", "control.camera_auto_framing", "control.occupancy", "control.door_sign_camera_password",
+    camera = {"control.camera_presets", "control.camera_auto_framing", "control.occupancy", "control.release_empty_minutes",
+              "control.door_sign_camera_password",
               "control.door_sign_camera_sound"}
     assert not any(path.startswith("control.") and path not in camera for path in paths)   # never the room page's own
 
@@ -51,7 +52,8 @@ def test_the_schema_covers_every_setting_the_pages_edit():
 def test_live_settings_are_the_booking_hours_the_camera_preset_names_auto_framing_and_the_door_sign_camera():
     assert {s.path for s in SCHEMA if s.live} == {"calendar.booking_start", "calendar.booking_end", "control.camera_presets",
                                                   "control.camera_auto_framing", "control.occupancy",
-                                                  "control.door_sign_camera_password", "control.door_sign_camera_sound"}
+                                                  "control.release_empty_minutes", "control.door_sign_camera_password",
+                                                  "control.door_sign_camera_sound"}
 
 
 def test_the_room_page_has_name_location_company_and_the_systems_time_zones():
@@ -426,6 +428,13 @@ def test_counting_people_is_a_live_switch_on_devices_that_is_off_until_someone_t
     from croom.settings.config_edit import default_of
     s = BY_PATH["control.occupancy"]
     assert (s.page, s.kind, s.live) == ("devices", "switch", True) and default_of("control.occupancy") is False
+
+
+def test_releasing_a_no_show_is_a_live_number_of_minutes_that_is_off_at_nought():
+    from croom.settings.config_edit import default_of
+    s = BY_PATH["control.release_empty_minutes"]
+    assert (s.page, s.kind, s.live, s.range, s.integer) == ("devices", "number", True, (0, 60), True)
+    assert default_of("control.release_empty_minutes") == 0
 
 
 def test_following_people_is_one_of_auto_framings_choices():

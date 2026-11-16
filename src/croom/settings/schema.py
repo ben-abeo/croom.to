@@ -94,7 +94,8 @@ PLATFORMS = (("zoom", "Zoom"), ("google_meet", "Google Meet"), ("teams", "Teams"
 # that the root helper need not import the AI backends). Another name is not a backend the room would use: AIService falls back to auto.
 AI_BACKENDS = (("auto", "Automatic"), ("hailo", "Hailo"), ("coral", "Coral"), ("nvidia", "NVIDIA"), ("intel", "Intel (OpenVINO)"),
                ("cpu", "Processor only"))
-AUTO_FRAMING = (("off", "Off"), ("call_start", "At the start of calls"), ("dynamic", "Throughout calls"))   # as RightSight's modes
+AUTO_FRAMING = (("off", "Off"), ("call_start", "At the start of calls"), ("dynamic", "Throughout calls"),
+                ("track", "Throughout calls, following people (AI HAT)"))   # as RightSight's modes
 AUTOMATIC = (("auto", "Automatic"),)   # the devices' choice before the room's own are added (croom.settings.devices)
 URL = r"https?://[^\s/$.?#][^\s]*"
 NO_SPACES = r"\S+"

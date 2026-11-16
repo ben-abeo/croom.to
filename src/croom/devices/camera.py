@@ -1083,6 +1083,27 @@ class RoomCamera:
             self._framing = False
         return dict(self.state(), **outcome)
 
+    async def keep_centred(self, faces, size) -> bool:
+        """Auto framing's following (autoframe.py, "track"): turn a camera that says where it points so that the people in a picture
+        just taken (`faces`, `size`) are in its middle again, at the zoom it has: framing.nudge's turn, inside the limits. Whether it
+        turned: not a camera that does not say where it points, not while it is framing or moving, and not when they are near enough
+        to the middle already. A long move, as Frame people's own correction is, so an arrow or a drag cuts it short."""
+        if not self._absolute or self._framing or self._busy or self._pan or self._tilt:
+            return False
+        zoom = await self.read_zoom()
+        if zoom is None:
+            return False
+        fix = framing.nudge(faces, size, zoom, len(faces))
+        if fix is None:
+            return False
+
+        async def work() -> None:
+            at = await self._where()
+            await self._go_to({"pan": at["pan"] + fix[0] * ARCSEC, "tilt": at["tilt"] + fix[1] * ARCSEC}, zoom)
+
+        await self._long(work, keeps_position=True)
+        return True
+
     async def _frame_work(self, still, detect, outcome: Dict[str, Any]) -> None:
         before = await self.read_zoom()
         await self._zoom_to(self._zoom_range[0])                         # 1. everyone in reach in view

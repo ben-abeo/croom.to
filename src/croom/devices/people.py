@@ -4,13 +4,15 @@ YuNet on the CPU when it has none or the HAT fails. `detect` is what Frame peopl
 framing.detect_faces does, so nothing else knows which found them.
 
 The HAT runs Raspberry Pi's yolov5s_personface (apt's hailo-models, installed by hailo-all), which finds bodies as well as faces in
-about 30 ms where YuNet takes ten times that. A body with no face found in it (someone turned away, or too far for a face) is given a
+about 30 ms where YuNet takes ten times that. It is opened at the first look and kept open (opening it costs 0.2 s, and following people
+looks several times a second); a look that fails closes it, and the next opens it again. A body with no face found in it (someone turned away, or too far for a face) is given a
 head where a head would be, so that person is framed too; `count` is how many people that makes (the room's occupancy).
 
 HailoRT's Python (python3-hailort) is apt's, in the system Python: the room's venv does not see it, so it is loaded from there by its
 path, and nothing else of the system's packages comes with it.
 """
 
+import contextlib
 import importlib.util
 import logging
 import sys
@@ -36,7 +38,8 @@ HEAD_DOWN = 0.1                 # the head's top below the body box's, in head h
 
 Box = Tuple[float, float, float, float]     # x, y, width, height in pixels of the picture, as a Face is
 
-_lock = threading.Lock()        # one look at a time: the HAT is opened for each
+_lock = threading.Lock()        # one look at a time
+_open: Any = None               # the HAT, opened: (what closes it, the pipeline's infer, the model's input name)
 _said: Any = None               # the last failure warned about, so that one that repeats at every look is said once
 
 
@@ -72,16 +75,26 @@ def _hailo() -> Any:
 def _infer(square: Any) -> Sequence[Any]:
     """The model's answer for one 640 x 640 RGB picture: for each of its classes (person, face), rows of ymin, xmin, ymax, xmax (as
     fractions of the square) and score. The model's own last layer has merged overlapping finds already."""
-    h = _hailo()
-    hef = h.HEF(str(MODEL))
-    # ponytail: the HAT is opened and closed for each look (about 0.2 s more than the 30 ms the look takes), so nothing is held
-    # between looks and a fault never outlives one. Keep it open if anything ever looks more than about once a second.
-    with h.VDevice() as device:
-        group = device.configure(hef, h.ConfigureParams.create_from_hef(hef, interface=h.HailoStreamInterface.PCIe))[0]
-        ins = h.InputVStreamParams.make(group, format_type=h.FormatType.UINT8)
-        outs = h.OutputVStreamParams.make(group, format_type=h.FormatType.FLOAT32)
-        with h.InferVStreams(group, ins, outs) as pipeline, group.activate(group.create_params()):
-            answer = pipeline.infer({hef.get_input_vstream_infos()[0].name: square[None]})
+    global _open
+    if _open is None:
+        h = _hailo()
+        hef = h.HEF(str(MODEL))
+        with contextlib.ExitStack() as stack:
+            device = stack.enter_context(h.VDevice())
+            group = device.configure(hef, h.ConfigureParams.create_from_hef(hef, interface=h.HailoStreamInterface.PCIe))[0]
+            ins = h.InputVStreamParams.make(group, format_type=h.FormatType.UINT8)
+            outs = h.OutputVStreamParams.make(group, format_type=h.FormatType.FLOAT32)
+            pipeline = stack.enter_context(h.InferVStreams(group, ins, outs))
+            stack.enter_context(group.activate(group.create_params()))
+            _open = (stack.pop_all(), pipeline, hef.get_input_vstream_infos()[0].name)
+    closer, pipeline, name = _open
+    try:
+        answer = pipeline.infer({name: square[None]})
+    except BaseException:
+        _open = None                # a HAT that failed is opened afresh at the next look
+        with contextlib.suppress(Exception):
+            closer.close()
+        raise
     return next(iter(answer.values()))[0]
 
 

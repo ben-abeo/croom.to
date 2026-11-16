@@ -426,3 +426,7 @@ def test_counting_people_is_a_live_switch_on_devices_that_is_off_until_someone_t
     from croom.settings.config_edit import default_of
     s = BY_PATH["control.occupancy"]
     assert (s.page, s.kind, s.live) == ("devices", "switch", True) and default_of("control.occupancy") is False
+
+
+def test_following_people_is_one_of_auto_framings_choices():
+    assert "track" in {value for value, _ in BY_PATH["control.camera_auto_framing"].options()}

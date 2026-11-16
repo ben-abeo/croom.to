@@ -228,3 +228,57 @@ async def test_without_the_hat_people_who_move_are_not_followed():
     room.faces = moved(TWO, 300)
     await looks(framer, clock, 8)
     assert framings == [False]
+
+
+# --- tracking ("track", a room with the AI HAT and a Rally): the camera turns to keep the people in the middle
+
+async def track_looks(framer, clock, n):
+    for _ in range(n):
+        clock.now += framer.TRACK_S
+        await framer.tick()
+
+
+async def tracking(faces=TWO):
+    framer, camera, room, clock, framings = await framer_for(faces, mode="track", follow=True)
+    await framed_at_the_start(framer, clock)
+    assert framings == [False]
+    return framer, camera, room, clock, framings
+
+
+async def test_tracking_turns_the_camera_to_people_who_have_moved_without_framing_again():
+    framer, camera, room, clock, framings = await tracking()
+    await track_looks(framer, clock, 3)
+    turns = len(camera._v4l2.set_many_calls)
+    room.faces = moved(TWO, 300)                               # both, a quarter of the picture to the right
+    await track_looks(framer, clock, framer.TRACK_LOOKS - 1)
+    assert len(camera._v4l2.set_many_calls) == turns           # one look: a head that bobbed
+    await track_looks(framer, clock, 1)
+    assert len(camera._v4l2.set_many_calls) > turns and framings == [False]     # turned, by itself: no framing from the widest
+    assert camera.taken_over_at is None                        # the room's own turn, not a person taking the camera
+
+
+async def test_tracking_leaves_people_near_the_middle_alone_and_never_turns_toward_fewer():
+    framer, camera, room, clock, framings = await tracking()
+    turns = len(camera._v4l2.set_many_calls)
+    room.faces = moved(TWO, 60)                                # a twentieth of the picture: within the middle
+    await track_looks(framer, clock, 6)
+    room.faces = [(1100, 300, 60, 60)]                         # one of the two, far to the right: the other is not left out
+    await track_looks(framer, clock, 6)
+    assert len(camera._v4l2.set_many_calls) == turns and framings == [False]
+
+
+async def test_tracking_still_frames_again_when_someone_comes_in():
+    framer, camera, room, clock, framings = await tracking()
+    clock.now += framer.REST_S
+    room.faces = THREE
+    await track_looks(framer, clock, round(framer.LOOK_S / framer.TRACK_S) * (framer.MORE_LOOKS + 1))
+    assert framings == [False, False]
+
+
+async def test_track_without_the_hat_is_dynamic():
+    framer, camera, room, clock, framings = await framer_for(mode="track", follow=False)
+    await framed_at_the_start(framer, clock)
+    turns = len(camera._v4l2.set_many_calls)
+    room.faces = moved(TWO, 300)
+    await looks(framer, clock, 6)
+    assert len(camera._v4l2.set_many_calls) == turns and framings == [False]

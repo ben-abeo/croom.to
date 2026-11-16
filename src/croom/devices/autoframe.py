@@ -9,6 +9,11 @@ In a room with the AI HAT (people.py), "dynamic" follows people too: the same pe
 apart since the last framing, and still there some looks later, are framed again. Without the HAT it does not: YuNet loses a face that
 turns away, and the group seems to move each time it does.
 
+"track" is "dynamic" and, with the AI HAT and a camera that says where it points (the Rally), the camera kept on the people as they
+move: the picture is looked at a few times a second, and when the group's middle has left the picture's for two looks the camera turns
+to put it back (RoomCamera.keep_centred), at the zoom it has. The Rally starts a turn 0.9 s after it is asked, so it follows in turns a
+second or two apart, not in one glide. A room without the HAT or with another camera gets "dynamic".
+
 A person who takes the camera by hand during the call (an arrow or a drag, the zoom, Home, a preset) pauses it for the rest of that
 call; their tap on Frame people gives the camera back to it. The camera screen says which (RoomCamera.auto_framing). Each look is one
 still from the call's own picture (CameraView.still) and the face detector in a worker thread; nothing else opens the camera.
@@ -25,7 +30,7 @@ from croom.meeting.providers.base import MeetingState
 
 logger = logging.getLogger(__name__)
 
-MODES = ("off", "call_start", "dynamic")
+MODES = ("off", "call_start", "dynamic", "track")
 
 
 def mode_of(value: Union[str, bool, None]) -> str:
@@ -50,6 +55,10 @@ class AutoFramer:
     MOVED = 0.12        # the group's middle this far (a fraction of the picture) from where the last framing left it: they have moved
     SPREAD = 1.4        # ... or the group this many times wider or narrower than it left them
     MOVED_LOOKS = 3     # moved this many looks in a row (about 9 s): someone who leaned over, or walked through, is not followed
+    # Tracking ("track"): tune these in a room where the camera fidgets, or lags
+    TRACK_S = 0.4       # between looks while tracking
+    TRACK_OFF = 0.12    # the group's middle this far (a fraction of the picture) from the picture's: turn to put it back
+    TRACK_LOOKS = 2     # ... for this many looks in a row (about a second): a head that bobs is not chased
 
     def __init__(self, camera, meeting, mode: Union[str, bool, None] = "off", detect: Optional[Callable[[bytes], Any]] = None,
                  clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep, follow: Optional[bool] = None):
@@ -66,6 +75,8 @@ class AutoFramer:
         self._follow = people.available() if follow is None else follow    # the same people are framed again when they move
         self._settled: Optional[framing.Box] = None    # the group's box at the first look after the last framing: where it left them
         self._moved = 0                         # looks in a row that saw them moved from there
+        self._off = 0                           # tracking: looks in a row that saw the group away from the middle
+        self._judged = 0.0                      # tracking: when the people were last counted (every LOOK_S, as "dynamic" counts them)
         self._said: Optional[str] = None
 
     @property
@@ -102,7 +113,13 @@ class AutoFramer:
                 if str(e) != self._said:
                     self._said = str(e)
                     logger.warning(f"Auto framing: {type(e).__name__}: {e}", exc_info=True)
-            await self._sleep(self.LOOK_S)
+            await self._sleep(self.TRACK_S if self._tracks() else self.LOOK_S)
+
+    def _tracks(self) -> bool:
+        """Whether the camera is kept on the people just now: the mode, the HAT, a camera that says where it points, and a call it
+        has framed and that nobody has taken the camera in."""
+        return (self._mode == "track" and self._follow and self._call is not None and self._framed is not None
+                and self._camera.auto_framing == "on" and getattr(self._camera, "says_where", False))
 
     async def tick(self) -> None:
         """One step: frame a call that is ready for it, or look at the picture and frame it again when the people in it have changed."""
@@ -134,6 +151,12 @@ class AutoFramer:
         faces, size = await self._look(view)
         if faces is None:
             return
+        if self._tracks():
+            if await self._track(faces, size):
+                return
+            if now - self._judged < self.LOOK_S:      # the people are counted as "dynamic" counts them: every LOOK_S
+                return
+            self._judged = now
         widest = state["zoom"]["level"] <= state["zoom"]["min"]      # at the widest, someone at the edge cannot be helped by framing
         more = len(faces) > self._framed or (not widest and framing.at_edge(faces, size, self.EDGE))
         self._more = self._more + 1 if more else 0
@@ -142,6 +165,27 @@ class AutoFramer:
         if max(self._more - self.MORE_LOOKS, self._fewer - self.FEWER_LOOKS, self._moved - self.MOVED_LOOKS) >= 0 \
                 and now - self._last >= self.REST_S:
             await self._frame(view)
+
+    async def _track(self, faces, size) -> bool:
+        """One look while tracking: whether the camera turned to put the people back in the middle. Never toward fewer people than
+        the last framing found: that would leave the rest out, and someone fewer is for the count to believe first."""
+        if not faces or len(faces) < self._framed:
+            self._off = 0
+            return False
+        left, top, right, bottom = framing.group_box(faces, size)
+        away = max(abs((left + right) / 2 - 0.5), abs((top + bottom) / 2 - 0.5)) > self.TRACK_OFF
+        self._off = self._off + 1 if away else 0
+        if self._off < self.TRACK_LOOKS:
+            return False
+        self._off = 0
+        try:
+            turned = await self._camera.keep_centred(faces, size)
+        except (NotReady, DeviceUnavailable, Interrupted) as e:
+            logger.info(f"Auto framing did not follow just now: {e}")
+            return False
+        if turned:
+            self._settled, self._moved = None, 0      # they are where this turn left them
+        return turned
 
     def _has_moved(self, faces, size) -> bool:
         """Whether the people the last framing found, all still in the picture, are no longer where it left them. Measured from
@@ -166,7 +210,7 @@ class AutoFramer:
             logger.info(f"Auto framing did not frame just now: {e}")
             return
         self._framed, self._last, self._more, self._fewer = int(answer.get("framed") or 0), self._clock(), 0, 0
-        self._settled, self._moved = None, 0
+        self._settled, self._moved, self._off, self._judged = None, 0, 0, self._clock()
         logger.info(f"Auto framing framed {self._framed} {'person' if self._framed == 1 else 'people'}")
         if self._mode == "call_start":
             self._show(None)                    # done for this call

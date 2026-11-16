@@ -402,3 +402,25 @@ async def test_at_the_start_of_calls_still_waits_for_people_to_sit_down_and_the_
     clock.now += soon.SOON_S
     await soon.tick()
     assert framings == [False]
+
+
+async def test_while_tracking_someone_more_or_fewer_is_kept_in_the_picture_without_framing_from_the_widest():
+    framer, camera, room, clock, framings = await tracking()
+    room.faces = THREE
+    await looks(framer, clock, framer.MORE_LOOKS)
+    assert framer._framed == 3 and framings == [False]         # the newcomer is kept in it from now on: no framing
+    room.faces = TWO[:1]
+    await looks(framer, clock, framer.FEWER_LOOKS)
+    assert framer._framed == 1 and framings == [False]
+    room.faces = []
+    await looks(framer, clock, framer.FEWER_LOOKS + 2)
+    assert framer._framed == 1                                 # no one at all is not a count to keep: they are looked for
+
+
+async def test_tracking_gives_the_people_room_so_that_someone_beside_them_is_in_the_picture_too():
+    framer, camera, room, clock, framings = await tracking()
+    await camera.zoom(250, by_person=False)
+    snug = [(430, 150, 200, 200), (650, 150, 200, 200)]        # in the middle, filling most of the picture: a step out
+    await see(framer, room, clock, snug, seconds=1.0)
+    await see(framer, room, clock, snug, seconds=1.0)
+    assert camera.state()["zoom"]["level"] < 250

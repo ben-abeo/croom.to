@@ -74,7 +74,8 @@ class AutoFramer:
     TRACK_OUT = 0.75    # a step out to find people who are lost: the zoom times this
     TRACK_EASE = 0.92   # a step out for people who have reached the picture's edge
     TRACK_IN = 1.06     # a step in: the zoom times this ...
-    TRACK_ROOMY = 0.6   # ... while the group, in the middle, has filled less than this much of the picture ...
+    TRACK_ROOMY = 0.4   # ... while the group, in the middle, has filled less than this much of the picture ...
+    TRACK_FULL = 0.7    # the group filling more than this much of it: a step out. Between the two, someone beside them is in it too
     TRACK_ROOMY_S = 2.0     # ... for this long
     TRACK_HOME_S = 8.0  # no one in the widest picture for this long: Home, the room's own picture
     TRACK_SEAT_S = 4.0  # at rest this long after turning: the camera is sent to where it is counted to be (RoomCamera.reseat)
@@ -108,6 +109,7 @@ class AutoFramer:
         self._middle: Optional[Tuple[float, float]] = None     # the group's middle, smoothed over the last pictures
         self._homed = False                     # sent Home for want of anyone, until someone is seen
         self._lost_said = False
+        self._counted, self._counted_at = (-1, -1), 0.0     # how many people the journal was last told were in the picture
         self._said: Optional[str] = None
 
     @property
@@ -191,6 +193,13 @@ class AutoFramer:
         more = len(faces) > self._framed or (not widest and not self._tracks() and framing.at_edge(faces, size, self.EDGE))
         self._more = self._more + 1 if more else 0
         self._fewer = self._fewer + 1 if len(faces) < self._framed else 0
+        if self._tracks():
+            # Tracking turns and zooms for whoever is in the picture: someone more, or fewer, for long enough to believe is whom it
+            # keeps there from now on, with no framing from the widest picture
+            if self._more >= self.MORE_LOOKS or (self._fewer >= self.FEWER_LOOKS and faces):
+                track_log.info(f"Now keeping {len(faces)} in the picture (was {self._framed})")
+                self._framed, self._more, self._fewer = len(faces), 0, 0
+            return
         self._moved = self._moved + 1 if self._has_moved(faces, size) else 0
         if max(self._more - self.MORE_LOOKS, self._fewer - self.FEWER_LOOKS, self._moved - self.MOVED_LOOKS) >= 0 \
                 and now - self._last >= self.REST_S:
@@ -237,7 +246,11 @@ class AutoFramer:
         home = self._camera.home_place
         if place is None:
             return
+        seen = len(faces or [])
         faces = self._in_the_room(faces, size, zoom, place, home)
+        if (len(faces), seen) != self._counted and now - self._counted_at >= 1.0:
+            self._counted, self._counted_at = (len(faces), seen), now
+            track_log.info(f"{len(faces)} in the room's picture ({seen} found in all; keeping {self._framed}), zoom {zoom}")
         turn = [self._reach(axis, self._turn[axis], place, home) for axis in (0, 1)]
 
         if not faces or len(faces) < self._framed or not self._framed:
@@ -309,7 +322,7 @@ class AutoFramer:
         if now - self._zoomed < self.TRACK_ZOOM_S:
             return
         fill = max(right - left, bottom - top)
-        if (fill > 0.95 or framing.at_edge(faces, size, self.EDGE)) and zoom > widest:
+        if (fill > self.TRACK_FULL or framing.at_edge(faces, size, self.EDGE)) and zoom > widest:
             self._roomy = None
             await self._zoom(max(widest, int(zoom * self.TRACK_EASE)), now)
         elif fill < self.TRACK_ROOMY and zoom < self.TRACK_ZOOM:

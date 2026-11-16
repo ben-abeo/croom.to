@@ -5,6 +5,10 @@ and Intel Macs and on its RoomMate, so not on the room Pi). Its modes are RightS
 "dynamic", where after that the picture is looked at every few seconds, and framed again when someone has come into it or reached its
 edge, or someone has left it, for long enough to believe. Never sooner than a rest after the last framing, so it does not hunt.
 
+In a room with the AI HAT (people.py), "dynamic" follows people too: the same people, moved across the picture or drawn together or
+apart since the last framing, and still there some looks later, are framed again. Without the HAT it does not: YuNet loses a face that
+turns away, and the group seems to move each time it does.
+
 A person who takes the camera by hand during the call (an arrow or a drag, the zoom, Home, a preset) pauses it for the rest of that
 call; their tap on Frame people gives the camera back to it. The camera screen says which (RoomCamera.auto_framing). Each look is one
 still from the call's own picture (CameraView.still) and the face detector in a worker thread; nothing else opens the camera.
@@ -15,7 +19,7 @@ import logging
 import time
 from typing import Any, Callable, Optional, Union
 
-from croom.devices import framing
+from croom.devices import framing, people
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.meeting.providers.base import MeetingState
 
@@ -42,19 +46,26 @@ class AutoFramer:
     FEWER_LOOKS = 5     # someone fewer, or no one, this many looks in a row (about 15 s): a face turned away is missed now and then
     REST_S = 20.0       # never framed again sooner than this after the last framing
     EDGE = 0.04         # a head and shoulders this near the picture's edge (a fraction of it): someone at the edge
+    # Following (the AI HAT's rooms): tune these in a room where the camera moves too readily, or too late
+    MOVED = 0.12        # the group's middle this far (a fraction of the picture) from where the last framing left it: they have moved
+    SPREAD = 1.4        # ... or the group this many times wider or narrower than it left them
+    MOVED_LOOKS = 3     # moved this many looks in a row (about 9 s): someone who leaned over, or walked through, is not followed
 
     def __init__(self, camera, meeting, mode: Union[str, bool, None] = "off", detect: Optional[Callable[[bytes], Any]] = None,
-                 clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep):
+                 clock: Callable[[], float] = time.monotonic, sleep=asyncio.sleep, follow: Optional[bool] = None):
         self._camera = camera
         self._meeting = meeting
         self._mode = mode_of(mode)
-        self._detect = detect or framing.detect_faces
+        self._detect = detect or people.detect
         self._clock, self._sleep = clock, sleep
         self._task: Optional[asyncio.Task] = None
         self._call: Optional[float] = None      # when the call being framed was first seen ready
         self._framed: Optional[int] = None      # how many people its last framing found; None: not framed yet in this call
         self._last = 0.0                        # when it last framed
         self._more = self._fewer = 0            # looks in a row that saw more people (or one at the edge), and fewer
+        self._follow = people.available() if follow is None else follow    # the same people are framed again when they move
+        self._settled: Optional[framing.Box] = None    # the group's box at the first look after the last framing: where it left them
+        self._moved = 0                         # looks in a row that saw them moved from there
         self._said: Optional[str] = None
 
     @property
@@ -104,7 +115,7 @@ class AutoFramer:
             return
         now = self._clock()
         if self._call is None:
-            self._call, self._framed, self._more, self._fewer = now, None, 0, 0
+            self._call, self._framed, self._more, self._fewer, self._settled, self._moved = now, None, 0, 0, None, 0
         taken = self._camera.taken_over_at
         if taken is not None and taken > self._call:   # a hand move since the call was first seen; one before it does not count
             self._show("paused")                # a person has the camera in this call; their Frame people gives it back
@@ -127,8 +138,26 @@ class AutoFramer:
         more = len(faces) > self._framed or (not widest and framing.at_edge(faces, size, self.EDGE))
         self._more = self._more + 1 if more else 0
         self._fewer = self._fewer + 1 if len(faces) < self._framed else 0
-        if (self._more >= self.MORE_LOOKS or self._fewer >= self.FEWER_LOOKS) and now - self._last >= self.REST_S:
+        self._moved = self._moved + 1 if self._has_moved(faces, size) else 0
+        if max(self._more - self.MORE_LOOKS, self._fewer - self.FEWER_LOOKS, self._moved - self.MOVED_LOOKS) >= 0 \
+                and now - self._last >= self.REST_S:
             await self._frame(view)
+
+    def _has_moved(self, faces, size) -> bool:
+        """Whether the people the last framing found, all still in the picture, are no longer where it left them. Measured from
+        where they were at the first look after it and not from the picture's middle: a framing that could do no better (the
+        camera at a limit, or at its furthest zoom) is not tried again."""
+        if not self._follow or not faces or len(faces) != self._framed:
+            return False
+        left, top, right, bottom = framing.group_box(faces, size)
+        if self._settled is None:
+            self._settled = (left, top, right, bottom)
+            return False
+        was_left, was_top, was_right, was_bottom = self._settled
+        across = abs((left + right) - (was_left + was_right)) / 2
+        down = abs((top + bottom) - (was_top + was_bottom)) / 2
+        spread = (right - left) / (was_right - was_left)
+        return across > self.MOVED or down > self.MOVED or spread > self.SPREAD or spread < 1 / self.SPREAD
 
     async def _frame(self, view) -> None:
         try:
@@ -137,6 +166,7 @@ class AutoFramer:
             logger.info(f"Auto framing did not frame just now: {e}")
             return
         self._framed, self._last, self._more, self._fewer = int(answer.get("framed") or 0), self._clock(), 0, 0
+        self._settled, self._moved = None, 0
         logger.info(f"Auto framing framed {self._framed} {'person' if self._framed == 1 else 'people'}")
         if self._mode == "call_start":
             self._show(None)                    # done for this call

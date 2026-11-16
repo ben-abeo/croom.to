@@ -21,7 +21,7 @@ import math
 import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
-from croom.devices import framing
+from croom.devices import framing, people
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.devices.v4l2 import (V4L2_CID_AUTO_WHITE_BALANCE, V4L2_CID_BACKLIGHT_COMPENSATION, V4L2_CID_BRIGHTNESS,
                                 V4L2_CID_CONTRAST, V4L2_CID_PAN_ABSOLUTE, V4L2_CID_PAN_SPEED, V4L2_CID_SATURATION, V4L2_CID_SHARPNESS,
@@ -1058,7 +1058,7 @@ class RoomCamera:
     async def frame_people(self, still: Callable[[], Awaitable[Optional[bytes]]],
                            detect: Optional[Callable[[bytes], Any]] = None, by_person: bool = True) -> Dict[str, Any]:
         """Frame the people in the room once: zoom to the widest and let the picture settle, take one picture (`still`: the tap's
-        CameraView.still, a JPEG or None), find the faces (`detect`: framing.detect_faces by default, run in a worker thread), zoom
+        CameraView.still, a JPEG or None), find the people (`detect`: people.detect by default, the AI HAT or YuNet, run in a worker thread), zoom
         so the group fills the picture and turn toward it by timed travel, then look once more and correct once at most.
 
         It is a long move of its own, so the camera is busy throughout, and a drag, an arrow, Home or a preset cuts it short as
@@ -1078,7 +1078,7 @@ class RoomCamera:
         outcome: Dict[str, Any] = {}
         self._framing = True      # before anything awaits: a second tap meanwhile is "Already framing"
         try:
-            await self._long(lambda: self._frame_work(still, detect or framing.detect_faces, outcome), keeps_position=True)
+            await self._long(lambda: self._frame_work(still, detect or people.detect, outcome), keeps_position=True)
         finally:
             self._framing = False
         return dict(self.state(), **outcome)

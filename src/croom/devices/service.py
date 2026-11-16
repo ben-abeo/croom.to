@@ -18,6 +18,7 @@ from croom.devices.buttons import RoomButtons, usb_devices
 from croom.devices.camera import RoomCamera
 from croom.devices.errors import DeviceUnavailable, Interrupted, NotReady
 from croom.devices.mic import RoomMic
+from croom.devices.occupancy import Occupancy
 from croom.devices.volume import RoomVolume
 from croom.meeting.providers.base import MeetingControlError, MeetingState
 
@@ -32,7 +33,7 @@ class DevicesService(Service):
     LIGHT_S = 1.0           # how often the speakerphone's mute light is brought into line with the call's mute
 
     def __init__(self, volume: RoomVolume, camera: RoomCamera, mic: Optional[RoomMic] = None, meeting=None,
-                 buttons_finder: Optional[Callable[[], List[Any]]] = None, auto_framing: Any = "off"):
+                 buttons_finder: Optional[Callable[[], List[Any]]] = None, auto_framing: Any = "off", occupancy: Any = False):
         super().__init__("devices")
         self.volume = volume
         self.camera = camera
@@ -57,11 +58,14 @@ class DevicesService(Service):
         self._light_task: Optional[asyncio.Task] = None
         # Auto framing (autoframe.py): Frame people by itself during calls, with the room's setting on; it needs the meeting
         self.autoframer = AutoFramer(camera, meeting, mode=auto_framing) if meeting is not None else None
+        # Occupancy (occupancy.py): the people in the room, counted once a minute, with the room's setting on; it needs the meeting's picture
+        self.occupancy = Occupancy(camera, meeting, on=occupancy) if meeting is not None else None
 
     @classmethod
     def from_config(cls, config, store, meeting=None) -> "DevicesService":
         return cls(RoomVolume.from_config(config), RoomCamera.from_config(config, store), RoomMic.from_config(config, store), meeting,
-                   buttons_finder=usb_devices, auto_framing=getattr(config.control, "camera_auto_framing", "off"))
+                   buttons_finder=usb_devices, auto_framing=getattr(config.control, "camera_auto_framing", "off"),
+                   occupancy=getattr(config.control, "occupancy", False))
 
     async def start(self) -> None:
         await self._check(self.volume.refresh, force=True)
@@ -86,6 +90,8 @@ class DevicesService(Service):
             self._light_task = asyncio.create_task(self._keep_light())
         if self.autoframer is not None:
             self.autoframer.start()
+        if self.occupancy is not None:
+            self.occupancy.start()
         logger.info("Devices service started")
 
     async def _check(self, look: Callable[..., Awaitable[Any]], *args: Any, **kwargs: Any) -> None:
@@ -286,6 +292,8 @@ class DevicesService(Service):
             await self.buttons.stop()
         if self.autoframer is not None:
             await self.autoframer.stop()
+        if self.occupancy is not None:
+            await self.occupancy.stop()
         # Closing the camera cuts a homing that is still under way short and waits for it to stop the motors
         await self.camera.close()
         if self.homing is not None:

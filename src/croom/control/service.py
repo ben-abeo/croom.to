@@ -390,6 +390,7 @@ class ControlService(Service):
         self._editor.on_change(("calendar.booking_start", "calendar.booking_end"), self._apply_booking_hours)
         self._editor.on_change(("control.camera_presets",), self._apply_preset_names)
         self._editor.on_change(("control.camera_auto_framing",), self._apply_auto_framing)
+        self._editor.on_change(("control.occupancy",), self._apply_occupancy)
         self._editor.on_change(("control.door_sign_camera_password",), self._apply_sign_camera_password)
         self._editor.on_change(("control.door_sign_camera_sound",), self._apply_sign_camera_sound)
 
@@ -766,6 +767,7 @@ class ControlService(Service):
             "camera": dict(self._camera_state(), view={"allowed": self._camera_view_allowed(request)}),
             "tv": self._tv_status(),
             "laptop": self._laptop_status(),
+            "occupancy": self._occupancy_status(),
             "page": self._page_files,
         }
         scores = self._scores_status()
@@ -920,6 +922,11 @@ class ControlService(Service):
     def _mic_state(self) -> Dict[str, Any]:
         mic = self._mic()
         return mic.state() if mic is not None else dict(self.NO_DEVICES, level=0, device_level=0, device=None)
+
+    def _occupancy_status(self) -> Dict[str, Any]:
+        """The people in the room as last counted (devices/occupancy.py); {"enabled": False} in a room that does not count them."""
+        occupancy = getattr(self._devices, "occupancy", None)
+        return occupancy.state() if occupancy is not None else {"enabled": False, "count": None, "at": None}
 
     def _camera_state(self) -> Dict[str, Any]:
         camera = self._camera()
@@ -1488,6 +1495,12 @@ class ControlService(Service):
         framer = getattr(self._devices, "autoframer", None)
         if framer is not None:
             framer.set_mode(values["control.camera_auto_framing"])
+
+    def _apply_occupancy(self, values: Dict[str, Any]) -> None:
+        """Counting the people in the room on or off, at once: from its next look."""
+        occupancy = getattr(self._devices, "occupancy", None)
+        if occupancy is not None:
+            occupancy.set_on(values["control.occupancy"])
 
     async def _handle_config(self, request: web.Request) -> web.Response:
         """A Settings page's values as config.yaml has them, the fields its form draws, and whether a saved change waits for a restart."""

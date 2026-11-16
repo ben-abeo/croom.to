@@ -163,8 +163,11 @@ class CroomAgent:
             from croom.control.settings import SettingsStore
             from croom.devices.service import DevicesService
             settings_store = SettingsStore(self.config.resolve_data_dir() / "control-settings.json")
-            self.service_manager.register(DevicesService.from_config(
-                self.config, settings_store, meeting=self.service_manager.get_service("meeting")))
+            devices = DevicesService.from_config(self.config, settings_store, meeting=self.service_manager.get_service("meeting"))
+            dashboard = self.service_manager.get_service("dashboard")
+            if dashboard is not None and devices.occupancy is not None:     # the dashboard's Average and Peak Occupancy
+                devices.occupancy.report = lambda count: dashboard.send_metrics("occupancy", {"count": count})
+            self.service_manager.register(devices)
             logger.info("Room devices registered")
         except ImportError as e:
             logger.warning(f"Room devices not available: {e}")

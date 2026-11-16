@@ -41,11 +41,11 @@ class Room:
         return list(self.faces), SIZE
 
 
-async def framer_for(faces=TWO, mode="dynamic"):
+async def framer_for(faces=TWO, mode="dynamic", follow=False):
     camera, v4l2, clock = camera_for(nodes={"/dev/video0": RALLY})
     await camera.discover()
     room = Room(faces)
-    framer = AutoFramer(camera, room.meeting, mode=mode, detect=room.detect, clock=clock, sleep=clock.sleep)
+    framer = AutoFramer(camera, room.meeting, mode=mode, detect=room.detect, clock=clock, sleep=clock.sleep, follow=follow)
     framings = []
     frame_people = camera.frame_people
 
@@ -175,3 +175,56 @@ def test_the_setting_is_one_of_the_modes_and_a_hand_written_switch_is_understood
     from croom.devices.autoframe import mode_of
     assert [mode_of(v) for v in ("off", "call_start", "dynamic", True, False, None, "sometimes")] == \
         ["off", "call_start", "dynamic", "dynamic", "off", "off", "off"]
+
+
+# --- following (a room with the AI HAT): the same people, moved since the last framing
+
+def moved(faces, by):
+    return [(x + by, y, w, h) for x, y, w, h in faces]
+
+
+async def test_with_the_hat_the_same_people_moved_across_the_picture_are_framed_again():
+    framer, camera, room, clock, framings = await framer_for(follow=True)
+    await framed_at_the_start(framer, clock)
+    clock.now += framer.REST_S
+    await looks(framer, clock, 4)                              # where the framing left them: nothing to follow
+    assert framings == [False]
+    room.faces = moved(TWO, 300)                               # both, a quarter of the picture to the right
+    await looks(framer, clock, framer.MOVED_LOOKS - 1)
+    assert framings == [False]                                 # not for a look or two: someone leaning over
+    await looks(framer, clock, 1)
+    assert framings == [False, False]
+    await looks(framer, clock, 12)                             # and where that framing left them is the new place: no hunting
+    assert framings == [False, False]
+
+
+async def test_people_who_move_and_come_back_or_draw_apart_a_little_are_left_alone():
+    framer, camera, room, clock, framings = await framer_for(follow=True)
+    await framed_at_the_start(framer, clock)
+    clock.now += framer.REST_S
+    await looks(framer, clock, 1)
+    room.faces = moved(TWO, 300)
+    await looks(framer, clock, framer.MOVED_LOOKS - 1)
+    room.faces = moved(TWO, 40)                                # back, near enough
+    await looks(framer, clock, 6)
+    assert framings == [False]
+
+
+async def test_people_drawn_together_are_framed_closer():
+    framer, camera, room, clock, framings = await framer_for(follow=True)
+    await framed_at_the_start(framer, clock)
+    clock.now += framer.REST_S
+    await looks(framer, clock, 1)
+    room.faces = [(570, 300, 60, 60), (650, 300, 60, 60)]      # the same middle, a fifth as far apart
+    await looks(framer, clock, framer.MOVED_LOOKS)
+    assert framings == [False, False]
+
+
+async def test_without_the_hat_people_who_move_are_not_followed():
+    framer, camera, room, clock, framings = await framer_for()
+    await framed_at_the_start(framer, clock)
+    clock.now += framer.REST_S
+    await looks(framer, clock, 1)
+    room.faces = moved(TWO, 300)
+    await looks(framer, clock, 8)
+    assert framings == [False]

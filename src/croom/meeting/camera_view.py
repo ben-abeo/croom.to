@@ -431,6 +431,9 @@ class CameraView:
         has stopped itself on the page) stays off until the call's camera is on again (by the page, or by the meeting's own word)."""
         if on:
             self._page_off = False
+            opened = getattr(self._devices, "camera_opened", None)
+            if opened is not None:
+                opened()             # a call's page: the room sends a Rally to its home for the call
             if self._tap_on and self._waiting:   # the tap opens on the page now: the wait for its first frame starts
                 self._waiting = False
                 self._first_frame_due = asyncio.get_running_loop().time() + self.FIRST_FRAME_S

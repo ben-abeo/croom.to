@@ -566,14 +566,19 @@ async def test_a_call_that_is_over_sends_the_rally_home_and_nothing_else_does(tm
         await service.homing                                  # at start, as ever
         v4l2.set_many_calls.clear()
         meeting.tell(MeetingState.IDLE)                       # no call has been on: nothing
-        meeting.tell(MeetingState.JOINING, MeetingState.IN_LOBBY, MeetingState.CONNECTED, MeetingState.LEAVING)
-        assert v4l2.set_many_calls == []                      # not while it is on, or ending
+        meeting.tell(MeetingState.JOINING, MeetingState.IN_LOBBY)
+        assert v4l2.set_many_calls == []                      # not on the way in
         with caplog.at_level(logging.INFO):
+            meeting.tell(MeetingState.CONNECTED)              # the call starts at the room's home, whatever the Rally did meanwhile
+            await service.homing
+            assert v4l2.set_many_calls == [GONE_HOME] and levels(caplog, "Camera homed as the call starts") == [logging.INFO]
+            meeting.tell(MeetingState.CONNECTED, MeetingState.LEAVING)
+            assert v4l2.set_many_calls == [GONE_HOME]         # once a call, and not while it ends
             meeting.tell(MeetingState.IDLE)
             await service.homing
-        assert v4l2.set_many_calls == [GONE_HOME] and levels(caplog, "Camera homed after the call") == [logging.INFO]
+        assert v4l2.set_many_calls == [GONE_HOME] * 2 and levels(caplog, "Camera homed after the call") == [logging.INFO]
         meeting.tell(MeetingState.IDLE)                       # over already: not again
-        assert v4l2.set_many_calls == [GONE_HOME]
+        assert v4l2.set_many_calls == [GONE_HOME] * 2
     finally:
         await service.stop()
 
@@ -607,5 +612,32 @@ async def test_a_rally_that_comes_back_is_sent_home(tmp_path):
         await until(lambda: service.homing is not None)
         await service.homing
         assert v4l2.set_many_calls == [GONE_HOME]
+    finally:
+        await service.stop()
+
+
+async def test_the_calls_page_opening_the_camera_sends_the_rally_home_once_and_the_tvs_preview_does_not(tmp_path, caplog):
+    service, v4l2, meeting = rally_service(tmp_path)
+    service.WAKE_S = 0.01
+    await service.start()
+    try:
+        await service.homing
+        v4l2.set_many_calls.clear()
+        service.camera_opened()                               # the TV's own preview, outside a call: a person is setting it up
+        assert v4l2.set_many_calls == []
+        meeting.tell(MeetingState.JOINING)
+        with caplog.at_level(logging.INFO):
+            service.camera_opened()                           # the call's page: the Rally woke at Logitech's home, and reads as before
+            await service.homing
+        assert v4l2.set_many_calls == [GONE_HOME] and levels(caplog, "Camera homed as the call opens it") == [logging.INFO]
+        service.camera_opened()
+        meeting.tell(MeetingState.IN_LOBBY, MeetingState.CONNECTED)
+        assert v4l2.set_many_calls == [GONE_HOME]             # once for the call: not again when it connects
+        meeting.tell(MeetingState.IDLE)
+        await service.homing
+        meeting.tell(MeetingState.JOINING)
+        service.camera_opened()                               # the next call: again
+        await service.homing
+        assert v4l2.set_many_calls == [GONE_HOME] * 3
     finally:
         await service.stop()

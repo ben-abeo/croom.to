@@ -8,6 +8,7 @@ class FakeUsbSwitch:
     chip = "/dev/gpiochip4"
 
     def __init__(self, available=True):
+        self.other = None       # another camera on this Pi while the configured one is not
         self._available, self.on_pi, self.answers, self.moves, self.opened, self.closed = available, True, True, [], False, False
 
     def open(self):
@@ -24,6 +25,9 @@ class FakeUsbSwitch:
 
     def holder(self):
         return ROOM if self.on_pi else LAPTOP
+
+    def other_camera(self):
+        return None if self.on_pi else self.other
 
     async def move_to(self, holder):
         self.moves.append(holder)

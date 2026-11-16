@@ -17,6 +17,12 @@ NOT_READY = "The switch is not ready"
 TV_FAILED = "The TV did not switch: choose its input with the TV's Input button"
 
 
+
+def wrong_camera(found: str) -> str:
+    """Laptop mode's words in a room whose camera (`found`, as lsusb shows it) is not the one laptop.usb_id names."""
+    return f"This room's camera is {found}, not the one the Laptop switch watches: choose it in Settings › Laptop switch"
+
+
 class LaptopError(Exception):
     """What the person at the table is told when Laptop mode cannot do what they asked; `status` is the route's answer."""
 

@@ -19,7 +19,7 @@ from croom.core.config import Config
 from croom.core.service import Service
 from croom.laptop.check import check_laptop
 from croom.laptop.errors import (CAMERA_AWAY, HOW_LONG, IN_A_MEETING, NOT_READY, SOURCE, SWITCHING, TITLE, TV_FAILED,  # noqa: F401
-                                 LaptopError)
+                                 LaptopError, wrong_camera)
 from croom.laptop.switch import LAPTOP, NO_ANSWER, ROOM, UsbSwitch
 from croom.meeting.providers.base import MeetingState
 
@@ -41,6 +41,7 @@ class LaptopService(Service):
         self._lock = asyncio.Lock()
         self._watch_task: Optional[asyncio.Task] = None
         self._problem: Optional[str] = None
+        self._wrong: Optional[str] = None     # the words while usb_id names a camera this room does not have
         self._active, self._until, self._key, self._made = False, None, None, False
         self._auto_return_failed = False   # the watch stopped pressing after one automatic return that did not move
         self._last_holder: Optional[str] = None   # the watch's previous look: a change it did not ask for is acted on at the second
@@ -104,7 +105,7 @@ class LaptopService(Service):
             "until": self._until.isoformat() if self._until else None,
             "made_booking": self._made,
             "switching": self._lock.locked(),
-            "problem": self._problem or (None if self._switch.available else self._switch.problem),
+            "problem": self._wrong or self._problem or (None if self._switch.available else self._switch.problem),
         }
 
     # -- the lifecycle
@@ -135,6 +136,18 @@ class LaptopService(Service):
         async with self._lock:
             try:
                 holder = self._switch.holder()
+                other = self._switch.other_camera() if holder == LAPTOP else None
+                if other is not None:
+                    # Another camera is on this Pi: usb_id is wrong, and the laptop has nothing. The room keeps (or takes back) its
+                    # devices and says what to put right, where it used to sit in Laptop mode with no way back.
+                    if self._wrong is None:
+                        logger.warning(f"Laptop mode: {wrong_camera(other)}")
+                    self._wrong, self._last_holder = wrong_camera(other), None
+                    if self._active:
+                        self._set(False)
+                        await self._reclaim()
+                    return
+                self._wrong = None
                 # A change of holder nobody asked for (taken at the switch, or given back there) is acted on at the second look that
                 # agrees, so one reading that lost the MeetUp for a moment moves nothing.
                 seen, self._last_holder = self._last_holder, holder
@@ -182,6 +195,9 @@ class LaptopService(Service):
         that time is taken, before anything is pressed), or with no end in a room with no calendar to book in."""
         if not self._switch.available:
             raise LaptopError(self._switch.problem or NOT_READY)
+        other = self._switch.other_camera()
+        if other is not None:
+            raise LaptopError(wrong_camera(other))
         if self._busy():
             raise LaptopError(IN_A_MEETING)
         if self._lock.locked():

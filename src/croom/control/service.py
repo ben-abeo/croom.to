@@ -43,7 +43,7 @@ from croom.settings.checks import CheckBusy, Checks
 from croom.settings.config_edit import ConfigEditor
 from croom.settings.credentials import MAX_KEY_FILE, CredentialError, Credentials
 from croom.settings.devices import find_devices as find_room_devices
-from croom.settings.devices import offer
+from croom.settings.devices import find_usb_cameras, offer, offer_usb_camera
 from croom.settings.github import CANT_CHECK, GitHub, GitHubError, is_commit
 from croom.settings.pin import UNLOCK_SECONDS, PinError, PinLocked, PinStore
 from croom.settings.schema import BY_PATH, SettingError
@@ -1503,6 +1503,8 @@ class ControlService(Service):
             return self._error_response(str(e), 500)
         if page == "devices":
             fields = offer(fields, values, await self._room_devices())
+        elif page == "laptop":
+            fields = offer_usb_camera(fields, values, await asyncio.to_thread(find_usb_cameras))
         return web.json_response({"values": values, "fields": fields, "pending_restart": self._editor.pending_restart})
 
     async def _handle_save_config(self, request: web.Request) -> web.Response:

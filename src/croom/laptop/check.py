@@ -12,6 +12,7 @@ import time
 from typing import Optional, TextIO
 
 from croom.core.config import Config
+from croom.laptop.errors import wrong_camera
 from croom.laptop.switch import LAPTOP, ROOM, UsbSwitch
 
 # The 40-pin header's pin for a BCM GPIO number, for the words: the wiring is done by the header's numbers.
@@ -38,6 +39,10 @@ async def check_laptop(config: Config, out: TextIO = sys.stdout, switch: Optiona
         print(f"GPIO chip: {switch.chip}", file=out)
         holder = switch.holder()
         print(f"The MeetUp ({laptop.usb_id}) is " + ("on this Pi." if holder == ROOM else "not on this Pi: the laptop side has it."), file=out)
+        other = switch.other_camera()
+        if other is not None:
+            print(wrong_camera(other), file=out)
+            return 1
         if not move:
             return 0
         target = LAPTOP if holder == ROOM else ROOM

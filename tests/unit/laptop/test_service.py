@@ -6,6 +6,7 @@ import pytest
 
 from croom.calendar.bookings import RoomBookings, SlotTaken
 from croom.control.settings import SettingsStore
+from croom.laptop.errors import wrong_camera
 from croom.laptop.service import CAMERA_AWAY, HOW_LONG, IN_A_MEETING, SWITCHING, LaptopError, LaptopService
 from croom.laptop.switch import NO_ANSWER
 from croom.meeting.providers.base import MeetingState
@@ -474,3 +475,34 @@ async def test_the_check_with_no_pin_says_why_and_does_not_tell_to_stop_the_room
     assert await room.service.check(out) == 1
     assert "The switch cannot be pressed: the switch's GPIO pin cannot be used: busy" in out.getvalue()
     assert "systemctl stop" not in out.getvalue()
+
+
+# --- usb_id names a camera this room does not have (a Rally in a room left at the MeetUp's id, or a camera that was replaced)
+
+RALLY = "046d:0881"
+
+
+async def test_another_camera_on_the_pi_is_a_wrong_id_and_not_laptop_mode(room):
+    room.switch.on_pi, room.switch.other = False, RALLY
+    await room.look()
+    await room.look()
+    state = room.service.state()
+    assert state["holder"] == "room" and state["problem"] == wrong_camera(RALLY) and room.devices.calls == []
+    with pytest.raises(LaptopError) as refused:
+        await room.service.to_laptop(30)
+    assert str(refused.value) == wrong_camera(RALLY) and room.switch.moves == [] and room.google.events == {}
+    room.switch.on_pi = True                       # the right id after all (the old camera back): the words go
+    await room.look()
+    assert room.service.state()["problem"] is None
+
+
+async def test_a_room_stuck_in_laptop_mode_by_a_wrong_id_comes_back_by_itself(room):
+    room.switch.on_pi = False
+    await room.look()
+    await room.look()
+    assert room.service.camera_away               # as a room was, before the id was known to be wrong
+    room.switch.other = RALLY
+    await room.look()
+    assert not room.service.camera_away and room.devices.calls == ["release", "reclaim"] and room.tv.calls == ["pi"]
+    assert room.service.state()["problem"] == wrong_camera(RALLY) and room.switch.moves == []
+    assert not room.make().camera_away            # and a restart does not bring Laptop mode back

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from croom.laptop import switch as switch_module
-from croom.laptop.switch import LAPTOP, ROOM, GpiodPin, UsbSwitch, usb_present
+from croom.laptop.switch import LAPTOP, ROOM, GpiodPin, UsbSwitch, usb_cameras, usb_present
 
 MEETUP = "046d:0866"
 
@@ -211,3 +211,30 @@ def test_a_usb_id_that_is_not_vendor_colon_product_leaves_the_switch_unavailable
 
 def test_a_usb_id_in_either_case_is_accepted():
     assert UsbSwitch(lambda: object(), "046D:0B21").open() is True
+
+
+def test_the_usb_cameras_are_found_once_each_and_the_pis_own_nodes_are_not(tmp_path):
+    usb = tmp_path / "devices" / "usb3" / "3-1"
+    interface = usb / "3-1:1.0"
+    interface.mkdir(parents=True)
+    (usb / "idVendor").write_text("046D\n")
+    (usb / "idProduct").write_text("0881\n")
+    codec = tmp_path / "devices" / "platform" / "codec"
+    codec.mkdir(parents=True)
+    nodes = tmp_path / "video4linux"
+    for name, device, label in (("video0", interface, "Logi Rally Camera"), ("video1", interface, "Logi Rally Camera"),
+                                ("video19", codec, "rpi-hevc-dec")):
+        (nodes / name).mkdir(parents=True)
+        (nodes / name / "device").symlink_to(device)
+        (nodes / name / "name").write_text(label + "\n")
+    assert usb_cameras(nodes) == {"046d:0881": "Logi Rally Camera"}
+    assert usb_cameras(tmp_path / "missing") == {}
+
+
+def test_another_camera_counts_only_while_the_configured_one_is_away():
+    here = {"present": False}
+    switch = UsbSwitch(lambda: None, MEETUP, present=lambda _: here["present"], cameras=lambda: {"046d:0881": "Logi Rally Camera"})
+    assert switch.other_camera() == "046d:0881"
+    here["present"] = True
+    assert switch.other_camera() is None
+    assert UsbSwitch(lambda: None, MEETUP, present=lambda _: False, cameras=dict).other_camera() is None   # the laptop has it

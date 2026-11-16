@@ -10,11 +10,12 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
 USB_DEVICES = Path("/sys/bus/usb/devices")
+VIDEO_NODES = Path("/sys/class/video4linux")
 HEADER_CHIPS = ("pinctrl-rp1", "pinctrl-bcm2711")   # the 40-pin header's GPIO chip on a Pi 5 and on a Pi 4
 NO_ANSWER = "The switch did not answer: press the button on the switch box"
 ROOM, LAPTOP = "room", "laptop"
@@ -36,6 +37,27 @@ def usb_present(usb_id: str, root: Path = USB_DEVICES) -> bool:
         if found == wanted:
             return True
     return False
+
+
+def usb_cameras(root: Path = VIDEO_NODES) -> Dict[str, str]:
+    """{vendor:product id: name} of the USB cameras on this computer now. A camera has several video nodes, and a Pi has its own (its
+    decoder, its image processor) that are on no USB: only a node whose device is a USB interface, or the USB device itself, counts."""
+    found: Dict[str, str] = {}
+    try:
+        nodes = sorted(root.iterdir())
+    except OSError:
+        return found
+    for node in nodes:
+        try:
+            device = (node / "device").resolve()
+            for usb in (device, device.parent):
+                if (usb / "idVendor").is_file():
+                    usb_id = f"{(usb / 'idVendor').read_text().strip()}:{(usb / 'idProduct').read_text().strip()}".lower()
+                    found.setdefault(usb_id, (node / "name").read_text().strip() or usb_id)
+                    break
+        except OSError:
+            continue        # a camera that went while it was read
+    return found
 
 
 class GpiodPin:
@@ -74,13 +96,15 @@ class UsbSwitch:
     `present(usb_id)` says whether the MeetUp is on this Pi. One move at a time."""
 
     def __init__(self, pin_factory: Callable[[], Any], usb_id: str, press_ms: int = 200, wait_s: float = 10.0, poll_s: float = 0.25,
-                 present: Callable[[str], bool] = usb_present, sleep=asyncio.sleep, clock=time.monotonic):
+                 present: Callable[[str], bool] = usb_present, sleep=asyncio.sleep, clock=time.monotonic,
+                 cameras: Callable[[], Dict[str, str]] = usb_cameras):
         self._pin_factory = pin_factory
         self._usb_id = usb_id
         self._press_s = press_ms / 1000
         self._wait_s = wait_s
         self._poll_s = poll_s
         self._present = present
+        self._cameras = cameras
         self._sleep = sleep
         self._clock = clock
         self._pin: Any = None
@@ -126,6 +150,16 @@ class UsbSwitch:
     def holder(self) -> str:
         """Who has the MeetUp: this Pi when it is on its USB, the laptop's side of the switch otherwise."""
         return ROOM if self._present(self._usb_id) else LAPTOP
+
+    def other_camera(self) -> Optional[str]:
+        """The id of a camera that is on this Pi while the one usb_id names is not: usb_id names a camera this room does not have
+        (the MeetUp's default in a room with a Rally, or a camera that was replaced), so its absence says nothing of the laptop.
+        None when the camera is here, or when no camera is (the laptop has it)."""
+        # ponytail: any other USB camera counts. A room that keeps a second one on the Pi (an HDMI capture stick) would be told its
+        # id is wrong while the first is lent: remember the cameras seen beside the configured one if a room ever has that.
+        if self._present(self._usb_id):
+            return None
+        return next(iter(self._cameras()), None)
 
     async def press(self) -> None:
         if self._pin is None:

@@ -13,6 +13,7 @@ import logging
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from croom.devices.volume import parse_nodes, run_command
+from croom.laptop.switch import usb_cameras
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ Runner = Callable[[List[str]], Awaitable[Tuple[int, str]]]
 
 AUTOMATIC: Choice = ("auto", "Automatic")
 SPEAKER, MICROPHONE, CAMERA = "audio.output_device", "audio.input_device", "video.device"
+USB_CAMERA = "laptop.usb_id"     # the Laptop switch page's: the camera by its USB id, as the switch watches for it
 NOT_THERE = "not connected now"
 
 
@@ -65,6 +67,28 @@ async def find_devices(run: Runner = run_command, v4l2=None) -> Found:
     except Exception as e:  # noqa: BLE001 - the page offers Automatic and the config's value whatever goes wrong here
         logger.warning(f"Devices page: the cameras could not be listed: {type(e).__name__}: {e}")
     return found
+
+
+def find_usb_cameras() -> Found:
+    """{USB_CAMERA: [(vendor:product id, "name (id)")]} for the USB cameras on this Pi now."""
+    return {USB_CAMERA: [(usb_id, f"{name} ({usb_id})") for usb_id, name in usb_cameras().items()]}
+
+
+def offer_usb_camera(fields: List[Dict[str, Any]], values: Dict[str, Any], found: Optional[Found]) -> List[Dict[str, Any]]:
+    """The Laptop switch page's fields with the camera's USB id as a choice of the cameras on this Pi now (and the config's own,
+    labelled as not connected now), so a new camera is chosen and not typed. No camera here (the laptop has it): typed, as before."""
+    choices = list((found or {}).get(USB_CAMERA, []))
+    if not choices:
+        return fields
+    fields = copy.deepcopy(fields)
+    for field in fields:
+        if field.get("path") != USB_CAMERA:
+            continue
+        current = values.get(USB_CAMERA)
+        if isinstance(current, str) and current and current not in {value for value, _ in choices}:
+            choices.append((current, f"{current} ({NOT_THERE})"))
+        field["kind"], field["choices"] = "choice", [{"value": value, "label": label} for value, label in choices]
+    return fields
 
 
 def offer(fields: List[Dict[str, Any]], values: Dict[str, Any], found: Optional[Found]) -> List[Dict[str, Any]]:

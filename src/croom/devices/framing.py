@@ -81,6 +81,23 @@ def turn_degrees(seconds: float, zoom: int) -> int:
     return math.floor(deg * _between(RALLY_TURN_ZOOM, zoom) + 0.5)
 
 
+def turn_speed(seconds: float, zoom: int) -> float:
+    """How fast the Rally is turning, in degrees a second, `seconds` into a turn by speed at `zoom`: the table's slope there."""
+    seconds = max(0.0, seconds)
+    step = 0.05
+    end_s = RALLY_TURN[-1][0]
+    if seconds + step >= end_s:
+        slope = RALLY_TURN_DEG_S
+    else:
+        slope = (_between(RALLY_TURN, seconds + step) - _between(RALLY_TURN, seconds)) / step
+    return slope * _between(RALLY_TURN_ZOOM, zoom)
+
+
+def angles_to(place: Tuple[float, float], zoom: int, tangents: Tuple[float, float] = RALLY_TANGENTS) -> Tuple[float, float]:
+    """The pan and tilt, in degrees, that bring a place of the Rally's picture at `zoom` to its middle (Auto framing's tracking)."""
+    return _angles(place, zoom, tangents)
+
+
 def _angles(place: Tuple[float, float], zoom: int, tangents: Tuple[float, float]) -> Tuple[float, float]:
     """The pan and tilt, in degrees, that bring a place of a picture taken at `zoom` to its middle. Up the picture is tilt +1."""
     magnification = max(zoom, ZOOM_MIN) / 100

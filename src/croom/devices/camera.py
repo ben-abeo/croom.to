@@ -431,15 +431,16 @@ class RoomCamera:
     # Moving
     # ------------------------------------------------------------------
 
-    async def move(self, pan: int, tilt: int) -> Dict[str, Any]:
+    async def move(self, pan: int, tilt: int, by_person: bool = True) -> Dict[str, Any]:
         """Start, change or stop motion; a second request within WATCHDOG_S keeps it going. A camera that says where it points (the
         Rally) turns by speed as well, but only once a target it was sent has been reached, and not past a limit or the end of its
-        range (_room, and _keep_turns_inside while it turns): how far it turned is counted from how long (_end_turns)."""
+        range (_room, and _keep_turns_inside while it turns): how far it turned is counted from how long (_end_turns).
+        by_person: an arrow or a drag, not Auto framing's own tracking, which does not take the camera from itself."""
         if (isinstance(pan, bool) or isinstance(tilt, bool)   # True and False equal 1 and 0 but are not directions
                 or pan not in (-1, 0, 1) or tilt not in (-1, 0, 1)):
             raise ValueError("pan and tilt must each be -1, 0 or 1")
         await self._require()
-        if pan or tilt:
+        if (pan or tilt) and by_person:
             self._by_hand()
         self._asked += 1
         mine = self._asked
@@ -1056,7 +1057,8 @@ class RoomCamera:
     # ------------------------------------------------------------------
 
     async def frame_people(self, still: Callable[[], Awaitable[Optional[bytes]]],
-                           detect: Optional[Callable[[bytes], Any]] = None, by_person: bool = True) -> Dict[str, Any]:
+                           detect: Optional[Callable[[bytes], Any]] = None, by_person: bool = True,
+                           zoom_top: Optional[int] = None) -> Dict[str, Any]:
         """Frame the people in the room once: zoom to the widest and let the picture settle, take one picture (`still`: the tap's
         CameraView.still, a JPEG or None), find the people (`detect`: people.detect by default, the AI HAT or YuNet, run in a worker thread), zoom
         so the group fills the picture and turn toward it by timed travel, then look once more and correct once at most.
@@ -1068,7 +1070,8 @@ class RoomCamera:
         limits (_aim_work). Answers the camera's state with "framed" (people found) and "turned" (whether
         it could turn toward them). A framed picture with no one left in it (a turn that missed, or a face that was not one) sends the
         camera back to the widest picture it found them in, answering "lost" too, and turned False. by_person: a person's tap, which also
-        gives the camera back to Auto framing; Auto framing's own framing is not."""
+        gives the camera back to Auto framing; Auto framing's own framing is not. zoom_top: the furthest it zooms in (Auto framing's
+        tracking leaves room around the people); None: as far as the group fills the picture."""
         if self._framing:
             raise NotReady(ALREADY_FRAMING)
         if self._busy or self._pan or self._tilt:
@@ -1078,33 +1081,12 @@ class RoomCamera:
         outcome: Dict[str, Any] = {}
         self._framing = True      # before anything awaits: a second tap meanwhile is "Already framing"
         try:
-            await self._long(lambda: self._frame_work(still, detect or people.detect, outcome), keeps_position=True)
+            await self._long(lambda: self._frame_work(still, detect or people.detect, outcome, zoom_top), keeps_position=True)
         finally:
             self._framing = False
         return dict(self.state(), **outcome)
 
-    async def keep_centred(self, faces, size) -> bool:
-        """Auto framing's following (autoframe.py, "track"): turn a camera that says where it points so that the people in a picture
-        just taken (`faces`, `size`) are in its middle again, at the zoom it has: framing.nudge's turn, inside the limits. Whether it
-        turned: not a camera that does not say where it points, not while it is framing or moving, and not when they are near enough
-        to the middle already. A long move, as Frame people's own correction is, so an arrow or a drag cuts it short."""
-        if not self._absolute or self._framing or self._busy or self._pan or self._tilt:
-            return False
-        zoom = await self.read_zoom()
-        if zoom is None:
-            return False
-        fix = framing.nudge(faces, size, zoom, len(faces))
-        if fix is None:
-            return False
-
-        async def work() -> None:
-            at = await self._where()
-            await self._go_to({"pan": at["pan"] + fix[0] * ARCSEC, "tilt": at["tilt"] + fix[1] * ARCSEC}, zoom)
-
-        await self._long(work, keeps_position=True)
-        return True
-
-    async def _frame_work(self, still, detect, outcome: Dict[str, Any]) -> None:
+    async def _frame_work(self, still, detect, outcome: Dict[str, Any], zoom_top: Optional[int] = None) -> None:
         before = await self.read_zoom()
         await self._zoom_to(self._zoom_range[0])                         # 1. everyone in reach in view
         await self._wait(self._target_done_at - self._clock())         # a Rally sent back inside its limits for the wider picture: there first
@@ -1117,7 +1099,7 @@ class RoomCamera:
             outcome.update(framed=0, turned=False)
             return
         if self._absolute:
-            return await self._aim_work(still, detect, faces, size, outcome)
+            return await self._aim_work(still, detect, faces, size, outcome, zoom_top)
         position = None
         if self._position_known and self._speed_controls(1, 1):
             self._account_now()
@@ -1141,14 +1123,14 @@ class RoomCamera:
             self._account_now()
             await self._move_to(self._pan_s + fix[0], self._tilt_s + fix[1])
 
-    async def _aim_work(self, still, detect, faces, size, outcome: Dict[str, Any]) -> None:
+    async def _aim_work(self, still, detect, faces, size, outcome: Dict[str, Any], zoom_top: Optional[int] = None) -> None:
         """Steps 4 to 7 on a camera that says where it is: from where it points, straight to the pan, tilt and zoom that frame the group
         (framing.aim, inside the limits), then one look and one nudge at most, never toward fewer people than were found."""
         at = await self._where()
         # No further than 5 times (the MeetUp's top): the Rally's 15 is a picture a few degrees across, which a turn a degree or two out
         # (its backlash alone is 1.3 deg) leaves on the table below the person.
         zoom, pan, tilt = framing.aim(faces, size, (at["pan"] / ARCSEC, at["tilt"] / ARCSEC), self._limit_degrees(),
-                                      min(self._zoom_range[1], framing.ZOOM_MAX))
+                                      min(self._zoom_range[1], zoom_top or framing.ZOOM_MAX))
         outcome.update(framed=len(faces), turned=True)
         await self._go_to({"pan": pan * ARCSEC, "tilt": tilt * ARCSEC}, zoom)
         await self._wait(self.SETTLE_S)

@@ -144,16 +144,6 @@ SCHEMA: List[Setting] = [
     Setting("video.ptz_travel_seconds", "Camera travel time", "devices", "number", range=(1, 60), step=0.5,
             help="Seconds the camera takes from one end stop to the other"),
     Setting("control.camera_presets", "Camera preset names", "devices", "list", live=True, required=True, max_items=3, max_length=24),
-    Setting("control.camera_auto_framing", "Auto framing", "devices", "choice", live=True, choices=AUTO_FRAMING,
-            help="Frames the people in the room by itself, as Logitech RightSight does: once each call starts, or throughout calls, "
-                 "when people come in, leave or reach the edge. Moving the camera by hand pauses it until Frame people is tapped"),
-    Setting("control.occupancy", "Count the people in the room", "devices", "switch", live=True,
-            help="The camera looks at the room once a minute, in and out of calls, and its light comes on as it does. Only the number is "
-                 "kept, for the dashboard: no picture is. Tell the people who use the room"),
-    Setting("control.release_empty_minutes", "Release a booking nobody came to after (minutes)", "devices", "number", range=(0, 60),
-            integer=True, live=True,
-            help="0 never releases. Needs Count the people in the room. A booking in progress with the room empty at every look "
-                 "for this long is ended, so the room can be booked. Only where the camera's home shows every seat"),
     Setting("control.door_sign_camera_password", "Door sign camera password", "devices", "secret", live=True, max_length=64,
             pattern=r"[!-~]{8,64}", pattern_words="8 to 64 letters, digits or symbols, with no spaces",
             help="Protect adopts each door sign's camera with the user camera and this password"),
@@ -169,7 +159,17 @@ SCHEMA: List[Setting] = [
     Setting("laptop.usb_id", "USB id of the camera", "laptop", "text", max_length=9, required=True, pattern=r"[0-9a-fA-F]{4}:[0-9a-fA-F]{4}",
             pattern_words="four hex digits, a colon and four more, as lsusb shows it (046d:0866)"),
     Setting("laptop.switch_wait_s", "Wait for a move (s)", "laptop", "number", range=(1, 60), step=0.5),
-    # AI & dashboard
+    # AI & dashboard: first what the room does with its camera's picture (the AI HAT's, or the CPU's without one)
+    Setting("control.camera_auto_framing", "Auto framing", "ai", "choice", live=True, choices=AUTO_FRAMING,
+            help="Frames the people in the room by itself, as Logitech RightSight does: once each call starts, or throughout calls, "
+                 "when people come in, leave or reach the edge. Moving the camera by hand pauses it until Frame people is tapped"),
+    Setting("control.occupancy", "Count the people in the room", "ai", "switch", live=True,
+            help="The camera looks at the room once a minute, in and out of calls, and its light comes on as it does. Only the number is "
+                 "kept, for the dashboard: no picture is. Tell the people who use the room"),
+    Setting("control.release_empty_minutes", "Release a booking nobody came to after (minutes)", "ai", "number", range=(0, 60),
+            integer=True, live=True,
+            help="0 never releases. Needs Count the people in the room. A booking in progress with the room empty at every look "
+                 "for this long is ended, so the room can be booked. Only where the camera's home shows every seat"),
     Setting("ai.enabled", "AI features", "ai", "switch"),
     Setting("ai.backend", "AI backend", "ai", "choice", choices=AI_BACKENDS),
     Setting("ai.person_detection", "Person detection", "ai", "switch"),

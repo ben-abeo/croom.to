@@ -131,10 +131,10 @@ async def test_camera_preset_names_apply_at_once(client, unlocked, room):
 
 async def test_auto_framing_changes_mode_at_once(client, unlocked, room):
     for mode in ("dynamic", "call_start", "off"):
-        response = await client.post("/api/settings/config/devices", json={"values": {"control.camera_auto_framing": mode}},
+        response = await client.post("/api/settings/config/ai", json={"values": {"control.camera_auto_framing": mode}},
                                      headers=unlocked)
         assert (await response.json())["restart"] is False and room.devices.autoframer.mode == mode
-    response = await client.post("/api/settings/config/devices", json={"values": {"control.camera_auto_framing": "always"}},
+    response = await client.post("/api/settings/config/ai", json={"values": {"control.camera_auto_framing": "always"}},
                                  headers=unlocked)
     assert response.status == 400 and room.devices.autoframer.mode == "off"
 

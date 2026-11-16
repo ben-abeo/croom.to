@@ -90,10 +90,6 @@ def time_zones() -> List[Tuple[str, str]]:
 
 
 PLATFORMS = (("zoom", "Zoom"), ("google_meet", "Google Meet"), ("teams", "Teams"), ("webex", "Webex"))
-# auto, and the name of each AI backend (its `name`), which is what croom.ai.service.AIService matches ai.backend against (kept here so
-# that the root helper need not import the AI backends). Another name is not a backend the room would use: AIService falls back to auto.
-AI_BACKENDS = (("auto", "Automatic"), ("hailo", "Hailo"), ("coral", "Coral"), ("nvidia", "NVIDIA"), ("intel", "Intel (OpenVINO)"),
-               ("cpu", "Processor only"))
 AUTO_FRAMING = (("off", "Off"), ("call_start", "At the start of calls"), ("dynamic", "Throughout calls"),
                 ("track", "Throughout calls, following people (AI HAT)"))   # as RightSight's modes
 AUTOMATIC = (("auto", "Automatic"),)   # the devices' choice before the room's own are added (croom.settings.devices)
@@ -170,16 +166,6 @@ SCHEMA: List[Setting] = [
             integer=True, live=True,
             help="0 never releases. Needs Count the people in the room. A booking in progress with the room empty at every look "
                  "for this long is ended, so the room can be booked. Only where the camera's home shows every seat"),
-    Setting("ai.enabled", "AI features", "ai", "switch"),
-    Setting("ai.backend", "AI backend", "ai", "choice", choices=AI_BACKENDS),
-    Setting("ai.person_detection", "Person detection", "ai", "switch"),
-    Setting("ai.noise_reduction", "Noise reduction", "ai", "switch"),
-    Setting("ai.echo_cancellation", "Echo cancellation", "ai", "switch"),
-    Setting("ai.auto_framing", "Auto framing", "ai", "switch"),
-    Setting("ai.occupancy_counting", "Occupancy counting", "ai", "switch"),
-    Setting("ai.speaker_detection", "Speaker detection", "ai", "switch", help="Needs an AI accelerator"),
-    Setting("ai.hand_raise_detection", "Hand raise detection", "ai", "switch", help="Needs an AI accelerator"),
-    Setting("ai.privacy_mode", "Privacy mode", "ai", "switch", help="Turns every AI feature off"),
     Setting("dashboard.enabled", "Dashboard", "ai", "switch"),
     Setting("dashboard.url", "Dashboard address", "ai", "text", max_length=500, pattern=URL, pattern_words="an http:// or https:// address"),
     Setting("dashboard.enrollment_token", "Enrollment token", "ai", "secret", max_length=500),

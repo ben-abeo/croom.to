@@ -214,11 +214,11 @@ def test_the_form_draws_every_kind_of_setting_and_sends_what_changed(browser, tm
         draw_form(page, "ai")                                            # a choice and a secret, never shown
         assert page.input_value("#setting-dashboard-enrollment-token") == ""
         assert page.locator("#setting-dashboard-enrollment-token").get_attribute("type") == "password"
-        page.select_option("#setting-ai-backend", "cpu")
+        page.select_option("#setting-control-camera-auto-framing", "dynamic")
         page.fill("#setting-dashboard-enrollment-token", "tok-123")
         save_and_wait(page)
         data = yaml.safe_load(config_file.read_text())
-        assert data["ai"] == {"backend": "cpu"} and data["dashboard"] == {"enrollment_token": "tok-123"}
+        assert data["control"]["camera_auto_framing"] == "dynamic" and data["dashboard"] == {"enrollment_token": "tok-123"}
         assert page.input_value("#setting-dashboard-enrollment-token") == ""
         assert "type a new one" in page.locator("#setting-dashboard-enrollment-token").get_attribute("placeholder")
         assert errors == []
@@ -286,13 +286,13 @@ def test_restart_now_whose_answer_is_lost_still_says_the_room_is_restarting(brow
 
 def test_a_refusal_held_on_another_page_names_that_page(browser, tmp_path):  # noqa: F811
     server, admin, config_file = room_server(tmp_path)
-    config_file.write_text(CONFIG + "ai:\n  backend: quantum\n")       # hand-written, and not a backend the room has
+    config_file.write_text(CONFIG + "control:\n  camera_auto_framing: always\n")    # hand-written, and not one of its modes
     with server:
         page = unlocked_page(browser, server)
         open_room(page)
         page.fill("#setting-room-name", "Boardroom")
         page.click(".settings-save")
         page.wait_for_function("document.querySelector('.settings-message').textContent !== ''", timeout=5000)
-        assert message(page) == "AI & dashboard: AI backend: choose one of the list"
+        assert message(page) == "AI & dashboard: Auto framing: choose one of the list"
         assert jobs(admin) == []
         page.close()

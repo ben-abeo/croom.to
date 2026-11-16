@@ -70,20 +70,9 @@ class CroomAgent:
         # Import services dynamically to avoid circular imports
         # and allow optional dependencies
 
-        # AI Service (if enabled)
-        if self.config.ai.enabled and not self.config.ai.privacy_mode:
-            try:
-                from croom.ai.service import AIService
-                ai_service = AIService(self.config, self.capabilities)
-                self.service_manager.register(ai_service)
-                logger.info("AI service registered")
-            except ImportError as e:
-                logger.warning(f"AI service not available: {e}")
-
         # The room's TV (spec 2026-10-13 TV remote and touchpad): kept on, and woken before a meeting is joined. Registered
         # ahead of audio and video, and listed among the meeting's dependencies below, so that it starts before the meeting
-        # (with the AI service on, audio and video are put right after it in the start order, and still come first). Its
-        # start never holds the others for long: it waits half a second for the first look at the TV, and no more.
+        # Its start never holds the others for long: it waits half a second for the first look at the TV, and no more.
         tv_service = None
         # A quiet, unconfigured service lets Find TVs configure and pair at runtime.
         # from_config also restores a TV selected on the table before this boot.
@@ -99,7 +88,7 @@ class CroomAgent:
         try:
             from croom.audio.service import AudioService
             audio_service = AudioService.from_config(self.config)
-            self.service_manager.register(audio_service, dependencies=["ai"] if self.config.ai.enabled else None)
+            self.service_manager.register(audio_service)
             logger.info("Audio service registered")
         except ImportError as e:
             logger.warning(f"Audio service not available: {e}")
@@ -108,7 +97,7 @@ class CroomAgent:
         try:
             from croom.video.service import VideoService
             video_service = VideoService.from_config(self.config)
-            self.service_manager.register(video_service, dependencies=["ai"] if self.config.ai.enabled else None)
+            self.service_manager.register(video_service)
             logger.info("Video service registered")
         except ImportError as e:
             logger.warning(f"Video service not available: {e}")

@@ -39,8 +39,7 @@ def test_the_schema_covers_every_setting_the_pages_edit():
     assert {"audio.input_device", "audio.output_device", "video.device", "video.ptz_travel_seconds", "control.camera_presets",
             "control.camera_auto_framing", "control.door_sign_camera_password", "control.door_sign_camera_sound"} <= paths
     assert {f"laptop.{name}" for name in ("enabled", "gpio_pin", "active_low", "press_ms", "usb_id", "switch_wait_s")} <= paths
-    assert {f"ai.{name}" for name in ("enabled", "backend", "person_detection", "noise_reduction", "echo_cancellation", "auto_framing",
-                                      "occupancy_counting", "speaker_detection", "hand_raise_detection", "privacy_mode")} <= paths
+    assert not any(path.startswith("ai.") for path in paths)       # the earlier AI service's switches: nothing the room uses
     assert {"dashboard.enabled", "dashboard.url", "dashboard.enrollment_token"} <= paths
     assert BY_PATH["dashboard.enrollment_token"].kind == "secret"
     camera = {"control.camera_presets", "control.camera_auto_framing", "control.occupancy", "control.release_empty_minutes",
@@ -111,7 +110,7 @@ def test_switch_takes_true_or_false_and_the_words_a_file_may_use():
 
 def test_choice_is_one_of_its_choices():
     assert validate("room.timezone", "Europe/London") == "Europe/London"
-    assert validate("ai.backend", "hailo") == "hailo"
+    assert validate("control.camera_auto_framing", "track") == "track"
     for value in ("Mars/Olympus", "", None):
         with pytest.raises(SettingError, match="choose one"):
             validate("room.timezone", value)
@@ -371,24 +370,6 @@ async def test_saves_are_one_at_a_time(config_file, admin):
 
 
 # --- every value the room accepts, the schema accepts (a hand-written one must never block every save)
-
-
-def test_the_ai_backends_offered_are_auto_and_the_name_of_each_backend():
-    # AIService uses the backend whose `name` is ai.backend: those names (and auto) are the choices, and no other
-    import importlib
-    names = set()
-    for module, cls in (("hailo", "HailoBackend"), ("coral", "CoralBackend"), ("openvino", "OpenVINOBackend"), ("nvidia", "NVIDIABackend"),
-                        ("onnx_cpu", "ONNXCPUBackend")):
-        backend = getattr(importlib.import_module(f"croom.ai.backends.{module}"), cls)
-        names.add(backend.name.fget(object.__new__(backend)))   # the name is a constant: no need for the hardware __init__ looks for
-    assert names == {"hailo", "coral", "intel", "nvidia", "cpu"}
-    offered = {c["value"] for c in BY_PATH["ai.backend"].describe()["choices"]}
-    assert offered == {"auto"} | names
-    for name in offered:
-        assert validate("ai.backend", name) == name
-    for name in ("openvino", "onnx"):
-        with pytest.raises(SettingError):
-            validate("ai.backend", name)
 
 
 def test_every_meeting_platform_the_room_builds_is_a_choice():

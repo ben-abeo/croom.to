@@ -237,12 +237,13 @@ def test_the_ai_page_saves_a_switch(browser, tmp_path):  # noqa: F811
     with PageServer(admin=admin, config_file=admin.config) as server:
         page = unlocked_page(browser, server)
         open_settings_page(page, "ai")
-        assert [o.get_attribute("value") for o in page.locator("#setting-ai-backend option").all()] == [
-            "auto", "hailo", "coral", "nvidia", "intel", "cpu"]
-        page.click("#setting-ai-noise-reduction")
+        assert [o.get_attribute("value") for o in page.locator("#setting-control-camera-auto-framing option").all()] == [
+            "off", "call_start", "dynamic", "track"]
+        assert page.locator("[id^='setting-ai-']").count() == 0          # the earlier AI service's switches are gone
+        page.click("#setting-dashboard-enabled")
         page.click(".settings-save")
         wait_message(page, "Saved: applies after a restart")
-        assert config_of(admin)["ai"]["noise_reduction"] is False
+        assert config_of(admin)["dashboard"]["enabled"] is False
         assert fits(page)
         page.close()
 
@@ -252,7 +253,7 @@ def test_restart_now_that_never_sees_the_room_go_away_says_it_did_not_restart(br
     with PageServer(admin=admin, config_file=admin.config) as server:
         page = unlocked_page(browser, server, stopped=True)
         open_settings_page(page, "ai")
-        page.click("#setting-ai-noise-reduction")
+        page.click("#setting-dashboard-enabled")
         page.click(".settings-save")
         wait_message(page, "Saved: applies after a restart")
         page.click(".settings-restart")

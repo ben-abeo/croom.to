@@ -17,7 +17,8 @@ import javax.crypto.spec.SecretKeySpec;
  * The camera's ONVIF answers (spec 2026-11-06, section 5): the least UniFi Protect needs to adopt one camera with one H.264 stream.
  * GetSystemDateAndTime is open (Protect asks it first, to sign its requests with the camera's clock); everything else needs the
  * room's login as a WS-UsernameToken. The stream's RTSP path is derived from the password and only GetStreamUri hands it out, so the
- * stream is closed to anyone without the password whether or not Protect also logs in on RTSP.
+ * stream is closed to anyone without the password whether or not Protect also logs in on RTSP. While the room's people detection is
+ * on, the camera has an event service too (OnvifEvents, spec 2026-11-22), named in GetServices and GetCapabilities.
  *
  * Requests are read with patterns, not an XML parser: Android's and the JVM's parsers differ, and only a few elements matter.
  */
@@ -73,13 +74,22 @@ final class Onvif {
     }
 
     static Reply handle(String soapBody, Info info, Instant now) {
+        return handle("/onvif/device_service", soapBody, info, null, now);
+    }
+
+    /** @param path the request's path, which tells an event subscription's requests apart; events: null while people detection is off. */
+    static Reply handle(String path, String soapBody, Info info, Events events, Instant now) {
         Matcher m = BODY_ACTION.matcher(soapBody);
         if (!m.find()) return new Reply(400, fault("s:Sender", "ter:InvalidArgVal", "Not a SOAP request"), "");
         String action = m.group(1);
         if (!action.equals("GetSystemDateAndTime") && !authorized(soapBody, info.login, now)) {
             return new Reply(401, fault("s:Sender", "ter:NotAuthorized", "Sender not authorized"), action);
         }
-        String body = answer(action, info, now);
+        if (events != null) {
+            Reply reply = OnvifEvents.handle(action, path, soapBody, "http://" + info.host + ":" + PORT, events, now);
+            if (reply != null) return reply;
+        }
+        String body = answer(action, info, now, events != null);
         if (body == null) return new Reply(400, fault("s:Receiver", "ter:ActionNotSupported", "Optional action not implemented"), action);
         return new Reply(200, envelope(body), action);
     }
@@ -127,9 +137,10 @@ final class Onvif {
         }
     }
 
-    private static String answer(String action, Info info, Instant now) {
+    private static String answer(String action, Info info, Instant now, boolean withEvents) {
         String device = "http://" + info.host + ":" + PORT + "/onvif/device_service";
         String media = "http://" + info.host + ":" + PORT + "/onvif/media_service";
+        String events = "http://" + info.host + ":" + PORT + OnvifEvents.SERVICE_PATH;
         switch (action) {
             case "GetSystemDateAndTime": {
                 ZonedDateTime t = now.atZone(ZoneOffset.UTC);
@@ -144,12 +155,17 @@ final class Onvif {
                         + "</tds:Model><tds:FirmwareVersion>" + esc(info.firmware) + "</tds:FirmwareVersion><tds:SerialNumber>" + esc(info.serial)
                         + "</tds:SerialNumber><tds:HardwareId>" + esc(info.model) + "</tds:HardwareId></tds:GetDeviceInformationResponse>";
             case "GetCapabilities":
-                return "<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Device><tt:XAddr>" + device + "</tt:XAddr></tt:Device><tt:Media><tt:XAddr>"
-                        + media + "</tt:XAddr><tt:StreamingCapabilities><tt:RTPMulticast>false</tt:RTPMulticast><tt:RTP_TCP>true</tt:RTP_TCP>"
-                        + "<tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP></tt:StreamingCapabilities></tt:Media></tds:Capabilities></tds:GetCapabilitiesResponse>";
+                return "<tds:GetCapabilitiesResponse><tds:Capabilities><tt:Device><tt:XAddr>" + device + "</tt:XAddr></tt:Device>"
+                        + (withEvents ? "<tt:Events><tt:XAddr>" + events + "</tt:XAddr><tt:WSSubscriptionPolicySupport>false"
+                        + "</tt:WSSubscriptionPolicySupport><tt:WSPullPointSupport>true</tt:WSPullPointSupport>"
+                        + "<tt:WSPausableSubscriptionManagerInterfaceSupport>false</tt:WSPausableSubscriptionManagerInterfaceSupport></tt:Events>" : "")
+                        + "<tt:Media><tt:XAddr>" + media + "</tt:XAddr><tt:StreamingCapabilities><tt:RTPMulticast>false</tt:RTPMulticast>"
+                        + "<tt:RTP_TCP>true</tt:RTP_TCP><tt:RTP_RTSP_TCP>true</tt:RTP_RTSP_TCP></tt:StreamingCapabilities></tt:Media>"
+                        + "</tds:Capabilities></tds:GetCapabilitiesResponse>";
             case "GetServices":
                 return "<tds:GetServicesResponse>" + service("http://www.onvif.org/ver10/device/wsdl", device)
-                        + service("http://www.onvif.org/ver10/media/wsdl", media) + "</tds:GetServicesResponse>";
+                        + service("http://www.onvif.org/ver10/media/wsdl", media) + (withEvents ? service(OnvifEvents.NAMESPACE, events) : "")
+                        + "</tds:GetServicesResponse>";
             case "GetNetworkInterfaces":
                 // ponytail: the prefix length is not known here; 24 is what the office LAN has, and Protect only reads the address and MAC
                 return "<tds:GetNetworkInterfacesResponse><tds:NetworkInterfaces token=\"eth0\"><tt:Enabled>true</tt:Enabled><tt:Info>"
@@ -250,16 +266,16 @@ final class Onvif {
                 + "xmlns:tt=\"http://www.onvif.org/ver10/schema\" xmlns:ter=\"http://www.onvif.org/ver10/error\"><s:Body>" + body + "</s:Body></s:Envelope>";
     }
 
-    private static String fault(String code, String subcode, String reason) {
+    static String fault(String code, String subcode, String reason) {
         return envelope("<s:Fault><s:Code><s:Value>" + code + "</s:Value><s:Subcode><s:Value>" + subcode + "</s:Value></s:Subcode></s:Code>"
                 + "<s:Reason><s:Text xml:lang=\"en\">" + reason + "</s:Text></s:Reason></s:Fault>");
     }
 
-    private static Pattern element(String name) {
+    static Pattern element(String name) {
         return Pattern.compile("<(?:[\\w.-]+:)?" + name + "\\b[^>]*>([^<]*)<", Pattern.DOTALL);
     }
 
-    private static String first(Pattern pattern, String text) {
+    static String first(Pattern pattern, String text) {
         Matcher m = pattern.matcher(text);
         return m.find() ? m.group(1) : null;
     }

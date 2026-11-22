@@ -284,6 +284,7 @@ class ControlConfig:
     release_empty_minutes: int = 0      # a booking nobody came to is ended after this many empty minutes (needs occupancy); 0: never
     occupancy: bool = False             # Occupancy (devices/occupancy.py): the people in the room counted from the camera; off until chosen
     door_sign_camera_sound: bool = False  # the door signs' microphone with their picture; off until someone chooses it (consent)
+    door_sign_camera_people: bool = False  # the door signs tell UniFi Protect when someone is in their picture; off until chosen
 
 
 @dataclass
@@ -449,6 +450,7 @@ class Config:
                 "release_empty_minutes": self.control.release_empty_minutes,
                 "door_sign_camera_password": self.control.door_sign_camera_password,
                 "door_sign_camera_sound": self.control.door_sign_camera_sound,
+                "door_sign_camera_people": self.control.door_sign_camera_people,
             },
             "updates": {
                 "auto_check": self.updates.auto_check,

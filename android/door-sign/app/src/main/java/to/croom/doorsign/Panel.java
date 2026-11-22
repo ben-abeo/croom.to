@@ -44,6 +44,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     static final String CAMERA_NO_PASSWORD = "Camera off: set the door sign camera password in Settings › Devices";
     static final String CAMERA_FAILED = "Camera off: the camera did not start: ";
     static final String SOUND_OFF = "Sound off: ";          // the room records sound but the panel sends none (spec 2026-11-10)
+    static final String PEOPLE_OFF = "People detection off: ";    // the room wants people told to Protect, the panel can't tell them (spec 2026-11-22)
 
     private final Context context;
     private final WifiChange wifi;
@@ -53,10 +54,14 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     private final Store store;
     private final Supplier<String> cameraTrouble;
     private final Supplier<String> soundTrouble;
+    private final Supplier<String> peopleTrouble;
 
-    /** @param cameraTrouble why the camera service is not running, or null while it runs; soundTrouble, why it sends no sound. */
+    /**
+     * @param cameraTrouble why the camera service is not running, or null while it runs; soundTrouble, why it sends no sound;
+     *                      peopleTrouble, why it can't tell people from other movement.
+     */
     Panel(Context context, WifiChange wifi, Agent.Http http, Supplier<String> server, Supplier<Identity> identity, Store store,
-          Supplier<String> cameraTrouble, Supplier<String> soundTrouble) {
+          Supplier<String> cameraTrouble, Supplier<String> soundTrouble, Supplier<String> peopleTrouble) {
         this.context = context.getApplicationContext();
         this.wifi = wifi;
         this.http = http;
@@ -65,6 +70,7 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         this.store = store;
         this.cameraTrouble = cameraTrouble;
         this.soundTrouble = soundTrouble;
+        this.peopleTrouble = peopleTrouble;
     }
 
     boolean isOwner() {
@@ -142,6 +148,8 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
         if (camera != null) cannot.put("camera", camera);
         String sound = camera == null ? soundCannot(login, soundTrouble.get()) : null;     // a camera that is off says enough
         if (sound != null) cannot.put("sound", sound);
+        String people = camera == null ? peopleCannot(login, peopleTrouble.get()) : null;
+        if (people != null) cannot.put("people", people);
         return cannot;
     }
 
@@ -155,6 +163,11 @@ final class Panel implements Agent.Device, JobRunner.Abilities {
     /** Why the room's sound is not being sent, in the card's words, or null (`trouble`: the camera service's reason, null while it sends it). */
     static String soundCannot(CameraLogin login, String trouble) {
         return login == null || !login.sound || trouble == null ? null : SOUND_OFF + trouble;
+    }
+
+    /** Why people are not told from other movement, in the card's words, or null (`trouble`: the camera service's reason, null while they are). */
+    static String peopleCannot(CameraLogin login, String trouble) {
+        return login == null || !login.people || trouble == null ? null : PEOPLE_OFF + trouble;
     }
 
     // --- JobRunner.Abilities

@@ -146,6 +146,9 @@ SCHEMA: List[Setting] = [
     Setting("control.door_sign_camera_sound", "Door sign camera sound", "devices", "switch", live=True,
             help="Each door sign's microphone goes to Protect with its picture. Recording people's conversations can need everyone's "
                  "consent: check the law where the room is, and put up a notice"),
+    Setting("control.door_sign_camera_people", "Door sign camera people detection", "devices", "switch", live=True,
+            help="Each door sign tells Protect when someone is in its picture, as motion, so Protect can record and alert on it. "
+                 "After turning it on, remove the door sign's camera in Protect and adopt it again"),
     # Laptop switch
     Setting("laptop.enabled", "Laptop switch", "laptop", "switch"),
     Setting("laptop.gpio_pin", "GPIO pin", "laptop", "number", range=(0, 27), integer=True, help="BCM numbering: 17 is header pin 11"),

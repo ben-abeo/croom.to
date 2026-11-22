@@ -43,6 +43,9 @@ import java.util.UUID;
  * login nothing listens. Anything that fails stops the lot, says why on the door sign's card, and is tried again in 10 seconds.
  * While the room's Door sign camera sound is on, the microphone (SoundStream) goes with the picture (spec 2026-11-10): a microphone
  * that fails turns only the sound off, and says so; the picture carries on.
+ * While the room's Door sign camera people detection is on (spec 2026-11-22), the camera's picture is watched for people (PeopleWatch)
+ * and Protect is told when someone is there, as ONVIF motion (Events). If that can't run, Protect is told more, never less, and the
+ * card says why.
  */
 public class CameraService extends Service {
 
@@ -56,8 +59,10 @@ public class CameraService extends Service {
     private static volatile String trouble;                // why it is not running, or null
     private static volatile String on;                     // the setup screen's line while it runs
     private static volatile String soundTrouble;           // why the room's sound is not being sent, or null
+    private static volatile String peopleTrouble;          // why people are not being told from other movement, or null
 
     private final Handler main = new Handler(Looper.getMainLooper());
+    private final SecondPicture second = new SecondPicture();
     private Engine engine;
     private CameraLogin running;
     private boolean runningSound;
@@ -72,11 +77,16 @@ public class CameraService extends Service {
         return soundTrouble;
     }
 
+    /** Why people are not told from other movement (the card's words come from Panel.peopleCannot), or null. */
+    static String peopleTrouble() {
+        return peopleTrouble;
+    }
+
     static void failedToStart(String why) {
         trouble = why;
     }
 
-    /** The setup screen's line about the camera, and its sound. */
+    /** The setup screen's line about the camera, its sound and its people detection. */
     static String line(Context context) {
         Context app = context.getApplicationContext();
         CameraLogin login = CameraLogin.load(new Prefs(app, "check_in"));
@@ -85,7 +95,8 @@ public class CameraService extends Service {
         String now = on;
         if (now == null) return "Camera starting";
         String sound = Panel.soundCannot(login, soundTrouble);
-        return sound == null ? now : now + ". " + sound;
+        String people = Panel.peopleCannot(login, peopleTrouble);
+        return now + (sound == null ? "" : ". " + sound) + (people == null ? "" : ". " + people);
     }
 
     @Override public IBinder onBind(Intent intent) {
@@ -110,7 +121,9 @@ public class CameraService extends Service {
         boolean sound = login.sound && soundRefused == null;
         if (!login.sound) soundTrouble = null;                   // the room records no sound: nothing to say
         else if (soundRefused != null) soundTrouble = soundRefused;   // else the running engine's word stands (a microphone that failed)
+        if (!login.people) peopleTrouble = null;                 // nor of people, when the room does not ask for them
         if (!login.equals(running) || sound != runningSound) {   // a new password: the old stream's path and sessions go with the old engine
+            if (!login.equals(running)) second.again();          // and the camera may be asked for a second picture afresh
             try {
                 restart(login, sound);
             } catch (RuntimeException e) {
@@ -168,13 +181,15 @@ public class CameraService extends Service {
     }
 
     /** One run of the camera and its three servers, with one login. Stopped as a whole, and replaced by a new one to try again. */
-    private final class Engine implements CameraStream.Sink, SoundStream.Sink {
+    private final class Engine implements CameraStream.Sink, SoundStream.Sink, PeopleWatch.Sink {
         private final CameraLogin login;
         private final String streamPath;
         private final StreamClients clients = new StreamClients(MAX_QUEUED);
         private final H264Rtp rtp = new H264Rtp(new SecureRandom().nextInt());
         private final CameraStream stream;
         private final SoundStream sound;        // null: picture only
+        private final PeopleWatch people;       // null: the room's people detection is off
+        private final Events events;            // what Protect is told of people; null with it
         private final AacRtp aac = new AacRtp(new SecureRandom().nextInt());
         private volatile boolean stopped;
         private volatile boolean soundGone;     // the microphone failed: picture only from here
@@ -191,11 +206,14 @@ public class CameraService extends Service {
         private String urn;
         private volatile long lastFrame;
         private volatile long lastSound;
+        private long started;
 
         Engine(CameraLogin login, boolean sound) {
             this.login = login;
             this.streamPath = Onvif.streamPath(login.password);
-            this.stream = new CameraStream(CameraService.this, this);
+            this.people = login.people ? new PeopleWatch(CameraService.this, this, second.allowed()) : null;
+            this.events = login.people ? new Events() : null;
+            this.stream = new CameraStream(CameraService.this, this, people);
             this.sound = sound ? new SoundStream(this) : null;
         }
 
@@ -230,6 +248,11 @@ public class CameraService extends Service {
             thread("door-sign-discovery", this::discover);
             lastFrame = System.nanoTime();
             lastSound = lastFrame;
+            started = lastFrame;
+            if (people != null) {
+                peopleTrouble = null;
+                people.start();             // before the camera: its thread takes the camera's second picture
+            }
             stream.start();
             if (sound != null) {
                 sound.start();
@@ -237,8 +260,13 @@ public class CameraService extends Service {
             }
             main.postDelayed(this::watch, STALL_MS);
             trouble = null;
-            on = "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user + (sound != null ? ", with sound" : "");
+            on = line(sound != null);
             Log.i(TAG, on);
+        }
+
+        private String line(boolean withSound) {
+            return "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user + (withSound ? ", with sound" : "")
+                    + (people != null ? ", with people detection" : "");
         }
 
         void stop() {
@@ -246,6 +274,7 @@ public class CameraService extends Service {
             stopped = true;
             stream.stop();
             if (sound != null) sound.stop();
+            if (events != null) events.close();     // a recorder waiting for news is answered, and asks the next camera
             clients.closeAll();
             close(onvif);
             close(rtsp);
@@ -264,6 +293,7 @@ public class CameraService extends Service {
             if (sound != null && !soundGone && System.nanoTime() - lastSound > STALL_MS * 1_000_000) {
                 soundFailed("no sound from it for " + STALL_MS / 1000 + " seconds");
             }
+            if (people != null) people.check(STALL_MS);
             main.postDelayed(this::watch, STALL_MS);
         }
 
@@ -318,7 +348,23 @@ public class CameraService extends Service {
                 soundGone = true;                  // new viewers are described the picture only; it is tried again when the camera next starts
                 sound.stop();
                 soundTrouble = "the microphone did not start: " + why;
-                on = "Camera on: " + host + ", ONVIF port " + Onvif.PORT + ", user " + login.user;
+                on = line(false);
+            });
+        }
+
+        // --- PeopleWatch.Sink, on the watch's thread
+
+        @Override public void people(boolean there) {
+            if (stopped) return;
+            Log.i(TAG, there ? "People: someone is there" : "People: nobody is there");
+            events.motion(there, Instant.now());
+        }
+
+        @Override public void peopleTrouble(String why) {
+            main.post(() -> {
+                if (engine != this || stopped) return;
+                Log.w(TAG, "People detection off: " + why);
+                peopleTrouble = why;
             });
         }
 
@@ -326,6 +372,8 @@ public class CameraService extends Service {
             main.post(() -> {
                 if (engine != this) return;
                 Log.w(TAG, "Camera off: " + why);
+                // A camera that fails while it draws a second picture may be failing because of it: SecondPicture decides when to stop asking
+                if (people != null && people.drawing() && !stopped) second.failed((System.nanoTime() - started) / 1_000_000);
                 trouble = why;
                 on = null;
                 stop();
@@ -352,8 +400,11 @@ public class CameraService extends Service {
                 MiniHttp.write(socket.getOutputStream(), 404, "text/plain", "Not found");
                 return;
             }
-            Onvif.Reply reply = Onvif.handle(request.body, info(socket.getLocalAddress().getHostAddress()), Instant.now());
-            if (reply.status == 400) Log.i(TAG, "ONVIF: Protect asked for " + reply.action + ", which the door sign does not answer");
+            // A recorder asking for news of people (PullMessages) waits in here, up to a minute, until there is some
+            Onvif.Reply reply = Onvif.handle(request.path, request.body, info(socket.getLocalAddress().getHostAddress()), events, Instant.now());
+            if (reply.status == 400 && reply.xml.contains("ter:ActionNotSupported")) {
+                Log.i(TAG, "ONVIF: Protect asked for " + reply.action + ", which the door sign does not answer");
+            }
             MiniHttp.write(socket.getOutputStream(), reply.status, "application/soap+xml; charset=utf-8", reply.xml);
         }
 

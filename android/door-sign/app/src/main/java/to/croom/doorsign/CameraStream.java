@@ -8,6 +8,8 @@ import android.hardware.camera2.CameraCharacteristics;
 import android.hardware.camera2.CameraDevice;
 import android.hardware.camera2.CameraManager;
 import android.hardware.camera2.CaptureRequest;
+import android.hardware.camera2.params.StreamConfigurationMap;
+import android.graphics.ImageFormat;
 import android.media.MediaCodec;
 import android.media.MediaCodecInfo;
 import android.media.MediaFormat;
@@ -15,8 +17,10 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.util.Range;
+import android.util.Size;
 import android.view.Surface;
 import java.nio.ByteBuffer;
+import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
 
@@ -24,6 +28,8 @@ import java.util.List;
  * The panel's front camera encoded to H.264 in hardware (spec 2026-11-06): Camera2 draws into MediaCodec's input surface, 1280 × 720 at
  * 15 frames a second, 1.5 Mbit/s, a keyframe every 2 seconds. Everything runs on a thread of its own, never the sign's; a camera or
  * encoder error is reported once to the sink, which decides what to do (the service stops it and tries again later).
+ * With a Second (people detection, spec 2026-11-22) the camera draws a small picture into its surface as well; if the camera will not,
+ * the Second is told and the stream goes on without it, exactly as it runs with none.
  */
 final class CameraStream {
 
@@ -37,8 +43,21 @@ final class CameraStream {
         void failed(String why);
     }
 
+    /** A second, small picture of what the camera sees, to look at rather than send. Called on the camera's thread. */
+    interface Second {
+        /** Where the camera is to draw it, given the sizes it can draw ({width, height} each); null for no second picture. */
+        Surface surface(int[][] sizes);
+
+        /** The camera would not draw it: the stream goes on without. */
+        void refused(String why);
+
+        /** The camera is closed and draws into the surface no more. May come more than once. */
+        void closed();
+    }
+
     private final Context context;
     private final Sink sink;
+    private final Second second;        // null: none
     private final HandlerThread thread = new HandlerThread("door-sign-camera");
     private Handler handler;
     private MediaCodec codec;
@@ -47,9 +66,10 @@ final class CameraStream {
     private CameraCaptureSession session;
     private volatile boolean stopped;
 
-    CameraStream(Context context, Sink sink) {
+    CameraStream(Context context, Sink sink, Second second) {
         this.context = context.getApplicationContext();
         this.sink = sink;
+        this.second = second;
     }
 
     void start() {
@@ -177,32 +197,70 @@ final class CameraStream {
         return ids[0];
     }
 
-    @SuppressWarnings("deprecation")   // createCaptureSession(List, …): the form Android 8, the app's oldest, has
     private void capture(CameraManager manager) {
         try {
-            Range<Integer> fps = fpsRange(manager.getCameraCharacteristics(camera.getId())
-                    .get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES));
-            List<Surface> targets = Collections.singletonList(surface);
+            CameraCharacteristics characteristics = manager.getCameraCharacteristics(camera.getId());
+            Range<Integer> fps = fpsRange(characteristics.get(CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES));
+            Surface extra = null;
+            if (second != null) {
+                try {
+                    extra = second.surface(sizes(characteristics));
+                } catch (RuntimeException e) {      // whatever goes wrong with the second picture, the stream starts without it
+                    second.refused(String.valueOf(e.getMessage()));
+                }
+            }
+            draw(fps, extra);
+        } catch (Exception e) {
+            fail("the camera would not start: " + e.getMessage());
+        }
+    }
+
+    /** The camera drawing into the encoder, and into `extra` too when there is one. */
+    @SuppressWarnings("deprecation")   // createCaptureSession(List, …): the form Android 8, the app's oldest, has
+    private void draw(Range<Integer> fps, Surface extra) {
+        try {
+            List<Surface> targets = extra == null ? Collections.singletonList(surface) : Arrays.asList(surface, extra);
             camera.createCaptureSession(targets, new CameraCaptureSession.StateCallback() {
                 @Override public void onConfigured(CameraCaptureSession s) {
                     session = s;
                     try {
                         CaptureRequest.Builder request = camera.createCaptureRequest(CameraDevice.TEMPLATE_RECORD);
                         request.addTarget(surface);
+                        if (extra != null) request.addTarget(extra);
                         if (fps != null) request.set(CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, fps);
                         s.setRepeatingRequest(request.build(), null, handler);
                     } catch (Exception e) {
-                        fail("the camera would not start: " + e.getMessage());
+                        if (extra != null) without(fps, String.valueOf(e.getMessage()));
+                        else fail("the camera would not start: " + e.getMessage());
                     }
                 }
 
                 @Override public void onConfigureFailed(CameraCaptureSession s) {
-                    fail("the camera would not take the encoder's picture size");
+                    if (extra != null) without(fps, "the camera would not draw two pictures at once");
+                    else fail("the camera would not take the encoder's picture size");
                 }
             }, handler);
         } catch (Exception e) {
-            fail("the camera would not start: " + e.getMessage());
+            if (extra != null) without(fps, String.valueOf(e.getMessage()));
+            else fail("the camera would not start: " + e.getMessage());
         }
+    }
+
+    /** The camera would not draw the second picture: the stream alone, as it runs without one. */
+    private void without(Range<Integer> fps, String why) {
+        if (stopped || camera == null) return;
+        second.refused(why);
+        draw(fps, null);
+    }
+
+    /** The sizes the camera can draw for looking at (YUV 4:2:0), {width, height} each. */
+    private static int[][] sizes(CameraCharacteristics characteristics) {
+        StreamConfigurationMap map = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP);
+        Size[] sizes = map == null ? null : map.getOutputSizes(ImageFormat.YUV_420_888);
+        if (sizes == null) return new int[0][];
+        int[][] out = new int[sizes.length][];
+        for (int i = 0; i < sizes.length; i++) out[i] = new int[] {sizes[i].getWidth(), sizes[i].getHeight()};
+        return out;
     }
 
     /** [15, 15] when the camera has it, else the narrowest range with 15 in it, else none (the camera's default). */
@@ -281,5 +339,6 @@ final class CameraStream {
         camera = null;
         codec = null;
         surface = null;
+        if (second != null) second.closed();
     }
 }

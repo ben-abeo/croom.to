@@ -309,13 +309,13 @@ Refused on purpose: enterprise (user-name) networks, WEP, a new password for the
 
 ### The camera in UniFi Protect
 
-From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's **Door sign camera password**. Until the room sends that password, nothing listens on the panel. From version 4 it can send the panel's microphone too, room by room: see **Sound** below.
+From version 3, every door sign's front camera can be recorded by UniFi Protect as a third-party (ONVIF) camera. The panel serves the camera itself, so recording carries on while the TV Pi restarts or updates. It needs the app to be device owner and the room's **Door sign camera password**. Until the room sends that password, nothing listens on the panel. From version 4 it can send the panel's microphone too, room by room: see **Sound** below. From version 5 it can tell Protect when someone is in its picture: see **People detection** below.
 
 1. On each room's touch screen: **Options › Settings › Devices**, set **Door sign camera password** (8 to 64 characters, no spaces). It applies at once. Using the same password in every room is simplest. Keep it in the office password manager.
 2. **Update** the door sign on **Settings › Software** to version 3 or later.
 3. In Protect: **Settings › System › Discover Third-Party Cameras** on.
 4. On the UniFi Devices page, adopt the door sign with user `camera` and the password. If it isn't listed, use **Advanced Adoption** with the panel's IP address and port **8000**.
-5. Set its recording to **Always**. The panel sends no motion events.
+5. Set its recording to **Always**. The panel sends no motion events unless the room's people detection is on (below).
 
 | | |
 | --- | --- |
@@ -354,6 +354,39 @@ Turning it off stops the microphone at the next check-in, and the app takes its 
 | Sound off: Android has not granted the app the microphone | The panel hasn't taken the permission yet. | Wait for the next check-in; if it stays, reboot the panel from the card. |
 | Sound off: Android would not let the app use the microphone: … | Android refused the camera service the microphone. The picture carries on. | Reboot the panel from the card. |
 | Sound off: the microphone did not start: … | The microphone or its encoder failed. The picture carries on; the sound is tried again when the camera next starts. | Reboot the panel from the card. If it stays, read `adb logcat -s DoorSign`. |
+
+#### People detection
+
+Off in every room until someone turns it on. With it on, each door sign watches its own picture for people and tells Protect when someone is there. Protect takes that as **motion** on the door sign's camera, so it can mark it on the timeline, record on it and alert on it.
+
+> **WHAT PROTECT CALLS IT**
+>
+> Protect gives its own Person label (and vehicles, faces and the rest) only to Ubiquiti's cameras, and to other cameras behind a UniFi AI Port. From any other camera it takes motion and nothing more. So the door sign tells people apart itself, and what Protect shows as motion on a door sign is a person. For Protect's own Person label on a door sign, put its camera on an AI Port in Protect; that needs nothing from this switch.
+
+1. **Update** the door sign on **Settings › Software** to version 5 or later.
+2. On the room's touch screen: **Options › Settings › Devices**, turn on **Door sign camera people detection**. It applies at once: each door sign starts watching at its next check-in (within 5 seconds), and its camera starts again, so Protect reconnects.
+3. In Protect, **remove the door sign's camera and adopt it again** (user `camera`, the password): Protect reads whether a camera reports motion only when it adopts it.
+4. Walk past the door sign and look for the motion on its camera in Protect. Then choose in Protect what it is for: keep recording **Always** and have each visit marked, or record on motion only, which keeps most of the 16 GB a day off the console's disk.
+
+| | |
+| --- | --- |
+| How it tells | A model on the panel (EfficientDet-Lite0) looks at the picture up to 4 times a second, and only while something moves in it or someone is there. The picture it looks at never leaves the panel |
+| Someone is there | From the first sight of them until 10 seconds after the last |
+| How far | A person about a sixth of the picture's height or taller. Farther away than that is missed |
+| Not a person | A poster or a screen showing one, once nothing has moved for 60 seconds |
+| Told to Protect as | ONVIF motion events, which Protect asks the panel for on ONVIF TCP 8000 |
+| Setup screen | The camera line ends ", with people detection" |
+
+A door sign that can't tell people tells Protect more, never less, so a fault here never stops a recording that waits for motion:
+
+| The card says | Meaning | Fix |
+| --- | --- | --- |
+| People detection off: …. Protect is told of any movement instead | The people model did not load, or failed, on this panel. Any movement in the picture is told to Protect as if it were a person. The picture carries on. | Reboot the panel from the card. If it stays, read `adb logcat -s DoorSign`. |
+| People detection off: …. Protect is told there is movement all the time, so it keeps recording | The camera gave no second picture for the door sign to look at, it stopped coming, or the camera failed twice while it drew one and is no longer asked. The picture Protect records carries on. | Reboot the panel from the card. If it stays, this panel's camera can't do both: turn the switch off. |
+
+> **BEFORE YOU TURN IT OFF**
+>
+> With the switch off the door sign reports no motion at all. If Protect records the door sign on motion only, set its recording back to **Always** first, or it records nothing.
 
 ## Building and releasing the app
 

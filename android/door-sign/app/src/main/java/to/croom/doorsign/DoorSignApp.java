@@ -34,7 +34,8 @@ public class DoorSignApp extends Application {
         java.util.function.Supplier<String> server = () -> SignAddress.server(settings.url());
         WifiChange wifi = new WifiChange(new AndroidWifi(this, server, http), store, SystemClock::elapsedRealtime, SystemClock::sleep,
                 () -> Instant.now().truncatedTo(ChronoUnit.SECONDS).toString());
-        panel = new Panel(this, wifi, http, server, () -> identity, store, CameraService::trouble, CameraService::soundTrouble);
+        panel = new Panel(this, wifi, http, server, () -> identity, store, CameraService::trouble, CameraService::soundTrouble,
+                CameraService::peopleTrouble);
         ExecutorService jobs = Executors.newSingleThreadExecutor(r -> new Thread(r, "door-sign-job"));
         JobRunner runner = new JobRunner(store, panel, jobs, SystemClock::elapsedRealtime);
         agent = new Agent(server, identity, http, panel, runner, words -> Log.i(TAG, words), login -> {

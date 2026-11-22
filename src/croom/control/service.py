@@ -328,6 +328,7 @@ class ControlService(Service):
         self._room_company = self.config.get("room_company", DEFAULT_COMPANY)
         self._sign_camera_password = str(self.config.get("sign_camera_password") or "")   # the door signs' camera (spec 2026-11-06)
         self._sign_camera_sound = bool(self.config.get("sign_camera_sound", False))        # and its microphone (spec 2026-11-10)
+        self._sign_camera_people = bool(self.config.get("sign_camera_people", False))      # and its people detection (spec 2026-11-22)
         self._static_dir = Path(self.config.get("static_dir", STATIC_DIR))
         self._page_files = page_files_hash(self._static_dir)
         self._store = store or SettingsStore(
@@ -393,6 +394,7 @@ class ControlService(Service):
         self._editor.on_change(("control.occupancy", "control.release_empty_minutes"), self._apply_occupancy)
         self._editor.on_change(("control.door_sign_camera_password",), self._apply_sign_camera_password)
         self._editor.on_change(("control.door_sign_camera_sound",), self._apply_sign_camera_sound)
+        self._editor.on_change(("control.door_sign_camera_people",), self._apply_sign_camera_people)
 
         self._runner: Optional[web.AppRunner] = None
         self._task: Optional[asyncio.Task] = None            # the running join or leave
@@ -430,6 +432,7 @@ class ControlService(Service):
                 "room_company": config.room.company,
                 "sign_camera_password": config.control.door_sign_camera_password,
                 "sign_camera_sound": config.control.door_sign_camera_sound,
+                "sign_camera_people": config.control.door_sign_camera_people,
                 "static_dir": str(STATIC_DIR),
                 "screensaver": config.control.screensaver,
                 "settings_file": str(data_dir / "control-settings.json"),
@@ -1508,6 +1511,10 @@ class ControlService(Service):
         """The door signs' microphone on or off, at once: each joined door sign starts or stops it at its next check-in."""
         self._sign_camera_sound = bool(values["control.door_sign_camera_sound"])
 
+    def _apply_sign_camera_people(self, values: Dict[str, Any]) -> None:
+        """The door signs' people detection on or off, at once: each joined door sign starts or stops it at its next check-in."""
+        self._sign_camera_people = bool(values["control.door_sign_camera_people"])
+
     def _apply_auto_framing(self, values: Dict[str, Any]) -> None:
         """Auto framing's mode (off, at the start of calls, throughout calls), at once: from its next look."""
         framer = getattr(self._devices, "autoframer", None)
@@ -2149,7 +2156,7 @@ class ControlService(Service):
         if answer.get("state") == "allowed" and data.get("kind") == "sign" and self._sign_camera_password:
             # The camera login for UniFi Protect (spec 2026-11-06), to a door sign that has joined only: on the LAN, as Wi-Fi jobs carry passwords
             answer["camera"] = {"user": SIGN_CAMERA_USER, "password": self._sign_camera_password, "name": f"{self._room_name} door sign",
-                                "sound": self._sign_camera_sound}
+                                "sound": self._sign_camera_sound, "people": self._sign_camera_people}
         return web.json_response(answer)
 
     async def _handle_apk(self, request: web.Request) -> web.Response:

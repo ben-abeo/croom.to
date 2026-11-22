@@ -257,16 +257,16 @@ def test_from_config_keeps_the_registry_in_the_data_directory(tmp_path):
 # --- the door sign camera (spec 2026-11-06): the room's login, handed to joined door signs only
 
 SIGN = "s" * 32
-LOGIN = {"user": "camera", "password": "secret-pw1", "name": "Conference Room B door sign", "sound": False}
+LOGIN = {"user": "camera", "password": "secret-pw1", "name": "Conference Room B door sign", "sound": False, "people": False}
 
 
 def sign_body():
     return {"id": SIGN, "kind": "sign", "version": "3", "version_name": "3.0", "name": "WF2489T", "network": {}, "job": None}
 
 
-def camera_service(pins, registry, password="secret-pw1", sound=False):
+def camera_service(pins, registry, password="secret-pw1", sound=False, people=False):
     return make_service(pin_store=pins, registry=registry, meeting=StubMeeting(), room_name="Conference Room B",
-                        sign_camera_password=password, sign_camera_sound=sound)
+                        sign_camera_password=password, sign_camera_sound=sound, sign_camera_people=people)
 
 
 async def test_a_joined_door_sign_gets_the_camera_login(client_factory, pins, registry):  # noqa: F811
@@ -284,6 +284,14 @@ async def test_a_room_that_records_sound_tells_its_door_signs_to_send_it(client_
     registry.allow(SIGN)
     answer = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
     assert answer["camera"] == dict(LOGIN, sound=True)
+
+
+async def test_a_room_with_people_detection_tells_its_door_signs_to_watch_for_them(client_factory, pins, registry):  # noqa: F811
+    client = await client_factory(camera_service(pins, registry, people=True))
+    await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)
+    registry.allow(SIGN)
+    answer = await (await client.post("/api/devices/checkin", json=sign_body(), headers=HEADER)).json()
+    assert answer["camera"] == dict(LOGIN, people=True)
 
 
 async def test_a_touch_pi_never_gets_the_camera_login(client_factory, pins, registry):  # noqa: F811

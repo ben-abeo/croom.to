@@ -34,6 +34,16 @@ echo "sdk.dir=$ANDROID_HOME" > local.properties
 The APK is `app/build/outputs/apk/debug/app-debug.apk`, signed with the debug key, for development. A panel that updates itself
 from Settings runs a release build signed with the room key (see "Releases and the signing key").
 
+### The people model
+
+`app/src/main/assets/people.tflite` is TensorFlow's EfficientDet-Lite0 object detector (trained on COCO, 8-bit, a 320 × 320
+picture in, 25 things found out, with its post-processing built in), under the Apache License 2.0, as TensorFlow publishes it for
+its Android examples:
+`https://storage.googleapis.com/download.tensorflow.org/models/tflite/task_library/object_detection/android/lite-model_efficientdet_lite0_detection_metadata_1.tflite`
+(SHA-256 `2e04c53bfeac0ac2a30c057c7e2a777594ce39baaac35a92f74fb1e8c4fc4e0b`). `PeopleModel` checks its shapes as it loads it
+and refuses any other model. TensorFlow Lite (`org.tensorflow:tensorflow-lite`, Apache License 2.0), which runs it, is the app's
+only library.
+
 ## Install on a panel
 
 With USB debugging on and the panel connected:
@@ -141,6 +151,15 @@ To take the device owner away again (to give the panel to something else): facto
   (16 kHz mono, 32 kbit/s) on a second RTSP track (`trackID=1`, interleaved channels 2-3, RFC 3640 AAC-hbr, `AacRtp`); ONVIF's
   profile gets an audio source and an AAC encoder. A microphone that fails turns only the sound off ("Sound off: …" on the card,
   `cannot.sound`); the picture carries on. No RTCP: a viewer lines the two tracks up by when each began.
+- **Its people detection** (from version 5; spec `docs/superpowers/specs/2026-11-22-door-sign-camera-people-design.md`): while the
+  room's **Door sign camera people detection** is on, the login carries `"people": true`, the camera draws a second, small picture
+  beside the encoder's (`CameraStream.Second`, an `ImageReader`) and `PeopleWatch` looks at it on a thread of its own: `MotionGate`
+  for movement five times a second and, while something moves or someone is there, `PeopleModel` (EfficientDet-Lite0 on TensorFlow
+  Lite) on the left or the right square of the picture (`Frame`). `Presence` makes one yes or no of it, which `Events` and
+  `OnvifEvents` tell Protect as ONVIF motion over PullPoint subscriptions (`/onvif/event_service`, `/onvif/subscription/<id>`):
+  the only detections Protect takes from a camera that is not Ubiquiti's. What fails costs only the telling apart ("People
+  detection off: …" on the card, `cannot.people`), never the picture: without the model any movement counts as someone, and
+  without pictures to look at Protect is told there is movement all the time, so a recording that waits for motion goes on.
 
 The check-in is the touch Pi's protocol (`POST /api/devices/checkin`, kind `sign`, the version being the app's `versionCode`); the
 id and token are made by the app at its first start and kept in its private storage. Clearing the app's data makes a new id, which
@@ -207,6 +226,11 @@ The Software page lists the newest release and the ones between the panel's vers
   with another key, or an older version, is refused in words and nothing is installed.
 - A panel without device owner (a debug build installed the old way): the sign works, the card says it is not the device owner, and
   Reboot, Update and Change Wi-Fi are not offered.
+- People detection (the room's switch on, the camera adopted again in Protect): `adb logcat -s DoorSign` says "People: someone is
+  there" within a second of walking into the picture and "People: nobody is there" about 10 seconds after leaving it, and Protect
+  shows motion on the camera for the visit. The stream still plays at 15 frames a second, the sign's page and its 5-second
+  check-in stay smooth, and the setup screen's camera line ends ", with people detection". The card says nothing of people. With
+  the switch off again the line loses its ending and Protect is told of no motion.
 
 ## Testing over USB
 

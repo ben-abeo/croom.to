@@ -37,14 +37,15 @@ def test_the_schema_covers_every_setting_the_pages_edit():
     assert {"calendar.google_calendar_id", "calendar.booking_start", "calendar.booking_end"} <= paths
     assert BY_PATH["calendar.google_credentials_path"].kind == "credential"
     assert {"audio.input_device", "audio.output_device", "video.device", "video.ptz_travel_seconds", "control.camera_presets",
-            "control.camera_auto_framing", "control.door_sign_camera_password", "control.door_sign_camera_sound"} <= paths
+            "control.camera_auto_framing", "control.door_sign_camera_password", "control.door_sign_camera_sound",
+            "control.door_sign_camera_people"} <= paths
     assert {f"laptop.{name}" for name in ("enabled", "gpio_pin", "active_low", "press_ms", "usb_id", "switch_wait_s")} <= paths
     assert not any(path.startswith("ai.") for path in paths)       # the earlier AI service's switches: nothing the room uses
     assert {"dashboard.enabled", "dashboard.url", "dashboard.enrollment_token"} <= paths
     assert BY_PATH["dashboard.enrollment_token"].kind == "secret"
     camera = {"control.camera_presets", "control.camera_auto_framing", "control.occupancy", "control.release_empty_minutes",
               "control.door_sign_camera_password",
-              "control.door_sign_camera_sound"}
+              "control.door_sign_camera_sound", "control.door_sign_camera_people"}
     assert not any(path.startswith("control.") and path not in camera for path in paths)   # never the room page's own
 
 
@@ -52,7 +53,7 @@ def test_live_settings_are_the_booking_hours_the_camera_preset_names_auto_framin
     assert {s.path for s in SCHEMA if s.live} == {"calendar.booking_start", "calendar.booking_end", "control.camera_presets",
                                                   "control.camera_auto_framing", "control.occupancy",
                                                   "control.release_empty_minutes", "control.door_sign_camera_password",
-                                                  "control.door_sign_camera_sound"}
+                                                  "control.door_sign_camera_sound", "control.door_sign_camera_people"}
 
 
 def test_the_room_page_has_name_location_company_and_the_systems_time_zones():
@@ -403,6 +404,16 @@ def test_door_sign_camera_sound_is_a_live_switch_on_devices_that_is_off_until_so
     assert (s.kind, s.page, s.live, s.label) == ("switch", "devices", True, "Door sign camera sound")
     assert default_of("control.door_sign_camera_sound") is False
     assert "consent" in s.help
+
+
+def test_door_sign_camera_people_detection_is_a_live_switch_on_devices_that_is_off_until_someone_turns_it_on():
+    """People told to Protect (spec 2026-11-22): a room's door signs start watching only once someone has chosen to, and the help
+    says Protect has to adopt the camera again to hear of it."""
+    from croom.settings.config_edit import default_of
+    s = BY_PATH["control.door_sign_camera_people"]
+    assert (s.kind, s.page, s.live, s.label) == ("switch", "devices", True, "Door sign camera people detection")
+    assert default_of("control.door_sign_camera_people") is False
+    assert "adopt it again" in s.help and "motion" in s.help
 
 
 def test_counting_people_is_a_live_switch_on_devices_that_is_off_until_someone_turns_it_on():

@@ -58,6 +58,35 @@ public class CameraLoginTest {
         assertFalse(CameraLogin.load(store).sound);
     }
 
+    @Test public void theRoomSaysWhetherToTellProtectOfPeople() throws Exception {
+        JSONObject block = new JSONObject().put("user", "camera").put("password", "secret-pw1").put("name", "Room 1 door sign");
+        assertFalse(CameraLogin.from(block).people);                     // a room from before the switch, or with it off
+        assertTrue(CameraLogin.from(block.put("people", true)).people);
+        assertFalse(CameraLogin.from(block.put("people", 1)).people);    // only a real true turns it on
+        assertFalse(CameraLogin.from(block.put("people", true)).sound);  // and it is not the sound's switch
+    }
+
+    @Test public void peopleDetectionSurvivesARestartAndTurningItOnIsAnotherLogin() {
+        CameraLogin withPeople = new CameraLogin("camera", "p&ss<w>rd1", "Conference Room B door sign", false, true);
+        MapStore store = new MapStore();
+        withPeople.save(store);
+        assertEquals(withPeople, CameraLogin.load(store));
+        assertNotEquals(LOGIN, withPeople);                              // the camera starts again, watching for people
+        assertNotEquals(withPeople.hashCode(), LOGIN.hashCode());
+        assertTrue(withPeople.toString().contains("with people detection") && !withPeople.toString().contains("p&ss"));
+        LOGIN.save(store);
+        assertFalse(CameraLogin.load(store).people);
+    }
+
+    @Test public void peopleCannotWords() {
+        CameraLogin withPeople = new CameraLogin("camera", "secret-pw1", "", false, true);
+        assertEquals("People detection off: the people model did not load: no library. Protect is told of any movement instead",
+                Panel.peopleCannot(withPeople, "the people model did not load: no library" + PeopleWatch.ANY_MOVEMENT));
+        assertNull(Panel.peopleCannot(withPeople, null));
+        assertNull(Panel.peopleCannot(LOGIN, "stale"));                  // the room does not ask for people: nothing to say
+        assertNull(Panel.peopleCannot(null, "stale"));
+    }
+
     @Test public void soundCannotWords() {
         CameraLogin withSound = new CameraLogin("camera", "secret-pw1", "", true);
         assertEquals("Sound off: Android has not granted the app the microphone",

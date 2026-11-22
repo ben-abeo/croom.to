@@ -130,14 +130,15 @@ Opens by itself during a call. It is laid out as a control deck.
 | Area | What is there |
 | --- | --- |
 | Meeting card (left) | State (Joining, In the lobby, In a meeting, Leaving), time in call, "N people in the call", "N unread chat messages", "The room is host/co-host", and what the meeting disclosed (recorded, transcribed, AI Companion). **Leave** asks "Tap again to leave" within 5 seconds; a double tap on the glass does not count. |
-| Main tiles | **Mute** / **Unmute**, **Turn camera off** / **Turn camera on**, **Raise hand** / **Lower hand** (when the call offers it), **Reactions** (a row of choices for 10 seconds, with Cancel). |
+| Main tiles | **Mute** / **Unmute**, **Turn camera off** / **Turn camera on**, **Raise hand** / **Lower hand** (when the call offers it), **Reactions** (a row of choices for 10 seconds, with Cancel). A tile's words say what a tap does; a muted microphone and a camera that is off turn their tile red, with **Muted** or **Camera off** at its corner. |
 | Second row | **Captions on** / **off**; on Zoom **Gallery view** / **Speaker view**, on Meet **Layout** (Auto, Tiled, Spotlight, Sidebar); **Hide self view** / **Show self view**; **Participants (N)**; **Chat (N)**; **Host** when the room is host or co-host. |
 | Camera strip | **Frame people**, the saved presets (Wide, Table, Whiteboard by default), the arrows (hold to move; the middle key is Home) and **Zoom in** / **Zoom out**, with a line saying what the camera did. Not shown while the laptop has the camera or a dialog card is up. |
 | Dock | **Sound**: volume slider, **Quieter** / **Louder**, **Mute speaker**, and **Mic** for the mic level. **Camera**: presets and nudges. **Upcoming meetings**. |
-| Top bar | **Touchpad**: a full-screen touchpad on the TV Pi's mouse. **TV**: the remote. |
-| Dialog card | A Zoom or Meet question that waits for a tap ("Zoom asks" / "Meet asks" when untitled), with the platform's own buttons. Questions the room is set to answer are answered by themselves. |
+| Top bar | **Magnify**: the TV's picture made larger (below). **Touchpad**: a full-screen touchpad on the TV Pi's mouse. **TV**: the remote. |
+| Dialog card | A Zoom or Meet question that waits for a tap ("Zoom asks" / "Meet asks" when untitled), with the platform's own buttons. Questions the room is set to answer are answered by themselves: Zoom's "This meeting is being recorded" among them, whose **Leave Meeting** the room never presses. |
 
 - **Participants.** Each person with Host, Hand raised, Muted or Video off, and "(this room)". **Pin** / **Unpin** for anyone. As host: **Mute** one person and **Remove** (second tap). On Meet, a **Waiting room** with **Admit** and **Deny**. On Meet the list is read from Meet's people panel while this screen is open ("Reading the list from Meet").
+- **Magnify.** Makes the TV's picture larger, to read a shared screen from the far end of the table, in Zoom and in Google Meet alike (neither has a call for it, so the TV Pi's browser enlarges the page it shows; it is a magnifying glass, not a sharper picture). The pad is the TV's whole picture and the box the part the TV shows: tap the whole picture to magnify about that spot, drag the box to move, pinch with two fingers, or use **Smaller** / **Larger** and **1×**, **1.5×**, **2×**, **3×**, **4×**. **Whole picture** puts it back, and so does the end of the call. While the TV is magnified the top bar's button is filled and says by how much ("Magnify 2×").
 - **Chat.** The last 20 messages. In a **Meet** call a message box and **Send** appear when Meet's chat is available; **Zoom chat is read-only**.
 - **Host controls on Zoom.** **Mute all**, **Ask all to unmute**, **Start recording** / **Stop recording**, **Lock meeting** / **Unlock meeting**, **End meeting for everyone** (second tap).
 - **Host controls on Meet.** **Mute everyone** (second tap), **End call for everyone**, and **Meeting settings** switches read from Meet's host panel (screen share, chat, reactions, microphones, video, Quick access).
@@ -685,7 +686,7 @@ For tests and unusual setups: `KIOSK_URL`, `KIOSK_USER`, `KIOSK_HOME`, `BIN_DIR`
 | src/croom/admin/nmcli.py | Wi-Fi with the safety net, shared with the TV Pi |
 | src/croom/settings/checkin.py | The device registry on the TV Pi |
 | src/croom/control/service.py | Every route |
-| src/croom/control/static/ | The room page: index.html, app.js, booking.js, devices.js, keyboard.js, remote.js, touchpad.js, settings*.js, style.css, icons.svg |
+| src/croom/control/static/ | The room page: index.html, app.js, booking.js, devices.js, keyboard.js, remote.js, touchpad.js, magnify.js, settings*.js, style.css, icons.svg |
 | docs/superpowers/specs/2026-10-29-room-settings-design.md | The design of room settings (sections 6 and 7 for the touch Pi) |
 
 ### Tests

@@ -134,9 +134,13 @@ def controls_from(reading: Dict[str, Any], reactions: List[str]) -> Dict[str, An
 
 
 class DialogPolicy:
-    """What the agent does with a dialog Zoom draws over the TV (spec 2026-10-13, section 5), in one place: a notice with a single button
-    whose words are on the list is pressed at once and kept on the table as a line, unless that button leaves or ends the meeting
-    (NEVER_PRESSED); any other dialog, and every dialog when ask_everything is set, waits for a tap on the table."""
+    """What the agent does with a dialog Zoom draws over the TV (spec 2026-10-13, section 5), in one place: a notice whose words are on
+    the list, and which has one button besides any that leave or end the meeting (NEVER_PRESSED), has that button pressed at once and
+    is kept on the table as a line; any other dialog, and every dialog when ask_everything is set, waits for a tap on the table.
+
+    Zoom's recording notice is "Leave Meeting" and "OK" (Ben, 2026-11-22: it waited on the table in every recorded meeting). Leaving
+    is never the room's answer, so a button that leaves is not a choice the room has to make: the one left is pressed, the room stays,
+    and the line under the title says the meeting is recorded."""
 
     # Notices that say a state changed, which is read from Zoom again once the notice is gone: the room's own mute (the Mute button shows
     # it), and a recording or a transcript that stopped (what the meeting disclosed stays as it was). They add no line under the title.
@@ -149,7 +153,8 @@ class DialogPolicy:
 
     # Buttons that are never pressed for the room, whatever the notice around them says: one that leaves or ends the meeting (Leave, Leave Meeting, End,
     # End Meeting, Exit, Quit), found as a whole word of its label, in any case. A notice whose only button is one of them would walk the room out of its
-    # own meeting by policy, and the line under the title would say all was well. It waits on the table instead, where a person taps it or not.
+    # own meeting by policy, and the line under the title would say all was well. It waits on the table instead, where a person taps it or not. Beside
+    # another button it is passed over, and the other one is the notice's answer (_staying).
     NEVER_PRESSED = ("leave", "end", "exit", "quit")
 
     # Where a sentence of a notice ends: a full stop, an exclamation mark or a question mark, and the space after it.
@@ -170,21 +175,26 @@ class DialogPolicy:
         """The button leaves or ends the meeting: one of NEVER_PRESSED is a whole word of its label ("Weekend" holds "end", and is not one)."""
         return any(word in cls.NEVER_PRESSED for word in re.findall(r"[a-z0-9]+", str(label).lower()))
 
+    @classmethod
+    def _staying(cls, dialog: Dict[str, Any]) -> List[str]:
+        """The dialog's buttons that do not leave or end the meeting, in its order."""
+        return [str(label) for label in dialog.get("buttons") or [] if not cls._never_pressed(label)]
+
     def decide(self, dialog: Dict[str, Any]) -> str:
         """'acknowledge' or 'ask'."""
-        buttons = dialog.get("buttons") or []
-        if self.ask_everything or len(buttons) != 1:
-            return "ask"    # a dialog with a choice in it is never answered for the room
-        if self._never_pressed(buttons[0]):
-            return "ask"    # nor is a notice whose one button leaves or ends the meeting
+        if self.ask_everything or len(self._staying(dialog)) != 1:
+            # A dialog with a choice in it (two buttons that stay) is never answered for the room, nor is one whose every button leaves
+            # or ends the meeting, nor one with no button at all.
+            return "ask"
         words = self._words(dialog)
         return "acknowledge" if any(p in words for p in self.acknowledge) else "ask"
 
     def answer(self, dialog: Dict[str, Any]) -> str:
-        """The button to press for an acknowledged notice: the last one, which Zoom draws as the affirmative (its footer puts cancel
-        first and OK last); for a notice with one button, that one."""
-        buttons = dialog.get("buttons") or []
-        return str(buttons[-1]) if buttons else ""
+        """The button to press for an acknowledged notice: the one that does not leave or end the meeting, wherever the client draws it
+        (Zoom's footer puts "Leave Meeting" first and the affirmative last). Never one that leaves: a dialog with nothing else has no
+        answer ("")."""
+        staying = self._staying(dialog)
+        return staying[-1] if staying else ""
 
     @classmethod
     def _only_a_state(cls, sentence: str) -> bool:

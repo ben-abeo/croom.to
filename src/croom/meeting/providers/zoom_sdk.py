@@ -16,6 +16,7 @@ from urllib.parse import parse_qs, urlparse
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS, Config
 from croom.core.logs import DIALOGS_LOGGER, ZOOM_PAGE_LOGGER
+from croom.meeting.magnify import Magnifier
 from croom.meeting.providers.base import (
     DialogPolicy,
     MeetingControlError,
@@ -152,6 +153,7 @@ class ZoomSdkProvider(MeetingProvider):
 
     def _reset_meeting(self) -> None:
         """What one meeting leaves that the next must not find: the page numbers its dialogs from 1 each time it loads."""
+        self._magnifier = Magnifier()               # what the TV is magnified to (croom.meeting.magnify): the next meeting's page starts whole
         self._reading: Dict[str, Any] = {}          # the page's last whole reading of the meeting
         self._dialogs: List[Dict[str, Any]] = []    # the dialogs waiting for a tap on the table, oldest first
         self._on_screen: Set[int] = set()           # every dialog the page has said is open: the waiting ones, and the notices being answered
@@ -504,6 +506,7 @@ class ZoomSdkProvider(MeetingProvider):
             # last knew, and the Mute control must say the same.
             known = dict(self._reading, me=dict(self._me_of(self._reading), muted=self._muted))
             info.controls = controls_from(known, self.reactions)
+            info.controls["magnify"] = self._magnifier.state()     # the room's own, not Zoom's: its browser magnifies the page (magnify.py)
             people = self._reading.get("participants") or []
             waiting = [p for p in people if p.get("waiting")]     # in the waiting room: not in the meeting yet, and listed apart (controls.host.waiting_room)
             listed = [p for p in people if not p.get("waiting")]
@@ -818,6 +821,11 @@ class ZoomSdkProvider(MeetingProvider):
             return {}
         if name == "host.end":
             return await self._end_meeting_for_everyone()
+        if name == "magnify":     # the room's own browser does it, not Zoom: nothing of the client is pressed, and no call of Zoom's waits for it
+            state = await self._magnifier.set(self._page, value)
+            if info.controls:     # before Zoom's first reading there is no model to add it to: the reading's own publish carries it
+                info.controls = dict(info.controls, magnify=state)
+            return info.controls
         if name == "mute":        # these two have paths of their own: the join's mic-off default and the reconnect rules are made for them
             await self.toggle_mute()
         elif name == "camera":

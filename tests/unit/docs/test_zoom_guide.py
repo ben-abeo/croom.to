@@ -145,11 +145,11 @@ def test_zoom_guide_says_how_zooms_dialogs_are_answered_and_names_the_defaults_a
     for word in DialogPolicy.NEVER_PRESSED:
         assert f'<span class="chip">{word.capitalize()}</span>' in html, word                # and the buttons it says are never pressed are the policy's own
     for needle in (
-        "A dialog with exactly one button whose title or words contain one of the phrases under dialogs › acknowledge in the room's config (in any case) is pressed at once",
-        "A dialog whose one button leaves or ends the meeting (a label with the whole word Leave, End, Exit or Quit, in any case) is never pressed this way, whatever its words say: it waits for a tap like any other",
-        "Every other dialog (more than one button, a single button that leaves or ends the meeting, or words that are not on the list, such as the host asking the room to unmute) shows on the table as a card above the controls",
+        "A dialog whose title or words contain one of the phrases under dialogs › acknowledge in the room's config (in any case), and which has exactly one button besides any that leaves or ends the meeting, has that button pressed at once",
+        "A button that leaves or ends the meeting (a label with the whole word Leave, End, Exit or Quit, in any case) is never pressed this way, whatever the words say: Zoom's recording notice, Leave Meeting and OK, is answered with OK, and a dialog with no other button waits for a tap like any other",
+        "Every other dialog (two or more buttons that stay in the meeting, only a button that leaves or ends it, or words that are not on the list, such as the host asking the room to unmute) shows on the table as a card above the controls",
         "a sentence ends at a full stop, an exclamation mark or a question mark, and the line shows two lines at most, cut short with an ellipsis",
-        "Zoom puts the cancelling button first, so recording consent reads Leave Meeting, Got it",
+        "Zoom puts the cancelling button first, so the host's request to unmute reads Stay Muted, Unmute",
         "Nothing is pressed until someone taps one, which presses it on the TV",
         "ask_everything: true under dialogs (default false) makes every dialog wait for a tap, the notices on the list too",
         "each disclosure is its own sentence, in the order they came, and one that is already there is not added again",
@@ -202,7 +202,7 @@ def test_zoom_guide_inventory_asks_for_what_spec_section_7_asks_for_and_what_the
     for needle in (
         "Have the second person start a recording: its real title and words appear in dialogs_seen",
         "Have the host turn on AI Companion: the notice's real title and words appear in dialogs_seen",
-        "The default list holds AI Companion and Zoom AI is on: with one button it should be pressed at once and its sentence should stay under the meeting's title; with two buttons, or words the list does not hold, it waits on the table as a card",
+        "The default list holds AI Companion and Zoom AI is on: with one button, or one besides Leave Meeting, it should be pressed at once and its sentence should stay under the meeting's title; with two buttons that both stay, or words the list does not hold, it waits on the table as a card",
         "Have the host ask the room to unmute. Zoom draws a dialog with a choice, whose words are not on the acknowledge list, so it should wait on the table as a card with Zoom's own buttons",
         "Have the second person raise a hand: in meeting › participants the person shows hand: true and the Participants screen marks them Hand raised",
         "The device reads an attendee's hand from raiseHand, bRaiseHand or bHandRaised, and which of them Zoom really uses is not confirmed: attendee_keys shows it",
@@ -223,8 +223,8 @@ def test_zoom_guide_has_the_inventory_run_for_the_first_real_meeting_and_says_wh
         "(the code reads isHold, waiting, bHold or isInWaitingRoom)",
         "its real title and words appear in dialogs_seen",
         "the stop notice's real wording too",
-        "the room should show a card with two buttons, Leave Meeting then Got it, with Got it highlighted",
-        "Double-tap Got it: the card answers once, and the second tap must not land on a control under it",
+        "The room should press the second by itself within a second or two, never Leave Meeting, and the notice's sentence should stay under the meeting's title; no card should wait on the table",
+        "double-tap its second button, and the card answers once, and the second tap must not land on a control under it",
         "an entry with empty text; its label is the aria-label of the modal's root",
         "Zoom's record of a participant who is an assistant shows no userId and the name \"You are a assistant\"",
         "date -u",

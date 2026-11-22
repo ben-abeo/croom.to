@@ -27,6 +27,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from croom.calendar.providers.base import CalendarEvent, MeetingPlatform
 from croom.core.config import DEFAULT_REACTIONS, Config, TvConfig
 from croom.core.service import Service
+from croom.meeting.magnify import Magnifier
 from croom.meeting.providers.base import MeetingControlError, MeetingInfo, MeetingState, controls_from, detect_platform
 from croom.scores.service import ScoresService
 from tests.unit.scores.schedules import Clock, Feed
@@ -47,13 +48,16 @@ STUB_PEOPLE = [
 
 def full_controls(role="participant"):
     """The control model of a Zoom meeting whose client has every button on the screen, as a participant (or a co-host, or the host) has it:
-    what the provider makes of a full reading of the meeting, with Zoom's names for the reactions."""
-    return controls_from({
+    what the provider makes of a full reading of the meeting, with Zoom's names for the reactions, and what it adds of its own: the
+    room's magnifier of the TV's page (croom.meeting.magnify), whole at the join."""
+    model = controls_from({
         "me": {"muted": False}, "role": role,
         "buttons": {"camera": {"on": True}, "raise_hand": {"on": False}, "reactions": {}, "captions": {"on": False},
                     "layout": {"value": "speaker"}, "hide_self": {"on": False}},
         "participants": copy.deepcopy(STUB_PEOPLE), "recording": False,
     }, DEFAULT_REACTIONS)
+    model["magnify"] = Magnifier().state()
+    return model
 
 
 class StubMeeting:
@@ -219,6 +223,15 @@ class StubMeeting:
             state["on"] = not state["on"]           # the recording starts, the meeting locks: and the next read says so
         elif name == "chat.seen":
             self.current_meeting.chat["unread"] = 0     # what has been seen is not counted any more
+        elif name == "magnify" and "magnify" in model:
+            # As the provider does it: the bounds the magnifier keeps, then the ones the TV's page keeps (the screen never shows past the picture)
+            magnifier = Magnifier()
+            magnifier.zoom, magnifier.x, magnifier.y = (model["magnify"][key] for key in ("zoom", "x", "y"))
+            zoom, x, y = magnifier.wanted(value)
+            half = 0.5 / zoom
+            whole = zoom <= 1
+            model["magnify"] = dict(model["magnify"], zoom=zoom, x=0.5 if whole else min(max(x, half), 1 - half),
+                                    y=0.5 if whole else min(max(y, half), 1 - half))
 
     async def diagnostics(self):
         if getattr(self, "fail_diagnostics", None) is not None:

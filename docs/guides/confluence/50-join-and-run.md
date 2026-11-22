@@ -21,8 +21,8 @@
 
 **MOST USED**
 
-- **Mute** / **Unmute**: the room's microphones.
-- **Turn camera off** / **Turn camera on**.
+- **Mute** / **Unmute**: the room's microphones. While the room is muted the button is red and says **Muted**.
+- **Turn camera off** / **Turn camera on**. While the camera is off the button is red and says **Camera off**.
 - **Sound**: room volume with **Quieter**, **Louder** and a slider.
 - **Camera**: move and zoom the camera, or tap a preset such as **Wide** or **Table**.
 
@@ -32,8 +32,9 @@
 - **Participants** and **Chat** (in Google Meet you can also send a message).
 - **Mic**: turn it up if people in the call can't hear the room.
 - **TV**: a remote for the TV, if you need it.
+- **Magnify** (at the top): makes the TV's picture larger, to read a shared screen. Tap the spot you want to see, drag the box to move around, and tap **Whole picture** to put it back.
 
-- **Pop-up questions.** If Zoom or Meet asks something (for example, to agree to a recording), a card appears on the table with its buttons. Tap your answer.
+- **Pop-up questions.** If Zoom or Meet asks something (for example, the host asking the room to unmute), a card appears on the table with its buttons. Tap your answer. A notice that the meeting is being recorded is answered by the room itself, and its words stay under the meeting's name.
 - **The next meeting.** When the next booking is 10 minutes away, the top of the table shows "Next: 10:00 AM …". The room doesn't hang up for you.
 
 ## Leave the call

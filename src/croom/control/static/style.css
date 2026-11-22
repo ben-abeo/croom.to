@@ -72,6 +72,7 @@ body[data-view="upcoming"] .view[data-view="upcoming"],
 body[data-view="participants"] .view[data-view="participants"],
 body[data-view="chat"] .view[data-view="chat"],
 body[data-view="host"] .view[data-view="host"],
+body[data-view="magnify"] .view[data-view="magnify"],
 body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 .view[data-view="idle"] {
   grid-template-columns: 3fr 2fr;
@@ -88,7 +89,7 @@ body[data-view="tv"] .view[data-view="tv"] { display: grid; }
 .list-box { display: flex; flex-direction: column; width: 100%; }
 .schedule .events, .upcoming-box .events { padding-right: 4px; align-content: start; }   /* rows keep their height */
 .view[data-view="options"], .view[data-view="camera"], .view[data-view="mic"], .view[data-view="screensaver"], .view[data-view="door-sign"],
-.view[data-view="upcoming"], .view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"],
+.view[data-view="upcoming"], .view[data-view="participants"], .view[data-view="chat"], .view[data-view="host"], .view[data-view="magnify"],
 .view[data-view="settings-pin"], .view[data-view="settings"] { grid-template-rows: auto 1fr; justify-items: start; }
 #meeting-detail { margin: 0; max-width: 90ch; white-space: pre-line; }   /* the screen's first line, with no card above it; joining gives it two lines; a long title keeps to one line at 1280 */
 /* Qualified with .button: the button rule below sets min-height, padding and font-size with one class and comes later. */
@@ -641,6 +642,35 @@ body.keyboard-open .schedule { display: none; }
   .touchpad #touchpad-done { padding: 0 20px; }
 }
 
+/* Magnify (Ben, 2026-11-22): the pad stands for the TV's whole picture, at its 16:9, and the box in it is the part the TV shows now; what is
+   outside the box is dimmed. The zoom's buttons stand in a column at the pad's right, as the camera's controls stand beside its picture. The
+   pad takes fingers as the touchpad does: the browser scrolls, selects and zooms nothing on it. */
+.magnify-box { display: flex; flex-direction: column; width: 100%; min-width: 0; }
+.magnify-grid { display: grid; grid-template-columns: minmax(0, 1fr) 340px; gap: 24px; align-items: start; }
+.magnify-pad { position: relative; width: 100%; aspect-ratio: 16 / 9; overflow: hidden; border-radius: var(--radius); border: 2px solid var(--line); background: var(--surface-800);
+  touch-action: none; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.magnify-window { position: absolute; box-sizing: border-box; border: 3px solid #fff; border-radius: var(--radius-sm); background: rgba(27, 82, 229, 0.30);
+  box-shadow: 0 0 0 2000px rgba(0, 0, 0, 0.5); pointer-events: none; }
+.magnify-side { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.magnify-level { margin: 0; font-size: 3.2rem; font-weight: 600; line-height: 1; color: #fff; }
+.magnify-steps { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.magnify-steps .button { min-height: 72px; padding: 0 12px; }
+.magnify-presets { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 8px; margin: 0; }
+.magnify-presets .button { min-height: 56px; padding: 0; }
+.magnify-side .note, .magnify-side .message { margin: 0; min-height: auto; max-width: none; }
+/* The top bar's button while the TV is magnified: filled, and it says by how much (app.js), so nobody wonders where the rest of the picture went. */
+body[data-state="meeting"] .button.nav.current { background: var(--blue-600); border-color: var(--blue-600); }
+@media (max-width: 899px) { .magnify-grid { grid-template-columns: minmax(0, 1fr); } }   /* a phone, or a tablet stood up: the buttons under the pad */
+@media (max-width: 640px) { #open-magnify { order: 1; } }   /* a phone's bar holds the clock, Touchpad and TV in one row and no more: Magnify goes under them, at the right */
+/* While the bar also holds the warning of the next booking, the kiosk's one row has no room for the word: the button is its picture alone, a
+   square (it is named for a screen reader, app.js), and the warning gives up the square's width and its gap (84 px, 8 of its 40 ch). So the
+   room's name and place have the width they had before there was a Magnify, the bar keeps its height, and the meeting screen under it its place. */
+@media (min-width: 1024px) {
+  .top:has(.next-warning:not([hidden])) #open-magnify { width: 64px; padding: 0; }
+  .top:has(.next-warning:not([hidden])) #open-magnify span { display: none; }
+  .top:has(#open-magnify:not([hidden])) .next-warning { max-width: 32ch; }
+}
+
 /* Viewport layouts (spec 2026-10-12, section 3). Last in the file, so they override the rules above. */
 @media (min-width: 1024px) and (min-height: 700px) {
   /* The fixed screen (the kiosk lays out at 1280 by 800): no page scrolling; only the bookings and the upcoming list
@@ -771,6 +801,13 @@ body[data-state="meeting"] .meeting-leave .button.danger:hover { background: #CE
 .meeting-main .meeting-actions .button .icon { width: 1.6em; height: 1.6em; }
 body[data-state="meeting"] .meeting-main .meeting-actions .button { background: var(--surface-800); border-color: #374151; }
 body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { background: #273244; }
+/* A microphone that is muted and a camera that is off (Ben, 2026-11-22): the whole tile is red, as Zoom's and Meet's own buttons are,
+   and says so in words at its corner. The label under it still says what a tap does. On, the tile is as the others. */
+.meeting-main .meeting-actions .button { position: relative; }
+.meeting-main .meeting-actions .button[data-badge]::after { content: attr(data-badge); position: absolute; top: 14px; right: 14px; padding: 3px 10px; border-radius: 999px;
+  background: #fff; color: #A3160B; font-size: 0.72rem; font-weight: 600; line-height: 1.5; text-transform: uppercase; white-space: nowrap; }
+body[data-state="meeting"] .meeting-main .meeting-actions .button.off { background: #B42318; border-color: #FDA29B; }
+body[data-state="meeting"] .meeting-main .meeting-actions .button.off:hover { background: #912018; }
 .meeting-main .actions.meeting-secondary { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 0; }
 .meeting-main .meeting-secondary .button { min-height: 56px; padding: 0 12px; justify-content: center; white-space: nowrap; }
 .meeting-main #reaction-row, .meeting-main #layout-row { grid-template-columns: repeat(4, minmax(0, 1fr)); }   /* in the second row's place, in its two rows: the dock under it does not move, and nothing settles */
@@ -819,6 +856,7 @@ body[data-state="meeting"] .meeting-main .meeting-actions .button:hover { backgr
   /* A tile on a phone is a button like the others, its symbol beside its words, one to a row: a label that wraps under a symbol grows the tile. */
   .meeting-main .actions.meeting-actions { grid-template-columns: minmax(0, 1fr); }
   .meeting-main .meeting-actions .button { min-height: 64px; padding: 0 20px; flex-direction: row; align-items: center; justify-content: flex-start; gap: 12px; }
+  .meeting-main .meeting-actions .button[data-badge]::after { top: 50%; transform: translateY(-50%); }   /* the tile is a row there: the badge at its right end */
 }
 
 /* Laptop mode (spec 2026-10-27): the idle card is the Laptop screen; joining by link waits for the MeetUp to come back. */

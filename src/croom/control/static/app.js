@@ -9,9 +9,9 @@
   // Screens (spec 2026-10-12): body[data-view] names the one shown. Each view belongs to a mode; the camera, Mic level and TV views
   // belong to whichever mode showed them, so their Back returns there. Settings (settings.js) is the PIN pad and the menu of pages, from Options.
   const VIEW_MODES = { idle: "idle", booking: "idle", options: "idle", screensaver: "idle", "door-sign": "idle", "settings-pin": "idle", settings: "idle",
-                       meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting" };
+                       meeting: "meeting", upcoming: "meeting", participants: "meeting", chat: "meeting", host: "meeting", magnify: "meeting" };
   const MAIN_SCREEN = { idle: "idle", meeting: "meeting" };
-  const SUB_SCREENS = ["participants", "chat", "host", "tv", "mic"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
+  const SUB_SCREENS = ["participants", "chat", "host", "tv", "mic", "magnify"];   // the screens that go back to the meeting screen after two idle minutes (armIdleReturn): its own, each with its Back, and the TV view when opened from it
 
   const el = (id) => document.getElementById(id);
   // lastLink: the link of the join the page last had accepted, until that join resolves (see render) or the person has the box
@@ -341,11 +341,16 @@
   // button moves from under the finger before it lifts, and the tap is lost.
   const keepFocus = (b) => b.addEventListener("pointerdown", (e) => e.preventDefault());
 
-  function button(label, className, onClick, disabled, iconName) {
+  // A button may carry a badge: a word or two about what its thing is now ("Muted", "Camera off"), beside a label that says what a tap
+  // does. It is the button's data-badge, drawn by style.css, and not a node in the button: the label stays the button's only words.
+  const setBadge = (b, badge) => { if (badge) b.dataset.badge = badge; else delete b.dataset.badge; };
+
+  function button(label, className, onClick, disabled, iconName, badge) {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "button " + className;
     labelWithIcon(b, label, iconName);
+    setBadge(b, badge);
     b.disabled = Boolean(disabled) || model.busy;
     keepFocus(b);
     b.addEventListener("click", onClick);
@@ -355,6 +360,7 @@
   // A button kept where it stands: its words and symbol in place (labelWithIcon), its class, and whether it can be pressed.
   function patchButton(b, s) {
     labelWithIcon(b, s.label, s.icon);
+    setBadge(b, s.badge);
     b.className = "button " + s.className;
     b.disabled = Boolean(s.disabled) || model.busy;
   }
@@ -368,7 +374,7 @@
     // tap. A row whose set or order of buttons changes is built again. A tap goes to the spec the row is drawn from now
     // (keyHolder.specs), not to the one its button was drawn with, so a button that is kept runs what it says now, unless its
     // words changed after the finger went down (below).
-    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null, s.icon || null]));
+    const key = JSON.stringify(specs.map((s) => [s.label, s.className, Boolean(s.disabled) || model.busy, s.target || null, s.icon || null, s.badge || null]));
     keyHolder.specs = specs;
     if (key === keyHolder.key) return;
     keyHolder.key = key;
@@ -388,7 +394,7 @@
         const now = keyHolder.specs[i], was = pressed;
         pressed = undefined;
         if (now && (was === undefined || was === now.label)) now.onClick(e);
-      }, s.disabled, s.icon);
+      }, s.disabled, s.icon, s.badge);
       b.addEventListener("pointerdown", () => { const now = keyHolder.specs[i]; pressed = now ? now.label : undefined; });
       b.addEventListener("pointercancel", () => { pressed = undefined; });
       return b;
@@ -573,12 +579,16 @@
     ({ id: name, label: label, icon: icon, className: className, disabled: model.pending.has(name), onClick: () => control(name, value) });
 
   // The primary row: Mute, Camera, Raise hand, Reactions, Leave. Mute and Camera keep their own routes and their state in the block;
-  // the rest are the model's, and are drawn when available.
+  // the rest are the model's, and are drawn when available. A room that is muted, or whose camera is off, must be seen to be from
+  // across the table (Ben, 2026-11-22: the struck-through icon alone was missed): the tile is red and says "Muted" or "Camera off"
+  // (the "off" class and the badge, style.css), while its label goes on saying what a tap does.
   function meetingPrimary(m) {
     const c = m.controls || {};
     const specs = [
-      { id: "mute", label: m.muted ? "Unmute" : "Mute", className: "", icon: m.muted ? "mic-off" : "mic", disabled: model.pending.has("mute"), onClick: () => setMute(!m.muted) },
-      { id: "camera", label: m.camera_on ? "Turn camera off" : "Turn camera on", className: "", icon: m.camera_on ? "video" : "video-off", disabled: model.pending.has("camera"), onClick: () => setCamera(!m.camera_on) },
+      { id: "mute", label: m.muted ? "Unmute" : "Mute", className: m.muted ? "off" : "", badge: m.muted ? "Muted" : "", icon: m.muted ? "mic-off" : "mic",
+        disabled: model.pending.has("mute"), onClick: () => setMute(!m.muted) },
+      { id: "camera", label: m.camera_on ? "Turn camera off" : "Turn camera on", className: m.camera_on ? "" : "off", badge: m.camera_on ? "" : "Camera off",
+        icon: m.camera_on ? "video" : "video-off", disabled: model.pending.has("camera"), onClick: () => setCamera(!m.camera_on) },
     ];
     if (c.raise_hand && c.raise_hand.available) specs.push(controlSpec("raise_hand", c.raise_hand.on ? "Lower hand" : "Raise hand", "hand", ""));
     if (reactionChoices(c).length) specs.push({ id: "reactions", label: "Reactions", icon: "smile", className: "", disabled: model.pending.has("reactions"), onClick: openReactions });
@@ -1160,6 +1170,28 @@
     el("upcoming-list").replaceChildren(...items.map((ev) => eventItem(ev)));
   }
 
+  // Magnify, in the top bar beside the Touchpad and the TV (the room's own tools, not the platform's): shown in a call whose page the room can
+  // magnify (controls.magnify, which Zoom's and Meet's providers both give). While the TV is magnified the button says by how much, and is
+  // filled, so that nobody wonders why half the shared screen is missing. magnify.js draws the screen it opens.
+  const magnifyState = () => {   // as the room last said: a poll that is missed takes nothing away (the bar's buttons go while the room is unreachable, as the others do)
+    const m = model.status ? model.status.meeting : null;
+    const c = m && m.state === "connected" && m.controls ? m.controls.magnify : null;
+    return c && c.available ? c : null;
+  };
+  const zoomWords = (zoom) => (Math.round(zoom * 10) / 10) + "×";
+  function renderMagnifyButton() {
+    const state = magnifyState(), b = el("open-magnify");
+    b.hidden = model.offline || !state;
+    const on = Boolean(state) && state.zoom > 1;
+    const words = on ? "Magnify " + zoomWords(state.zoom) : "Magnify";
+    labelWithIcon(b, words, "zoom-in");
+    b.setAttribute("aria-label", words);   // its name when the bar has room for the picture alone (beside the next booking's warning, style.css)
+    b.classList.toggle("current", on);
+    // The call's page can no longer be magnified (the call is being left, or its model lost the control): nothing to show on the screen.
+    // A call that is over lands on the idle screen by itself (landOnMode), and a room that is unreachable for a moment moves nobody.
+    if (!state && !model.offline && model.status && view() === "magnify" && mode() === "meeting") applyView("meeting", true);
+  }
+
   function render() {
     const body = document.body;
     const tv = model.status && model.status.tv;
@@ -1167,6 +1199,7 @@
     // the TV's state (Ben, 2026-10-25): the TV view has a card for a TV that is not set up or paired, and the Touchpad drives the room Pi's mouse.
     const inMeeting = mode() === "meeting";
     el("open-touchpad").hidden = model.offline || !inMeeting;
+    renderMagnifyButton();
     el("open-tv-remote").hidden = model.offline || (!inMeeting && !(tv && tv.configured && tv.paired));
     labelWithIcon(el("open-tv-remote"), inMeeting ? "TV" : "TV Remote", "tv");
     if (!model.offline && model.status && viewMode(view()) !== mode()) landOnMode();   // before the error lines below are written
@@ -1556,6 +1589,8 @@
   el("back-from-mic").addEventListener("click", () => setView(micMode === "meeting" ? "meeting" : "options"));
   // Touchpad, in the top bar in a meeting: the room Pi's mouse in one tap, for a dialog on the TV in a call (Ben, 2026-10-25), without going by
   // the TV's remote (remote.js); Done brings the meeting screen back.
+  el("open-magnify").addEventListener("click", () => setView("magnify"));
+  el("back-from-magnify").addEventListener("click", () => setView("meeting"));
   el("open-touchpad").addEventListener("click", () => { if (window.croomRemote) window.croomRemote.openTouchpad("pi", el("open-touchpad")); });
   el("back-from-upcoming").addEventListener("click", () => setView("meeting"));
   for (const name of ["participants", "chat", "host"]) el("back-from-" + name).addEventListener("click", () => setView("meeting"));
@@ -1570,6 +1605,7 @@
     iconsReady: iconsReady, icon: icon, labelWithIcon: labelWithIcon, keepFocus: keepFocus, CONFIRM_MS: CONFIRM_MS,
     refreshStatus: refreshStatus, deviceEpoch: deviceEpoch, IN_MEETING: IN_MEETING, submitForm: submitForm,
     view: view, setView: setView, mode: mode, cameraMode: () => cameraMode, kiosk: kiosk,
+    takeMeeting: takeMeeting, magnifyState: magnifyState, zoomWords: zoomWords,
     onViewChange: (fn) => viewHooks.push(fn),
     holdIdleReturn: (held) => { idleReturnHeld = Boolean(held); armIdleReturn(); },
     // A hook that registers after a poll has been answered (on a slow link the first answer can land before the other

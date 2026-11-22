@@ -17,6 +17,7 @@ from typing import Optional, Dict, Any, Callable, List, Tuple
 
 from croom.core.config import DEFAULT_ACKNOWLEDGE, DEFAULT_REACTIONS
 from croom.core.logs import DIALOGS_LOGGER
+from croom.meeting.magnify import Magnifier
 from croom.meeting.meet_api import MeetParticipants
 from croom.meeting.meet_capture import JOIN_MEET_FIRST, MeetCapture, save_capture
 from croom.meeting.meet_page import (
@@ -613,6 +614,12 @@ class GoogleMeetProvider(MeetingProvider):
             raise MeetingControlError("Not in a meeting")
         if name == "screen":
             return await self._on_screen_said(value)
+        if name == "magnify":     # the room's own browser does it, not Meet: nothing of Meet's is pressed, so it does not wait its turn behind a press
+            info = self._current_meeting
+            state = await self._magnifier.set(self._page, value)
+            if info.controls:     # before the first reading of Meet's page there is no model to add it to: the reading's own publish carries it
+                info.controls = dict(info.controls, magnify=state)
+            return info.controls
         if name in self.MEET_ACTIONS:
             return await getattr(self, self.MEET_ACTIONS[name])(name, value)
         if name == "mute":
@@ -732,6 +739,7 @@ class GoogleMeetProvider(MeetingProvider):
             buttons, info.is_muted, drawn=reading.get("drawn") or {}, people=people is not None, hosting=bool(reading.get("hosting")),
             reactions=self._reaction_choices if self._reaction_choices is not None else self.reactions, layout=self._layout,
             hide_self=self._hide_self, switches=self._switches, waiting=self._waiting)
+        info.controls["magnify"] = self._magnifier.state()     # the room's own, not Meet's: its browser magnifies the page (magnify.py)
         if self._panel_people is None and self._api_people is not None:
             # The people panel is closed and the Meet API answered: its list is the touch Pi's Participants before the panel opens. The panel's
             # list, with Meet's own ids, wins while it is open (Pin and Remove find the person by it).
@@ -953,6 +961,7 @@ class GoogleMeetProvider(MeetingProvider):
 
     def _reset_panels(self) -> None:
         """What one call leaves of the touch Pi's screens and Meet's panels that the next must not find."""
+        self._magnifier = Magnifier()                             # what the TV is magnified to (croom.meeting.magnify): the next call's page starts whole
         self._screen = ""                                         # the touch Pi's open Meet screen, as it last said ("" for none)
         self._screen_at = float("-inf")                           # when it last said so (self._clock)
         self._room_panel: Optional[str] = None                    # the panel the room opened and has not closed ("chat", "people", "host")

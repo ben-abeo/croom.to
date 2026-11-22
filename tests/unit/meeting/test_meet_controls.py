@@ -298,6 +298,33 @@ async def test_chat_seen_has_nothing_to_mark_and_answers_with_the_chat(meet_page
     assert await keys(provider) == []
 
 
+async def test_the_tv_is_magnified_by_the_rooms_own_browser_and_nothing_of_meets_is_pressed(meet_page):
+    """Magnify (Ben, 2026-11-22): Meet has no call that enlarges a shared screen for a viewer, so the room's browser magnifies Meet's page."""
+    provider, info = await meet_page(replica())
+    whole = {"available": True, "zoom": 1.0, "x": 0.5, "y": 0.5, "max": 4.0}
+    assert info.controls["magnify"] == whole
+    controls = await provider.control("magnify", {"zoom": 2, "x": 0.25, "y": 0.5})
+    assert controls["magnify"] == dict(whole, zoom=2.0, x=0.25) and info.controls["magnify"] == controls["magnify"]
+    assert "scale(2)" in await provider._page.evaluate("document.documentElement.style.transform")
+    assert await keys(provider) == []                                       # no shortcut of Meet's was pressed for it
+    await provider._read_controls()                                         # the next reading of Meet's buttons keeps what the TV has
+    assert info.controls["magnify"] == dict(whole, zoom=2.0, x=0.25)
+    assert (await provider.control("magnify", {"x": 1.0}))["magnify"]["x"] == 0.75      # the screen never shows past the picture's edge
+    with pytest.raises(MeetingControlError, match="Send the zoom"):
+        await provider.control("magnify", {"zoom": "large"})
+    assert (await provider.control("magnify", {"zoom": 1}))["magnify"] == whole
+    assert await provider._page.evaluate("document.documentElement.style.transform") == ""
+
+
+async def test_the_call_after_a_magnified_one_starts_with_the_whole_picture(meet_page):
+    provider, info = await meet_page(replica())
+    await provider.control("magnify", {"zoom": 3})
+    await provider.leave_meeting()
+    assert provider._magnifier.state() == {"available": True, "zoom": 1.0, "x": 0.5, "y": 0.5, "max": 4.0}
+    with pytest.raises(MeetingControlError, match="Not in a meeting"):
+        await provider.control("magnify", {"zoom": 2})                      # and with no call there is nothing to magnify
+
+
 async def test_leave_is_carried_out_from_the_table_as_zooms_is(meet_page):
     """The model says leave is available; a control the model offers must work."""
     provider, info = await meet_page(replica())

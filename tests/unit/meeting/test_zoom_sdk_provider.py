@@ -1123,13 +1123,27 @@ def test_the_policy_acknowledges_only_one_button_notices_on_the_list():
     assert policy.disclosure({"text": "You have been muted by the host", "buttons": ["OK"]}) == ""
 
 
-def test_the_consent_dialog_waits_for_a_tap_though_the_default_list_names_it():
-    """The same words with a choice to make are not a notice: with two buttons, whatever the list says, the table is asked."""
+def test_the_recording_notice_with_leave_and_ok_is_answered_for_the_room():
+    """Zoom's recording notice has two buttons, Leave Meeting and OK, and it waited on the table in every recorded meeting (Ben, 2026-11-22).
+    Leaving is never the room's answer, so the button that leaves is no choice for the room to make: the other one is pressed, wherever Zoom
+    draws it. A choice between two buttons that both stay still waits, and so does a notice with nothing but ways out."""
     policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
-    consent = {"title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]}
-    assert policy.decide(consent) == "ask"
-    assert policy.decide(dict(consent, buttons=["Got it"])) == "acknowledge"
-    assert policy.decide(dict(consent, buttons=[])) == "ask"
+    consent = {"title": "This meeting is being recorded", "text": "By staying in this meeting, you consent to being recorded.",
+               "buttons": ["Leave Meeting", "OK"]}
+    assert policy.decide(consent) == "acknowledge" and policy.answer(consent) == "OK"
+    for buttons, pressed in ((["Leave Meeting", "Got it"], "Got it"), (["Got it", "Leave meeting"], "Got it"), (["OK"], "OK"),
+                             (["Leave", "End Meeting", "Continue"], "Continue")):
+        assert policy.decide(dict(consent, buttons=buttons)) == "acknowledge", buttons
+        assert policy.answer(dict(consent, buttons=buttons)) == pressed, buttons
+    for buttons in ([], ["Leave Meeting"], ["Leave Meeting", "End Meeting"], ["Leave Meeting", "Learn more", "OK"], ["Cancel", "OK"]):
+        assert policy.decide(dict(consent, buttons=buttons)) == "ask", buttons
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE, ask_everything=True).decide(consent) == "ask"      # a room that wants every popup to wait
+
+
+def test_a_leave_button_does_not_make_a_notice_of_words_the_list_does_not_hold():
+    policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
+    assert policy.decide({"title": "Leave meeting", "text": "Do you want to leave this meeting?", "buttons": ["Leave Meeting", "Cancel"]}) == "ask"
+    assert policy.decide({"title": "Unmute", "text": "The host would like you to unmute.", "buttons": ["Stay Muted", "Unmute"]}) == "ask"
 
 
 @pytest.mark.parametrize("label", [
@@ -1154,10 +1168,11 @@ def test_a_single_button_that_does_not_leave_or_end_is_acknowledged_as_before(la
 
 def test_the_buttons_never_pressed_are_named_with_their_why_and_a_dialog_with_a_choice_in_it_is_asked_as_ever():
     assert DialogPolicy.NEVER_PRESSED == ("leave", "end", "exit", "quit")
-    consent = {"text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]}
-    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(consent) == "ask"                                        # two buttons: the table is asked, as before
+    consent = {"text": "This meeting is being recorded.", "buttons": ["Stay", "Got it"]}
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(consent) == "ask"                                        # two buttons that stay: the table is asked, as before
     assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(dict(consent, buttons=["Leave Meeting"])) == "ask"      # and so is one that leaves
     assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(dict(consent, buttons=["Got it"])) == "acknowledge"
+    assert DialogPolicy(DEFAULT_ACKNOWLEDGE).decide(dict(consent, buttons=["Leave Meeting", "Got it"])) == "acknowledge"   # the one that leaves is passed over
 
 
 def test_the_list_is_matched_in_the_title_or_the_text_whatever_the_case():
@@ -1177,10 +1192,12 @@ def test_a_blank_phrase_or_a_bare_word_never_makes_every_dialog_a_notice():
     assert DialogPolicy("is being recorded").decide({"text": "This meeting is being recorded.", "buttons": ["OK"]}) == "acknowledge"
 
 
-def test_the_policy_presses_the_last_button_which_zoom_draws_as_the_affirmative_one():
+def test_the_policy_presses_the_button_that_stays_wherever_zoom_draws_it():
     policy = DialogPolicy(DEFAULT_ACKNOWLEDGE)
     assert policy.answer({"buttons": ["OK"]}) == "OK"
-    assert policy.answer({"buttons": ["Leave Meeting", "Got it"]}) == "Got it"
+    assert policy.answer({"buttons": ["Leave Meeting", "Got it"]}) == "Got it"      # Zoom draws the one that leaves first
+    assert policy.answer({"buttons": ["Got it", "Leave Meeting"]}) == "Got it"      # and were it last, it would still not be the answer
+    assert policy.answer({"buttons": ["Leave Meeting"]}) == ""                      # never the one that leaves
     assert policy.answer({"buttons": []}) == ""
 
 
@@ -1570,6 +1587,33 @@ class TestControlsAndDialogs:
         finally:
             await shutdown(provider)
 
+    async def test_the_tv_is_magnified_by_the_rooms_own_browser_and_zoom_is_asked_for_nothing(self):
+        """Magnify (Ben, 2026-11-22): the Meeting SDK has no call that enlarges a shared screen for a viewer, so the room's browser magnifies the
+        page Zoom's client is in. The model says what the TV has, a reading of the meeting keeps it, and the next meeting starts whole."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            whole = {"available": True, "zoom": 1.0, "x": 0.5, "y": 0.5, "max": 4.0}
+            assert await eventually(lambda: info.controls.get("magnify") == whole)
+            calls = await provider._page.evaluate("window.__zoomCalls.length")
+            controls = await provider.control("magnify", {"zoom": 2, "x": 0.75, "y": 0.5})
+            assert controls["magnify"] == dict(whole, zoom=2.0, x=0.75) and info.controls["magnify"] == controls["magnify"]
+            assert "scale(2)" in await provider._page.evaluate("document.documentElement.style.transform")
+            assert await provider._page.evaluate("window.__zoomCalls.length") == calls       # nothing of Zoom's was called for it
+            await provider._read_state_from_zoom()
+            assert info.controls["magnify"] == dict(whole, zoom=2.0, x=0.75)                 # a reading of the meeting keeps it
+            assert info.controls["mute"]["available"] is True                                # and the rest of the model is still there
+            with pytest.raises(MeetingControlError, match="Send the zoom"):
+                await provider.control("magnify", {"zoom": None})
+            assert (await provider.control("magnify", {"zoom": 1}))["magnify"] == whole
+            assert await provider._page.evaluate("document.documentElement.style.transform") == ""
+            await provider.control("magnify", {"zoom": 4})
+            await provider.leave_meeting()
+            info = await provider.join_meeting(LINK)
+            assert await eventually(lambda: info.controls.get("magnify") == whole)           # the next meeting's page starts whole
+        finally:
+            await shutdown(provider)
+
     async def test_an_acknowledged_dialog_is_pressed_once_and_disclosed(self):
         provider = await provider_for(api=FakeApi())
         try:
@@ -1594,17 +1638,32 @@ class TestControlsAndDialogs:
         provider = await provider_for(api=FakeApi())
         try:
             info = await provider.join_meeting(LINK)
-            await provider._page.evaluate("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded.', ['Leave Meeting', 'Got it'])")
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Unmute', 'The host would like you to unmute.', ['Stay Muted', 'Unmute'])")
             assert await eventually(lambda: info.dialog)
-            assert info.dialog["buttons"] == ["Leave Meeting", "Got it"] and info.dialog["title"] == "Recording consent"      # in the client's order: the affirmative last
-            assert info.dialog["text"] == "This meeting is being recorded." and info.notice == ""
+            assert info.dialog["buttons"] == ["Stay Muted", "Unmute"] and info.dialog["title"] == "Unmute"      # in the client's order: the affirmative last
+            assert info.dialog["text"] == "The host would like you to unmute." and info.notice == ""
             await asyncio.sleep(0.3)
             assert await dialog_presses(provider) == []                                  # nothing is pressed until a person taps
-            assert await provider.control("dialog", {"id": info.dialog["id"], "button": "Got it"}) == {"dialog": None}
+            assert await provider.control("dialog", {"id": info.dialog["id"], "button": "Unmute"}) == {"dialog": None}
             assert info.dialog is None
-            assert ["dialog", "Recording consent", "Got it"] in await provider._page.evaluate("window.__zoomCalls")
+            assert ["dialog", "Unmute", "Unmute"] in await provider._page.evaluate("window.__zoomCalls")
             assert await eventually(lambda: not provider._dialogs and not provider._on_screen)      # the page's own word that it closed changes nothing more
             assert info.dialog is None
+        finally:
+            await shutdown(provider)
+
+    async def test_the_recording_notice_with_leave_meeting_and_ok_is_pressed_for_the_room_and_stays_as_a_line(self):
+        """Ben, 2026-11-22: a recorded Zoom meeting put "This meeting is being recorded" on the TV with an OK that someone had to tap on the table
+        every time. Through the provider and the stub's page: OK is pressed (never Leave Meeting), nothing waits, and the table keeps the line."""
+        provider = await provider_for(api=FakeApi())
+        try:
+            info = await provider.join_meeting(LINK)
+            await provider._page.evaluate("window.ZoomMtg._showDialog('This meeting is being recorded', "
+                                          "'By staying in this meeting, you consent to being recorded.', ['Leave Meeting', 'OK'])")
+            assert await dialog_presses(provider, at_least=1) == [["dialog", "This meeting is being recorded", "OK"]]
+            assert info.notice == "By staying in this meeting, you consent to being recorded."
+            assert await eventually(lambda: not provider._on_screen)
+            assert info.dialog is None and provider.state == MeetingState.CONNECTED
         finally:
             await shutdown(provider)
 
@@ -1753,9 +1812,9 @@ class TestControlsAndDialogs:
         provider = await provider_for(api=FakeApi())
         try:
             info = await provider.join_meeting(LINK)
-            await provider._page.evaluate("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded.', ['Leave Meeting', 'Got it'])")
+            await provider._page.evaluate("window.ZoomMtg._showDialog('Unmute', 'The host would like you to unmute.', ['Stay Muted', 'Unmute'])")
             assert await eventually(lambda: info.dialog)
-            tap = {"id": info.dialog["id"], "button": "Got it"}
+            tap = {"id": info.dialog["id"], "button": "Unmute"}
             both = await asyncio.gather(provider.control("dialog", tap), provider.control("dialog", tap), return_exceptions=True)
             assert both == [{"dialog": None}, {"dialog": None}]                          # the page finds the second one's dialog gone
             assert len(await dialog_presses(provider)) == 1
@@ -2159,12 +2218,12 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         the one thing a stock install's journal must hold of a meeting, so they come from a logger of their own that the agent keeps at INFO."""
         caplog.set_level(logging.INFO)
         provider = in_a_meeting(FakePage())
-        provider._on_dialog({"id": 8, "title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]})
+        provider._on_dialog({"id": 8, "title": "Unmute", "text": "The host would like you to unmute.", "buttons": ["Stay Muted", "Unmute"]})
         provider._on_dialog({"id": 9, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
         await settle_background(provider)
         ours = [(r.name, r.levelno, r.getMessage()) for r in caplog.records if r.name == DIALOGS_LOGGER]
         assert ours == [
-            (DIALOGS_LOGGER, logging.INFO, "Zoom dialog: 'Recording consent' 'This meeting is being recorded.' buttons ['Leave Meeting', 'Got it']"),
+            (DIALOGS_LOGGER, logging.INFO, "Zoom dialog: 'Unmute' 'The host would like you to unmute.' buttons ['Stay Muted', 'Unmute']"),
             (DIALOGS_LOGGER, logging.INFO, "The dialog waits on the table"),
             (DIALOGS_LOGGER, logging.INFO, "Zoom dialog: '' 'This meeting is being transcribed.' buttons ['OK']"),
             (DIALOGS_LOGGER, logging.INFO, "Acknowledged Zoom's dialog with 'OK'"),
@@ -2175,13 +2234,13 @@ class TestTheModelAndTheDialogsWithoutABrowser:
         """The unit starts the agent with no -v. The provider's own INFO lines are not written then; the dialogs' are."""
         reached = agent_logging()
         provider = in_a_meeting(FakePage())
-        provider._on_dialog({"id": 8, "title": "Recording consent", "text": "This meeting is being recorded.", "buttons": ["Leave Meeting", "Got it"]})
+        provider._on_dialog({"id": 8, "title": "Unmute", "text": "The host would like you to unmute.", "buttons": ["Stay Muted", "Unmute"]})
         provider._on_dialog({"id": 9, "title": "", "text": "This meeting is being transcribed.", "buttons": ["OK"]})
         await settle_background(provider)
         logging.getLogger("croom.meeting.providers.zoom_sdk").info("Left the Zoom meeting")        # an INFO line of the provider's own
         said = [r.getMessage() for r in reached]
         assert said == [
-            "Zoom dialog: 'Recording consent' 'This meeting is being recorded.' buttons ['Leave Meeting', 'Got it']",
+            "Zoom dialog: 'Unmute' 'The host would like you to unmute.' buttons ['Stay Muted', 'Unmute']",
             "The dialog waits on the table",
             "Zoom dialog: '' 'This meeting is being transcribed.' buttons ['OK']",
             "Acknowledged Zoom's dialog with 'OK'",

@@ -25,6 +25,8 @@
       <p id="clock" class="clock"></p>
       <p id="date" class="date"></p>
     </div>
+    <!-- Magnify (Ben, 2026-11-22): in a meeting, the TV's picture made larger to read a shared screen; app.js shows it while the platform's page can be magnified. -->
+    <button type="button" id="open-magnify" class="button quiet nav" data-icon="zoom-in" hidden>Magnify</button>
     <button type="button" id="open-touchpad" class="button quiet nav" data-icon="touchpad" hidden>Touchpad</button>
     <button type="button" id="open-tv-remote" class="button quiet nav" data-icon="tv" hidden>TV Remote</button>
     <button type="button" id="open-options" class="button quiet nav" data-icon="settings">Options</button>
@@ -293,6 +295,32 @@
     </section>
   </section>
 
+  <!-- Magnify (Ben, 2026-11-22): the TV's picture made larger, to read a shared screen from the far end of the table. The pad is the whole of
+       the TV's picture and the box in it the part the TV shows now: a finger moves the box, two fingers pinch it smaller or larger, and the
+       buttons step the zoom. magnify.js draws it from the meeting's model (controls.magnify) and sends what the fingers do. -->
+  <section class="view" data-view="magnify">
+    <button type="button" id="back-from-magnify" class="button quiet back">Back</button>
+    <section class="magnify-box">
+      <p class="kicker">Magnify the TV</p>
+      <div class="magnify-grid">
+        <div id="magnify-pad" class="magnify-pad" role="group" aria-label="The TV's picture. Drag to move around it, pinch to zoom">
+          <div id="magnify-window" class="magnify-window" aria-hidden="true"></div>
+        </div>
+        <div class="magnify-side">
+          <p id="magnify-level" class="magnify-level" aria-live="polite"></p>
+          <div class="magnify-steps">
+            <button type="button" id="magnify-out" class="button quiet" data-icon="zoom-out">Smaller</button>
+            <button type="button" id="magnify-in" class="button quiet" data-icon="zoom-in">Larger</button>
+          </div>
+          <div id="magnify-presets" class="picker magnify-presets" role="group" aria-label="Zoom"></div>
+          <button type="button" id="magnify-reset" class="button quiet" data-icon="monitor">Whole picture</button>
+          <p class="note">The box is the part of the picture the TV shows. Drag it to move around, or pinch to make it smaller or larger.</p>
+          <p id="magnify-message" class="message" role="status"></p>
+        </div>
+      </div>
+    </section>
+  </section>
+
   <!-- The meeting screen's sub-screens (spec 2026-10-13, section 6.1). Each has its way back and returns to the meeting screen on its own after two idle
        minutes; app.js draws what is in them. The heading and Back stay where they are while a list scrolls inside its box. -->
   <section class="view" data-view="participants">
@@ -529,6 +557,7 @@
 <script src="/static/devices.js"></script>
 <script src="/static/keyboard.js"></script>
 <script src="/static/touchpad.js"></script>
+<script src="/static/magnify.js"></script>
 <script src="/static/remote.js"></script>
 <script src="/static/settings.js"></script>
 <script src="/static/settings-form.js"></script>

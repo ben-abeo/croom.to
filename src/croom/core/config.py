@@ -59,8 +59,9 @@ class RoomConfig:
         self.location = without_placeholder(self.location)
 
 
-# Dialogs Zoom and Google Meet draw over the TV that are only a notice (one button): pressed at once and kept on the table as a line under
-# the title. Meet's "Others may see your video differently … Got it" shows as the room joins (spec 2026-10-30 Meet controls, section 3).
+# Dialogs Zoom and Google Meet draw over the TV that are only a notice (one button, or one besides a button that leaves the meeting): pressed
+# at once and kept on the table as a line under the title. Meet's "Others may see your video differently … Got it" shows as the room joins
+# (spec 2026-10-30 Meet controls, section 3).
 DEFAULT_ACKNOWLEDGE = ["is being recorded", "is being transcribed", "AI Companion", "Zoom AI is on",
                        "has been muted", "has been unmuted", "recording has started", "recording has stopped",
                        "others may see your video differently"]
@@ -109,7 +110,7 @@ def _flag(value: Any, default: bool, where: str) -> bool:
 @dataclass
 class DialogsConfig:
     """What the agent does with the dialogs Zoom and Google Meet draw over the TV (spec 2026-10-13, section 5)."""
-    acknowledge: List[str] = field(default_factory=lambda: list(DEFAULT_ACKNOWLEDGE))   # one-button notices pressed at once
+    acknowledge: List[str] = field(default_factory=lambda: list(DEFAULT_ACKNOWLEDGE))   # notices answered at once, by words in them
     ask_everything: bool = False   # every dialog waits for a tap on the table, the acknowledgeable ones too
 
     def __post_init__(self):

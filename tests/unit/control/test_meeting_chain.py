@@ -163,14 +163,14 @@ def test_a_dialog_is_answered_from_the_table_while_the_camera_is_still_switching
         chain.stub("window.ZoomMtg._behaviour.videoStartsAfterMs = 5000")                  # from here on a press takes five seconds to switch
         camera.click()
         page.wait_for_function("document.querySelectorAll('#meeting-actions .button')[1].disabled", timeout=5000)
-        chain.stub("window.ZoomMtg._showDialog('Recording consent', 'This meeting is being recorded.', ['Leave Meeting', 'Got it'])")
+        chain.stub("window.ZoomMtg._showDialog('Unmute', 'The host would like you to unmute.', ['Stay Muted', 'Unmute'])")
         poll_until(page, CARD)
         page.clock.run_for(600)                                                            # the card's half second of ignoring a tap
         assert camera.is_disabled() and mute.is_enabled() and page.locator("#dialog-actions .button:disabled").count() == 0
         assert page.evaluate("window.croomPage.model.busy") is False
-        page.locator("#dialog-actions .button", has_text="Got it").click()
+        page.locator("#dialog-actions .button", has_text="Stay Muted").click()
         page.wait_for_function("document.querySelector('#meeting-dialog').hidden", timeout=10000)
-        assert chain.stub("window.__zoomCalls").count(["dialog", "Recording consent", "Got it"]) == 1
+        assert chain.stub("window.__zoomCalls").count(["dialog", "Unmute", "Stay Muted"]) == 1
         assert chain.stub("window.ZoomMtg._videoOn") is True and camera.is_disabled()      # the camera had not switched yet: the card was answered meanwhile
         page.wait_for_function("document.querySelectorAll('#meeting-actions .button')[1].textContent.trim() === 'Turn camera on'", timeout=20000)
         assert camera.is_enabled() and chain.stub("window.ZoomMtg._videoOn") is False

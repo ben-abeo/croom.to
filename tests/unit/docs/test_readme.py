@@ -146,7 +146,9 @@ def test_readme_describes_the_meeting_screens_rows_sub_screens_and_second_taps()
     for needle in (
         "the meeting's card on the left (the time in the call in large type, how many people are in it, the chat that waits, whether the room is host, and **Leave** at its foot)",
         "on the right Mute, Turn camera off, Raise hand and **Reactions** as tiles, a second set of **Captions**, the view (**Gallery view** or **Speaker view**), **Hide self view**, **Participants**, **Chat** and **Host** (only while the room is host or co-host), "
-        "and at the foot a dock of the room's volume, **Camera** for presets and nudges and **Upcoming meetings**, with **Touchpad** and **TV** in the top bar",
+        "and at the foot a dock of the room's volume, **Camera** for presets and nudges and **Upcoming meetings**, with **Magnify**, **Touchpad** and **TV** in the top bar",
+        "A muted microphone and a camera that is off turn their tile red, with **Muted** or **Camera off** at its corner",
+        "**Magnify** makes the TV's picture larger, to read a shared screen, in Zoom and Meet alike",
         "A Google Meet call offers Mute, Turn camera off, Raise hand and Captions, and no more (Leave, **TV** and the rest of the screen are as ever)",
         "A call on a platform that reports no controls at all keeps Mute, Turn camera off and Leave, and **TV**, which is the room's own and never depends on the platform",
         "a Zoom dialog that waits for a tap shows as a card above the controls with Zoom's own buttons",
@@ -275,7 +277,8 @@ def test_the_notices_the_readme_says_disclose_nothing_are_the_ones_the_policy_tr
 def test_readme_says_a_button_that_leaves_or_ends_the_meeting_is_never_pressed_for_the_room_and_the_notice_line_is_two_lines():
     """The names are the policy's own (NEVER_PRESSED), and the page's line is clamped to the two lines the README says."""
     text = README.read_text(encoding="utf-8")
-    assert "and that a dialog whose one button leaves or ends the meeting (the whole word `Leave`, `End`, `Exit` or `Quit` in its label, in any case) is never pressed for the room, whatever its words say" in text
+    assert "and that a button which leaves or ends the meeting (the whole word `Leave`, `End`, `Exit` or `Quit` in its label, in any case) is never pressed for the room, whatever the words say, so a dialog with no other button waits" in text
+    assert "Zoom's recording notice, **Leave Meeting** and **OK**, is answered with OK" in text
     assert DialogPolicy.NEVER_PRESSED == ("leave", "end", "exit", "quit")
     assert "(recorded, transcribed; two lines at most, cut short with an ellipsis)" in text
     style = (REPO / "src" / "croom" / "control" / "static" / "style.css").read_text(encoding="utf-8")
